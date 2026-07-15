@@ -1,0 +1,25 @@
+{
+  "contract": "graphify.workspace.compensation_plan",
+  "schema_version": 1,
+  "transaction_id": "33333333-3333-4333-8333-333333333333",
+  "restore_order": [
+    "/tmp/graphify-home/.local/bin/graphify",
+    "/tmp/graphify-home/.codex/skills/graphify/SKILL.md"
+  ],
+  "remove_if_created": [],
+  "restore_artifacts": [
+    {
+      "path": "/tmp/graphify-home/.local/bin/graphify",
+      "offline_artifact": "prior/bin/graphify"
+    },
+    {
+      "path": "/tmp/graphify-home/.codex/skills/graphify/SKILL.md",
+      "offline_artifact": "prior/skill/SKILL.md"
+    }
+  ],
+  "required_offline_artifacts": [
+    "prior/bin/graphify",
+    "prior/skill/SKILL.md"
+  ],
+  "generation_disposition": "preserve_untouched"
+}

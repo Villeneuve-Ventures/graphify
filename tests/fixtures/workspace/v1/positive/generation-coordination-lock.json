@@ -1,0 +1,11 @@
+{
+  "contract": "graphify.workspace.generation_coordination_lock",
+  "schema_version": 1,
+  "lock_id": "generation:0001",
+  "generation_id": "gen-0001",
+  "relative_path": "locks/generations/gen-0001.lock",
+  "installed_before_state": "CERTIFIED",
+  "query_lock": "read_only_shared_advisory",
+  "gc_lock": "exclusive_then_reachability_recheck",
+  "retention": "retain_v1"
+}

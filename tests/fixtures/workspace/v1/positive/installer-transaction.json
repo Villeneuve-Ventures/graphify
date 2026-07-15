@@ -1,0 +1,23 @@
+{
+  "contract": "graphify.workspace.installer_transaction",
+  "schema_version": 1,
+  "transaction_id": "33333333-3333-4333-8333-333333333333",
+  "phase": "PREPARED",
+  "home": "/tmp/graphify-home",
+  "codex_home": "/tmp/graphify-home/.codex",
+  "candidate_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "items": [
+    {
+      "path": "/tmp/graphify-home/.local/bin/graphify",
+      "before_sha256": "6060606060606060606060606060606060606060606060606060606060606060",
+      "after_sha256": "2020202020202020202020202020202020202020202020202020202020202020"
+    },
+    {
+      "path": "/tmp/graphify-home/.codex/skills/graphify/SKILL.md",
+      "before_sha256": "7070707070707070707070707070707070707070707070707070707070707070",
+      "after_sha256": "4040404040404040404040404040404040404040404040404040404040404040"
+    }
+  ],
+  "compensation_plan_sha256": "297355d50509ab075e27ca9003849b42bf306f485f8d732c413124deb887e0a8",
+  "generation_disposition": "preserve_untouched"
+}

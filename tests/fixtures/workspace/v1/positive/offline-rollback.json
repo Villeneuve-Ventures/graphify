@@ -1,0 +1,27 @@
+{
+  "contract": "graphify.workspace.offline_rollback",
+  "schema_version": 1,
+  "bundle_version": 1,
+  "offline": true,
+  "entries": [
+    {
+      "path": "prior/bin/graphify",
+      "file_type": "regular_file",
+      "size": 25,
+      "sha256": "6060606060606060606060606060606060606060606060606060606060606060",
+      "mode": "0644"
+    },
+    {
+      "path": "prior/skill/SKILL.md",
+      "file_type": "regular_file",
+      "size": 18,
+      "sha256": "7070707070707070707070707070707070707070707070707070707070707070",
+      "mode": "0644"
+    }
+  ],
+  "restore_order": [
+    "prior/bin/graphify",
+    "prior/skill/SKILL.md"
+  ],
+  "generation_disposition": "preserve_untouched"
+}

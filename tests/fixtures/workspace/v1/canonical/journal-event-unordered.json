@@ -1,0 +1,14 @@
+{
+  "transition": "CERTIFIED",
+  "schema_version": 1,
+  "receipt_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+  "prior_event_sha256": null,
+  "pointer_revision": 0,
+  "fence_token": 1,
+  "occurred_at": "2026-07-15T21:00:00Z",
+  "generation_id": "gen-0001",
+  "event_id": "22222222-2222-4222-8222-222222222222",
+  "contract": "graphify.workspace.journal_event",
+  "operation_epoch": 1,
+  "sequence": 1
+}

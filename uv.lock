@@ -1090,7 +1090,7 @@ wheels = [
 
 [[package]]
 name = "graphifyy"
-version = "0.9.6"
+version = "0.9.16+workspace.1"
 source = { editable = "." }
 dependencies = [
     { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1098,6 +1098,7 @@ dependencies = [
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13'" },
     { name = "rapidfuzz" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "tree-sitter" },
     { name = "tree-sitter-bash" },
     { name = "tree-sitter-c" },
@@ -1241,7 +1242,6 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
     { name = "setuptools" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "tree-sitter-hcl" },
     { name = "wheel" },
 ]
@@ -1292,6 +1292,7 @@ requires-dist = [
     { name = "tiktoken", marker = "extra == 'gemini'" },
     { name = "tiktoken", marker = "extra == 'kimi'" },
     { name = "tiktoken", marker = "extra == 'openai'" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "tree-sitter", specifier = ">=0.23.0,<0.26" },
     { name = "tree-sitter-bash", specifier = ">=0.23,<0.27" },
     { name = "tree-sitter-c", specifier = ">=0.23,<0.25" },
@@ -1347,7 +1348,6 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "ruff", specifier = ">=0.15.13" },
     { name = "setuptools", specifier = ">=82.0.1" },
-    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
     { name = "tree-sitter-hcl", specifier = ">=1.2.0" },
     { name = "wheel", specifier = ">=0.47.0" },
 ]

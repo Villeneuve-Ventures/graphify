@@ -1,0 +1,18 @@
+{
+  "contract": "graphify.workspace.installer_transaction",
+  "schema_version": 1,
+  "transaction_id": "33333333-3333-4333-8333-333333333333",
+  "phase": "PREPARED",
+  "home": "/tmp/graphify-home",
+  "codex_home": "/tmp/graphify-home/.codex",
+  "candidate_manifest_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "items": [
+    {
+      "path": "/tmp/graphify-home/.local/bin/graphify",
+      "before_sha256": null,
+      "after_sha256": "2020202020202020202020202020202020202020202020202020202020202020"
+    }
+  ],
+  "compensation_plan_sha256": "5050505050505050505050505050505050505050505050505050505050505050",
+  "generation_disposition": "delete"
+}

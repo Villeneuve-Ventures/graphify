@@ -35,6 +35,11 @@ def _install(tmp_path, platform):
         os.chdir(old_cwd)
 
 
+def _with_disposable_home(tmp_path, action):
+    with patch("graphify.__main__.Path.home", return_value=tmp_path / "home"):
+        action(tmp_path)
+
+
 def test_install_default_claude(tmp_path):
     _install(tmp_path, "claude")
     assert (tmp_path / ".claude" / "skills" / "graphify" / "SKILL.md").exists()
@@ -877,7 +882,7 @@ def test_cursor_uninstall_noop_if_not_installed(tmp_path):
 def test_gemini_install_writes_gemini_md(tmp_path):
     from graphify.__main__ import gemini_install
 
-    gemini_install(tmp_path)
+    _with_disposable_home(tmp_path, gemini_install)
     md = tmp_path / "GEMINI.md"
     assert md.exists()
     assert "graphify-out/GRAPH_REPORT.md" in md.read_text()
@@ -887,7 +892,7 @@ def test_gemini_install_writes_hook(tmp_path):
     import json as _json
     from graphify.__main__ import gemini_install
 
-    gemini_install(tmp_path)
+    _with_disposable_home(tmp_path, gemini_install)
     settings = _json.loads((tmp_path / ".gemini" / "settings.json").read_text())
     hooks = settings["hooks"]["BeforeTool"]
     assert any("graphify" in str(h) for h in hooks)
@@ -896,8 +901,8 @@ def test_gemini_install_writes_hook(tmp_path):
 def test_gemini_install_idempotent(tmp_path):
     from graphify.__main__ import gemini_install
 
-    gemini_install(tmp_path)
-    gemini_install(tmp_path)
+    _with_disposable_home(tmp_path, gemini_install)
+    _with_disposable_home(tmp_path, gemini_install)
     md = tmp_path / "GEMINI.md"
     assert md.read_text().count("## graphify") == 1
 
@@ -906,7 +911,7 @@ def test_gemini_install_merges_existing_gemini_md(tmp_path):
     from graphify.__main__ import gemini_install
 
     (tmp_path / "GEMINI.md").write_text("# My project rules\n")
-    gemini_install(tmp_path)
+    _with_disposable_home(tmp_path, gemini_install)
     content = (tmp_path / "GEMINI.md").read_text()
     assert "# My project rules" in content
     assert "graphify-out/GRAPH_REPORT.md" in content
@@ -915,8 +920,8 @@ def test_gemini_install_merges_existing_gemini_md(tmp_path):
 def test_gemini_uninstall_removes_section(tmp_path):
     from graphify.__main__ import gemini_install, gemini_uninstall
 
-    gemini_install(tmp_path)
-    gemini_uninstall(tmp_path)
+    _with_disposable_home(tmp_path, gemini_install)
+    _with_disposable_home(tmp_path, gemini_uninstall)
     md = tmp_path / "GEMINI.md"
     assert not md.exists()
 
@@ -925,8 +930,8 @@ def test_gemini_uninstall_removes_hook(tmp_path):
     import json as _json
     from graphify.__main__ import gemini_install, gemini_uninstall
 
-    gemini_install(tmp_path)
-    gemini_uninstall(tmp_path)
+    _with_disposable_home(tmp_path, gemini_install)
+    _with_disposable_home(tmp_path, gemini_uninstall)
     settings_path = tmp_path / ".gemini" / "settings.json"
     if settings_path.exists():
         settings = _json.loads(settings_path.read_text())
@@ -937,7 +942,7 @@ def test_gemini_uninstall_removes_hook(tmp_path):
 def test_gemini_uninstall_noop_if_not_installed(tmp_path):
     from graphify.__main__ import gemini_uninstall
 
-    gemini_uninstall(tmp_path)  # should not raise
+    _with_disposable_home(tmp_path, gemini_uninstall)  # should not raise
 
 
 def test_amp_user_install_lands_in_config_agents(tmp_path, monkeypatch):
