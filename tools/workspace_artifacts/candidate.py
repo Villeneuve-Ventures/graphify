@@ -56,6 +56,7 @@ UPSTREAM_WHEEL_NAME = "graphifyy-0.9.16-py3-none-any.whl"
 UPSTREAM_WHEEL_SHA256 = "24eefd6cd8e0f47eb8167671fbe3aceb31b49a6508b91fe1b60c4fd1978e32bc"
 UPSTREAM_PYPI_METADATA_URL = "https://pypi.org/pypi/graphifyy/0.9.16/json"
 CONTROLLED_UPSTREAM_INDEX = "https://pypi.org/simple"
+CANDIDATE_UV_VERSION = "0.11.29"
 
 _PACKAGE_SOURCE_ENVIRONMENT = {
     "PIP_CONFIG_FILE",
@@ -267,6 +268,13 @@ def _uv() -> str:
     executable = shutil.which("uv")
     if not executable:
         raise ArtifactError("uv is required for candidate artifact generation")
+    reported = _run([executable, "--version"], cwd=Path.cwd()).stdout.strip()
+    fields = reported.split()
+    if len(fields) < 2 or fields[0] != "uv" or fields[1] != CANDIDATE_UV_VERSION:
+        raise ArtifactError(
+            f"candidate artifact generation requires uv {CANDIDATE_UV_VERSION}; "
+            f"found {reported or 'unknown version'}"
+        )
     return executable
 
 
@@ -396,6 +404,7 @@ def _download_verified_upstream_wheel(destination: Path) -> dict[str, str]:
 
 
 def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
+    env = _controlled_upstream_environment(os.environ)
     requirements_result = _run(
         [
             _uv(),
@@ -410,6 +419,7 @@ def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
             "requirements.txt",
         ],
         cwd=repo_root,
+        env=env,
     )
     requirements.write_text(requirements_result.stdout, encoding="utf-8")
     sbom_result = _run(
@@ -424,6 +434,7 @@ def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
             "cyclonedx1.5",
         ],
         cwd=repo_root,
+        env=env,
     )
     try:
         parsed = json.loads(sbom_result.stdout)
@@ -483,6 +494,7 @@ def build_candidate(*, repo_root: Path, output_root: Path) -> dict[str, object]:
     """Build the exact committed P1 candidate and its frozen manifest."""
     repo_root = repo_root.resolve()
     output_root = output_root.resolve()
+    _uv()
     head, tree = _assert_candidate_source(repo_root)
     _assert_safe_output_root(repo_root, output_root)
     if output_root.exists() and any(output_root.iterdir()):
@@ -671,7 +683,7 @@ def _isolated_environment(home: Path, codex_home: Path) -> dict[str, str]:
     )
     env.pop("VIRTUAL_ENV", None)
     env.pop("PYTHONPATH", None)
-    return env
+    return _controlled_upstream_environment(env)
 
 
 def skill_bundle_tree_sha256(
@@ -804,6 +816,7 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
     """Run isolated clean-home, provenance, tamper, and compensation proofs."""
     artifact_root = artifact_root.resolve()
     proof_root = proof_root.resolve()
+    _uv()
     if proof_root == artifact_root or artifact_root in proof_root.parents:
         raise ArtifactError("proof_root must be outside the frozen artifact root")
     if proof_root.exists() and any(proof_root.iterdir()):
@@ -841,6 +854,8 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
         "identical_dependency_manifests": True,
         "identical_skill_trees": True,
         "matches_skill_bundle": True,
+        "controlled_index": CONTROLLED_UPSTREAM_INDEX,
+        "ambient_index_and_find_links_scrubbed": True,
         "skill_bundle_tree_sha256": expected_skill_tree,
         "home_one": first,
         "home_two": second,
@@ -856,7 +871,9 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
     upstream_wheel = str(upstream_record["path"])
     upstream = _run(
         [
-            "uvx",
+            _uv(),
+            "tool",
+            "run",
             "--isolated",
             "--no-cache",
             "--default-index",
@@ -873,7 +890,7 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
         raise ArtifactError(f"isolated upstream probe returned {upstream!r}")
     provenance_proof = {
         "command": (
-            "uvx --isolated --no-cache --default-index https://pypi.org/simple "
+            "uv tool run --isolated --no-cache --default-index https://pypi.org/simple "
             f"--from {upstream_wheel} graphify --version"
         ),
         "from_spec": upstream_wheel,

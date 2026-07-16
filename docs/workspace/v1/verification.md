@@ -28,6 +28,8 @@
 ## Candidate gates
 
 - exact baseline ancestry and candidate version are checked;
+- artifact generation requires exact uv `0.11.29`, which supplies the frozen
+  CycloneDX 1.5 export path;
 - two fixed-epoch clean wheel builds are byte-identical;
 - wheel package data contains every v1 schema;
 - the schema directory, wheel, and contract bundle match one explicit frozen

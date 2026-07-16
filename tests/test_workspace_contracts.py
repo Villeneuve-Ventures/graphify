@@ -314,6 +314,7 @@ def test_generation_payload_entries_are_sorted_unique_regular_files() -> None:
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\\b"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\x00b"),
         ("registry.json", REGISTRY_SOURCE_PATH, "//"),
+        ("registry.json", REGISTRY_SOURCE_PATH, "//tmp/home"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\n\\b"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\n/../b"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\n"),
@@ -673,6 +674,42 @@ def test_installer_items_must_be_contained_by_declared_home_roots() -> None:
     value["items"][0]["path"] = "/tmp/unrelated/bin/graphify"
 
     with pytest.raises(ContractError, match="outside declared HOME/CODEX_HOME"):
+        parse_contract(value)
+
+
+@pytest.mark.parametrize("field", ["home", "codex_home"])
+def test_installer_declared_home_roots_must_be_non_root(
+    field: str,
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / "installer-transaction.json")
+    value[field] = "/"
+    schema = load_schema(value["contract"])
+    validator = Draft202012Validator(
+        schema,
+        registry=schema_registry,
+        format_checker=FormatChecker(),
+    )
+
+    assert list(validator.iter_errors(value))
+    with pytest.raises(ContractError, match=f"{field}.*must not be the filesystem root"):
+        parse_contract(value)
+
+
+def test_artifact_manifest_must_cover_at_least_one_artifact(
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / "artifact-manifest.json")
+    value["artifacts"] = []
+    schema = load_schema(value["contract"])
+    validator = Draft202012Validator(
+        schema,
+        registry=schema_registry,
+        format_checker=FormatChecker(),
+    )
+
+    assert list(validator.iter_errors(value))
+    with pytest.raises(ContractError, match="at least one artifact"):
         parse_contract(value)
 
 

@@ -306,6 +306,8 @@ def write_trusted_manifest(
     artifact_root = _ensure_absolute_directory(artifact_root, "artifact_root")
     destination = destination or artifact_root / "trusted-manifest.json"
     artifact_paths = [artifact_root / name for name in sorted(artifact_names)]
+    if not artifact_paths:
+        raise ArtifactError("trusted manifest must cover at least one artifact")
     for path in artifact_paths:
         _relative_file(artifact_root, path)
         metadata = path.lstat()

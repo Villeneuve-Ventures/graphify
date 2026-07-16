@@ -22,6 +22,11 @@ contract bundle, fixture manifest, provenance record, and CycloneDX 1.5 SBOM
 hashes. It does not model the
 engine as an independently replaceable component inside the distribution.
 
+The artifact-generation and proof toolchain separately pins uv `0.11.29` and
+records its full reported build string in provenance. This proof-only pin is
+not part of runtime compatibility and does not constrain ordinary Graphify
+usage.
+
 ## Version behavior
 
 - Unknown contract schema versions are rejected before field interpretation.

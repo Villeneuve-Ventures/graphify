@@ -11,8 +11,9 @@ import zipfile
 
 import pytest
 
-from graphify.workspace import WORKSPACE_SCHEMA_FILES, canonical_sha256
+from graphify.workspace import WORKSPACE_SCHEMA_FILES, canonical_json_bytes, canonical_sha256
 import tools.workspace_artifacts as workspace_artifacts
+import tools.workspace_artifacts.candidate as candidate_artifacts
 from tools.workspace_artifacts import (
     ArtifactError,
     build_static_bundles,
@@ -26,6 +27,7 @@ from tools.workspace_artifacts import (
     write_trusted_manifest,
 )
 from tools.workspace_artifacts.candidate import (
+    CANDIDATE_UV_VERSION,
     CONTROLLED_UPSTREAM_INDEX,
     UPSTREAM_WHEEL_NAME,
     UPSTREAM_WHEEL_SHA256,
@@ -38,7 +40,9 @@ from tools.workspace_artifacts.candidate import (
     _normalize_cyclonedx,
     _run,
     _select_upstream_wheel,
+    build_candidate,
     compare_candidate_roots,
+    prove_candidate,
     skill_bundle_tree_sha256,
 )
 
@@ -192,6 +196,171 @@ def test_upstream_environment_scrubs_untrusted_package_sources() -> None:
         "PIP_NO_INDEX",
     ):
         assert name not in env
+
+
+def test_isolated_environment_scrubs_untrusted_package_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient = {
+        "PIP_CONFIG_FILE": "/tmp/pip.conf",
+        "PIP_EXTRA_INDEX_URL": "https://attacker.invalid/simple",
+        "PIP_FIND_LINKS": "/tmp/wheels",
+        "PIP_INDEX_URL": "https://attacker.invalid/simple",
+        "PIP_NO_INDEX": "1",
+        "PIP_TRUSTED_HOST": "attacker.invalid",
+        "UV_CONFIG_FILE": "/tmp/uv.toml",
+        "UV_INDEX": "private=https://attacker.invalid/simple",
+        "UV_DEFAULT_INDEX": "https://attacker.invalid/simple",
+        "UV_EXTRA_INDEX_URL": "https://attacker.invalid/simple",
+        "UV_FIND_LINKS": "/tmp/wheels",
+        "UV_INDEX_STRATEGY": "unsafe-best-match",
+        "UV_INDEX_URL": "https://attacker.invalid/simple",
+        "UV_NO_INDEX": "1",
+        "UV_OFFLINE": "1",
+    }
+    assert set(ambient) == candidate_artifacts._PACKAGE_SOURCE_ENVIRONMENT
+    for name, value in ambient.items():
+        monkeypatch.setenv(name, value)
+
+    env = _isolated_environment(tmp_path / "home", tmp_path / "home/.codex")
+
+    assert env["UV_DEFAULT_INDEX"] == CONTROLLED_UPSTREAM_INDEX
+    assert env["PIP_INDEX_URL"] == CONTROLLED_UPSTREAM_INDEX
+    assert env["UV_NO_CONFIG"] == "1"
+    for name in ambient.keys() - {"UV_DEFAULT_INDEX", "PIP_INDEX_URL"}:
+        assert name not in env
+
+
+def test_candidate_uv_version_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert CANDIDATE_UV_VERSION == "0.11.29"
+    monkeypatch.setattr(candidate_artifacts.shutil, "which", lambda name: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["/fixture/uv", "--version"],
+            0,
+            stdout="uv 0.11.29 (fixture)\n",
+            stderr="",
+        ),
+    )
+
+    assert candidate_artifacts._uv() == "/fixture/uv"
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        "uv 0.11.30\n",
+        "uv\n",
+        "uvx 0.11.29\n",
+        "uv 0.11.29-beta.1\n",
+    ],
+)
+def test_candidate_uv_version_rejects_unpinned_or_malformed_toolchain(
+    monkeypatch: pytest.MonkeyPatch,
+    reported: str,
+) -> None:
+    monkeypatch.setattr(candidate_artifacts.shutil, "which", lambda name: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["/fixture/uv", "--version"],
+            0,
+            stdout=reported,
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(ArtifactError, match="requires uv 0.11.29"):
+        candidate_artifacts._uv()
+
+
+def test_runtime_export_scrubs_untrusted_package_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in candidate_artifacts._PACKAGE_SOURCE_ENVIRONMENT:
+        monkeypatch.setenv(name, f"ambient-{name.lower()}")
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    calls: list[dict[str, str]] = []
+
+    def fake_run(command, *, cwd, env=None, umask=None):
+        del cwd, umask
+        calls.append(dict(env or {}))
+        if "requirements.txt" in command:
+            stdout = "networkx==3.6.1\n"
+        else:
+            stdout = json.dumps(
+                {
+                    "bomFormat": "CycloneDX",
+                    "metadata": {"timestamp": "2026-07-15T01:02:03Z"},
+                    "serialNumber": "urn:uuid:11111111-1111-1111-1111-111111111111",
+                    "specVersion": "1.5",
+                    "version": 1,
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(candidate_artifacts, "_run", fake_run)
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+    candidate_artifacts._export_runtime(
+        tmp_path,
+        tmp_path / "runtime-requirements.txt",
+        tmp_path / "sbom.cdx.json",
+    )
+
+    assert len(calls) == 2
+    for env in calls:
+        assert env["UV_DEFAULT_INDEX"] == CONTROLLED_UPSTREAM_INDEX
+        assert env["PIP_INDEX_URL"] == CONTROLLED_UPSTREAM_INDEX
+        assert env["UV_NO_CONFIG"] == "1"
+        for name in candidate_artifacts._PACKAGE_SOURCE_ENVIRONMENT - {
+            "UV_DEFAULT_INDEX",
+            "PIP_INDEX_URL",
+        }:
+            assert name not in env
+
+
+def test_trusted_manifest_rejects_empty_artifact_set(tmp_path: Path) -> None:
+    trusted = canonical_json_bytes(
+        {
+            "contract": "graphify.workspace.artifact_manifest",
+            "schema_version": 1,
+            "manifest_version": 1,
+            "artifacts": [],
+        }
+    )
+
+    with pytest.raises(ArtifactError, match="at least one artifact"):
+        verify_trusted_manifest(artifact_root=tmp_path, trusted_manifest=trusted)
+
+    with pytest.raises(ArtifactError, match="at least one artifact"):
+        write_trusted_manifest(artifact_root=tmp_path, artifact_names=[])
+    assert not (tmp_path / "trusted-manifest.json").exists()
+
+
+def test_candidate_entrypoints_reject_wrong_uv_before_writing_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_uv() -> str:
+        raise ArtifactError("candidate artifact generation requires uv 0.11.29")
+
+    monkeypatch.setattr(candidate_artifacts, "_uv", reject_uv)
+    candidate_root = tmp_path / "candidate"
+    proof_root = tmp_path / "proof"
+
+    with pytest.raises(ArtifactError, match="requires uv 0.11.29"):
+        build_candidate(repo_root=tmp_path / "repo", output_root=candidate_root)
+    with pytest.raises(ArtifactError, match="requires uv 0.11.29"):
+        prove_candidate(artifact_root=tmp_path / "artifacts", proof_root=proof_root)
+
+    assert not candidate_root.exists()
+    assert not proof_root.exists()
 
 
 def test_upstream_wheel_selector_binds_exact_pypi_file_and_digest() -> None:

@@ -257,7 +257,7 @@ def _date_time(value: object, path: str) -> str:
 
 def _absolute_path(value: object, path: str) -> str:
     text = _string(value, path)
-    if "\x00" in text or "\r" in text or "\n" in text or text == "//":
+    if "\x00" in text or "\r" in text or "\n" in text or text.startswith("//"):
         raise ContractError(f"{path}: expected canonical absolute POSIX path")
     pure = PurePosixPath(text)
     if (
@@ -873,7 +873,9 @@ def _validate_freshness(data: Mapping[str, object]) -> None:
 def _validate_artifact_manifest(data: Mapping[str, object]) -> None:
     _exact_keys(data, "$", {"contract", "schema_version", "manifest_version", "artifacts"})
     _exact_version(data["manifest_version"], "$.manifest_version")
-    _validate_payload_entries(data["artifacts"], "$.artifacts")
+    artifacts = _validate_payload_entries(data["artifacts"], "$.artifacts")
+    if not artifacts:
+        raise ContractError("$.artifacts: manifest must cover at least one artifact")
 
 
 def _validate_compatibility(data: Mapping[str, object]) -> None:
@@ -995,6 +997,10 @@ def _validate_installer(data: Mapping[str, object]) -> None:
     )
     home = PurePosixPath(_absolute_path(data["home"], "$.home"))
     codex_home = PurePosixPath(_absolute_path(data["codex_home"], "$.codex_home"))
+    if home == PurePosixPath("/"):
+        raise ContractError("$.home: installer root must not be the filesystem root")
+    if codex_home == PurePosixPath("/"):
+        raise ContractError("$.codex_home: installer root must not be the filesystem root")
     _digest(data["candidate_manifest_sha256"], "$.candidate_manifest_sha256")
     items = _list(data["items"], "$.items")
     if not items:

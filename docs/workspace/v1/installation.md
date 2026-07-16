@@ -10,7 +10,8 @@ cutover.
 `graphify.workspace.installer_transaction` binds a transaction UUID, isolated
 `HOME` and `CODEX_HOME`, phase, frozen candidate manifest, before/after hashes
 for each switched item, compensation-plan hash, and an invariant that retained
-generations remain untouched.
+generations remain untouched. Both declared roots must be non-root canonical
+absolute paths so containment cannot collapse to the filesystem root.
 
 `graphify.workspace.compensation_plan` freezes restore order, candidate-created
 paths to remove, offline artifacts required for restoration, and the same
@@ -43,9 +44,10 @@ are independently reproducible.
 
 ## P1 proof boundary
 
-The proof harness uses disposable absolute homes and explicitly sets `HOME`,
-`CODEX_HOME`, `XDG_*`, `UV_TOOL_DIR`, and `UV_TOOL_BIN_DIR`. It installs the
-candidate wheel and refreshes the Codex skill only there. It proves:
+The proof harness uses disposable absolute homes, explicitly sets `HOME`,
+`CODEX_HOME`, `XDG_*`, `UV_TOOL_DIR`, and `UV_TOOL_BIN_DIR`, and scrubs ambient
+pip/uv package-source settings in favor of the declared PyPI index. It installs
+the candidate wheel and refreshes the Codex skill only there. It proves:
 
 1. two clean homes resolve the same sorted dependency manifest;
 2. the candidate binary and skill resolve to the candidate tuple inside each
