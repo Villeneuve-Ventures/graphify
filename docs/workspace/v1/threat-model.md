@@ -21,13 +21,14 @@ ceilings before operational approval.
 
 ## Durability claim
 
-The planned implementation must handle process death, injected short writes,
+The P2 registry and lease persistence implementation handles process death,
+injected short writes,
 `EINTR`, `ENOSPC`, `EDQUOT`, `EIO`, failed sync, failed rename, and clean reboot
-after a successful durable-write completion. Sudden hardware power-loss
-durability is not claimed.
+after a successful durable-write completion. Later lifecycle records must reuse
+the same boundary. Sudden hardware power-loss durability is not claimed.
 
-P1 schemas describe the records and ordering but execute no durable state
-transition.
+P2 executes registry and lease transitions only; generation, pointer, journal,
+adapter, service, and installation transitions remain absent.
 
 ## Protected risks
 

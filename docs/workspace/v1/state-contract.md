@@ -26,8 +26,11 @@ records one or more normalized HTTPS/SSH remote aliases in canonical URL order,
 with a SHA-256 evidence receipt for each. Workspace source paths, worktree
 coordinates, and remotes are discovery aliases; `repo_uuid` is the authoritative
 identity. The explicit singular field prevents a consumer from treating
-multiple aliases as current. P1 freezes and validates this evidence shape but
-does not implement activation.
+multiple aliases as current. P2 serializes registry revisions globally, stores
+content-addressed authorization and remote evidence externally, and requires
+an expected registry revision plus expected active-source revision for
+activation. Missing or mismatched active-source evidence fails closed; aliases
+are never used as an implicit fallback.
 
 ## Receipt and sealed payload
 
@@ -82,6 +85,17 @@ token (safety) from boot/process/heartbeat/deadline data (liveness). Wall time
 is never a safety primitive. The frozen shared operation identities include
 activation and pointer recovery as well as build, migration, promotion,
 rollback, repair, GC, and semantic claim work.
+
+P2 persists the fence high-water mark, operation epoch, migration epoch, and
+current lease records under each workspace. Allocation, heartbeat, acceptance,
+and release recover a registry snapshot before taking the workspace lock and
+recheck current registry state under that lock; activation holds registry then
+workspace locks. Fence values advance before ownership is accepted, survive
+recovery and clean reboot, and never reset through release or expiry. An
+expired lease, a stale fence, a changed owner identity, a changed active-source
+revision, or an advanced operation epoch cannot authorize a later commit. Wall
+timestamps remain audit/liveness metadata; monotonic deadlines are the only
+expiry input.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

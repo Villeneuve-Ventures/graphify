@@ -47,10 +47,31 @@
 - the real global Graphify binary and installed skill tree match their pre-P1
   digests afterward.
 
+## P2 runtime gates
+
+- enrollment, adoption, evidence rotation, rebind, and activation each require
+  matching operator authorization and preserve immutable UUID identity;
+- UUID collisions fail until shared-history and remote evidence support an
+  explicit adoption;
+- registry and workspace commits recover at every pending/previous/current
+  durable-write boundary and reject corrupt or ambiguous state;
+- global registry mutations serialize across processes, and deterministic lease
+  races produce one owner and one monotonic fence sequence;
+- active-source activation is a revision-checked CAS; resolution never guesses
+  among aliases;
+- lease expiry uses monotonic time, and stale fence, owner, source, operation,
+  and migration epochs fail acceptance;
+- state roots reject unsupported platforms, links, source overlap, and split
+  registry/lease roots; recursive before/after source snapshots remain equal;
+  and
+- fault schedules cover short writes, `EINTR`, capacity/I/O errors, failed sync
+  and replace, process-death boundaries, reboot identity, and commit-unknown
+  recovery without fence reuse.
+
 ## Repo gates
 
 Run the repo's five skill-generation guards, pre-commit, full pytest suite,
-wheel build, CLI help, focused type checking for P1 modules, Bandit, pip-audit,
+wheel build, CLI help, focused type checking for workspace modules, Bandit, pip-audit,
 and `git diff --check`. Security findings inherited from the untouched baseline
 must be separated from introduced findings.
 
@@ -58,8 +79,8 @@ After code changes, run the absolute repo-local Graphify binary to update the
 repo graph. Because the release checkout has no committed graph, bootstrap
 output remains ignored and must not widen the P1 product diff.
 
-P1 verification does not satisfy P2-P5 executable state-machine, crash,
-freshness, queue, service, performance, or live cutover gates.
+P2 verification does not satisfy P3-P5 generation, journal, pointer, adapter,
+freshness, queue, service, performance, installation, or live-cutover gates.
 
 The P1 fixture bundle is deliberately limited to synthetic contract fixtures;
 it is not claimed as the representative repository corpus required by the

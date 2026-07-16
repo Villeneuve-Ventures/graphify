@@ -1,12 +1,14 @@
 # Graphify workspace contract v1
 
-Status: P1 contract freeze for `graphifyy 0.9.16+workspace.1`.
+Status: P2 registry, identity, active-source, and fenced-lease runtime for
+`graphifyy 0.9.16+workspace.1`; the v1 contract fields remain frozen.
 
 This directory defines the first version of Graphify's workspace control-plane
-contracts. It does not provide a `graphify workspace` runtime. P2 through P5
-will implement registry mutation, immutable generations, the engine adapter,
-freshness observation, semantic queues, services, and commands against these
-contracts.
+contracts. P2 provides a library surface for external durable registry state,
+operator-authorized UUID/source binding, explicit active-source selection, and
+fenced lease allocation. It does not provide a `graphify workspace` command.
+P3 through P5 still own generations, journals, pointers, engine adaptation,
+freshness observation, semantic queues, services, and commands.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build
@@ -24,6 +26,10 @@ or fork engine logic inside the package.
   cross-field and cross-document validation is normative where JSON Schema
   cannot express relational invariants such as keyed ordering, digest binding,
   revision binding, or exact compensation coverage.
+- `graphify.workspace.persistence`, `.identity`, `.registry`, and `.leases`
+  implement only the P2 runtime boundary. Lifecycle mutation fails closed
+  outside non-elevated macOS on local APFS; tests use an explicit injected
+  capability seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,
   canonicalization, version-rejection, compensation, and rollback examples.
 - Candidate artifacts are built by `python -m tools.workspace_artifacts build`
@@ -41,4 +47,4 @@ or fork engine logic inside the package.
 
 Any change to a v1 field, enum, canonical encoding, or invariant requires a new
 schema version or an explicitly compatible additive revision. Unknown versions
-fail before a state-changing operation; P1 itself performs no such operation.
+fail before a state-changing operation. P2 does not modify the frozen fields.

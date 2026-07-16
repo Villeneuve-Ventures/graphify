@@ -1,4 +1,4 @@
-"""Explicit-root P1 artifact and isolated compensation proof helpers.
+"""Explicit-root workspace artifact and isolated compensation proof helpers.
 
 This module is build/test tooling.  It does not install into the real user home
 and is not imported by Graphify's production CLI or installer.
@@ -232,18 +232,20 @@ def build_static_bundles(
             "schemas/v1",
         )
     )
-    contract_members.extend(
-        [
+    for module_name in (
+        "__init__.py",
+        "contracts.py",
+        "identity.py",
+        "leases.py",
+        "persistence.py",
+        "registry.py",
+    ):
+        contract_members.append(
             _ZipMember(
-                "reference/graphify/workspace/__init__.py",
-                (repo_root / "graphify" / "workspace" / "__init__.py").read_bytes(),
-            ),
-            _ZipMember(
-                "reference/graphify/workspace/contracts.py",
-                (repo_root / "graphify" / "workspace" / "contracts.py").read_bytes(),
-            ),
-        ]
-    )
+                f"reference/graphify/workspace/{module_name}",
+                (repo_root / "graphify" / "workspace" / module_name).read_bytes(),
+            )
+        )
     contract_bundle = output_root / "contract-bundle.zip"
     _write_deterministic_zip(contract_bundle, contract_members)
 

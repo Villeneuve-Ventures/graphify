@@ -83,6 +83,10 @@ def test_workspace_contract_surface_ships_in_wheel(wheel_namelist: set[str]) -> 
     expected = {
         "graphify/workspace/__init__.py",
         "graphify/workspace/contracts.py",
+        "graphify/workspace/identity.py",
+        "graphify/workspace/leases.py",
+        "graphify/workspace/persistence.py",
+        "graphify/workspace/registry.py",
         *{
             f"graphify/workspace/schemas/v1/{name}" for name in WORKSPACE_SCHEMA_FILES
         },

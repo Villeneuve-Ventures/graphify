@@ -3,6 +3,8 @@
 The JSON Schemas shipped beside this module are normative.  These frozen
 reference models provide a dependency-free implementation of the invariants
 that matter for hashing, version rejection, round trips, and journal framing.
+The P2-internal lease-state envelope also lives here so runtime modules do not
+invent a second serialization or validation authority.
 They do not read or mutate a real registry, generation, lease, pointer, source
 checkout, service, or global installation.
 """
@@ -86,6 +88,19 @@ _REMOTE_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=:@-]+", re.ASCII)
 _JOURNAL_MAGIC = b"GWF1"
 _JOURNAL_FRAME_VERSION = 1
 _JOURNAL_HEADER = struct.Struct(">4sBQ32s")
+_FENCED_LEASE_OPERATIONS = frozenset(
+    {
+        "ACTIVATE",
+        "BUILD",
+        "GC",
+        "MIGRATE",
+        "POINTER_RECOVERY",
+        "PROMOTE",
+        "REPAIR",
+        "ROLLBACK",
+        "SEMANTIC_CLAIM",
+    }
+)
 
 
 class ContractError(ValueError):
@@ -674,17 +689,7 @@ def _validate_fenced_lease(data: Mapping[str, object]) -> None:
     _enum(
         data["operation"],
         "$.operation",
-        {
-            "ACTIVATE",
-            "BUILD",
-            "GC",
-            "MIGRATE",
-            "POINTER_RECOVERY",
-            "PROMOTE",
-            "REPAIR",
-            "ROLLBACK",
-            "SEMANTIC_CLAIM",
-        },
+        set(_FENCED_LEASE_OPERATIONS),
     )
     _integer(data["fence_token"], "$.fence_token", minimum=1)
     owner = _mapping(data["owner"], "$.owner")
@@ -1237,6 +1242,112 @@ class JournalEvent(ContractDocument):
 
 class FencedLease(ContractDocument):
     CONTRACT = "graphify.workspace.fenced_lease"
+
+
+@dataclass(frozen=True)
+class WorkspaceLeaseState:
+    """Canonical P2-internal envelope for durable fence allocation state.
+
+    This is not a new public v1 JSON Schema member. It keeps runtime persistence
+    serialization and validation beside the frozen Registry and FencedLease
+    authorities without changing either public contract.
+    """
+
+    repo_uuid: str
+    revision: int
+    fence_high_watermark: int
+    operation_epoch: int
+    migration_epoch: int
+    leases: dict[str, FencedLease]
+
+    @staticmethod
+    def canonical_repo_uuid(value: object) -> str:
+        return _uuid(value, "$.repo_uuid")
+
+    @staticmethod
+    def lease_domain(operation: object) -> str:
+        name = _enum(operation, "$.operation", set(_FENCED_LEASE_OPERATIONS))
+        return "semantic" if name == "SEMANTIC_CLAIM" else "workspace"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract": "graphify.workspace.lease_state.internal",
+            "format_version": 1,
+            "repo_uuid": self.repo_uuid,
+            "revision": self.revision,
+            "fence_high_watermark": self.fence_high_watermark,
+            "operation_epoch": self.operation_epoch,
+            "migration_epoch": self.migration_epoch,
+            "leases": {name: lease.to_dict() for name, lease in sorted(self.leases.items())},
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "WorkspaceLeaseState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "repo_uuid",
+                "revision",
+                "fence_high_watermark",
+                "operation_epoch",
+                "migration_epoch",
+                "leases",
+            },
+        )
+        if data["contract"] != "graphify.workspace.lease_state.internal":
+            raise ContractError("$.contract: unsupported internal lease-state contract")
+        _exact_version(data["format_version"], "$.format_version")
+        repo_uuid = cls.canonical_repo_uuid(data["repo_uuid"])
+        revision = _integer(data["revision"], "$.revision", minimum=1)
+        fence_high_watermark = _integer(
+            data["fence_high_watermark"],
+            "$.fence_high_watermark",
+            minimum=1,
+        )
+        operation_epoch = _integer(data["operation_epoch"], "$.operation_epoch", minimum=1)
+        migration_epoch = _integer(data["migration_epoch"], "$.migration_epoch")
+        raw_leases = _mapping(data["leases"], "$.leases")
+        if not set(raw_leases).issubset({"workspace", "semantic"}):
+            raise ContractError("$.leases: unsupported lease domain")
+        leases: dict[str, FencedLease] = {}
+        for domain, raw_lease in raw_leases.items():
+            lease_mapping = _mapping(raw_lease, f"$.leases.{domain}")
+            lease = cast(FencedLease, FencedLease.from_mapping(lease_mapping))
+            lease_value = lease.to_dict()
+            if lease_value["repo_uuid"] != repo_uuid:
+                raise ContractError(f"$.leases.{domain}.repo_uuid: must match state repo_uuid")
+            if cls.lease_domain(lease_value["operation"]) != domain:
+                raise ContractError(f"$.leases.{domain}: lease is stored in the wrong domain")
+            if int(lease_value["fence_token"]) > fence_high_watermark:
+                raise ContractError(f"$.leases.{domain}.fence_token: exceeds fence_high_watermark")
+            leases[domain] = lease
+        return cls(
+            repo_uuid=repo_uuid,
+            revision=revision,
+            fence_high_watermark=fence_high_watermark,
+            operation_epoch=operation_epoch,
+            migration_epoch=migration_epoch,
+            leases=leases,
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "WorkspaceLeaseState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal lease state is not canonical JSON")
+        return document
 
 
 class PointerSet(ContractDocument):
