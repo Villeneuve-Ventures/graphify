@@ -178,6 +178,14 @@ def test_canonicalization_rejects_lone_unicode_surrogates(value: dict[str, str])
         canonical_json_bytes(value)
 
 
+def test_contract_parser_rejects_non_string_mapping_keys() -> None:
+    value = _json(FIXTURES / "positive" / "registry.json")
+    value[1] = "unexpected"
+
+    with pytest.raises(ContractError, match="object keys must be strings"):
+        parse_contract(value)
+
+
 @pytest.mark.parametrize(
     "repo_uuid",
     [
@@ -364,6 +372,14 @@ def test_generation_payload_entries_are_sorted_unique_regular_files() -> None:
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://exa\x07mple.com/a"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://exa%mple.com/a"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/a|b"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/aKb"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/a;b"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "ssh://uKv@example.com/a"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "ssh://u;v@example.com/a"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "ssh://git@example.com/aKb"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "ssh://git@example.com/a;b"),
+        ("journal-event.json", ("transition",), "ROLLED_BACK"),
+        ("fenced-lease.json", ("operation",), "ROLLBACK"),
     ],
 )
 def test_schema_and_model_reject_noncanonical_contract_strings(

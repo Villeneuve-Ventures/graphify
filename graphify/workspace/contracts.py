@@ -1157,6 +1157,21 @@ class ContractDocument:
         normalised = _normalise_json(value)
         if not isinstance(normalised, dict):
             raise ContractError("$: expected object")
+
+        raw_contract = _string(value.get("contract"), "$.contract")
+        if cls.CONTRACT is not None and raw_contract != cls.CONTRACT:
+            raise ContractError(
+                f"$.contract: expected {cls.CONTRACT!r}, got {raw_contract!r}"
+            )
+        if raw_contract not in _VALIDATORS:
+            raise ContractError(f"$.contract: unknown contract {raw_contract!r}")
+        raw_version = _integer(value.get("schema_version"), "$.schema_version", minimum=1)
+        if raw_version != WORKSPACE_SCHEMA_VERSION:
+            raise UnsupportedContractVersion(
+                f"$.schema_version: expected {WORKSPACE_SCHEMA_VERSION}, got {raw_version}"
+            )
+        _VALIDATORS[raw_contract](value)
+
         contract = _string(normalised.get("contract"), "$.contract")
         if cls.CONTRACT is not None and contract != cls.CONTRACT:
             raise ContractError(f"$.contract: expected {cls.CONTRACT!r}, got {contract!r}")
