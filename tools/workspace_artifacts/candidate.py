@@ -676,6 +676,7 @@ def _isolated_environment(home: Path, codex_home: Path) -> dict[str, str]:
             "UV_TOOL_DIR": str(home / ".local/share/uv/tools"),
             "UV_TOOL_BIN_DIR": str(home / ".local/bin"),
             "UV_NO_CONFIG": "1",
+            "UV_PYTHON": sys.executable,
             "UV_PYTHON_DOWNLOADS": "never",
             "PYTHONNOUSERSITE": "1",
             "PATH": os.pathsep.join(path_components),

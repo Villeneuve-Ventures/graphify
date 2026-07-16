@@ -228,6 +228,7 @@ def test_isolated_environment_scrubs_untrusted_package_sources(
     assert env["UV_DEFAULT_INDEX"] == CONTROLLED_UPSTREAM_INDEX
     assert env["PIP_INDEX_URL"] == CONTROLLED_UPSTREAM_INDEX
     assert env["UV_NO_CONFIG"] == "1"
+    assert env["UV_PYTHON"] == sys.executable
     for name in ambient.keys() - {"UV_DEFAULT_INDEX", "PIP_INDEX_URL"}:
         assert name not in env
 
