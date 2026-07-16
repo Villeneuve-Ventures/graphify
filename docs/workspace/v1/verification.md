@@ -56,6 +56,9 @@
   substitutes for exact active-source evidence;
 - registry and workspace commits recover at every pending/previous/current
   durable-write boundary and reject corrupt or ambiguous state;
+- public lease transitions keep the recovered registry snapshot locked and
+  stable while nesting the workspace lock, so a higher durable pending registry
+  revision cannot be skipped by current-only CAS validation;
 - global registry mutations serialize across processes, and deterministic lease
   races produce one owner and one monotonic fence sequence;
 - active-source activation is a revision-checked CAS; resolution never guesses

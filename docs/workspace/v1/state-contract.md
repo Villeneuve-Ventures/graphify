@@ -91,16 +91,16 @@ P2 durably initializes the fence floor during enrollment, then persists the
 fence high-water mark, global operation allocator, migration epoch, current
 lease records, and each live domain's accepted operation epoch under the
 workspace. Missing initialized records fail closed rather than recreating the
-floor. Allocation, heartbeat, acceptance,
-and release recover a registry snapshot before taking the workspace lock and
-recheck current registry state under that lock; activation holds registry then
-workspace locks. Fence values advance before ownership is accepted, survive
-recovery and clean reboot, and never reset through release or expiry. An
-expired lease, a stale fence, a runtime owner/boot/process mismatch, a changed
-active-source revision, an advanced operation epoch in the same lease domain,
-or an advanced migration epoch cannot authorize a later commit. Runtime owner
-identity comes from OS-owned boot and process-start facts rather than caller
-assertion. Wall
+floor. Allocation, heartbeat, acceptance, release, and inspection acquire the
+registry lock, recover one stable registry snapshot, and keep that lock while
+nesting the workspace lock. They never replace recovery with a current-only
+re-read; activation uses the same order through its already-held registry-lock
+path. Fence values advance before ownership is accepted, survive recovery and
+clean reboot, and never reset through release or expiry. An expired lease, a
+stale fence, a runtime owner/boot/process mismatch, a changed active-source
+revision, an advanced operation epoch in the same lease domain, or an advanced
+migration epoch cannot authorize a later commit. Runtime owner identity comes
+from OS-owned boot and process-start facts rather than caller assertion. Wall
 timestamps remain audit/liveness metadata; monotonic deadlines are the only
 expiry input.
 Release is cleanup rather than commit acceptance: the trusted current runtime

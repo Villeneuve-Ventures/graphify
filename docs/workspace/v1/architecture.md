@@ -63,13 +63,15 @@ does not create those paths or write into source checkouts.
 
 P2 enforces global registry lock before the exclusive fenced workspace-operation
 lock whenever an operation needs both. Activation holds both in that order.
-Ordinary lease allocation first recovers a registry snapshot, releases the
-global lock, then takes the per-workspace lock and rechecks the atomically
-installed current registry revision; unrelated workspaces are therefore not
-globally serialized. P3 extends the nested order with generation coordination
-locks in lexical generation-ID order and pointer validation/CAS. Queries will
-take only the pre-created generation's shared advisory lock and will not
-acquire a writer-operation lease.
+Every public lease transition holds the registry lock while recovering one
+stable snapshot, then nests the per-workspace lock through validation and any
+lease-state commit. A durable pending registry revision therefore cannot be
+skipped between recovery and workspace CAS. The locks are released before the
+long-lived operation begins, so builds remain serialized only for their short
+lease transition rather than for extraction work. P3 extends the nested order
+with generation coordination locks in lexical generation-ID order and pointer
+validation/CAS. Queries will take only the pre-created generation's shared
+advisory lock and will not acquire a writer-operation lease.
 
 Activation, migration, promotion, rollback, repair, pointer recovery, and GC
 share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved

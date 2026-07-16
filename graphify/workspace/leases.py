@@ -380,22 +380,21 @@ class LeaseStore:
         monotonic_ns: int,
         ttl_ns: int,
     ) -> LeaseGrant:
-        document = self.registry.load()
-        return self._acquire_under_registry_lock(
-            document,
-            repo_uuid,
-            operation,
-            owner,
-            expected_registry_revision=expected_registry_revision,
-            expected_active_source_revision=expected_active_source_revision,
-            expected_operation_epoch=expected_operation_epoch,
-            expected_migration_epoch=expected_migration_epoch,
-            acquired_at=acquired_at,
-            monotonic_ns=monotonic_ns,
-            ttl_ns=ttl_ns,
-            verify_active=True,
-            recheck_registry=True,
-        )
+        with self.registry.recovered_snapshot() as document:
+            return self._acquire_under_registry_lock(
+                document,
+                repo_uuid,
+                operation,
+                owner,
+                expected_registry_revision=expected_registry_revision,
+                expected_active_source_revision=expected_active_source_revision,
+                expected_operation_epoch=expected_operation_epoch,
+                expected_migration_epoch=expected_migration_epoch,
+                acquired_at=acquired_at,
+                monotonic_ns=monotonic_ns,
+                ttl_ns=ttl_ns,
+                verify_active=True,
+            )
 
     def _acquire_under_registry_lock(
         self,
@@ -412,7 +411,6 @@ class LeaseStore:
         monotonic_ns: int,
         ttl_ns: int,
         verify_active: bool = False,
-        recheck_registry: bool = False,
     ) -> LeaseGrant:
         owner = self._require_current_owner(owner)
         if ttl_ns <= 0 or monotonic_ns < 0:
@@ -430,9 +428,6 @@ class LeaseStore:
                 )
             self.state.assert_external_to(discovered.root)
         with self.workspace_lock(repo_uuid):
-            if recheck_registry:
-                document = self.registry._read_current_unlocked()
-                entry = _registry_entry(document, repo_uuid)
             state = self._load_state_locked(document, repo_uuid)
             self._check_expected(
                 document,
@@ -531,15 +526,14 @@ class LeaseStore:
     def assert_current(self, grant: LeaseGrant, *, monotonic_ns: int) -> FencedLease:
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        document = self.registry.load()
-        with self.workspace_lock(repo_uuid):
-            document = self.registry._read_current_unlocked()
-            self._check_active(document, grant)
-            state = self._load_state_locked(document, repo_uuid)
-            _domain, current = self._matching_lease(state, grant)
-            if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
-                raise LeaseExpired("liveness deadline has passed")
-            return current
+        with self.registry.recovered_snapshot() as document:
+            with self.workspace_lock(repo_uuid):
+                self._check_active(document, grant)
+                state = self._load_state_locked(document, repo_uuid)
+                _domain, current = self._matching_lease(state, grant)
+                if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
+                    raise LeaseExpired("liveness deadline has passed")
+                return current
 
     def heartbeat(
         self,
@@ -553,46 +547,44 @@ class LeaseStore:
             raise LeaseError("ttl_ns must be positive")
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        document = self.registry.load()
-        with self.workspace_lock(repo_uuid):
-            document = self.registry._read_current_unlocked()
-            self._check_active(document, grant)
-            state = self._load_state_locked(document, repo_uuid)
-            domain, current = self._matching_lease(state, grant)
-            if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
-                raise LeaseExpired("liveness deadline has passed")
-            value = current.to_dict()
-            value["heartbeat_at"] = _timestamp(heartbeat_at)
-            value["liveness_deadline_monotonic_ns"] = monotonic_ns + ttl_ns
-            leases = dict(state.leases)
-            leases[domain] = cast(FencedLease, FencedLease.from_mapping(value))
-            committed = self._commit_state_locked(
-                WorkspaceLeaseState(
-                    repo_uuid=state.repo_uuid,
-                    revision=state.revision + 1,
-                    fence_high_watermark=state.fence_high_watermark,
-                    operation_epoch=state.operation_epoch,
-                    migration_epoch=state.migration_epoch,
-                    leases=leases,
-                    lease_epochs=dict(state.lease_epochs),
+        with self.registry.recovered_snapshot() as document:
+            with self.workspace_lock(repo_uuid):
+                self._check_active(document, grant)
+                state = self._load_state_locked(document, repo_uuid)
+                domain, current = self._matching_lease(state, grant)
+                if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
+                    raise LeaseExpired("liveness deadline has passed")
+                value = current.to_dict()
+                value["heartbeat_at"] = _timestamp(heartbeat_at)
+                value["liveness_deadline_monotonic_ns"] = monotonic_ns + ttl_ns
+                leases = dict(state.leases)
+                leases[domain] = cast(FencedLease, FencedLease.from_mapping(value))
+                committed = self._commit_state_locked(
+                    WorkspaceLeaseState(
+                        repo_uuid=state.repo_uuid,
+                        revision=state.revision + 1,
+                        fence_high_watermark=state.fence_high_watermark,
+                        operation_epoch=state.operation_epoch,
+                        migration_epoch=state.migration_epoch,
+                        leases=leases,
+                        lease_epochs=dict(state.lease_epochs),
+                    )
                 )
-            )
-            return LeaseGrant(
-                lease=committed.leases[domain],
-                registry_revision=int(document.to_dict()["revision"]),
-                active_source_revision=grant.active_source_revision,
-                operation_epoch=grant.operation_epoch,
-                migration_epoch=committed.migration_epoch,
-            )
+                return LeaseGrant(
+                    lease=committed.leases[domain],
+                    registry_revision=int(document.to_dict()["revision"]),
+                    active_source_revision=grant.active_source_revision,
+                    operation_epoch=grant.operation_epoch,
+                    migration_epoch=committed.migration_epoch,
+                )
 
     def release(self, grant: LeaseGrant) -> WorkspaceLeaseState:
-        document = self.registry.load()
-        return self._release_under_registry_lock(
-            grant,
-            document,
-            validate_active=False,
-            recheck_registry=True,
-        )
+        with self.registry.recovered_snapshot() as document:
+            return self._release_under_registry_lock(
+                grant,
+                document,
+                validate_active=False,
+            )
 
     def _release_under_registry_lock(
         self,
@@ -600,13 +592,10 @@ class LeaseStore:
         document: Registry,
         *,
         validate_active: bool,
-        recheck_registry: bool = False,
     ) -> WorkspaceLeaseState:
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
         with self.workspace_lock(repo_uuid):
-            if recheck_registry:
-                document = self.registry._read_current_unlocked()
             if validate_active:
                 self._check_active(document, grant)
             state = self._load_state_locked(document, repo_uuid)
@@ -628,10 +617,9 @@ class LeaseStore:
             )
 
     def inspect(self, repo_uuid: str) -> WorkspaceLeaseState:
-        document = self.registry.load()
-        with self.workspace_lock(repo_uuid):
-            document = self.registry._read_current_unlocked()
-            return self._load_state_locked(document, repo_uuid)
+        with self.registry.recovered_snapshot() as document:
+            with self.workspace_lock(repo_uuid):
+                return self._load_state_locked(document, repo_uuid)
 
 
 __all__ = [

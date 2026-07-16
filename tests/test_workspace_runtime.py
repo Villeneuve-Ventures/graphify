@@ -690,6 +690,50 @@ def test_registry_recovery_is_monotonic_across_named_crash_schedules(tmp_path: P
         }
 
 
+def test_lease_acquire_recovers_durable_pending_registry_before_cas(tmp_path: Path) -> None:
+    first_repo = _create_repo(tmp_path / "first", REPO_UUID)
+    second_repo = _create_repo(tmp_path / "second", SECOND_UUID)
+    state_root = tmp_path / "state"
+    RegistryStore(state_root, capabilities=SUPPORTED).enroll(
+        discover_source(first_repo),
+        _authorization(IdentityAction.ENROLL, "first"),
+        expected_revision=0,
+    )
+    crash = CrashAt("registry:pending_durable")
+    crashing = RegistryStore(state_root, capabilities=SUPPORTED, fault_hook=crash)
+    with pytest.raises(CommitUnknown):
+        crashing.enroll(
+            discover_source(second_repo),
+            _authorization(IdentityAction.ENROLL, "second"),
+            expected_revision=1,
+        )
+    assert crash.fired
+    assert (state_root / "registry.pending.json").exists()
+
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    workspace_root = state_root / "workspaces" / REPO_UUID
+    before_workspace = _tree_snapshot(workspace_root)
+
+    with pytest.raises(RevisionConflict, match="expected 1, found 2"):
+        leases.acquire(
+            REPO_UUID,
+            "BUILD",
+            leases.current_owner(),
+            expected_registry_revision=1,
+            expected_active_source_revision=1,
+            expected_operation_epoch=1,
+            expected_migration_epoch=0,
+            acquired_at=datetime(2026, 7, 16, 15, 2, tzinfo=timezone.utc),
+            monotonic_ns=100,
+            ttl_ns=50,
+        )
+
+    assert registry.load().to_dict()["revision"] == 2
+    assert not (state_root / "registry.pending.json").exists()
+    assert _tree_snapshot(workspace_root) == before_workspace
+
+
 def test_lease_allocation_fails_before_workspace_write_when_active_source_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -1512,6 +1556,14 @@ def test_registry_before_workspace_lock_order_is_enforced_and_observable(tmp_pat
             pass
     assert events.index("lock:registry:acquired") < events.index("lock:workspace:acquired")
 
+    def assert_registry_encloses_workspace() -> None:
+        assert events.index("lock:registry:acquired") < events.index(
+            "lock:workspace:acquired"
+        )
+        assert events.index("lock:workspace:released") < events.index(
+            "lock:registry:released"
+        )
+
     events.clear()
     grant = leases.acquire(
         REPO_UUID,
@@ -1525,8 +1577,28 @@ def test_registry_before_workspace_lock_order_is_enforced_and_observable(tmp_pat
         monotonic_ns=20_000,
         ttl_ns=1_000,
     )
-    assert events.index("lock:registry:released") < events.index("lock:workspace:acquired")
+    assert_registry_encloses_workspace()
+
+    events.clear()
+    leases.assert_current(grant, monotonic_ns=20_100)
+    assert_registry_encloses_workspace()
+
+    events.clear()
+    grant = leases.heartbeat(
+        grant,
+        heartbeat_at=datetime(2026, 7, 16, 15, 8, tzinfo=timezone.utc),
+        monotonic_ns=20_200,
+        ttl_ns=1_000,
+    )
+    assert_registry_encloses_workspace()
+
+    events.clear()
+    leases.inspect(REPO_UUID)
+    assert_registry_encloses_workspace()
+
+    events.clear()
     leases.release(grant)
+    assert_registry_encloses_workspace()
 
 
 def test_registry_and_lease_operations_never_write_source_checkouts(tmp_path: Path) -> None:

@@ -117,32 +117,19 @@ class RegistryStore:
         )
         return cast(Registry | None, result)
 
-    def load(self) -> Registry:
+    @contextmanager
+    def recovered_snapshot(self) -> Iterator[Registry]:
+        """Hold the registry lock while exposing one recovered stable revision."""
+
         with self.exclusive_lock():
             document = self._load_locked()
-        if document is None:  # pragma: no cover - narrowed by allow_missing=False
-            raise StateCorrupt("registry current record is missing")
-        return document
+            if document is None:  # pragma: no cover - narrowed by allow_missing=False
+                raise StateCorrupt("registry current record is missing")
+            yield document
 
-    def _read_current_unlocked(self) -> Registry:
-        """Read one atomically installed current revision without recovery.
-
-        Workspace operations use this only after a locked recovery snapshot and
-        while holding their per-workspace lock. Registry writers install current
-        with one atomic replacement; activation also needs that workspace lock.
-        """
-
-        document = cast(
-            Registry | None,
-            self.state.read_current(
-                self.CURRENT,
-                decoder=self._decode_registry,
-                label="registry",
-            ),
-        )
-        if document is None:  # pragma: no cover - allow_missing is false
-            raise StateCorrupt("registry current record is missing")
-        return document
+    def load(self) -> Registry:
+        with self.recovered_snapshot() as document:
+            return document
 
     def _decode_registry(self, payload: bytes) -> Registry:
         document = cast(Registry, Registry.from_json(payload))
