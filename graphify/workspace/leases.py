@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ctypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -78,6 +79,33 @@ class LeaseIdentityProvider(Protocol):
     def current_owner(self) -> LeaseOwner: ...
 
 
+class _DarwinProcBSDInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
 class SystemLeaseIdentityProvider:
     """Read boot and process-start identity from OS-owned runtime state."""
 
@@ -111,13 +139,7 @@ class SystemLeaseIdentityProvider:
                 text=True,
                 env=environment,
             ).stdout.strip()
-            process_start = subprocess.run(
-                ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-                check=True,
-                capture_output=True,
-                text=True,
-                env=environment,
-            ).stdout.strip()
+            process_start = cls._darwin_process_start(pid)
         except (OSError, subprocess.CalledProcessError) as exc:
             raise LeaseError(f"cannot read trusted macOS process identity: {exc}") from exc
         if not boot or not process_start:
@@ -127,6 +149,35 @@ class SystemLeaseIdentityProvider:
             pid=pid,
             process_start_id=cls._digest("darwin-process-start", process_start),
         )
+
+    @staticmethod
+    def _darwin_process_start(pid: int, proc_pidinfo: Any | None = None) -> str:
+        if proc_pidinfo is None:
+            try:
+                library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+                probe = cast(Any, library.proc_pidinfo)
+            except OSError as exc:
+                raise LeaseError(f"cannot load trusted macOS process identity: {exc}") from exc
+            probe.argtypes = [
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint64,
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ]
+            probe.restype = ctypes.c_int
+        else:
+            probe = proc_pidinfo
+        info = _DarwinProcBSDInfo()
+        size = ctypes.sizeof(info)
+        returned = probe(pid, 3, 0, ctypes.byref(info), size)
+        if returned != size or info.pbi_pid != pid:
+            error_number = ctypes.get_errno()
+            detail = os.strerror(error_number) if error_number else f"returned {returned} bytes"
+            raise LeaseError(f"cannot read trusted macOS process start: {detail}")
+        if info.pbi_start_tvsec < 1 or info.pbi_start_tvusec >= 1_000_000:
+            raise LeaseError("trusted macOS process start is invalid")
+        return f"{info.pbi_start_tvsec}:{info.pbi_start_tvusec:06d}"
 
     def current_owner(self) -> LeaseOwner:
         pid = os.getpid()
@@ -439,6 +490,8 @@ class LeaseStore:
     def _matching_lease(
         state: WorkspaceLeaseState,
         grant: LeaseGrant,
+        *,
+        require_epochs: bool = True,
     ) -> tuple[str, FencedLease]:
         grant_value = grant.lease.to_dict()
         domain = _lease_domain(str(grant_value["operation"]))
@@ -450,9 +503,9 @@ class LeaseStore:
             raise StaleLease("fence token is no longer current")
         if current_value["owner"] != grant_value["owner"]:
             raise StaleLease("stale_owner: owner identity no longer matches")
-        if state.lease_epochs.get(domain) != grant.operation_epoch:
+        if require_epochs and state.lease_epochs.get(domain) != grant.operation_epoch:
             raise StaleLease("stale_epoch: lease-domain operation epoch advanced")
-        if state.migration_epoch != grant.migration_epoch:
+        if require_epochs and state.migration_epoch != grant.migration_epoch:
             raise StaleLease("stale_epoch: operation or migration epoch advanced")
         return domain, current
 
@@ -525,7 +578,7 @@ class LeaseStore:
         return self._release_under_registry_lock(
             grant,
             document,
-            validate_active=True,
+            validate_active=False,
             recheck_registry=True,
         )
 
@@ -545,7 +598,7 @@ class LeaseStore:
             if validate_active:
                 self._check_active(document, grant)
             state = self._load_state_locked(document, repo_uuid)
-            domain, _current = self._matching_lease(state, grant)
+            domain, _current = self._matching_lease(state, grant, require_epochs=False)
             leases = dict(state.leases)
             del leases[domain]
             lease_epochs = dict(state.lease_epochs)

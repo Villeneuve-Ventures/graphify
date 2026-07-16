@@ -103,6 +103,9 @@ identity comes from OS-owned boot and process-start facts rather than caller
 assertion. Wall
 timestamps remain audit/liveness metadata; monotonic deadlines are the only
 expiry input.
+Release is cleanup rather than commit acceptance: the trusted current runtime
+may remove only the exact current owner/fence record even after a source,
+operation, or migration epoch invalidates that lease's commit authority.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

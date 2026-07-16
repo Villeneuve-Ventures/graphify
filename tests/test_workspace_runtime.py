@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import ctypes
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -11,9 +12,12 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 from typing import Any, cast
 
 import pytest
+
+import graphify.workspace.leases as lease_module
 
 from graphify.workspace.contracts import FencedLease, canonical_json_bytes
 from graphify.workspace.identity import (
@@ -33,6 +37,7 @@ from graphify.workspace.leases import (
     LeaseOwner,
     LeaseStore,
     StaleLease,
+    SystemLeaseIdentityProvider,
 )
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -257,6 +262,51 @@ def test_runtime_rejects_unsupported_platform_without_test_capability(tmp_path: 
 
     with pytest.raises(UnsupportedRuntime, match="macOS.*APFS"):
         RegistryStore(tmp_path / "state", capabilities=unsupported)
+
+
+def test_darwin_identity_probe_preserves_subsecond_process_start() -> None:
+    def probe(microseconds: int) -> str:
+        def fake_proc_pidinfo(
+            pid: int,
+            flavor: int,
+            argument: int,
+            buffer: Any,
+            size: int,
+        ) -> int:
+            assert flavor == 3
+            assert argument == 0
+            assert size == ctypes.sizeof(lease_module._DarwinProcBSDInfo)
+            info = ctypes.cast(
+                buffer,
+                ctypes.POINTER(lease_module._DarwinProcBSDInfo),
+            ).contents
+            info.pbi_pid = pid
+            info.pbi_start_tvsec = 1_721_149_200
+            info.pbi_start_tvusec = microseconds
+            return size
+
+        return SystemLeaseIdentityProvider._darwin_process_start(700, fake_proc_pidinfo)
+
+    first = probe(100_001)
+    second = probe(100_002)
+    assert first == "1721149200:100001"
+    assert second == "1721149200:100002"
+    assert SystemLeaseIdentityProvider._digest("darwin-process-start", first) != (
+        SystemLeaseIdentityProvider._digest("darwin-process-start", second)
+    )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="libproc is the supported macOS probe")
+def test_darwin_identity_provider_reads_a_stable_live_owner() -> None:
+    provider = SystemLeaseIdentityProvider()
+
+    first = provider.current_owner()
+    second = provider.current_owner()
+
+    assert first == second
+    assert first.pid == os.getpid()
+    assert len(first.boot_id) == 64
+    assert len(first.process_start_id) == 64
 
 
 def test_enrollment_is_operator_authorized_audited_and_source_pure(tmp_path: Path) -> None:
@@ -975,6 +1025,53 @@ def test_workspace_and_semantic_domains_keep_independent_operation_epochs(
     assert state.leases == {}
     assert state.lease_epochs == {}
     assert state.operation_epoch == 3
+
+
+def test_migration_invalidates_semantic_commit_but_not_exact_owner_cleanup(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    owner = leases.current_owner()
+    semantic = leases.acquire(
+        REPO_UUID,
+        "SEMANTIC_CLAIM",
+        owner,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 3, tzinfo=timezone.utc),
+        monotonic_ns=1_000,
+        ttl_ns=1_000,
+    )
+    migration = leases.acquire(
+        REPO_UUID,
+        "MIGRATE",
+        owner,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=2,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 4, tzinfo=timezone.utc),
+        monotonic_ns=1_010,
+        ttl_ns=1_000,
+    )
+
+    with pytest.raises(StaleLease, match="stale_epoch"):
+        leases.assert_current(semantic, monotonic_ns=1_020)
+    after_semantic_release = leases.release(semantic)
+    assert set(after_semantic_release.leases) == {"workspace"}
+    after_migration_release = leases.release(migration)
+    assert after_migration_release.leases == {}
+    assert after_migration_release.lease_epochs == {}
 
 
 def test_trusted_runtime_identity_rejects_forged_reboot_and_pid_reuse(

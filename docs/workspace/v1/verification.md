@@ -64,7 +64,8 @@
   forged reboot and PID reuse; and stale fence, owner, source, domain operation,
   and migration epochs fail acceptance;
 - enrollment initializes the durable fence floor, missing initialized records
-  fail closed, and workspace/semantic domains remain independently releasable;
+  fail closed, and workspace/semantic domains remain independently releasable
+  after source, operation, or migration invalidation;
 - state roots reject unsupported platforms, links, source overlap, and split
   registry/lease roots; recursive before/after source snapshots remain equal;
   and
