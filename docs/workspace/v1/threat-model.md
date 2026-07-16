@@ -15,20 +15,22 @@ Detectable unsupported conditions fail closed:
 - pre-login/system-daemon operation.
 
 Watch supervision is login-scoped. Automatic online GC and historical certified
-query are deferred. V1 capacity policy requires preflight reserve and configured
-global/per-workspace byte and generation limits; P3/P5 will freeze quantitative
-ceilings before operational approval.
+query are deferred. P3 requires an explicit validated runtime `CapacityPolicy`
+for every allocation and GC operation. It has no defaults and adds no public
+config field; operators must supply global/per-workspace byte and generation
+limits plus a free-space reserve threshold.
 
 ## Durability claim
 
-The P2 registry and lease persistence implementation handles process death,
+The P2/P3 persistence implementation handles process death,
 injected short writes,
 `EINTR`, `ENOSPC`, `EDQUOT`, `EIO`, failed sync, failed rename, and clean reboot
 after a successful durable-write completion. Later lifecycle records must reuse
 the same boundary. Sudden hardware power-loss durability is not claimed.
 
-P2 executes registry and lease transitions only; generation, pointer, journal,
-adapter, service, and installation transitions remain absent.
+P3 executes generation, journal, pointer, and explicit offline-GC transitions.
+Adapter, freshness, service, command, and installation transitions remain
+absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the

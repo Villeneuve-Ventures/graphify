@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from contextvars import ContextVar
 from dataclasses import dataclass
 import errno
@@ -11,13 +11,14 @@ from pathlib import Path, PurePosixPath
 import platform
 import stat
 import subprocess
-from typing import Callable, Iterator, Protocol, TypeVar
+from typing import Callable, Iterator, Protocol, Sequence, TypeVar
 import uuid
 
 
 FaultHook = Callable[[str], None]
 REGISTRY_LOCK_RANK = 10
 WORKSPACE_LOCK_RANK = 20
+GENERATION_LOCK_RANK = 30
 _LOCK_STACK: ContextVar[tuple[tuple[int, str], ...]] = ContextVar(
     "graphify_workspace_lock_stack",
     default=(),
@@ -116,6 +117,10 @@ class Syscalls(Protocol):
 
     def replace(self, source: Path, destination: Path) -> None: ...
 
+    def unlink(self, path: Path) -> None: ...
+
+    def mkdir(self, path: Path, mode: int) -> None: ...
+
 
 class PosixSyscalls:
     """Injectable POSIX syscall surface used by durability tests."""
@@ -128,6 +133,12 @@ class PosixSyscalls:
 
     def replace(self, source: Path, destination: Path) -> None:
         os.replace(source, destination)
+
+    def unlink(self, path: Path) -> None:
+        os.unlink(path)
+
+    def mkdir(self, path: Path, mode: int) -> None:
+        os.mkdir(path, mode)
 
 
 RecordT = TypeVar("RecordT")
@@ -165,7 +176,7 @@ class DurableStateRoot:
                     f"state root parent must already be an owned directory: {self.root.parent}"
                 ) from exc
             try:
-                os.mkdir(self.root, 0o700)
+                self.syscalls.mkdir(self.root, 0o700)
             except FileExistsError:
                 pass
             if self.root.is_symlink() or not self.root.is_dir():
@@ -207,7 +218,7 @@ class DurableStateRoot:
             try:
                 child.lstat()
             except FileNotFoundError:
-                os.mkdir(child, 0o700)
+                self.syscalls.mkdir(child, 0o700)
                 self._fsync_directory(current)
             self._require_owned_directory(child)
             os.chmod(child, 0o700)
@@ -226,6 +237,25 @@ class DurableStateRoot:
                 f"external state root {self.root} overlaps source checkout {source}"
             )
 
+    def require_existing_directory_chain(self, relative: str | Path) -> Path:
+        """Validate every existing directory component without mutating state."""
+
+        destination = self.path(relative)
+        self._require_owned_directory(self.root)
+        current = self.root
+        for part in destination.relative_to(self.root).parts:
+            current = current / part
+            try:
+                details = current.lstat()
+            except FileNotFoundError as exc:
+                raise StatePathError(f"state directory is missing: {current}") from exc
+            if not stat.S_ISDIR(details.st_mode) or current.is_symlink():
+                raise StatePathError(
+                    f"state directory is linked or not a directory: {current}"
+                )
+            self._require_owner(details, current)
+        return destination
+
     @contextmanager
     def lock(
         self,
@@ -236,8 +266,13 @@ class DurableStateRoot:
     ) -> Iterator[None]:
         self._ensure_root()
         stack = _LOCK_STACK.get()
-        if stack and rank < stack[-1][0]:
-            raise LockOrderError(f"{name} lock cannot be acquired after {stack[-1][1]} lock")
+        if stack and (
+            rank < stack[-1][0]
+            or (rank == stack[-1][0] and name <= stack[-1][1])
+        ):
+            raise LockOrderError(
+                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
+            )
         path = self.path(relative)
         self._ensure_parent(path)
         flags = os.O_RDWR | os.O_CREAT
@@ -293,10 +328,255 @@ class DurableStateRoot:
             raise StateCorrupt(f"content-addressed state verification failed at {path}")
         return path
 
+    def install_once_bytes(
+        self,
+        relative: str | Path,
+        data: bytes,
+        *,
+        label: str,
+    ) -> Path:
+        """Durably install immutable bytes once, preserving a stable inode on retry."""
+
+        self._ensure_root()
+        path = self.path(relative)
+        self._ensure_parent(path)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if self._read_regular(path) != data:
+                raise StateCorrupt(f"immutable state conflicts at {path}")
+            return path
+        visible = False
+
+        def replaced() -> None:
+            nonlocal visible
+            visible = True
+            self.fault_hook(f"{label}:installed")
+
+        try:
+            self._atomic_replace(path, data, after_replace=replaced)
+        except BaseException as exc:
+            if visible:
+                raise CommitUnknown(
+                    f"{label} became visible before durability acknowledgement"
+                ) from exc
+            raise
+        if self._read_regular(path) != data:
+            raise StateCorrupt(f"immutable state verification failed at {path}")
+        return path
+
+    def atomic_replace_bytes(
+        self,
+        relative: str | Path,
+        data: bytes,
+        *,
+        label: str,
+    ) -> Path:
+        """Durably replace one contained record and surface uncertain visibility."""
+
+        destination = self.path(relative)
+        visible = False
+
+        def replaced() -> None:
+            nonlocal visible
+            visible = True
+            self.fault_hook(f"{label}:replaced")
+
+        try:
+            self._atomic_replace(destination, data, after_replace=replaced)
+        except BaseException as exc:
+            if visible:
+                raise CommitUnknown(
+                    f"{label} became visible before durability acknowledgement"
+                ) from exc
+            raise
+        return destination
+
+    def rename_contained(
+        self,
+        source: str | Path,
+        destination: str | Path,
+        *,
+        label: str,
+    ) -> Path:
+        """Atomically move one contained file/directory and sync both parents."""
+
+        self._ensure_root()
+        source_path = self.path(source)
+        destination_path = self.path(destination)
+        self._ensure_parent(destination_path)
+        if not source_path.exists() or source_path.is_symlink():
+            raise StatePathError(f"rename source is missing or linked: {source_path}")
+        if destination_path.exists() or destination_path.is_symlink():
+            raise StatePathError(f"rename destination already exists: {destination_path}")
+        source_details = source_path.lstat()
+        self._require_owner(source_details, source_path)
+        visible = False
+        self.fault_hook(f"{label}:before_rename")
+        try:
+            self.syscalls.replace(source_path, destination_path)
+            visible = True
+            self.fault_hook(f"{label}:renamed")
+            self._fsync_directory(source_path.parent)
+            self.fault_hook(f"{label}:source_parent_durable")
+            if destination_path.parent != source_path.parent:
+                self._fsync_directory(destination_path.parent)
+            self.fault_hook(f"{label}:destination_parent_durable")
+        except BaseException as exc:
+            if visible:
+                raise CommitUnknown(
+                    f"{label} rename became visible before both directories were durable"
+                ) from exc
+            raise
+        return destination_path
+
+    def unlink_and_sync(self, relative: str | Path, *, label: str) -> None:
+        path = self.path(relative)
+        self.fault_hook(f"{label}:before_unlink")
+        try:
+            details = path.lstat()
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1 or path.is_symlink():
+            raise StatePathError(f"state cleanup target is not a regular file: {path}")
+        self._require_owner(details, path)
+        if stat.S_IMODE(details.st_mode) != 0o600:
+            raise StatePathError(f"state cleanup target mode is not 0600: {path}")
+        visible = False
+        try:
+            self.syscalls.unlink(path)
+            visible = True
+            self.fault_hook(f"{label}:unlinked")
+            self._fsync_directory(path.parent)
+            self.fault_hook(f"{label}:parent_durable")
+        except BaseException as exc:
+            if visible:
+                raise CommitUnknown(
+                    f"{label} cleanup became visible before durability acknowledgement"
+                ) from exc
+            raise
+
+    def fsync_directory(self, relative: str | Path) -> None:
+        path = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
+        self._fsync_directory(path)
+
+    def fsync_regular_file(
+        self,
+        relative: str | Path,
+        *,
+        allowed_modes: frozenset[int] = frozenset({0o600}),
+    ) -> None:
+        path = self.path(relative)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                raise StatePathError(f"state file is not a singular regular file: {path}")
+            self._require_owner(details, path)
+            if stat.S_IMODE(details.st_mode) not in allowed_modes:
+                raise StatePathError(f"state file mode is not allowed: {path}")
+            self.syscalls.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def existing_generation_lock(
+        self,
+        relative: str | Path,
+        *,
+        generation_id: str,
+        exclusive: bool,
+        blocking: bool = True,
+    ) -> Iterator[None]:
+        """Lock a retained coordination object without any mutating syscall."""
+
+        stack = _LOCK_STACK.get()
+        name = f"generation:{generation_id}"
+        rank = GENERATION_LOCK_RANK
+        if stack and (
+            rank < stack[-1][0]
+            or (rank == stack[-1][0] and name <= stack[-1][1])
+        ):
+            raise LockOrderError(
+                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
+            )
+        path = self.path(relative)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                raise StatePathError(f"generation lock is not a singular regular file: {path}")
+            self._require_owner(details, path)
+            if stat.S_IMODE(details.st_mode) != 0o600:
+                raise StatePathError(f"generation lock mode is not 0600: {path}")
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - rejected by capability gate
+                raise UnsupportedRuntime("fcntl is required for generation locking") from exc
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            if not blocking:
+                operation |= fcntl.LOCK_NB
+            while True:
+                try:
+                    fcntl.flock(descriptor, operation)
+                    break
+                except InterruptedError:
+                    continue
+            token = _LOCK_STACK.set((*stack, (rank, name)))
+            self.fault_hook(f"lock:{name}:acquired")
+            try:
+                yield
+            finally:
+                _LOCK_STACK.reset(token)
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        break
+                    except InterruptedError:
+                        continue
+                self.fault_hook(f"lock:{name}:released")
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def existing_generation_locks(
+        self,
+        locks: Sequence[tuple[str, str | Path]],
+        *,
+        exclusive: bool,
+        blocking: bool = True,
+    ) -> Iterator[None]:
+        ordered = list(locks)
+        if ordered != sorted(ordered, key=lambda item: item[0]):
+            raise LockOrderError("generation locks must be requested in lexical generation order")
+        if len({generation_id for generation_id, _path in ordered}) != len(ordered):
+            raise LockOrderError("generation locks must be unique")
+        with ExitStack() as stack:
+            for generation_id, path in ordered:
+                stack.enter_context(
+                    self.existing_generation_lock(
+                        path,
+                        generation_id=generation_id,
+                        exclusive=exclusive,
+                        blocking=blocking,
+                    )
+                )
+            yield
+
     def read_bytes(self, relative: str | Path) -> bytes:
         """Read one contained regular state file without following its final path."""
 
         self._ensure_root()
+        return self._read_regular(self.path(relative))
+
+    def read_existing_bytes(self, relative: str | Path) -> bytes:
+        """Read existing state without mkdir, chmod, replacement, or cleanup."""
+
+        self._require_owned_directory(self.root)
         return self._read_regular(self.path(relative))
 
     def read_current(
@@ -527,7 +807,7 @@ class DurableStateRoot:
         self._require_owner(details, path)
         if stat.S_IMODE(details.st_mode) != 0o600:
             raise StatePathError(f"state cleanup target mode is not 0600: {path}")
-        path.unlink()
+        self.syscalls.unlink(path)
         self._fsync_directory(path.parent)
 
     def _fsync_directory(self, path: Path) -> None:
@@ -548,6 +828,7 @@ __all__ = [
     "CommitUnknown",
     "DurableStateRoot",
     "FaultHook",
+    "GENERATION_LOCK_RANK",
     "InjectedFault",
     "LockOrderError",
     "PosixSyscalls",

@@ -19,10 +19,11 @@ P1 freezes only these seams:
 8. compatibility and candidate artifact manifests; and
 9. installer transaction, compensation, and offline rollback records.
 
-P2 now implements the registry writer, identity/source enrollment, explicit
-active-source CAS, and lease allocator. It does not implement a generation
-builder, pointer mover, journal appender, GC action, freshness scanner, semantic
-queue, service, or workspace CLI. Those remain dependency-ordered P3-P5 work.
+P2 implements the registry writer, identity/source enrollment, explicit
+active-source CAS, and lease allocator. P3 implements lifecycle mechanics for
+caller-supplied staged generations, pointers, journals, and offline GC. Neither
+phase implements a Graphify engine adapter, freshness scanner, semantic queue,
+service, or workspace CLI; those remain dependency-ordered P4/P5 work.
 
 ## Authority split
 
@@ -56,8 +57,9 @@ P2 writes only this external lifecycle state:
     workspace.lock
 ```
 
-P3 owns generations, lifecycle journals, coordination locks, and pointers; P2
-does not create those paths or write into source checkouts.
+P3 now owns generations, lifecycle journals, coordination locks, pointers,
+capacity reservations, and explicit offline-GC records. None of those paths is
+written inside a source checkout.
 
 ## Ordering
 
@@ -78,5 +80,6 @@ share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved
 semantic domain. Each live domain retains its own accepted operation epoch, so
 allocating a semantic claim cannot invalidate or strand an otherwise-current
 workspace lease. Migration may invalidate semantic commit authority, but the
-exact trusted owner/fence can still release that stale record. P2 allocates and validates these leases but performs none of
-the deferred P3-P5 operations named by them.
+exact trusted owner/fence can still release that stale record. P2 allocates and
+validates these leases; P3 consumes only the lifecycle-operation subset. P4/P5
+remain responsible for adapter, freshness, semantic, service, and command use.

@@ -209,6 +209,28 @@ class LeaseGrant:
     migration_epoch: int
 
 
+@dataclass(frozen=True)
+class LeaseOperation:
+    """A current fenced operation held under registry-then-workspace locks."""
+
+    registry: Registry
+    state: WorkspaceLeaseState
+    lease: FencedLease
+    grant: LeaseGrant
+
+    @property
+    def repo_uuid(self) -> str:
+        return str(self.lease.to_dict()["repo_uuid"])
+
+    @property
+    def operation(self) -> str:
+        return str(self.lease.to_dict()["operation"])
+
+    @property
+    def fence_token(self) -> int:
+        return int(self.lease.to_dict()["fence_token"])
+
+
 def _lease_domain(operation: str) -> str:
     return WorkspaceLeaseState.lease_domain(operation)
 
@@ -535,6 +557,42 @@ class LeaseStore:
                     raise LeaseExpired("liveness deadline has passed")
                 return current
 
+    @contextmanager
+    def current_operation(
+        self,
+        grant: LeaseGrant,
+        *,
+        monotonic_ns: int,
+        allowed_operations: frozenset[str] | None = None,
+    ) -> Iterator[LeaseOperation]:
+        """Keep a grant current for one serialized P3 mutation.
+
+        The registry and workspace locks remain held for the yielded scope so a
+        source activation or successor fence cannot interleave between grant
+        validation and the durable commit it authorizes.
+        """
+
+        self._require_grant_owner(grant)
+        repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
+        with self.registry.recovered_snapshot() as document:
+            with self.workspace_lock(repo_uuid):
+                self._check_active(document, grant)
+                state = self._load_state_locked(document, repo_uuid)
+                _domain, current = self._matching_lease(state, grant)
+                operation = str(current.to_dict()["operation"])
+                if allowed_operations is not None and operation not in allowed_operations:
+                    raise StaleLease(
+                        f"operation {operation} is not authorized for this mutation"
+                    )
+                if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
+                    raise LeaseExpired("liveness deadline has passed")
+                yield LeaseOperation(
+                    registry=document,
+                    state=state,
+                    lease=current,
+                    grant=grant,
+                )
+
     def heartbeat(
         self,
         grant: LeaseGrant,
@@ -628,6 +686,7 @@ __all__ = [
     "LeaseExpired",
     "LeaseGrant",
     "LeaseIdentityProvider",
+    "LeaseOperation",
     "LeaseOwner",
     "LeaseStore",
     "StaleLease",

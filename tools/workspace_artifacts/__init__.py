@@ -235,9 +235,13 @@ def build_static_bundles(
     for module_name in (
         "__init__.py",
         "contracts.py",
+        "gc.py",
+        "generations.py",
         "identity.py",
+        "journal.py",
         "leases.py",
         "persistence.py",
+        "pointers.py",
         "registry.py",
     ):
         contract_members.append(

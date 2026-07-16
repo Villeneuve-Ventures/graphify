@@ -87,8 +87,30 @@ After code changes, run the absolute repo-local Graphify binary to update the
 repo graph. Because the release checkout has no committed graph, bootstrap
 output remains ignored and must not widen the P1 product diff.
 
-P2 verification does not satisfy P3-P5 generation, journal, pointer, adapter,
-freshness, queue, service, performance, installation, or live-cutover gates.
+## P3 runtime gates
+
+- capacity limits and the filesystem reserve fail before allocation mutation,
+  with registry-serialized durable reservations for concurrent workspaces;
+- descriptor-relative payload inventories reject links, special files,
+  hardlinks, extras, unstable identities, and noncanonical declarations;
+- certification syncs the exact payload and receipt, atomically installs one
+  generation, reopens and verifies it, then appends `CERTIFIED`;
+- journal recovery adopts one complete uncommitted hash-linked segment,
+  discards only one truncated tail, and rejects committed corruption or an
+  ambiguous suffix;
+- promotion retains the prior pointer before one visible replacement, stale
+  candidates become `SUPERSEDED`, and recovery emits a fresh higher revision;
+- shared readers open retained locks read-only, perform no durable write, and
+  exclude GC's exclusive counterpart;
+- offline GC proves a no-write dry run, writes a durable intent, rechecks under
+  lexical generation locks, quarantines with both directories synced, records
+  completion, reconciles `commit_unknown`, and purges only by a separate
+  explicit operation; and
+- focused failpoint and deterministic concurrency schedules cover segment,
+  generation, pointer, reader-lock, and GC boundaries.
+
+P3 verification does not satisfy P4/P5 adapter, freshness, queue, service,
+performance, installation, or live-cutover gates.
 
 The P1 fixture bundle is deliberately limited to synthetic contract fixtures;
 it is not claimed as the representative repository corpus required by the
