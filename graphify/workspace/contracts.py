@@ -931,9 +931,7 @@ def _validate_compatibility(data: Mapping[str, object]) -> None:
         ("adapter_contract_version", ADAPTER_CONTRACT_VERSION),
         ("cli_contract_version", CLI_CONTRACT_VERSION),
     ):
-        actual = _integer(data[field], f"$.{field}", minimum=1)
-        if actual != expected:
-            raise UnsupportedContractVersion(f"$.{field}: expected {expected}, got {actual}")
+        _exact_version(data[field], f"$.{field}", expected)
     for field in (
         "runtime_lock_sha256",
         "skill_bundle_sha256",

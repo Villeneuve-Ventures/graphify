@@ -33,6 +33,7 @@ from graphify.workspace import (
     UPSTREAM_BASELINE_COMMIT,
     CompatibilityManifest,
     canonical_json_bytes,
+    canonical_sha256,
 )
 from tools.workspace_artifacts import (
     ArtifactError,
@@ -160,6 +161,14 @@ def _assert_safe_output_root(repo_root: Path, output_root: Path) -> None:
         raise ArtifactError("candidate output root must be external or Git-ignored")
 
 
+def _file_hashes(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): sha256_file(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def _extract_git_archive(archive_bytes: bytes, destination: Path) -> None:
     seen: set[str] = set()
     with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r:") as source:
@@ -230,13 +239,15 @@ def _build_wheel_once(repo_root: Path, destination: Path) -> Path:
 
 
 def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
-    with tempfile.TemporaryDirectory(prefix="graphify-wheel-one-") as first_raw:
-        with tempfile.TemporaryDirectory(prefix="graphify-wheel-two-") as second_raw:
-            first = _build_wheel_once(repo_root, Path(first_raw))
-            second = _build_wheel_once(repo_root, Path(second_raw))
-            if first.read_bytes() != second.read_bytes():
-                raise ArtifactError("two fixed-epoch clean wheel builds were not byte-identical")
-            destination.write_bytes(first.read_bytes())
+    with (
+        tempfile.TemporaryDirectory(prefix="graphify-wheel-one-") as first_raw,
+        tempfile.TemporaryDirectory(prefix="graphify-wheel-two-") as second_raw,
+    ):
+        first = _build_wheel_once(repo_root, Path(first_raw))
+        second = _build_wheel_once(repo_root, Path(second_raw))
+        if first.read_bytes() != second.read_bytes():
+            raise ArtifactError("two fixed-epoch clean wheel builds were not byte-identical")
+        destination.write_bytes(first.read_bytes())
     with zipfile.ZipFile(destination) as wheel:
         names = set(wheel.namelist())
     required = {
@@ -405,9 +416,10 @@ def _download_verified_upstream_wheel(destination: Path) -> dict[str, str]:
 
 def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
     env = _controlled_upstream_environment(os.environ)
+    uv = _uv()
     requirements_result = _run(
         [
-            _uv(),
+            uv,
             "export",
             "--locked",
             "--no-dev",
@@ -423,7 +435,7 @@ def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
     requirements.write_text(requirements_result.stdout, encoding="utf-8")
     sbom_result = _run(
         [
-            _uv(),
+            uv,
             "export",
             "--locked",
             "--no-dev",
@@ -590,11 +602,7 @@ def build_candidate(*, repo_root: Path, output_root: Path) -> dict[str, object]:
         artifact_names=sorted(artifacts),
     )
     verify_trusted_manifest(artifact_root=output_root, trusted_manifest=trusted)
-    files = {
-        path.relative_to(output_root).as_posix(): sha256_file(path)
-        for path in sorted(output_root.rglob("*"))
-        if path.is_file()
-    }
+    files = _file_hashes(output_root)
     return {
         "artifact_root": str(output_root),
         "fork_commit": head,
@@ -612,16 +620,8 @@ def compare_candidate_roots(*, first: Path, second: Path) -> dict[str, object]:
     for root in (first, second):
         trusted = (root / "trusted-manifest.json").read_bytes()
         verify_trusted_manifest(artifact_root=root, trusted_manifest=trusted)
-    first_files = {
-        path.relative_to(first).as_posix(): sha256_file(path)
-        for path in sorted(first.rglob("*"))
-        if path.is_file()
-    }
-    second_files = {
-        path.relative_to(second).as_posix(): sha256_file(path)
-        for path in sorted(second.rglob("*"))
-        if path.is_file()
-    }
+    first_files = _file_hashes(first)
+    second_files = _file_hashes(second)
     if first_files != second_files:
         names = sorted(set(first_files) | set(second_files))
         drift = [name for name in names if first_files.get(name) != second_files.get(name)]
@@ -723,7 +723,7 @@ def skill_bundle_tree_sha256(
             )
     if not entries:
         raise ArtifactError("skill bundle contains no installed files")
-    expected = hashlib.sha256(canonical_json_bytes(entries)).hexdigest()
+    expected = canonical_sha256(entries)
     if installed_root is not None:
         actual = strict_tree_sha256(installed_root)
         if actual != expected:
@@ -864,9 +864,7 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
     upstream_home = proof_root / "upstream-home"
     upstream_home.mkdir()
     upstream_record = _download_verified_upstream_wheel(proof_root / "upstream-distribution")
-    upstream_env = _controlled_upstream_environment(
-        _isolated_environment(upstream_home, upstream_home / ".codex")
-    )
+    upstream_env = _isolated_environment(upstream_home, upstream_home / ".codex")
     upstream_wheel = str(upstream_record["path"])
     upstream = _run(
         [

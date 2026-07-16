@@ -99,9 +99,7 @@ def strict_tree_manifest(
 
 
 def strict_tree_sha256(root: Path, *, exclude: Iterable[str] = ()) -> str:
-    return hashlib.sha256(
-        canonical_json_bytes(strict_tree_manifest(root, exclude=exclude))
-    ).hexdigest()
+    return canonical_sha256(strict_tree_manifest(root, exclude=exclude))
 
 
 def _ensure_absolute_directory(path: Path, label: str) -> Path:
@@ -553,10 +551,7 @@ def _restore_offline(
     transaction: InstallerTransaction,
     plan: CompensationPlan,
     rollback: OfflineRollback,
-    offline: bool,
 ) -> dict[str, object]:
-    if not offline:
-        raise ArtifactError("compensation proof must use the offline rollback path")
     with zipfile.ZipFile(rollback_bundle) as archive:
         document = cast(OfflineRollback, OfflineRollback.from_json(archive.read("rollback.json")))
         if document.canonical != rollback.canonical:
@@ -617,14 +612,12 @@ def run_disposable_compensation_proof(
     rollback_bundle: Path,
     candidate_files: Mapping[str, bytes],
     fail_after: str = "skill",
-    require_isolated_environment: bool = True,
 ) -> dict[str, object]:
     """Stage fixture state, inject failure, then compensate without network access."""
     home = _ensure_absolute_directory(home, "HOME")
     codex_home = _ensure_absolute_directory(codex_home, "CODEX_HOME")
-    if require_isolated_environment:
-        if os.environ.get("HOME") != str(home) or os.environ.get("CODEX_HOME") != str(codex_home):
-            raise ArtifactError("HOME and CODEX_HOME must match the explicit disposable roots")
+    if os.environ.get("HOME") != str(home) or os.environ.get("CODEX_HOME") != str(codex_home):
+        raise ArtifactError("HOME and CODEX_HOME must match the explicit disposable roots")
     targets = _target_paths(home, codex_home)
     if set(candidate_files) != set(targets):
         raise ArtifactError(f"candidate_files must contain exactly {sorted(targets)}")
@@ -794,7 +787,6 @@ def run_disposable_compensation_proof(
             transaction=transaction_document,
             plan=plan_document,
             rollback=rollback_document,
-            offline=True,
         )
         _validate_compensation_execution(plan_document, execution)
         if untracked_paths:
