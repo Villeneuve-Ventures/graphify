@@ -29,12 +29,14 @@ from tools.workspace_artifacts.candidate import (
     CONTROLLED_UPSTREAM_INDEX,
     UPSTREAM_WHEEL_NAME,
     UPSTREAM_WHEEL_SHA256,
+    _build_offline_rollback,
     _controlled_upstream_environment,
     _download_verified_upstream_wheel,
     _extract_git_archive,
     _fetch_url,
     _isolated_environment,
     _normalize_cyclonedx,
+    _run,
     _select_upstream_wheel,
     compare_candidate_roots,
     skill_bundle_tree_sha256,
@@ -334,6 +336,38 @@ def test_candidate_artifact_modes_and_hashes_are_umask_independent(tmp_path: Pat
     assert comparison["byte_identical"] is True
     for output in outputs:
         assert {path.stat().st_mode & 0o777 for path in output.iterdir()} == {0o644}
+
+
+def test_candidate_subprocess_applies_explicit_umask(tmp_path: Path) -> None:
+    previous = os.umask(0o077)
+    try:
+        _run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('created').write_bytes(b'x')",
+            ],
+            cwd=tmp_path,
+            umask=0o022,
+        )
+    finally:
+        os.umask(previous)
+
+    assert (tmp_path / "created").stat().st_mode & 0o777 == 0o644
+
+
+def test_candidate_offline_rollback_is_umask_independent(tmp_path: Path) -> None:
+    bundles = []
+    for name, mask in (("normal", 0o022), ("restrictive", 0o077)):
+        previous = os.umask(mask)
+        try:
+            bundle = tmp_path / f"{name}.zip"
+            _build_offline_rollback(bundle)
+        finally:
+            os.umask(previous)
+        bundles.append(bundle)
+
+    assert bundles[0].read_bytes() == bundles[1].read_bytes()
 
 
 def test_installed_skill_tree_digest_is_bound_to_skill_bundle(tmp_path: Path) -> None:

@@ -89,6 +89,7 @@ def _run(
     *,
     cwd: Path,
     env: Mapping[str, str] | None = None,
+    umask: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # Arguments are explicit and subprocess never invokes a shell.
     result = subprocess.run(  # nosec B603
@@ -97,6 +98,7 @@ def _run(
         env=dict(env) if env is not None else None,
         capture_output=True,
         text=True,
+        umask=-1 if umask is None else umask,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout)[-4000:]
@@ -218,6 +220,7 @@ def _build_wheel_once(repo_root: Path, destination: Path) -> Path:
         ],
         cwd=source,
         env=env,
+        umask=0o022,
     )
     wheels = list(output.glob("*.whl"))
     if len(wheels) != 1 or wheels[0].name != WHEEL_NAME:
@@ -443,19 +446,25 @@ def _write_prior_home(home: Path, codex_home: Path) -> None:
         path.write_bytes(_PRIOR_FILES[name])
         path.chmod(0o755 if name == "binary" else 0o644)
     skill_root = targets["skill"].parent
-    (skill_root / ".graphify_version").write_bytes(b"0.9.16")
+    version = skill_root / ".graphify_version"
+    version.write_bytes(b"0.9.16")
+    version.chmod(0o644)
     prior_reference = skill_root / "references/prior.md"
     prior_reference.parent.mkdir(parents=True)
     prior_reference.write_bytes(b"# prior Graphify reference\n")
+    prior_reference.chmod(0o644)
     canary = home / ".local/state/graphify/workspaces/fixture/generations/gen-canary/receipt.json"
     canary.parent.mkdir(parents=True, exist_ok=True)
     canary.write_bytes(_CANARY)
+    canary.chmod(0o644)
     graph = canary.parent / "graphify-out/graph.json"
     graph.parent.mkdir(parents=True)
     graph.write_bytes(b'{"nodes":[]}\n')
+    graph.chmod(0o644)
     last_good = canary.parents[1] / "gen-last-good/receipt.json"
     last_good.parent.mkdir(parents=True)
     last_good.write_bytes(b'{"generation":"gen-last-good","immutable":true}\n')
+    last_good.chmod(0o644)
 
 
 def _build_offline_rollback(destination: Path) -> None:
