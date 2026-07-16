@@ -53,6 +53,22 @@ def test_skill_newer_than_package_recommends_upgrade_not_install(tmp_path, monke
     assert "upgrade" in err.lower()
 
 
+def test_post_release_skill_is_newer_than_local_workspace_package(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setattr(mainmod, "__version__", "0.9.16+workspace.1")
+    skill_dst = _make_skill(tmp_path, "0.9.16.post1")
+
+    mainmod._check_skill_version(skill_dst)
+
+    err = capsys.readouterr().err
+    assert "Run 'graphify install' to update" not in err
+    assert "downgrade" in err
+    assert "upgrade" in err.lower()
+
+
 def test_matching_version_is_silent(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(mainmod, "__version__", "0.9.3")
     skill_dst = _make_skill(tmp_path, "0.9.3")

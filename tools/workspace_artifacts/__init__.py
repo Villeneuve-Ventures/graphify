@@ -512,7 +512,7 @@ def _snapshot_file_roots(roots: Sequence[Path]) -> dict[str, str]:
             absolute = str(path)
             if absolute in snapshot:
                 raise ArtifactError(f"overlapping compensation audit roots include {path}")
-            snapshot[absolute] = str(entry["sha256"])
+            snapshot[absolute] = canonical_sha256(entry)
     return snapshot
 
 

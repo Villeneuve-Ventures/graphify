@@ -7,6 +7,7 @@ later repo plans consume.
 
 Each repository will own one small `.graphify/workspace.toml` containing:
 
+- the required `contract = "graphify.workspace.config"` discriminator;
 - `schema_version = 1`;
 - an immutable canonical `repo_uuid` label; and
 - freshness, semantic-capability, network-egress, and backend policy.

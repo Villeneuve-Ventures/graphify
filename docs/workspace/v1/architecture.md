@@ -25,10 +25,11 @@ or workspace CLI. Those are dependency-ordered P2-P5 work.
 
 ## Authority split
 
-Repo-owned `.graphify/workspace.toml` contains the immutable `repo_uuid` label
-and policy only. It cannot select lifecycle paths, pointers, generations, or
-global state. Enrollment remains operator-authorized in P2; possession of a
-copied UUID is not proof of identity.
+Repo-owned `.graphify/workspace.toml` contains the required
+`contract = "graphify.workspace.config"` discriminator, `schema_version = 1`,
+the immutable `repo_uuid` label, and policy only. It cannot select lifecycle
+paths, pointers, generations, or global state. Enrollment remains
+operator-authorized in P2; possession of a copied UUID is not proof of identity.
 
 The future global registry has one singular `active_source` per workspace plus
 a monotonic `active_source_revision`, UUID-enrollment evidence, and

@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
-from tools.workspace_artifacts import verify_trusted_manifest
+from tools.workspace_artifacts import ArtifactError, verify_trusted_manifest
 from tools.workspace_artifacts.candidate import (
     build_and_compare_candidates,
     build_candidate,
@@ -55,10 +56,18 @@ def main() -> int:
     elif args.command == "verify":
         artifact_root = args.artifact_root.resolve()
         manifest = (args.manifest or artifact_root / "trusted-manifest.json").resolve()
-        verify_trusted_manifest(
-            artifact_root=artifact_root,
-            trusted_manifest=manifest.read_bytes(),
-        )
+        try:
+            trusted_manifest = manifest.read_bytes()
+            verify_trusted_manifest(
+                artifact_root=artifact_root,
+                trusted_manifest=trusted_manifest,
+            )
+        except OSError as exc:
+            print(f"error: cannot read trusted manifest {manifest}: {exc}", file=sys.stderr)
+            return 2
+        except ArtifactError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
         result = {"verified": True, "artifact_root": str(artifact_root)}
     else:
         result = prove_candidate(

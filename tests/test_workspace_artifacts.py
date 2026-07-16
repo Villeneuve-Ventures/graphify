@@ -287,9 +287,11 @@ def test_runtime_export_scrubs_untrusted_package_sources(
         monkeypatch.setenv(name, f"ambient-{name.lower()}")
     monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
     calls: list[dict[str, str]] = []
+    commands: list[list[str]] = []
 
     def fake_run(command, *, cwd, env=None, umask=None):
         del cwd, umask
+        commands.append(list(command))
         calls.append(dict(env or {}))
         if "requirements.txt" in command:
             stdout = "networkx==3.6.1\n"
@@ -315,6 +317,7 @@ def test_runtime_export_scrubs_untrusted_package_sources(
     )
 
     assert len(calls) == 2
+    assert all("--all-extras" not in command for command in commands)
     for env in calls:
         assert env["UV_DEFAULT_INDEX"] == CONTROLLED_UPSTREAM_INDEX
         assert env["PIP_INDEX_URL"] == CONTROLLED_UPSTREAM_INDEX
@@ -568,6 +571,29 @@ def test_candidate_module_exposes_explicit_two_root_build_flags() -> None:
     assert "--comparison-output-root" in result.stdout
 
 
+def test_verify_cli_reports_missing_manifest_without_traceback(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-manifest.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tools.workspace_artifacts",
+            "verify",
+            "--artifact-root",
+            str(tmp_path / "candidate"),
+            "--manifest",
+            str(missing),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert f"cannot read trusted manifest {missing}" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_absolute_candidate_update_does_not_refresh_real_home_skills(tmp_path: Path) -> None:
     candidate = Path(sys.executable).with_name("graphify")
     if not candidate.is_file():
@@ -808,6 +834,35 @@ def test_compensation_rejects_untracked_created_file(tmp_path: Path, monkeypatch
             _write(target.parent / "untracked-created.txt", "untracked\n")
 
     monkeypatch.setattr(workspace_artifacts, "_stage_transaction_item", stage_with_untracked_file)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    with pytest.raises(ArtifactError, match="untracked created or mutated path"):
+        run_disposable_compensation_proof(
+            home=home,
+            codex_home=codex_home,
+            rollback_bundle=bundle,
+            candidate_files={
+                "binary": b"candidate-binary\n",
+                "runtime": b"candidate-runtime\n",
+                "skill": b"candidate-skill\n",
+                "service": b"candidate-service\n",
+            },
+            fail_after="skill",
+        )
+
+
+def test_compensation_rejects_untracked_mode_mutation(tmp_path: Path, monkeypatch) -> None:
+    home, codex_home, bundle = _disposable_compensation_fixture(tmp_path)
+    undeclared = _write(home / ".local/bin/undeclared-helper", "helper\n")
+    original = workspace_artifacts._stage_transaction_item
+
+    def stage_with_untracked_chmod(*, target: Path, data: bytes) -> None:
+        original(target=target, data=data)
+        if target.name == "SKILL.md":
+            undeclared.chmod(0o600)
+
+    monkeypatch.setattr(workspace_artifacts, "_stage_transaction_item", stage_with_untracked_chmod)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 

@@ -85,6 +85,13 @@ def test_workspace_toml_positive_round_trip_and_schema(schema_registry: SchemaRe
     assert WorkspaceConfig.from_json(config.canonical).canonical == config.canonical
 
 
+@pytest.mark.parametrize("name", ["architecture.md", "migration.md"])
+def test_workspace_docs_name_required_contract_discriminator(name: str) -> None:
+    path = Path(__file__).parents[1] / "docs" / "workspace" / "v1" / name
+
+    assert '`contract = "graphify.workspace.config"`' in path.read_text(encoding="utf-8")
+
+
 def test_every_positive_json_fixture_passes_schema_model_and_round_trip(
     schema_registry: SchemaRegistry,
 ) -> None:
