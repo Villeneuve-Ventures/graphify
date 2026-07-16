@@ -835,7 +835,9 @@ def test_compensation_rejects_executor_plan_order_mismatch(
 
     def restore_out_of_order(**kwargs) -> dict[str, object]:
         execution = original(**kwargs)
-        execution["restore_order"] = list(reversed(execution["restore_order"]))
+        restore_order = execution["restore_order"]
+        assert isinstance(restore_order, list)
+        execution["restore_order"] = list(reversed(restore_order))
         return execution
 
     monkeypatch.setattr(workspace_artifacts, "_restore_offline", restore_out_of_order)
