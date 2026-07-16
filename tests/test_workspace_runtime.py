@@ -296,6 +296,61 @@ def test_darwin_identity_probe_preserves_subsecond_process_start() -> None:
     )
 
 
+def test_darwin_identity_uses_timezone_stable_boot_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boot_sessions = iter(
+        [
+            "AFC8B9F3-9D67-4745-8327-078C1E140CC0\n",
+            "afc8b9f3-9d67-4745-8327-078c1e140cc0\n",
+        ]
+    )
+
+    def fake_run(
+        arguments: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        assert arguments == ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"]
+        assert check and capture_output and text
+        assert env == {"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+        return subprocess.CompletedProcess(arguments, 0, stdout=next(boot_sessions), stderr="")
+
+    def fake_proc_pidinfo(
+        pid: int,
+        flavor: int,
+        argument: int,
+        buffer: Any,
+        size: int,
+    ) -> int:
+        info = ctypes.cast(
+            buffer,
+            ctypes.POINTER(lease_module._DarwinProcBSDInfo),
+        ).contents
+        info.pbi_pid = pid
+        info.pbi_start_tvsec = 1_721_149_200
+        info.pbi_start_tvusec = 100_001
+        return size
+
+    monkeypatch.setenv("TZ", "UTC")
+    first = SystemLeaseIdentityProvider._darwin_owner(
+        700,
+        runner=fake_run,
+        proc_pidinfo=fake_proc_pidinfo,
+    )
+    monkeypatch.setenv("TZ", "Pacific/Honolulu")
+    second = SystemLeaseIdentityProvider._darwin_owner(
+        700,
+        runner=fake_run,
+        proc_pidinfo=fake_proc_pidinfo,
+    )
+
+    assert first == second
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="libproc is the supported macOS probe")
 def test_darwin_identity_provider_reads_a_stable_live_owner() -> None:
     provider = SystemLeaseIdentityProvider()

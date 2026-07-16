@@ -12,6 +12,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any, cast, Iterator, Protocol
+from uuid import UUID
 
 from graphify.workspace.contracts import FencedLease, Registry, WorkspaceLeaseState
 from graphify.workspace.identity import SourceAmbiguousError, discover_source
@@ -129,21 +130,32 @@ class SystemLeaseIdentityProvider:
         )
 
     @classmethod
-    def _darwin_owner(cls, pid: int) -> LeaseOwner:
+    def _darwin_owner(
+        cls,
+        pid: int,
+        *,
+        runner: Any | None = None,
+        proc_pidinfo: Any | None = None,
+    ) -> LeaseOwner:
         environment = {"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+        run_process = subprocess.run if runner is None else runner
         try:
-            boot = subprocess.run(
-                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+            boot = run_process(
+                ["/usr/sbin/sysctl", "-n", "kern.bootsessionuuid"],
                 check=True,
                 capture_output=True,
                 text=True,
                 env=environment,
             ).stdout.strip()
-            process_start = cls._darwin_process_start(pid)
+            process_start = cls._darwin_process_start(pid, proc_pidinfo)
         except (OSError, subprocess.CalledProcessError) as exc:
             raise LeaseError(f"cannot read trusted macOS process identity: {exc}") from exc
         if not boot or not process_start:
             raise LeaseError("trusted macOS process identity is empty")
+        try:
+            boot = str(UUID(boot))
+        except ValueError as exc:
+            raise LeaseError("trusted macOS boot-session identity is invalid") from exc
         return LeaseOwner(
             boot_id=cls._digest("darwin-boot", boot),
             pid=pid,
