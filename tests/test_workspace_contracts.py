@@ -30,6 +30,16 @@ from graphify.workspace import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workspace" / "v1"
 SCHEMAS = Path(__file__).parents[1] / "graphify" / "workspace" / "schemas" / "v1"
+REGISTRY_SOURCE_PATH = ("workspaces", 0, "active_source", "path")
+REGISTRY_REMOTE_URL_PATH = (
+    "workspaces",
+    0,
+    "active_source",
+    "remote_aliases",
+    0,
+    "url",
+)
+RECEIPT_PAYLOAD_PATH = ("sealed_query_payload", "entries", 0, "path")
 
 
 def _json(path: Path) -> dict:
@@ -196,6 +206,69 @@ def test_generation_payload_entries_are_sorted_unique_regular_files() -> None:
 
     with pytest.raises(ContractError, match="unique and sorted"):
         parse_contract(value)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "field_path", "replacement"),
+    [
+        ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a/../b"),
+        ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a/./b"),
+        ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a//b"),
+        ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\\b"),
+        ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a/./b"),
+        ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a//b"),
+        ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a/"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com:8443/x/y"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://user@example.com/x/y"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://EXAMPLE.com/x/y"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "ssh://user:secret@example.com/x/y"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/x/./y"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/x/%79"),
+    ],
+)
+def test_schema_and_model_reject_noncanonical_paths_and_remote_urls(
+    fixture: str,
+    field_path: tuple[str | int, ...],
+    replacement: str,
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / fixture)
+    parent = value
+    for part in field_path[:-1]:
+        parent = parent[part]
+    parent[field_path[-1]] = replacement
+    schema = load_schema(value["contract"])
+    validator = Draft202012Validator(
+        schema,
+        registry=schema_registry,
+        format_checker=FormatChecker(),
+    )
+
+    assert list(validator.iter_errors(value))
+    with pytest.raises(ContractError):
+        parse_contract(value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ssh://git@github.com/openai/graphify.git",
+        "ssh://github.com/openai/graphify.git",
+    ],
+)
+def test_schema_and_model_accept_normalized_ssh_remote_urls(
+    url: str,
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / "registry.json")
+    source = value["workspaces"][0]["active_source"]
+    source["remote_aliases"][0]["url"] = url
+    value["workspaces"][0]["active_source_evidence"]["source_sha256"] = canonical_sha256(
+        source
+    )
+
+    _validate_schema(value, schema_registry)
+    assert parse_contract(value).to_dict()["workspaces"][0]["active_source"] == source
 
 
 @pytest.mark.parametrize(
