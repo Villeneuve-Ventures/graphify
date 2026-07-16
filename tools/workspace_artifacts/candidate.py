@@ -1,4 +1,4 @@
-"""Reproducible P1 candidate build and isolated-home proof orchestration."""
+"""Reproducible workspace candidate build and isolated-home proof orchestration."""
 
 from __future__ import annotations
 
@@ -253,6 +253,10 @@ def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
     required = {
         "graphify/workspace/__init__.py",
         "graphify/workspace/contracts.py",
+        "graphify/workspace/identity.py",
+        "graphify/workspace/leases.py",
+        "graphify/workspace/persistence.py",
+        "graphify/workspace/registry.py",
         "graphify/workspace/schemas/v1/common.schema.json",
     }
     missing = required - names
@@ -501,7 +505,7 @@ def _build_offline_rollback(destination: Path) -> None:
 
 
 def build_candidate(*, repo_root: Path, output_root: Path) -> dict[str, object]:
-    """Build the exact committed P1 candidate and its frozen manifest."""
+    """Build the exact committed workspace candidate and its frozen manifest."""
     repo_root = repo_root.resolve()
     output_root = output_root.resolve()
     _uv()

@@ -1,8 +1,8 @@
-"""Versioned workspace contract surface.
+"""Versioned workspace contracts plus the bounded P2 registry/lease runtime.
 
-P1 intentionally exposes schemas, canonical encodings, and reference models
-only.  Runtime registry mutation, generations, leases, freshness checks, and
-workspace commands are implemented by later work packages.
+P2 adds external registry persistence, operator-authorized UUID/source
+identity, explicit active-source CAS, and fenced leases. Generations, journals,
+pointers, adapters, freshness, queues, services, and commands remain deferred.
 """
 
 from graphify.workspace.contracts import (
@@ -41,6 +41,43 @@ from graphify.workspace.contracts import (
     parse_contract,
     validate_installer_compensation,
 )
+from graphify.workspace.identity import (
+    AuthorizationError,
+    IdentityAction,
+    IdentityError,
+    OperatorAuthorization,
+    SourceAmbiguousError,
+    SourceDiscoveryError,
+    SourceIdentity,
+    UUIDCollisionError,
+    discover_source,
+)
+from graphify.workspace.leases import (
+    LeaseBusy,
+    LeaseError,
+    LeaseExpired,
+    LeaseGrant,
+    LeaseIdentityProvider,
+    LeaseOwner,
+    LeaseStore,
+    StaleLease,
+    SystemLeaseIdentityProvider,
+)
+from graphify.workspace.persistence import (
+    CommitUnknown,
+    LockOrderError,
+    RuntimeCapabilities,
+    StateCorrupt,
+    StatePathError,
+    UnsupportedRuntime,
+    WorkspaceRuntimeError,
+)
+from graphify.workspace.registry import (
+    ActivationResult,
+    RegistryError,
+    RegistryStore,
+    RevisionConflict,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -54,8 +91,11 @@ __all__ = [
     "UPSTREAM_BASELINE_COMMIT",
     "WORKSPACE_SCHEMA_FILES",
     "ArtifactManifest",
+    "ActivationResult",
+    "AuthorizationError",
     "CompatibilityManifest",
     "CompensationPlan",
+    "CommitUnknown",
     "ContractDocument",
     "ContractError",
     "FencedLease",
@@ -63,16 +103,42 @@ __all__ = [
     "GenerationCoordinationLock",
     "GenerationReceipt",
     "InstallerTransaction",
+    "IdentityAction",
+    "IdentityError",
     "JournalEvent",
+    "LeaseBusy",
+    "LeaseError",
+    "LeaseExpired",
+    "LeaseGrant",
+    "LeaseIdentityProvider",
+    "LeaseOwner",
+    "LeaseStore",
+    "LockOrderError",
     "OfflineRollback",
+    "OperatorAuthorization",
     "PointerSet",
     "PriorPointerRecord",
     "Registry",
+    "RegistryError",
+    "RegistryStore",
+    "RevisionConflict",
+    "RuntimeCapabilities",
+    "SourceAmbiguousError",
+    "SourceDiscoveryError",
+    "SourceIdentity",
+    "StaleLease",
+    "SystemLeaseIdentityProvider",
+    "StateCorrupt",
+    "StatePathError",
     "UnsupportedContractVersion",
+    "UnsupportedRuntime",
+    "UUIDCollisionError",
     "WorkspaceConfig",
+    "WorkspaceRuntimeError",
     "canonical_json_bytes",
     "canonical_sha256",
     "decode_journal_frame",
+    "discover_source",
     "encode_journal_frame",
     "load_schema",
     "parse_contract",

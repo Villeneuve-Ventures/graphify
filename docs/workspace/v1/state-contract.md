@@ -18,16 +18,20 @@ layout.
 `graphify.workspace.registry` has a monotonic registry revision. Each workspace
 record has one required `active_source`, a monotonic
 `active_source_revision`, immutable/current UUID-enrollment evidence, and
-active-source/rebind evidence bound to both the revision and canonical source
-hash. That evidence also records the distinct positive operation epoch and
+active-source evidence bound to both the revision and exact canonical active
+source hash. Alias rebind authorization is recorded as the current identity
+evidence without replacing active-source evidence. The active evidence also records the distinct positive operation epoch and
 accepted fence token for the audited activation CAS; a registry commit with
 missing, zero, or revision-stale activation evidence is invalid. Every source
 records one or more normalized HTTPS/SSH remote aliases in canonical URL order,
 with a SHA-256 evidence receipt for each. Workspace source paths, worktree
 coordinates, and remotes are discovery aliases; `repo_uuid` is the authoritative
 identity. The explicit singular field prevents a consumer from treating
-multiple aliases as current. P1 freezes and validates this evidence shape but
-does not implement activation.
+multiple aliases as current. P2 serializes registry revisions globally, stores
+content-addressed authorization and remote evidence externally, and requires
+an expected registry revision plus expected active-source revision for
+activation. Missing or mismatched active-source evidence fails closed; aliases
+are never used as an implicit fallback.
 
 ## Receipt and sealed payload
 
@@ -82,6 +86,26 @@ token (safety) from boot/process/heartbeat/deadline data (liveness). Wall time
 is never a safety primitive. The frozen shared operation identities include
 activation and pointer recovery as well as build, migration, promotion,
 rollback, repair, GC, and semantic claim work.
+
+P2 durably initializes the fence floor during enrollment, then persists the
+fence high-water mark, global operation allocator, migration epoch, current
+lease records, and each live domain's accepted operation epoch under the
+workspace. Missing initialized records fail closed rather than recreating the
+floor. Allocation, heartbeat, acceptance, release, and inspection acquire the
+registry lock, recover one stable registry snapshot, and keep that lock while
+nesting the workspace lock. They never replace recovery with a current-only
+re-read; activation uses the same order through its already-held registry-lock
+path. Fence values advance before ownership is accepted, survive recovery and
+clean reboot, and never reset through release or expiry. An expired lease, a
+stale fence, a runtime owner/boot/process mismatch, a changed active-source
+revision, an advanced operation epoch in the same lease domain, or an advanced
+migration epoch cannot authorize a later commit. Runtime owner identity comes
+from OS-owned boot and process-start facts rather than caller assertion. Wall
+timestamps remain audit/liveness metadata; monotonic deadlines are the only
+expiry input.
+Release is cleanup rather than commit acceptance: the trusted current runtime
+may remove only the exact current owner/fence record even after a source,
+operation, or migration epoch invalidates that lease's commit authority.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

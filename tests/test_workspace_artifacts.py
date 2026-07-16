@@ -83,6 +83,8 @@ def _synthetic_repo(root: Path) -> tuple[Path, Path]:
     _write(root / "graphify/skills/codex/references/query.md", "# query\n")
     _write(root / "graphify/workspace/__init__.py", "# reference package\n")
     _write(root / "graphify/workspace/contracts.py", "# reference model\n")
+    for module_name in ("identity.py", "leases.py", "persistence.py", "registry.py"):
+        _write(root / "graphify/workspace" / module_name, f"# {module_name} runtime\n")
     for schema_name in WORKSPACE_SCHEMA_FILES:
         _write(root / "graphify/workspace/schemas/v1" / schema_name, "{}\n")
     _write(root / "docs/workspace/v1/README.md", "# contracts\n")
