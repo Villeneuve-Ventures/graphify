@@ -219,16 +219,21 @@ def test_schema_format_checker_enforces_date_time() -> None:
         ("prior-pointer.json", ("retained_at",)),
     ],
 )
+@pytest.mark.parametrize(
+    "invalid_value",
+    ["not a timestamp", "2000-01-01T00:00:00Z\n", "2000-01-01T00:00:00Z\r\n"],
+)
 def test_schema_and_model_reject_invalid_date_times(
     fixture: str,
     field_path: tuple[str, ...],
+    invalid_value: str,
     schema_registry: SchemaRegistry,
 ) -> None:
     value = _json(FIXTURES / "positive" / fixture)
     parent = value
     for part in field_path[:-1]:
         parent = parent[part]
-    parent[field_path[-1]] = "not a timestamp"
+    parent[field_path[-1]] = invalid_value
     schema = load_schema(value["contract"])
     validator = Draft202012Validator(
         schema,
@@ -303,12 +308,37 @@ def test_generation_payload_entries_are_sorted_unique_regular_files() -> None:
         ("registry.json", REGISTRY_SOURCE_PATH, "//"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\n\\b"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\n/../b"),
+        ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\n"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a/./b"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a//b"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a/"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a\x00b"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a\n\\b"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a\n/../b"),
+        ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a\n"),
+        (
+            "registry.json",
+            (*REGISTRY_REMOTE_URL_PATH[:-1], "evidence_sha256"),
+            "a" * 64 + "\n",
+        ),
+        (
+            "registry.json",
+            ("workspaces", 0, "repo_uuid"),
+            "11111111-1111-4111-8111-111111111111\n",
+        ),
+        ("generation-receipt.json", ("source_commit",), "a" * 40 + "\n"),
+        ("compatibility-manifest.json", ("fork_commit",), "a" * 40 + "\n"),
+        ("journal-event.json", ("generation_id",), "gen-0001\n"),
+        (
+            "generation-coordination-lock.json",
+            ("lock_id",),
+            "generation:gen-0001\n",
+        ),
+        (
+            "generation-coordination-lock.json",
+            ("relative_path",),
+            "locks/generations/gen-0001.lock\n",
+        ),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com:8443/x/y"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://user@example.com/x/y"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://EXAMPLE.com/x/y"),
@@ -327,9 +357,16 @@ def test_generation_payload_entries_are_sorted_unique_regular_files() -> None:
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://a]b.com/a"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://Éxample.com/a"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/a\x00b"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/a\n"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "ssh://git@example.com/a\n"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/a\r\n"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://exa\\mple.com/a"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://exa\x07mple.com/a"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://exa%mple.com/a"),
+        ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com/a|b"),
     ],
 )
-def test_schema_and_model_reject_noncanonical_paths_and_remote_urls(
+def test_schema_and_model_reject_noncanonical_contract_strings(
     fixture: str,
     field_path: tuple[str | int, ...],
     replacement: str,
@@ -362,9 +399,11 @@ def test_schema_and_model_reject_noncanonical_paths_and_remote_urls(
     [
         "ssh://git@github.com/openai/graphify.git",
         "ssh://github.com/openai/graphify.git",
+        "https://git.example-host.com/org/repo.git",
+        "ssh://git-user@example-host.com/~team/repo_v1.git",
     ],
 )
-def test_schema_and_model_accept_normalized_ssh_remote_urls(
+def test_schema_and_model_accept_normalized_remote_urls(
     url: str,
     schema_registry: SchemaRegistry,
 ) -> None:

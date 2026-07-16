@@ -76,6 +76,13 @@ _RFC3339_RE = re.compile(
     r"(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)$",
     re.ASCII,
 )
+_REMOTE_HOST_RE = re.compile(
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*",
+    re.ASCII,
+)
+_REMOTE_USERNAME_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=-]+", re.ASCII)
+_REMOTE_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=:@-]+", re.ASCII)
 _JOURNAL_MAGIC = b"GWF1"
 _JOURNAL_FRAME_VERSION = 1
 _JOURNAL_HEADER = struct.Struct(">4sBQ32s")
@@ -250,7 +257,7 @@ def _date_time(value: object, path: str) -> str:
 
 def _absolute_path(value: object, path: str) -> str:
     text = _string(value, path)
-    if "\x00" in text or text == "//":
+    if "\x00" in text or "\r" in text or "\n" in text or text == "//":
         raise ContractError(f"{path}: expected canonical absolute POSIX path")
     pure = PurePosixPath(text)
     if (
@@ -265,7 +272,7 @@ def _absolute_path(value: object, path: str) -> str:
 
 def _relative_path(value: object, path: str) -> str:
     text = _string(value, path)
-    if "\x00" in text:
+    if "\x00" in text or "\r" in text or "\n" in text:
         raise ContractError(f"{path}: expected normalized non-escaping POSIX relative path")
     pure = PurePosixPath(text)
     if pure.is_absolute() or ".." in pure.parts or text.startswith("./") or "\\" in text:
@@ -292,10 +299,13 @@ def _normalized_remote_url(value: object, path: str) -> str:
         raise ContractError(f"{path}: SSH remote URL username must not be empty")
     if parsed.username is not None and parsed.scheme != "ssh":
         raise ContractError(f"{path}: HTTPS remote URL must not contain userinfo")
+    if parsed.username is not None and _REMOTE_USERNAME_RE.fullmatch(parsed.username) is None:
+        raise ContractError(f"{path}: SSH remote URL username is not canonical")
     if port is not None:
         raise ContractError(f"{path}: remote URL must not contain a port")
     remote_path = parsed.path
     pure = PurePosixPath(remote_path)
+    path_segments = remote_path.removeprefix("/").split("/")
     if (
         not remote_path.startswith("/")
         or remote_path == "/"
@@ -306,10 +316,11 @@ def _normalized_remote_url(value: object, path: str) -> str:
         or "." in pure.parts
         or ".." in pure.parts
         or str(pure) != remote_path
+        or any(_REMOTE_PATH_SEGMENT_RE.fullmatch(segment) is None for segment in path_segments)
     ):
         raise ContractError(f"{path}: remote URL path is not canonical")
-    if not parsed.hostname.isascii():
-        raise ContractError(f"{path}: remote URL hostname must be ASCII")
+    if _REMOTE_HOST_RE.fullmatch(parsed.hostname) is None:
+        raise ContractError(f"{path}: remote URL hostname is not canonical")
     hostname = parsed.hostname.lower()
     netloc = f"{parsed.username}@{hostname}" if parsed.username is not None else hostname
     normalized = urlunsplit((parsed.scheme.lower(), netloc, remote_path, "", ""))
