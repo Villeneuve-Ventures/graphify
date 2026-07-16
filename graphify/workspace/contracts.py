@@ -222,6 +222,8 @@ def _uuid(value: object, path: str) -> str:
 
 def _absolute_path(value: object, path: str) -> str:
     text = _string(value, path)
+    if "\x00" in text:
+        raise ContractError(f"{path}: expected canonical absolute POSIX path")
     pure = PurePosixPath(text)
     if (
         not Path(text).is_absolute()
@@ -236,6 +238,8 @@ def _absolute_path(value: object, path: str) -> str:
 
 def _relative_path(value: object, path: str) -> str:
     text = _string(value, path)
+    if "\x00" in text:
+        raise ContractError(f"{path}: expected normalized non-escaping POSIX relative path")
     pure = PurePosixPath(text)
     if pure.is_absolute() or ".." in pure.parts or text.startswith("./") or "\\" in text:
         raise ContractError(f"{path}: expected normalized non-escaping POSIX relative path")

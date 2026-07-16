@@ -215,9 +215,11 @@ def test_generation_payload_entries_are_sorted_unique_regular_files() -> None:
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a/./b"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a//b"),
         ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\\b"),
+        ("registry.json", REGISTRY_SOURCE_PATH, "/tmp/a\x00b"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a/./b"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a//b"),
         ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a/"),
+        ("generation-receipt.json", RECEIPT_PAYLOAD_PATH, "graphify-out/a\x00b"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://example.com:8443/x/y"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://user@example.com/x/y"),
         ("registry.json", REGISTRY_REMOTE_URL_PATH, "https://EXAMPLE.com/x/y"),
@@ -237,6 +239,11 @@ def test_schema_and_model_reject_noncanonical_paths_and_remote_urls(
     for part in field_path[:-1]:
         parent = parent[part]
     parent[field_path[-1]] = replacement
+    if field_path[:3] == ("workspaces", 0, "active_source"):
+        source = value["workspaces"][0]["active_source"]
+        value["workspaces"][0]["active_source_evidence"]["source_sha256"] = (
+            canonical_sha256(source)
+        )
     schema = load_schema(value["contract"])
     validator = Draft202012Validator(
         schema,
