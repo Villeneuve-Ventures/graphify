@@ -272,7 +272,7 @@ def _absolute_path(value: object, path: str) -> str:
 
 def _relative_path(value: object, path: str) -> str:
     text = _string(value, path)
-    if "\x00" in text or "\r" in text or "\n" in text:
+    if text == "." or "\x00" in text or "\r" in text or "\n" in text:
         raise ContractError(f"{path}: expected normalized non-escaping POSIX relative path")
     pure = PurePosixPath(text)
     if pure.is_absolute() or ".." in pure.parts or text.startswith("./") or "\\" in text:
@@ -645,7 +645,12 @@ def _validate_journal_event(data: Mapping[str, object]) -> None:
         if receipt is None or pointer_revision is None:
             raise ContractError("certified journal event requires receipt and pointer references")
         _digest(receipt, "$.receipt_sha256")
-        _integer(pointer_revision, "$.pointer_revision")
+        minimum_pointer_revision = 0 if transition == "CERTIFIED" else 1
+        _integer(
+            pointer_revision,
+            "$.pointer_revision",
+            minimum=minimum_pointer_revision,
+        )
     _date_time(data["occurred_at"], "$.occurred_at")
 
 
@@ -1160,10 +1165,6 @@ class ContractDocument:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "ContractDocument":
-        normalised = _normalise_json(value)
-        if not isinstance(normalised, dict):
-            raise ContractError("$: expected object")
-
         raw_contract = _string(value.get("contract"), "$.contract")
         if cls.CONTRACT is not None and raw_contract != cls.CONTRACT:
             raise ContractError(
@@ -1176,6 +1177,10 @@ class ContractDocument:
             raise UnsupportedContractVersion(
                 f"$.schema_version: expected {WORKSPACE_SCHEMA_VERSION}, got {raw_version}"
             )
+
+        normalised = _normalise_json(value)
+        if not isinstance(normalised, dict):
+            raise ContractError("$: expected object")
         _VALIDATORS[raw_contract](value)
 
         contract = _string(normalised.get("contract"), "$.contract")

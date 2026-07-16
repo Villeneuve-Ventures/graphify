@@ -138,6 +138,7 @@ def test_repo_config_rejects_lifecycle_path_override() -> None:
 
 def test_unknown_schema_version_is_rejected_before_event_fields() -> None:
     value = _json(FIXTURES / "version-rejection" / "journal-event-v2.json")
+    value["v2_weight"] = 1.5
 
     with pytest.raises(UnsupportedContractVersion, match="expected 1, got 2"):
         parse_contract(value)
@@ -981,6 +982,24 @@ def test_offline_rollback_restore_order_is_nonempty_unique_and_exact(
         parse_contract(value)
 
 
+def test_relative_paths_cannot_name_the_manifest_root(
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / "offline-rollback.json")
+    value["entries"][0]["path"] = "."
+    value["restore_order"][0] = "."
+    schema = load_schema(value["contract"])
+    validator = Draft202012Validator(
+        schema,
+        registry=schema_registry,
+        format_checker=FormatChecker(),
+    )
+
+    assert list(validator.iter_errors(value))
+    with pytest.raises(ContractError, match="relative path"):
+        parse_contract(value)
+
+
 def test_noninitial_journal_event_requires_prior_event_hash(
     schema_registry: SchemaRegistry,
 ) -> None:
@@ -1068,6 +1087,38 @@ def test_certified_and_later_journal_events_require_receipt_and_pointer(
 
     assert list(validator.iter_errors(value))
     with pytest.raises(ContractError, match="certified journal event"):
+        parse_contract(value)
+
+
+def test_certified_journal_event_allows_zero_before_first_promotion(
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / "journal-event.json")
+
+    _validate_schema(value, schema_registry)
+    assert parse_contract(value).to_dict()["pointer_revision"] == 0
+
+
+@pytest.mark.parametrize(
+    "transition",
+    ["PROMOTED", "SUPERSEDED", "REPAIRED", "ROLLED_BACK"],
+)
+def test_post_certification_journal_events_require_positive_pointer_revision(
+    transition: str,
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / "journal-event.json")
+    value["transition"] = transition
+    value["pointer_revision"] = 0
+    schema = load_schema(value["contract"])
+    validator = Draft202012Validator(
+        schema,
+        registry=schema_registry,
+        format_checker=FormatChecker(),
+    )
+
+    assert list(validator.iter_errors(value))
+    with pytest.raises(ContractError, match=r"pointer_revision.*integer >= 1"):
         parse_contract(value)
 
 

@@ -53,6 +53,9 @@ implement durable validation and sealing.
 `graphify.workspace.journal_event` binds a sequence, lifecycle transition,
 generation, previous-event hash, operation epoch, accepted fence token, and
 (once a sealed receipt exists) the receipt hash and observed pointer revision.
+`CERTIFIED` may record revision zero only as the no-current-pointer sentinel
+before first promotion. `PROMOTED`, `SUPERSEDED`, `REPAIRED`, and `ROLLED_BACK`
+require a positive installed or reconciled pointer revision.
 Events are outside certified generations.
 `ALLOCATED`, `STAGING`, `BUILT`, `VALIDATING`, and `FAILED` are
 pre-certification transitions and therefore require null receipt and pointer

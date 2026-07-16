@@ -27,7 +27,7 @@
     "relativePath": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?![\\s\\S]*[\\r\\n])(?:\\.|(?!\\.{1,2}(?:/|(?![\\s\\S])))(?![\\s\\S]*/\\.{1,2}(?:/|(?![\\s\\S])))[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*)(?![\\s\\S])"
+      "pattern": "^(?![\\s\\S]*[\\r\\n])(?!\\.{1,2}(?:/|(?![\\s\\S])))(?![\\s\\S]*/\\.{1,2}(?:/|(?![\\s\\S])))[^/\\\\\\u0000]+(?:/[^/\\\\\\u0000]+)*(?![\\s\\S])"
     },
     "remoteAlias": {
       "type": "object",
@@ -402,6 +402,21 @@
             "properties": {
               "receipt_sha256": {"$ref": "#/$defs/sha256"},
               "pointer_revision": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "transition": {
+                "enum": ["PROMOTED", "SUPERSEDED", "REPAIRED", "ROLLED_BACK"]
+              }
+            },
+            "required": ["transition"]
+          },
+          "then": {
+            "properties": {
+              "pointer_revision": {"type": "integer", "minimum": 1}
             }
           }
         }
