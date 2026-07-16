@@ -1,0 +1,35 @@
+{
+  "contract": "graphify.workspace.registry",
+  "schema_version": 1,
+  "revision": 2,
+  "workspaces": [
+    {
+      "repo_uuid": "11111111-1111-4111-8111-111111111111",
+      "uuid_enrollment": {
+        "repo_uuid": "11111111-1111-4111-8111-111111111111",
+        "immutable_evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "current_evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "active_source_revision": 2,
+      "active_source": {
+        "path": "/tmp/graphify-source",
+        "git_common_dir": "/tmp/graphify-source/.git",
+        "worktree_id": "main",
+        "remote_aliases": [
+          {
+            "url": "https://github.com/openai/graphify.git",
+            "evidence_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ]
+      },
+      "active_source_evidence": {
+        "active_source_revision": 1,
+        "source_sha256": "a6960342307ca8e9c194e0240263e8058c580c52c5f35b4853f9a20334f696e6",
+        "rebind_evidence_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "operation_epoch": 7,
+        "fence_token": 11
+      },
+      "aliases": []
+    }
+  ]
+}

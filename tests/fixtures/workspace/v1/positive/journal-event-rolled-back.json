@@ -1,0 +1,14 @@
+{
+  "contract": "graphify.workspace.journal_event",
+  "schema_version": 1,
+  "event_id": "88888888-8888-4888-8888-888888888888",
+  "sequence": 2,
+  "transition": "ROLLED_BACK",
+  "generation_id": "gen-0001",
+  "prior_event_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+  "receipt_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+  "pointer_revision": 2,
+  "operation_epoch": 2,
+  "fence_token": 2,
+  "occurred_at": "2026-07-15T21:02:00Z"
+}

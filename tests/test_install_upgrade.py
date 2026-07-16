@@ -12,6 +12,7 @@ the new query-first wording and does not contain the old report-first text.
 from __future__ import annotations
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -177,7 +178,8 @@ def test_gemini_install_upgrades_stale_section(tmp_path, monkeypatch):
     gemini_md.write_text(_OLD_GEMINI_SECTION, encoding="utf-8")
     monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
 
-    mainmod.gemini_install(tmp_path)
+    with patch("graphify.__main__.Path.home", return_value=tmp_path / "home"):
+        mainmod.gemini_install(tmp_path)
 
     after = gemini_md.read_text(encoding="utf-8")
     _assert_no_report_first(after, "GEMINI.md")
@@ -192,7 +194,8 @@ def test_vscode_install_upgrades_stale_section(tmp_path, monkeypatch):
     instructions.write_text(_OLD_VSCODE_SECTION, encoding="utf-8")
     monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
 
-    mainmod.vscode_install(tmp_path)
+    with patch("graphify.__main__.Path.home", return_value=tmp_path / "home"):
+        mainmod.vscode_install(tmp_path)
 
     after = instructions.read_text(encoding="utf-8")
     _assert_no_report_first(after, "copilot-instructions.md")

@@ -1,0 +1,23 @@
+{
+  "contract": "graphify.workspace.compatibility_manifest",
+  "schema_version": 1,
+  "distribution": "graphifyy",
+  "distribution_version": "0.9.17+workspace.1",
+  "distribution_build": "future-build",
+  "engine_baseline": "0.9.17",
+  "upstream_commit": "a0e4a1c6bd3a99edfdd84ad30927003f51face6a",
+  "fork_commit": "a0e4a1c6bd3a99edfdd84ad30927003f51face6a",
+  "extractor_cache_abi": "graphify-0.9.17",
+  "python": "CPython 3.14.3",
+  "platform": "macOS-26.5.2-arm64-apfs",
+  "state_schema_version": 2,
+  "adapter_contract_version": 2,
+  "cli_contract_version": 2,
+  "runtime_lock_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+  "skill_bundle_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contract_bundle_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "fixture_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "provenance_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "sbom_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "artifacts": {"future.whl": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}
+}

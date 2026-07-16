@@ -1,0 +1,14 @@
+{
+  "contract": "graphify.workspace.freshness_release",
+  "schema_version": 1,
+  "policy": "current_only",
+  "pre_observation": {},
+  "post_observation": {},
+  "release_decision": "release",
+  "reason": "observed_current",
+  "limitations": {
+    "strict_source_linearizability": true,
+    "inter_observation_aba_detection": false,
+    "post_boundary_changes": "out_of_scope"
+  }
+}

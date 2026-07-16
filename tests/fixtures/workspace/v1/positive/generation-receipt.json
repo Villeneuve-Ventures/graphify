@@ -1,0 +1,32 @@
+{
+  "contract": "graphify.workspace.generation_receipt",
+  "schema_version": 1,
+  "repo_uuid": "11111111-1111-4111-8111-111111111111",
+  "generation_id": "gen-0001",
+  "lifecycle_state": "CERTIFIED",
+  "source_commit": "a0e4a1c6bd3a99edfdd84ad30927003f51face6a",
+  "source_epoch": 1,
+  "active_source_revision": 1,
+  "operation_epoch": 1,
+  "fence_token": 1,
+  "policy_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "observation_manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "queue_watermark": 0,
+  "semantic_completeness": "not_required",
+  "compatibility_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "coordination_lock_id": "generation:0001",
+  "sealed_query_payload": {
+    "root": "graphify-out",
+    "manifest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "entries": [
+      {
+        "path": "graphify-out/graph.json",
+        "file_type": "regular_file",
+        "size": 42,
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "mode": "0644"
+      }
+    ]
+  },
+  "validations": ["payload_manifest", "coordination_lock_precreated"]
+}

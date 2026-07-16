@@ -7,6 +7,7 @@ This builds the wheel once and asserts every committed skill artifact ships in i
 """
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 import zipfile
@@ -14,19 +15,14 @@ from pathlib import Path
 
 import pytest
 
+from graphify.workspace import WORKSPACE_SCHEMA_FILES
+
 REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "graphify"
 
 
 def _has_build() -> bool:
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "build", "--version"],
-            check=True, capture_output=True,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
+    return importlib.util.find_spec("build") is not None
 
 
 def _skill_bodies() -> list[Path]:
@@ -62,8 +58,7 @@ def wheel_namelist(tmp_path_factory) -> set[str]:
          "--outdir", str(out), str(REPO)],
         capture_output=True, text=True,
     )
-    if proc.returncode != 0:
-        pytest.skip(f"wheel build failed in this env:\n{proc.stderr[-800:]}")
+    assert proc.returncode == 0, f"wheel build failed:\n{proc.stderr[-800:]}"
     wheels = list(out.glob("graphifyy-*.whl"))
     assert wheels, "no wheel produced"
     with zipfile.ZipFile(max(wheels, key=lambda p: p.stat().st_mtime)) as z:
@@ -82,3 +77,22 @@ def test_skill_artifact_ships_in_wheel(artifact: Path, wheel_namelist: set[str])
         f"`graphify install` would hard-exit for this host. Check the "
         f"[tool.setuptools.package-data] globs in pyproject.toml."
     )
+
+
+def test_workspace_contract_surface_ships_in_wheel(wheel_namelist: set[str]) -> None:
+    expected = {
+        "graphify/workspace/__init__.py",
+        "graphify/workspace/contracts.py",
+        *{
+            f"graphify/workspace/schemas/v1/{name}" for name in WORKSPACE_SCHEMA_FILES
+        },
+    }
+    assert expected <= wheel_namelist
+    actual_schemas = {
+        name
+        for name in wheel_namelist
+        if name.startswith("graphify/workspace/schemas/v1/")
+    }
+    assert actual_schemas == {
+        f"graphify/workspace/schemas/v1/{name}" for name in WORKSPACE_SCHEMA_FILES
+    }

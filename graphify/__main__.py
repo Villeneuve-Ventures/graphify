@@ -190,7 +190,7 @@ def _check_skill_version(skill_dst: Path) -> None:
     except OSError:
         return
     if installed != __version__:
-        if _version_tuple(installed) > _version_tuple(__version__):
+        if _version_is_newer(installed, __version__):
             # The skill on disk is NEWER than the running package. `graphify install`
             # writes the package's OWN (older) bundled skill and re-stamps the version,
             # so following the old "run install" advice would silently DOWNGRADE the
@@ -225,6 +225,41 @@ def _version_tuple(version: str) -> tuple[int, ...]:
                 break
         parts.append(int(digits) if digits else 0)
     return tuple(parts)
+
+
+_RELEASE_POST_LOCAL_VERSION = re.compile(
+    r"^\s*v?(?P<release>\d+(?:\.\d+)*)"
+    r"(?:(?:[-_.]?(?:post|rev|r))(?P<post>\d+))?"
+    r"(?:\+(?P<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _release_post_local_key(version: str) -> tuple[tuple[int, ...], int, tuple] | None:
+    """Return a PEP 440 ordering key for release/post/local skill stamps."""
+    match = _RELEASE_POST_LOCAL_VERSION.fullmatch(str(version))
+    if match is None:
+        return None
+    release = [int(part) for part in match.group("release").split(".")]
+    while len(release) > 1 and release[-1] == 0:
+        release.pop()
+    post = int(match.group("post")) if match.group("post") is not None else -1
+    local_text = match.group("local")
+    local = tuple(
+        (1, int(part)) if part.isdigit() else (0, part.lower())
+        for part in re.split(r"[-_.]", local_text or "")
+        if part
+    )
+    return tuple(release), post, local
+
+
+def _version_is_newer(installed: str, package: str) -> bool:
+    """Compare common PEP 440 skill stamps without adding a runtime dependency."""
+    installed_key = _release_post_local_key(installed)
+    package_key = _release_post_local_key(package)
+    if installed_key is not None and package_key is not None:
+        return installed_key > package_key
+    return _version_tuple(installed) > _version_tuple(package)
 
 
 

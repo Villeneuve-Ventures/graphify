@@ -1,0 +1,22 @@
+{
+  "contract": "graphify.workspace.prior_pointer",
+  "schema_version": 1,
+  "retained_at": "2026-07-15T21:01:00Z",
+  "replaced_by_revision": 2,
+  "pointer_set": {
+    "contract": "graphify.workspace.pointer_set",
+    "schema_version": 1,
+    "repo_uuid": "11111111-1111-4111-8111-111111111111",
+    "pointer_revision": 1,
+    "active_source_revision": 1,
+    "source_epoch": 1,
+    "operation_epoch": 1,
+    "fence_token": 1,
+    "state_schema_version": 1,
+    "current": {
+      "generation_id": "gen-0001",
+      "receipt_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+    },
+    "last_good": null
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "contract": "graphify.workspace.artifact_manifest",
+  "schema_version": 1,
+  "manifest_version": 1,
+  "artifacts": [
+    {
+      "path": "graphifyy-0.9.16+workspace.1-py3-none-any.whl",
+      "file_type": "regular_file",
+      "size": 100,
+      "sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "mode": "0644"
+    }
+  ]
+}

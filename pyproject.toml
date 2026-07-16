@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "graphifyy"
-version = "0.9.16"
+version = "0.9.16+workspace.1"
 description = "AI coding assistant skill (Claude Code, CodeBuddy, Codex, OpenCode, Kilo Code, Cursor, Gemini CLI, Aider, OpenClaw, Factory Droid, Trae, Hermes, Kiro, Pi, Devin CLI, Google Antigravity) - turn any folder of code, docs, papers, images, or videos into a queryable knowledge graph"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -40,6 +40,7 @@ dependencies = [
     "tree-sitter-fortran>=0.6,<0.8",
     "tree-sitter-bash>=0.23,<0.27",
     "tree-sitter-json>=0.23,<0.26",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -91,6 +92,7 @@ dev = [
     "bandit>=1.9.4",
     "build>=1.5.0",
     "hypothesis>=6.152.7",
+    "jsonschema>=4.26.0",
     "nuitka>=4.1",
     "patchelf>=0.17.2.4 ; sys_platform != 'win32'",
     "pip-audit>=2.10.0",
@@ -98,10 +100,11 @@ dev = [
     "pyright>=1.1.409",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
+    "referencing>=0.37.0",
+    "rfc3339-validator>=0.1.4",
     "ruff>=0.15.13",
     "setuptools>=82.0.1",
     "wheel>=0.47.0",
-    "tomli>=2.0 ; python_version < '3.11'",
     "tree-sitter-hcl>=1.2.0",
 ]
 
@@ -111,7 +114,7 @@ dev = [
 package = true
 
 [tool.setuptools]
-packages = ["graphify", "graphify.extractors", "graphify.exporters"]
+packages = ["graphify", "graphify.extractors", "graphify.exporters", "graphify.workspace"]
 include-package-data = false
 
 [tool.setuptools.package-data]
@@ -120,7 +123,7 @@ include-package-data = false
 # under graphify/skills/<host>/references/, and the always-on injection blocks
 # under graphify/always_on/. There is no graphify/skills/<host>/SKILL.md in the
 # repo, so no SKILL.md glob is needed here.
-graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-kilo.md", "command-kilo.md", "skill-aider.md", "skill-amp.md", "skill-agents.md", "skill-copilot.md", "skill-claw.md", "skill-windows.md", "skill-droid.md", "skill-trae.md", "skill-kiro.md", "skill-vscode.md", "skill-pi.md", "skill-devin.md", "skills/*/references/*.md", "always_on/*.md"]
+graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-kilo.md", "command-kilo.md", "skill-aider.md", "skill-amp.md", "skill-agents.md", "skill-copilot.md", "skill-claw.md", "skill-windows.md", "skill-droid.md", "skill-trae.md", "skill-kiro.md", "skill-vscode.md", "skill-pi.md", "skill-devin.md", "skills/*/references/*.md", "always_on/*.md", "workspace/schemas/v1/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

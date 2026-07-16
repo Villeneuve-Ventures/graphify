@@ -1,0 +1,15 @@
+{
+  "contract": "graphify.workspace.fenced_lease",
+  "schema_version": 1,
+  "repo_uuid": "11111111-1111-4111-8111-111111111111",
+  "operation": "BUILD",
+  "fence_token": 1,
+  "owner": {
+    "boot_id": "boot-fixture",
+    "pid": 123,
+    "process_start_id": "123:456"
+  },
+  "acquired_at": "2026-07-15T21:00:00Z",
+  "heartbeat_at": "2026-07-15T21:00:01Z",
+  "liveness_deadline_monotonic_ns": 999999999
+}
