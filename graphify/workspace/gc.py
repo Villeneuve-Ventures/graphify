@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from graphify.workspace.contracts import (
     CapacityPolicy,
+    ContractError,
     GcCompletionState,
     GcIntentState,
     GcPurgeState,
@@ -149,6 +150,13 @@ class GcStore:
         self.fault_hook = fault_hook or (lambda _event: None)
 
     @staticmethod
+    def _validated_capacity_policy(policy: CapacityPolicy) -> CapacityPolicy:
+        try:
+            return CapacityPolicy.from_mapping(policy.to_dict())
+        except ContractError as exc:
+            raise GcError(f"capacity policy is invalid: {exc}") from exc
+
+    @staticmethod
     def _workspace(repo_uuid: str) -> Path:
         return LeaseStore._directory(repo_uuid)
 
@@ -282,7 +290,8 @@ class GcStore:
         protections: GcProtection,
         monotonic_ns: int,
     ) -> GcPlan:
-        with self.leases.current_operation(
+        capacity_policy = self._validated_capacity_policy(capacity_policy)
+        with self.leases.current_operation_read_only(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
@@ -404,6 +413,7 @@ class GcStore:
         occurred_at: datetime,
         monotonic_ns: int,
     ) -> GcCompletionState:
+        capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
@@ -466,6 +476,7 @@ class GcStore:
         completed_at: datetime,
         monotonic_ns: int,
     ) -> GcCompletionState | None:
+        capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
@@ -539,6 +550,7 @@ class GcStore:
         completed_at: datetime,
         monotonic_ns: int,
     ) -> GcPurgeState:
+        capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,

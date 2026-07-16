@@ -15,6 +15,7 @@ from graphify.workspace.contracts import (
     CapacityPolicy,
     CapacityReservation,
     CapacityReservationState,
+    ContractError,
     GenerationCoordinationLock,
     GenerationReceipt,
     canonical_json_bytes,
@@ -200,6 +201,13 @@ class GenerationStore:
             )
         except StateCorrupt as exc:
             raise CapacityExceeded(f"capacity reservation state is corrupt: {exc}") from exc
+
+    @staticmethod
+    def _validated_capacity_policy(policy: CapacityPolicy) -> CapacityPolicy:
+        try:
+            return CapacityPolicy.from_mapping(policy.to_dict())
+        except ContractError as exc:
+            raise CapacityExceeded(f"capacity policy is invalid: {exc}") from exc
 
     def _commit_capacity_locked(
         self,
@@ -483,6 +491,7 @@ class GenerationStore:
         occurred_at: datetime,
         monotonic_ns: int,
     ) -> GenerationAllocation:
+        capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,

@@ -32,6 +32,7 @@ from tests.workspace_p3_helpers import (
     authorization,
     create_harness,
     create_repo,
+    metadata_snapshot,
     tree_snapshot,
 )
 
@@ -107,10 +108,45 @@ def test_capacity_preflight_fails_before_allocation_mutates_workspace_state(
     assert tree_snapshot(harness.state_root / "workspaces" / REPO_UUID) == before
 
 
+def test_allocate_revalidates_capacity_policy_before_any_state_mutation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    invalid = replace(POLICY, reserve_bytes=-1)
+    before = tree_snapshot(harness.state_root)
+    before_metadata = metadata_snapshot(harness.state_root)
+
+    with pytest.raises(CapacityExceeded, match="capacity policy is invalid"):
+        store.allocate(
+            grant,
+            expected_payload_bytes=1,
+            capacity_policy=invalid,
+            generation_id="gen-invalid-policy",
+            occurred_at=START,
+            monotonic_ns=10_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+    assert metadata_snapshot(harness.state_root) == before_metadata
+
+
 @pytest.mark.parametrize(
     ("policy", "message"),
     [
-        (replace(POLICY, global_max_bytes=64), "global byte limit"),
+        (
+            replace(POLICY, global_max_bytes=96, workspace_max_bytes=64),
+            "global byte limit",
+        ),
         (replace(POLICY, workspace_max_generations=1), "workspace generation limit"),
     ],
 )
@@ -141,7 +177,11 @@ def test_capacity_preflight_enforces_global_bytes_and_workspace_generation_count
         )
         requested_bytes = 32
     else:
-        requested_bytes = 65
+        existing = harness.leases.state.ensure_directory(
+            Path("workspaces") / SECOND_UUID / "generations" / "gen-existing"
+        )
+        (existing / "payload.bin").write_bytes(b"x" * 64)
+        requested_bytes = 64
 
     with pytest.raises(CapacityExceeded, match=message):
         store.allocate(

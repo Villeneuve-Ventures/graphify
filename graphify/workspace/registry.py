@@ -105,8 +105,14 @@ class RegistryStore:
         ):
             yield
 
-    def _load_locked(self, *, allow_missing: bool = False) -> Registry | None:
-        result = self.state.recover_record(
+    def _load_locked(
+        self,
+        *,
+        allow_missing: bool = False,
+        recover: bool = True,
+    ) -> Registry | None:
+        loader = self.state.recover_record if recover else self.state.read_stable_record
+        result = loader(
             label="registry",
             current=self.CURRENT,
             previous=self.PREVIOUS,
@@ -123,6 +129,20 @@ class RegistryStore:
 
         with self.exclusive_lock():
             document = self._load_locked()
+            if document is None:  # pragma: no cover - narrowed by allow_missing=False
+                raise StateCorrupt("registry current record is missing")
+            yield document
+
+    @contextmanager
+    def read_only_snapshot(self) -> Iterator[Registry]:
+        """Hold an existing registry lock without repair, creation, or chmod."""
+
+        with self.state.existing_lock(
+            self.LOCK,
+            rank=REGISTRY_LOCK_RANK,
+            name="registry",
+        ):
+            document = self._load_locked(recover=False)
             if document is None:  # pragma: no cover - narrowed by allow_missing=False
                 raise StateCorrupt("registry current record is missing")
             yield document
@@ -169,7 +189,7 @@ class RegistryStore:
             raise StateCorrupt("evidence digest is not lowercase SHA-256")
         path = self.state.path(Path("evidence") / f"{digest}.json")
         try:
-            payload = self.state.read_bytes(path.relative_to(self.state.root))
+            payload = self.state.read_existing_bytes(path.relative_to(self.state.root))
             value = json.loads(payload)
         except (OSError, ValueError) as exc:
             raise StateCorrupt(f"evidence {digest} is unreadable: {exc}") from exc

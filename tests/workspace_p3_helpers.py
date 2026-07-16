@@ -146,3 +146,21 @@ def tree_snapshot(root: Path) -> dict[str, tuple[int, int, int, str | None]]:
             digest,
         )
     return result
+
+
+def metadata_snapshot(root: Path) -> dict[str, tuple[int, int, int, int]]:
+    """Capture write-sensitive metadata omitted from content snapshots."""
+
+    if not root.exists():
+        return {}
+    result: dict[str, tuple[int, int, int, int]] = {}
+    for path in (root, *sorted(root.rglob("*"))):
+        details = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        result[relative] = (
+            details.st_mode,
+            details.st_size,
+            details.st_mtime_ns,
+            details.st_ctime_ns,
+        )
+    return result

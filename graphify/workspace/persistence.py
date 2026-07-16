@@ -208,6 +208,30 @@ class DurableStateRoot:
             raise StatePathError(f"state directory is not a real directory: {path}")
         self._require_owner(details, path)
 
+    def _require_private_directory_chain(self, destination: Path) -> None:
+        """Validate an existing state-directory chain without repairing it."""
+
+        if destination != self.root and self.root not in destination.parents:
+            raise StatePathError(f"state directory escapes root: {destination}")
+        current = self.root
+        parts = () if destination == self.root else destination.relative_to(self.root).parts
+        candidates = [self.root]
+        for part in parts:
+            current /= part
+            candidates.append(current)
+        for candidate in candidates:
+            try:
+                details = candidate.lstat()
+            except FileNotFoundError as exc:
+                raise StatePathError(f"state directory is missing: {candidate}") from exc
+            if not stat.S_ISDIR(details.st_mode) or candidate.is_symlink():
+                raise StatePathError(
+                    f"state directory is linked or not a directory: {candidate}"
+                )
+            self._require_owner(details, candidate)
+            if stat.S_IMODE(details.st_mode) != 0o700:
+                raise StatePathError(f"state directory mode is not 0700: {candidate}")
+
     def path(self, relative: str | Path) -> Path:
         pure = PurePosixPath(Path(relative).as_posix())
         if pure.is_absolute() or not pure.parts or ".." in pure.parts or "." in pure.parts:
@@ -302,6 +326,70 @@ class DurableStateRoot:
             while True:
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    break
+                except InterruptedError:
+                    continue
+            token = _LOCK_STACK.set((*stack, (rank, name)))
+            self.fault_hook(f"lock:{name}:acquired")
+            try:
+                yield
+            finally:
+                _LOCK_STACK.reset(token)
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        break
+                    except InterruptedError:
+                        continue
+                self.fault_hook(f"lock:{name}:released")
+        finally:
+            os.close(descriptor)
+
+    @contextmanager
+    def existing_lock(
+        self,
+        relative: str | Path,
+        *,
+        rank: int,
+        name: str,
+        exclusive: bool = True,
+        blocking: bool = True,
+        kind: str = "state",
+    ) -> Iterator[None]:
+        """Lock an existing coordination file without any mutating syscall."""
+
+        stack = _LOCK_STACK.get()
+        if stack and (
+            rank < stack[-1][0]
+            or (rank == stack[-1][0] and name <= stack[-1][1])
+        ):
+            raise LockOrderError(
+                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
+            )
+        path = self.path(relative)
+        self._require_private_directory_chain(path.parent)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError as exc:
+            raise StatePathError(f"{kind} lock is missing: {path}") from exc
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                raise StatePathError(f"state lock is not a singular regular file: {path}")
+            self._require_owner(details, path)
+            if stat.S_IMODE(details.st_mode) != 0o600:
+                raise StatePathError(f"state lock mode is not 0600: {path}")
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - rejected by capability gate
+                raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            if not blocking:
+                operation |= fcntl.LOCK_NB
+            while True:
+                try:
+                    fcntl.flock(descriptor, operation)
                     break
                 except InterruptedError:
                     continue
@@ -552,57 +640,16 @@ class DurableStateRoot:
     ) -> Iterator[None]:
         """Lock a retained coordination object without any mutating syscall."""
 
-        stack = _LOCK_STACK.get()
         name = f"generation:{generation_id}"
-        rank = GENERATION_LOCK_RANK
-        if stack and (
-            rank < stack[-1][0]
-            or (rank == stack[-1][0] and name <= stack[-1][1])
+        with self.existing_lock(
+            relative,
+            rank=GENERATION_LOCK_RANK,
+            name=name,
+            exclusive=exclusive,
+            blocking=blocking,
+            kind="generation",
         ):
-            raise LockOrderError(
-                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
-            )
-        path = self.path(relative)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(path, flags)
-        except FileNotFoundError as exc:
-            raise StatePathError(f"generation lock is missing: {path}") from exc
-        try:
-            details = os.fstat(descriptor)
-            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
-                raise StatePathError(f"generation lock is not a singular regular file: {path}")
-            self._require_owner(details, path)
-            if stat.S_IMODE(details.st_mode) != 0o600:
-                raise StatePathError(f"generation lock mode is not 0600: {path}")
-            try:
-                import fcntl
-            except ImportError as exc:  # pragma: no cover - rejected by capability gate
-                raise UnsupportedRuntime("fcntl is required for generation locking") from exc
-            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-            if not blocking:
-                operation |= fcntl.LOCK_NB
-            while True:
-                try:
-                    fcntl.flock(descriptor, operation)
-                    break
-                except InterruptedError:
-                    continue
-            token = _LOCK_STACK.set((*stack, (rank, name)))
-            self.fault_hook(f"lock:{name}:acquired")
-            try:
-                yield
-            finally:
-                _LOCK_STACK.reset(token)
-                while True:
-                    try:
-                        fcntl.flock(descriptor, fcntl.LOCK_UN)
-                        break
-                    except InterruptedError:
-                        continue
-                self.fault_hook(f"lock:{name}:released")
-        finally:
-            os.close(descriptor)
+            yield
 
     @contextmanager
     def existing_generation_locks(
@@ -660,6 +707,68 @@ class DurableStateRoot:
             if isinstance(exc, StateCorrupt):
                 raise
             raise StateCorrupt(f"{label} current record is invalid: {exc}") from exc
+
+    def read_stable_record(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Callable[[bytes], RecordT],
+        revision: Callable[[RecordT], int],
+        allow_missing: bool = False,
+    ) -> RecordT | None:
+        """Read current authority only when no durable recovery is required."""
+
+        paths = {
+            "current": self.path(current),
+            "pending": self.path(pending),
+            "previous": self.path(previous),
+        }
+        parents = {path.parent for path in paths.values()}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        parent = next(iter(parents))
+        self._require_private_directory_chain(parent)
+
+        def load_candidate(name: str) -> tuple[bytes, RecordT, int] | None:
+            path = paths[name]
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return None
+            try:
+                data = self._read_regular(path)
+                record = decoder(data)
+                return data, record, revision(record)
+            except Exception as exc:
+                if isinstance(exc, StateCorrupt):
+                    raise
+                raise StateCorrupt(f"{label} {name} record is invalid: {exc}") from exc
+
+        try:
+            paths["pending"].lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise StateCorrupt(f"{label} has an unresolved pending commit")
+
+        current_candidate = load_candidate("current")
+        previous_candidate = load_candidate("previous")
+        if current_candidate is None:
+            if allow_missing and previous_candidate is None:
+                return None
+            raise StateCorrupt(f"{label} current record is missing")
+        current_bytes, current_record, current_revision = current_candidate
+        if previous_candidate is None:
+            return current_record
+        previous_bytes, _previous_record, previous_revision = previous_candidate
+        if previous_revision > current_revision:
+            raise StateCorrupt(f"{label} previous record is newer than current")
+        if previous_revision == current_revision and previous_bytes != current_bytes:
+            raise StateCorrupt(f"{label} has divergent records at revision {current_revision}")
+        return current_record
 
     def recover_record(
         self,

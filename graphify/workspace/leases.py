@@ -313,6 +313,16 @@ class LeaseStore:
         ):
             yield
 
+    @contextmanager
+    def read_only_workspace_lock(self, repo_uuid: str) -> Iterator[None]:
+        directory = self._directory(repo_uuid)
+        with self.state.existing_lock(
+            directory / "workspace.lock",
+            rank=WORKSPACE_LOCK_RANK,
+            name="workspace",
+        ):
+            yield
+
     def _paths(self, repo_uuid: str) -> tuple[Path, Path, Path]:
         directory = self._directory(repo_uuid)
         return (
@@ -338,7 +348,13 @@ class LeaseStore:
             raise LeaseRecoveryRequired(f"recovery barrier mode is not 0600: {relative}")
         return True
 
-    def _assert_recovery_barriers_locked(self, repo_uuid: str, operation: str) -> None:
+    def _assert_recovery_barriers_locked(
+        self,
+        repo_uuid: str,
+        operation: str,
+        *,
+        recover: bool = True,
+    ) -> None:
         workspace = self._directory(repo_uuid)
         gc_intent = workspace / "gc" / "intent.json"
         if self._durable_record_exists(gc_intent) and operation not in {
@@ -352,7 +368,12 @@ class LeaseStore:
         if operation != "ACTIVATE":
             return
         try:
-            capacity = self.state.recover_record(
+            loader = (
+                self.state.recover_record
+                if recover
+                else self.state.read_stable_record
+            )
+            capacity = loader(
                 label="capacity",
                 current=Path("capacity.json"),
                 previous=Path("capacity.previous.json"),
@@ -376,10 +397,13 @@ class LeaseStore:
         self,
         document: Registry,
         repo_uuid: str,
+        *,
+        recover: bool = True,
     ) -> WorkspaceLeaseState:
         entry = _registry_entry(document, repo_uuid)
         current, previous, pending = self._paths(repo_uuid)
-        recovered = self.state.recover_record(
+        loader = self.state.recover_record if recover else self.state.read_stable_record
+        recovered = loader(
             label="workspace",
             current=current,
             previous=previous,
@@ -667,6 +691,44 @@ class LeaseStore:
             snapshot = document
         with self.workspace_lock(repo_uuid):
             yield checked_operation(snapshot)
+
+    @contextmanager
+    def current_operation_read_only(
+        self,
+        grant: LeaseGrant,
+        *,
+        monotonic_ns: int,
+        allowed_operations: frozenset[str] | None = None,
+    ) -> Iterator[LeaseOperation]:
+        """Validate a grant under existing locks without repairing durable state."""
+
+        self._require_grant_owner(grant)
+        repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
+        with self.registry.read_only_snapshot() as document:
+            with self.read_only_workspace_lock(repo_uuid):
+                self._check_active(document, grant)
+                state = self._load_state_locked(document, repo_uuid, recover=False)
+                _domain, current = self._matching_lease(state, grant)
+                operation = str(current.to_dict()["operation"])
+                if allowed_operations is not None and operation not in allowed_operations:
+                    raise StaleLease(
+                        f"operation {operation} is not authorized for this mutation"
+                    )
+                if monotonic_ns >= int(
+                    current.to_dict()["liveness_deadline_monotonic_ns"]
+                ):
+                    raise LeaseExpired("liveness deadline has passed")
+                self._assert_recovery_barriers_locked(
+                    repo_uuid,
+                    operation,
+                    recover=False,
+                )
+                yield LeaseOperation(
+                    registry=document,
+                    state=state,
+                    lease=current,
+                    grant=grant,
+                )
 
     def heartbeat(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import errno
 import hashlib
 from pathlib import Path
@@ -12,14 +13,27 @@ from typing import Any
 import pytest
 
 from graphify.workspace.contracts import CapacityPolicy, GcIntentState
-from graphify.workspace.gc import GcProtection, GcRecoveryRequired, GcStore
+from graphify.workspace.gc import GcError, GcProtection, GcRecoveryRequired, GcStore
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import LeaseRecoveryRequired
-from graphify.workspace.persistence import CommitUnknown, InjectedFault, PosixSyscalls
+from graphify.workspace.persistence import (
+    CommitUnknown,
+    InjectedFault,
+    PosixSyscalls,
+    StateCorrupt,
+    StatePathError,
+)
 from graphify.workspace.pointers import PointerCAS, PointerStore
 
-from tests.workspace_p3_helpers import REPO_UUID, START, acquire, create_harness, tree_snapshot
+from tests.workspace_p3_helpers import (
+    REPO_UUID,
+    START,
+    acquire,
+    create_harness,
+    metadata_snapshot,
+    tree_snapshot,
+)
 
 
 POLICY = CapacityPolicy.from_mapping(
@@ -73,6 +87,8 @@ GC_RECOVERY_PHASES = (
     "gc:intent_clear:unlinked",
     "gc:complete",
 )
+
+
 SUCCESSOR_WRITER_OPERATIONS = (
     "ACTIVATE",
     "MIGRATE",
@@ -241,10 +257,17 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
 
     gc_directory = harness.state_root / "workspaces" / REPO_UUID / "gc"
     gc_directory.mkdir(parents=True, exist_ok=True)
-    orphan = gc_directory / f".intent.json.tmp-123-{'a' * 32}"
-    orphan.write_bytes(b"orphan")
-    orphan.chmod(0o600)
+    workspace_directory = harness.state_root / "workspaces" / REPO_UUID
+    orphans = (
+        harness.state_root / f".registry.json.tmp-121-{'a' * 32}",
+        workspace_directory / f".workspace.json.tmp-122-{'b' * 32}",
+        gc_directory / f".intent.json.tmp-123-{'c' * 32}",
+    )
+    for orphan in orphans:
+        orphan.write_bytes(b"orphan")
+        orphan.chmod(0o600)
     before = tree_snapshot(harness.state_root)
+    before_metadata = metadata_snapshot(harness.state_root)
     plan = gc.plan(
         gc_grant,
         capacity_policy=POLICY,
@@ -252,7 +275,8 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         monotonic_ns=30_002,
     )
     assert tree_snapshot(harness.state_root) == before
-    assert orphan.read_bytes() == b"orphan"
+    assert metadata_snapshot(harness.state_root) == before_metadata
+    assert all(orphan.read_bytes() == b"orphan" for orphan in orphans)
     assert plan.candidates == ("gen-unused",)
     assert "gen-current" in dict(plan.protected)
 
@@ -290,6 +314,129 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     assert purge.purged == ("gen-unused",)
     assert not quarantine.exists()
     assert retained_lock.stat().st_ino == inode
+
+
+def test_gc_plan_rejects_insecure_root_without_repairing_it(tmp_path: Path) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    harness.state_root.chmod(0o755)
+    before = metadata_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError, match="mode is not 0700"):
+        gc.plan(
+            gc_grant,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            monotonic_ns=30_001,
+        )
+
+    assert metadata_snapshot(harness.state_root) == before
+
+
+@pytest.mark.parametrize(
+    ("current_relative", "pending_relative"),
+    [
+        ("registry.json", "registry.pending.json"),
+        (
+            f"workspaces/{REPO_UUID}/workspace.json",
+            f"workspaces/{REPO_UUID}/workspace.pending.json",
+        ),
+    ],
+)
+def test_gc_plan_fails_closed_on_pending_recovery_without_mutation(
+    tmp_path: Path,
+    current_relative: str,
+    pending_relative: str,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    current = harness.state_root / current_relative
+    pending = harness.state_root / pending_relative
+    pending.write_bytes(current.read_bytes())
+    pending.chmod(0o600)
+    before = metadata_snapshot(harness.state_root)
+
+    with pytest.raises(StateCorrupt, match="unresolved pending commit"):
+        gc.plan(
+            gc_grant,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            monotonic_ns=30_001,
+        )
+
+    assert metadata_snapshot(harness.state_root) == before
+
+
+def test_gc_entry_points_revalidate_capacity_policy_before_state_access(
+    tmp_path: Path,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    valid_plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    invalid = replace(POLICY, reserve_bytes=-1)
+    before = metadata_snapshot(harness.state_root)
+    calls = (
+        lambda: gc.plan(
+            gc_grant,
+            capacity_policy=invalid,
+            protections=EMPTY_PROTECTION,
+            monotonic_ns=30_002,
+        ),
+        lambda: gc.execute(
+            gc_grant,
+            valid_plan,
+            capacity_policy=invalid,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        ),
+        lambda: gc.reconcile(
+            gc_grant,
+            capacity_policy=invalid,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=30_002,
+        ),
+        lambda: gc.purge(
+            gc_grant,
+            plan_sha256=valid_plan.sha256,
+            capacity_policy=invalid,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=30_002,
+        ),
+    )
+
+    for call in calls:
+        with pytest.raises(GcError, match="capacity policy is invalid"):
+            call()
+        assert metadata_snapshot(harness.state_root) == before
 
 
 def test_gc_commit_unknown_blocks_pointer_writer_until_successor_reconciles(
