@@ -318,6 +318,24 @@ def test_complete_candidate_roots_compare_every_output_file(tmp_path: Path) -> N
         )
 
 
+def test_candidate_artifact_modes_and_hashes_are_umask_independent(tmp_path: Path) -> None:
+    outputs = []
+    for name, mask in (("normal", 0o022), ("restrictive", 0o077)):
+        previous = os.umask(mask)
+        try:
+            output = tmp_path / name
+            _build_candidate(tmp_path / f"repo-{name}", output)
+        finally:
+            os.umask(previous)
+        outputs.append(output)
+
+    comparison = compare_candidate_roots(first=outputs[0], second=outputs[1])
+
+    assert comparison["byte_identical"] is True
+    for output in outputs:
+        assert {path.stat().st_mode & 0o777 for path in output.iterdir()} == {0o644}
+
+
 def test_installed_skill_tree_digest_is_bound_to_skill_bundle(tmp_path: Path) -> None:
     artifacts, _ = _build_candidate(tmp_path / "repo", tmp_path / "candidate")
     skill_bundle = artifacts["skill-bundle.zip"]

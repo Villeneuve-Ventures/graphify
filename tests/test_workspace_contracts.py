@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry as SchemaRegistry, Resource
 
+import graphify.workspace.contracts as workspace_contracts
 from graphify.workspace import (
     CompensationPlan,
     ContractError,
@@ -163,6 +164,89 @@ def test_canonicalization_normalizes_unicode_and_rejects_floats() -> None:
     )
     with pytest.raises(ContractError, match="floating-point values are forbidden"):
         canonical_json_bytes({"timeout": 1.5})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"value": "\ud800"},
+        {"\udfff": "value"},
+    ],
+)
+def test_canonicalization_rejects_lone_unicode_surrogates(value: dict[str, str]) -> None:
+    with pytest.raises(ContractError, match="surrogate"):
+        canonical_json_bytes(value)
+
+
+@pytest.mark.parametrize(
+    "repo_uuid",
+    [
+        "00000000-0000-0000-0000-000000000000",
+        "00000000-0000-0000-8000-000000000000",
+        "00000000-0000-1000-0000-000000000000",
+    ],
+)
+def test_schema_and_model_reject_non_rfc_uuid_version_or_variant(
+    repo_uuid: str,
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = WorkspaceConfig.from_toml(
+        (FIXTURES / "positive" / "workspace.toml").read_bytes()
+    ).to_dict()
+    value["repo_uuid"] = repo_uuid
+    schema = load_schema(value["contract"])
+    validator = Draft202012Validator(
+        schema,
+        registry=schema_registry,
+        format_checker=FormatChecker(),
+    )
+
+    assert list(validator.iter_errors(value))
+    with pytest.raises(ContractError):
+        parse_contract(value)
+
+
+def test_schema_format_checker_enforces_date_time() -> None:
+    assert "date-time" in FormatChecker.checkers
+
+
+@pytest.mark.parametrize(
+    ("fixture", "field_path"),
+    [
+        ("journal-event.json", ("occurred_at",)),
+        ("fenced-lease.json", ("acquired_at",)),
+        ("fenced-lease.json", ("heartbeat_at",)),
+        ("prior-pointer.json", ("retained_at",)),
+    ],
+)
+def test_schema_and_model_reject_invalid_date_times(
+    fixture: str,
+    field_path: tuple[str, ...],
+    schema_registry: SchemaRegistry,
+) -> None:
+    value = _json(FIXTURES / "positive" / fixture)
+    parent = value
+    for part in field_path[:-1]:
+        parent = parent[part]
+    parent[field_path[-1]] = "not a timestamp"
+    schema = load_schema(value["contract"])
+    validator = Draft202012Validator(
+        schema,
+        registry=schema_registry,
+        format_checker=FormatChecker(),
+    )
+
+    assert list(validator.iter_errors(value))
+    with pytest.raises(ContractError):
+        parse_contract(value)
+
+
+def test_contract_parser_uses_posix_path_semantics_on_every_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(workspace_contracts, "Path", PureWindowsPath)
+
+    assert parse_contract(_json(FIXTURES / "positive" / "registry.json"))
 
 
 def test_json_parsing_rejects_duplicate_keys_before_contract_validation() -> None:

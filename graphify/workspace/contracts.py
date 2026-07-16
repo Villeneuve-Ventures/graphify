@@ -10,6 +10,7 @@ checkout, service, or global installation.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import calendar
 from dataclasses import dataclass
 import hashlib
 import json
@@ -69,6 +70,12 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$")
 _LOCK_RE = re.compile(r"^generation:[a-z0-9][a-z0-9._-]{0,62}$")
+_RFC3339_RE = re.compile(
+    r"^(?P<year>\d{4})-(?P<month>0[1-9]|1[0-2])-(?P<day>\d{2})"
+    r"[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?"
+    r"(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)$",
+    re.ASCII,
+)
 _JOURNAL_MAGIC = b"GWF1"
 _JOURNAL_FRAME_VERSION = 1
 _JOURNAL_HEADER = struct.Struct(">4sBQ32s")
@@ -85,13 +92,19 @@ class UnsupportedContractVersion(ContractError):
 JsonValue = None | bool | int | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
+def _normalise_string(value: str, path: str) -> str:
+    if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise ContractError(f"{path}: Unicode surrogate code points are forbidden")
+    return unicodedata.normalize("NFC", value)
+
+
 def _normalise_json(value: object, path: str = "$") -> JsonValue:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, int):
         return value
     if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
+        return _normalise_string(value, path)
     if isinstance(value, float):
         raise ContractError(f"{path}: floating-point values are forbidden in hashed contracts")
     if isinstance(value, Mapping):
@@ -99,7 +112,7 @@ def _normalise_json(value: object, path: str = "$") -> JsonValue:
         for raw_key, raw_value in value.items():
             if not isinstance(raw_key, str):
                 raise ContractError(f"{path}: object keys must be strings")
-            key = unicodedata.normalize("NFC", raw_key)
+            key = _normalise_string(raw_key, path)
             if key in result:
                 raise ContractError(f"{path}: duplicate key after Unicode normalization: {key!r}")
             result[key] = _normalise_json(raw_value, f"{path}.{key}")
@@ -217,6 +230,21 @@ def _uuid(value: object, path: str) -> str:
         raise ContractError(f"{path}: expected UUID") from exc
     if str(parsed) != text:
         raise ContractError(f"{path}: UUID must use canonical lowercase hyphenated form")
+    if parsed.version not in range(1, 9) or parsed.variant != uuid.RFC_4122:
+        raise ContractError(f"{path}: UUID must use an RFC variant and version 1 through 8")
+    return text
+
+
+def _date_time(value: object, path: str) -> str:
+    text = _string(value, path)
+    match = _RFC3339_RE.fullmatch(text)
+    if match is None:
+        raise ContractError(f"{path}: expected RFC 3339 date-time")
+    year = int(match.group("year"))
+    month = int(match.group("month"))
+    day = int(match.group("day"))
+    if year == 0 or not 1 <= day <= calendar.monthrange(year, month)[1]:
+        raise ContractError(f"{path}: expected RFC 3339 date-time")
     return text
 
 
@@ -226,8 +254,7 @@ def _absolute_path(value: object, path: str) -> str:
         raise ContractError(f"{path}: expected canonical absolute POSIX path")
     pure = PurePosixPath(text)
     if (
-        not Path(text).is_absolute()
-        or not pure.is_absolute()
+        not pure.is_absolute()
         or ".." in pure.parts
         or str(pure) != text
         or "\\" in text
@@ -608,7 +635,7 @@ def _validate_journal_event(data: Mapping[str, object]) -> None:
             raise ContractError("certified journal event requires receipt and pointer references")
         _digest(receipt, "$.receipt_sha256")
         _integer(pointer_revision, "$.pointer_revision")
-    _string(data["occurred_at"], "$.occurred_at")
+    _date_time(data["occurred_at"], "$.occurred_at")
 
 
 def _validate_fenced_lease(data: Mapping[str, object]) -> None:
@@ -649,8 +676,8 @@ def _validate_fenced_lease(data: Mapping[str, object]) -> None:
     _string(owner["boot_id"], "$.owner.boot_id")
     _integer(owner["pid"], "$.owner.pid", minimum=1)
     _string(owner["process_start_id"], "$.owner.process_start_id")
-    _string(data["acquired_at"], "$.acquired_at")
-    _string(data["heartbeat_at"], "$.heartbeat_at")
+    _date_time(data["acquired_at"], "$.acquired_at")
+    _date_time(data["heartbeat_at"], "$.heartbeat_at")
     _integer(data["liveness_deadline_monotonic_ns"], "$.liveness_deadline_monotonic_ns", minimum=1)
 
 
@@ -702,7 +729,7 @@ def _validate_prior_pointer(data: Mapping[str, object]) -> None:
         "$",
         {"contract", "schema_version", "retained_at", "replaced_by_revision", "pointer_set"},
     )
-    _string(data["retained_at"], "$.retained_at")
+    _date_time(data["retained_at"], "$.retained_at")
     replaced = _integer(data["replaced_by_revision"], "$.replaced_by_revision", minimum=2)
     pointer = _mapping(data["pointer_set"], "$.pointer_set")
     _validate_pointer_set(pointer)

@@ -305,7 +305,14 @@ def write_trusted_manifest(
 ) -> bytes:
     artifact_root = _ensure_absolute_directory(artifact_root, "artifact_root")
     destination = destination or artifact_root / "trusted-manifest.json"
-    entries = [_artifact_entry(artifact_root, artifact_root / name) for name in sorted(artifact_names)]
+    artifact_paths = [artifact_root / name for name in sorted(artifact_names)]
+    for path in artifact_paths:
+        _relative_file(artifact_root, path)
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ArtifactError(f"artifact input must be a single-link regular file: {path}")
+        path.chmod(0o644)
+    entries = [_artifact_entry(artifact_root, path) for path in artifact_paths]
     data = {
         "contract": "graphify.workspace.artifact_manifest",
         "schema_version": 1,
@@ -314,6 +321,7 @@ def write_trusted_manifest(
     }
     document = ArtifactManifest.from_mapping(data)
     destination.write_bytes(document.canonical)
+    destination.chmod(0o644)
     return document.canonical
 
 
