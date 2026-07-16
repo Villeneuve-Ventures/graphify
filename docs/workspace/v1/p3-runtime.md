@@ -15,6 +15,11 @@ unfinished reservation only when its generation, byte count, policy, and
 active-source revision are identical. Activation remains blocked until that
 reservation is completed and cleared. Each generation receives a retained
 canonical coordination object before its first journal transition.
+Filesystem reserve preflight subtracts the unconsumed headroom promised by
+every durable reservation before admitting another allocation.
+If certification completed before a process died after durable reservation
+release, a successor verifies the installed receipt and journal and returns the
+same certified result without recreating staging or capacity state.
 Capacity enumeration requires two identical logical filesystem observations;
 it retries bounded rename/purge races and treats persistent duplicate locations
 or a snapshot that cannot stabilize as a capacity failure.
@@ -32,7 +37,9 @@ single incomplete next frame is discarded. Private atomic-replace temporary
 files left by process death are removed only after their exact owner, mode,
 type, link count, and name are validated. Committed truncation, checksum
 failure, gaps, extra suffixes, divergent idempotency, or a mismatched head fail
-closed. `occurred_at` is canonical logical-event material: a retry under the
+closed. Every decoded event ID is recomputed with the containing workspace UUID,
+so a segment copied from another workspace cannot be adopted. `occurred_at` is
+canonical logical-event material: a retry under the
 same operation epoch and fence must reuse the exact timestamp, while a
 successor fence records a distinct event. Generation certification and visible
 pointer transitions are appendable only through their owning stores.

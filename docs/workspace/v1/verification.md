@@ -93,11 +93,15 @@ output remains ignored and must not widen the P1 product diff.
   with registry-serialized durable reservations for concurrent workspaces and
   a bounded two-observation filesystem scan that tolerates concurrent renames
   but rejects persistent duplicate locations;
+- filesystem reserve preflight counts unconsumed bytes promised by every
+  durable reservation before admitting another cross-workspace allocation;
 - successor fences adopt only byte-, policy-, source-, and generation-identical
   reservations, forged allocation objects fail against durable state, and
   activation is blocked while a reservation remains outstanding; a successor
-  revalidates before sealing a new receipt but may finish a fully sealed
-  predecessor receipt after binding it to the predecessor's validating event;
+  revalidates before sealing a new receipt, may finish a fully sealed
+  predecessor receipt after binding it to the predecessor's validating event,
+  and idempotently returns an already-certified result after durable capacity
+  release;
 - descriptor-relative payload inventories reject links, special files,
   hardlinks, extras, unstable identities, invalid root or descendant modes,
   and noncanonical declarations;
@@ -105,8 +109,8 @@ output remains ignored and must not widen the P1 product diff.
   generation, reopens and verifies it, then appends owner-bound `CERTIFIED`;
 - journal recovery adopts one complete uncommitted hash-linked segment,
   discards only one truncated tail, cleans validated private temporary files
-  left by real process death, and rejects committed corruption or an ambiguous
-  suffix;
+  left by real process death, recomputes repo-bound event IDs, and rejects
+  cross-workspace grafts, committed corruption, or an ambiguous suffix;
 - promotion retains the prior pointer before one visible replacement, stale
   candidates become `SUPERSEDED`, corrupt pending state fails closed, pointer
   documents remain workspace-bound, and recovery emits and immediately verifies

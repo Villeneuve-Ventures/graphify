@@ -101,6 +101,7 @@ class _PayloadInventory:
 @dataclass(frozen=True)
 class _Usage:
     bytes_by_generation: Mapping[tuple[str, str], int]
+    unconsumed_reserved_bytes: int
 
     @property
     def global_bytes(self) -> int:
@@ -303,10 +304,19 @@ class GenerationStore:
             previous = observed
         if usage is None:
             raise CapacityExceeded("capacity filesystem snapshot did not stabilize")
+        physical_usage = dict(usage)
+        unconsumed_reserved_bytes = sum(
+            max(
+                reservation.reserved_bytes
+                - physical_usage.get((reservation.repo_uuid, reservation.generation_id), 0),
+                0,
+            )
+            for reservation in reservations
+        )
         for reservation in reservations:
             key = (reservation.repo_uuid, reservation.generation_id)
             usage[key] = max(usage.get(key, 0), reservation.reserved_bytes)
-        return _Usage(usage)
+        return _Usage(usage, unconsumed_reserved_bytes)
 
     def _preflight(
         self,
@@ -344,7 +354,10 @@ class GenerationStore:
             raise CapacityExceeded("global generation limit would be exceeded")
         available = shutil.disk_usage(self.state.root.parent).free
         additional_bytes = 0 if existing is not None else expected_payload_bytes
-        if available - additional_bytes < policy.reserve_bytes:
+        if (
+            available - usage.unconsumed_reserved_bytes - additional_bytes
+            < policy.reserve_bytes
+        ):
             raise CapacityExceeded("filesystem reserve threshold would be violated")
 
     def _reserve_locked(
@@ -730,22 +743,11 @@ class GenerationStore:
         canonical_staging = self.state.path(
             self._staging(operation.repo_uuid, allocation.generation_id)
         )
-        expected = (
+        if (allocation.repo_uuid, allocation.staging_path) != (
             operation.repo_uuid,
             canonical_staging,
-            operation.grant.active_source_revision,
-            operation.grant.operation_epoch,
-            operation.fence_token,
-        )
-        actual = (
-            allocation.repo_uuid,
-            allocation.staging_path,
-            allocation.active_source_revision,
-            allocation.operation_epoch,
-            allocation.fence_token,
-        )
-        if actual != expected:
-            raise GenerationConflict("allocation is stale for the current fenced operation")
+        ):
+            raise GenerationConflict("allocation path is not canonical for the current workspace")
         state = self._load_capacity_locked()
         reservation = (
             None
@@ -761,7 +763,24 @@ class GenerationStore:
             )
         )
         if reservation is None:
+            final_path = self.state.path(
+                self._generation(operation.repo_uuid, allocation.generation_id)
+            )
+            if final_path.exists():
+                return
             raise GenerationConflict("allocation has no durable capacity reservation")
+        expected_fence = (
+            operation.grant.active_source_revision,
+            operation.grant.operation_epoch,
+            operation.fence_token,
+        )
+        supplied_fence = (
+            allocation.active_source_revision,
+            allocation.operation_epoch,
+            allocation.fence_token,
+        )
+        if supplied_fence != expected_fence:
+            raise GenerationConflict("allocation is stale for the current fenced operation")
         durable = (
             reservation.reserved_bytes,
             reservation.policy_sha256,

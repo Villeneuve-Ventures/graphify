@@ -287,7 +287,6 @@ class GcStore:
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
         ) as operation:
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             if self._read_intent(operation.repo_uuid) is not None:
                 raise GcRecoveryRequired("an unresolved GC intent must be reconciled")
             return self._plan_locked(

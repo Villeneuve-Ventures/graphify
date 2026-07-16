@@ -239,6 +239,11 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         holder.stdin.flush()
         holder.wait(timeout=5)
 
+    gc_directory = harness.state_root / "workspaces" / REPO_UUID / "gc"
+    gc_directory.mkdir(parents=True, exist_ok=True)
+    orphan = gc_directory / f".intent.json.tmp-123-{'a' * 32}"
+    orphan.write_bytes(b"orphan")
+    orphan.chmod(0o600)
     before = tree_snapshot(harness.state_root)
     plan = gc.plan(
         gc_grant,
@@ -247,6 +252,7 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         monotonic_ns=30_002,
     )
     assert tree_snapshot(harness.state_root) == before
+    assert orphan.read_bytes() == b"orphan"
     assert plan.candidates == ("gen-unused",)
     assert "gen-current" in dict(plan.protected)
 

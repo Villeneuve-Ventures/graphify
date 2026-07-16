@@ -6,7 +6,6 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import cast
-import uuid
 
 import pytest
 
@@ -223,20 +222,23 @@ def test_journal_adopts_one_complete_hash_linked_uncommitted_segment(tmp_path: P
         capabilities=harness.leases.state.capabilities,
     )
     first = _append_allocated(store, grant)
+    logical = {
+        "transition": "STAGING",
+        "generation_id": "gen-journal",
+        "receipt_sha256": None,
+        "pointer_revision": None,
+        "operation_epoch": grant.operation_epoch,
+        "fence_token": grant.lease.to_dict()["fence_token"],
+        "occurred_at": "2026-07-16T19:00:00Z",
+    }
     second = cast(JournalEvent, JournalEvent.from_mapping(
         {
             "contract": "graphify.workspace.journal_event",
             "schema_version": 1,
-            "event_id": str(uuid.uuid4()),
+            "event_id": store._event_id(REPO_UUID, logical),
             "sequence": 2,
-            "transition": "STAGING",
-            "generation_id": "gen-journal",
             "prior_event_sha256": first.sha256,
-            "receipt_sha256": None,
-            "pointer_revision": None,
-            "operation_epoch": grant.operation_epoch,
-            "fence_token": grant.lease.to_dict()["fence_token"],
-            "occurred_at": "2026-07-16T19:00:00Z",
+            **logical,
         }
     ))
     tail = _segment(harness.state_root, 2)
@@ -261,22 +263,25 @@ def test_every_strict_frame_prefix_is_classified_as_one_torn_tail(tmp_path: Path
         capabilities=harness.leases.state.capabilities,
     )
     first = _append_allocated(store, grant)
+    logical = {
+        "transition": "STAGING",
+        "generation_id": "gen-journal",
+        "receipt_sha256": None,
+        "pointer_revision": None,
+        "operation_epoch": grant.operation_epoch,
+        "fence_token": grant.lease.to_dict()["fence_token"],
+        "occurred_at": "2026-07-16T19:00:00Z",
+    }
     second = cast(
         JournalEvent,
         JournalEvent.from_mapping(
             {
                 "contract": "graphify.workspace.journal_event",
                 "schema_version": 1,
-                "event_id": str(uuid.uuid4()),
+                "event_id": store._event_id(REPO_UUID, logical),
                 "sequence": 2,
-                "transition": "STAGING",
-                "generation_id": "gen-journal",
                 "prior_event_sha256": first.sha256,
-                "receipt_sha256": None,
-                "pointer_revision": None,
-                "operation_epoch": grant.operation_epoch,
-                "fence_token": grant.lease.to_dict()["fence_token"],
-                "occurred_at": "2026-07-16T19:00:00Z",
+                **logical,
             }
         ),
     )
@@ -294,6 +299,52 @@ def test_every_strict_frame_prefix_is_classified_as_one_torn_tail(tmp_path: Path
     tail.chmod(0o600)
     completed = store.recover(grant, monotonic_ns=20_000)
     assert completed.head is not None and completed.head.sequence == 2
+
+
+def test_journal_rejects_uncommitted_event_id_from_another_workspace(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    logical = {
+        "transition": "ALLOCATED",
+        "generation_id": "gen-cross-workspace",
+        "receipt_sha256": None,
+        "pointer_revision": None,
+        "operation_epoch": grant.operation_epoch,
+        "fence_token": grant.lease.to_dict()["fence_token"],
+        "occurred_at": "2026-07-16T19:00:00Z",
+    }
+    event = cast(
+        JournalEvent,
+        JournalEvent.from_mapping(
+            {
+                "contract": "graphify.workspace.journal_event",
+                "schema_version": 1,
+                "event_id": store._event_id(
+                    "22222222-2222-4222-8222-222222222222",
+                    logical,
+                ),
+                "sequence": 1,
+                "prior_event_sha256": None,
+                **logical,
+            }
+        ),
+    )
+    segment = _segment(harness.state_root, 1)
+    segment.parent.mkdir(parents=True)
+    segment.write_bytes(encode_journal_frame(event))
+    segment.chmod(0o600)
+
+    with pytest.raises(JournalCorrupt, match="event id is not bound"):
+        store.recover(grant, monotonic_ns=10_001)
+
+    assert not store.state.path(store._head_paths(REPO_UUID)[0]).exists()
 
 
 def test_journal_rejects_committed_corruption_and_ambiguous_suffix(tmp_path: Path) -> None:

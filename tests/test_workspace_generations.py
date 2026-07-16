@@ -188,6 +188,79 @@ def test_capacity_preflight_enforces_filesystem_reserve_before_mutation(
     assert tree_snapshot(harness.state_root / "workspaces" / REPO_UUID) == before
 
 
+def test_filesystem_reserve_counts_unconsumed_cross_workspace_reservations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    policy = replace(
+        POLICY,
+        global_max_bytes=1_000,
+        workspace_max_bytes=1_000,
+        reserve_bytes=10,
+    )
+    monkeypatch.setattr(
+        "graphify.workspace.generations.shutil.disk_usage",
+        lambda _path: SimpleNamespace(free=100),
+    )
+    store.allocate(
+        acquire(harness, "BUILD", tick=1),
+        expected_payload_bytes=60,
+        capacity_policy=policy,
+        generation_id="gen-reserved-one",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+
+    second_repo = create_repo(tmp_path / "repo-two", SECOND_UUID)
+    harness.registry.enroll(
+        discover_source(second_repo),
+        authorization("enroll-second"),
+        expected_revision=1,
+    )
+    registry = harness.registry.load()
+    entry = next(
+        item
+        for item in registry.to_dict()["workspaces"]
+        if item["repo_uuid"] == SECOND_UUID
+    )
+    lease_state = harness.leases.inspect(SECOND_UUID)
+    second_grant = harness.leases.acquire(
+        SECOND_UUID,
+        "BUILD",
+        harness.leases.current_owner(),
+        expected_registry_revision=int(registry.to_dict()["revision"]),
+        expected_active_source_revision=int(entry["active_source_revision"]),
+        expected_operation_epoch=lease_state.operation_epoch,
+        expected_migration_epoch=lease_state.migration_epoch,
+        acquired_at=START + timedelta(seconds=2),
+        monotonic_ns=20_000,
+        ttl_ns=1_000_000,
+    )
+    before = tree_snapshot(harness.state_root / "workspaces" / SECOND_UUID)
+
+    with pytest.raises(CapacityExceeded, match="filesystem reserve"):
+        store.allocate(
+            second_grant,
+            expected_payload_bytes=60,
+            capacity_policy=policy,
+            generation_id="gen-reserved-two",
+            occurred_at=START,
+            monotonic_ns=20_001,
+        )
+
+    assert tree_snapshot(harness.state_root / "workspaces" / SECOND_UUID) == before
+
+
 def test_global_capacity_reservation_serializes_cross_workspace_allocations(
     tmp_path: Path,
 ) -> None:
@@ -848,6 +921,75 @@ def test_successor_fence_finishes_installed_generation_before_certified_event(
     assert receipt.to_dict()["operation_epoch"] == dead.operation_epoch
     capacity = store._load_capacity_locked()
     assert capacity is not None and not capacity.reservations
+
+
+def test_successor_retries_certification_after_durable_capacity_release(
+    tmp_path: Path,
+) -> None:
+    armed = True
+
+    def fail_after_capacity_release(event: str) -> None:
+        nonlocal armed
+        if armed and event == "generation:gen-capacity-release:capacity_released":
+            armed = False
+            raise InjectedFault(event)
+
+    harness = create_harness(tmp_path)
+    dead = acquire(harness, "BUILD", tick=1, ttl_ns=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=fail_after_capacity_release,
+    )
+    allocation = store.allocate(
+        dead,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-capacity-release",
+        occurred_at=START,
+        monotonic_ns=10_000,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("released\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    request = _request("e" * 40)
+
+    with pytest.raises(InjectedFault, match="capacity_released"):
+        store.certify(
+            dead,
+            allocation,
+            request,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_000,
+        )
+    capacity = store._load_capacity_locked()
+    assert capacity is not None and not capacity.reservations
+
+    successor = acquire(harness, "BUILD", tick=2)
+    receipt = store.certify(
+        successor,
+        allocation,
+        request,
+        declared_entries=declared,
+        occurred_at=START + timedelta(seconds=2),
+        monotonic_ns=20_001,
+    )
+
+    assert store.verify_generation(REPO_UUID, allocation.generation_id).canonical == receipt.canonical
+    transitions = [
+        event.to_dict()["transition"]
+        for event in journal.recover(successor, monotonic_ns=20_002).for_generation(
+            allocation.generation_id
+        )
+    ]
+    assert transitions == ["ALLOCATED", "STAGING", "BUILT", "VALIDATING", "CERTIFIED"]
 
 
 def test_capacity_counts_corrupt_quarantine_and_rejects_ambiguous_locations(

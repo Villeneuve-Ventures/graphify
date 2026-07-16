@@ -291,6 +291,7 @@ class JournalStore:
             except JournalFrameTruncated as exc:
                 raise JournalCorrupt("committed journal segment is truncated") from exc
             value = event.to_dict()
+            self._require_repo_event_id(repo_uuid, event)
             if int(value["sequence"]) != sequence:
                 raise JournalCorrupt("journal frame sequence does not match its segment")
             if value["prior_event_sha256"] != prior_sha256:
@@ -316,6 +317,7 @@ class JournalStore:
                 self.fault_hook("journal:torn_tail:discarded")
             else:
                 value = event.to_dict()
+                self._require_repo_event_id(repo_uuid, event)
                 if (
                     int(value["sequence"]) != sequence
                     or value["prior_event_sha256"] != prior_sha256
@@ -338,6 +340,23 @@ class JournalStore:
     def _event_id(repo_uuid: str, logical: dict[str, Any]) -> str:
         material = hashlib.sha256(canonical_json_bytes(logical)).hexdigest()
         return str(uuid.uuid5(_EVENT_NAMESPACE, f"{repo_uuid}:{material}"))
+
+    def _require_repo_event_id(self, repo_uuid: str, event: JournalEvent) -> None:
+        value = event.to_dict()
+        logical = {
+            key: value[key]
+            for key in (
+                "transition",
+                "generation_id",
+                "receipt_sha256",
+                "pointer_revision",
+                "operation_epoch",
+                "fence_token",
+                "occurred_at",
+            )
+        }
+        if value["event_id"] != self._event_id(repo_uuid, logical):
+            raise JournalCorrupt("journal event id is not bound to its workspace")
 
     def _require_transition_authority(
         self,
