@@ -222,7 +222,7 @@ def _uuid(value: object, path: str) -> str:
 
 def _absolute_path(value: object, path: str) -> str:
     text = _string(value, path)
-    if "\x00" in text:
+    if "\x00" in text or text == "//":
         raise ContractError(f"{path}: expected canonical absolute POSIX path")
     pure = PurePosixPath(text)
     if (
@@ -250,6 +250,8 @@ def _relative_path(value: object, path: str) -> str:
 
 def _normalized_remote_url(value: object, path: str) -> str:
     text = _string(value, path)
+    if "\x00" in text or any(character.isspace() for character in text):
+        raise ContractError(f"{path}: expected normalized https:// or ssh:// remote URL")
     try:
         parsed = urlsplit(text)
         port = parsed.port
@@ -259,6 +261,8 @@ def _normalized_remote_url(value: object, path: str) -> str:
         raise ContractError(f"{path}: expected normalized https:// or ssh:// remote URL")
     if parsed.password is not None or parsed.query or parsed.fragment:
         raise ContractError(f"{path}: remote URL credentials, query, and fragment are forbidden")
+    if parsed.username == "":
+        raise ContractError(f"{path}: SSH remote URL username must not be empty")
     if parsed.username is not None and parsed.scheme != "ssh":
         raise ContractError(f"{path}: HTTPS remote URL must not contain userinfo")
     if port is not None:
@@ -277,6 +281,8 @@ def _normalized_remote_url(value: object, path: str) -> str:
         or str(pure) != remote_path
     ):
         raise ContractError(f"{path}: remote URL path is not canonical")
+    if not parsed.hostname.isascii():
+        raise ContractError(f"{path}: remote URL hostname must be ASCII")
     hostname = parsed.hostname.lower()
     netloc = f"{parsed.username}@{hostname}" if parsed.username is not None else hostname
     normalized = urlunsplit((parsed.scheme.lower(), netloc, remote_path, "", ""))
