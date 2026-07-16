@@ -588,13 +588,6 @@ class GenerationStore:
                 fence_token=reservation.fence_token,
             )
 
-    def _require_real_chain(self, path: Path) -> None:
-        try:
-            relative = path.relative_to(self.state.root)
-        except ValueError as exc:
-            raise StatePathError("generation path escapes state root") from exc
-        self.state.require_existing_directory_chain(relative)
-
     def _scan_directory(
         self,
         descriptor: int,
@@ -678,11 +671,11 @@ class GenerationStore:
             raise PayloadChanged(f"payload directory changed during inventory: {prefix}")
 
     def _inventory(self, container: Path, *, allowed_root_entries: frozenset[str]) -> _PayloadInventory:
-        self._require_real_chain(container)
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        root_descriptor = os.open(container, flags)
         try:
+            relative = container.relative_to(self.state.root)
+        except ValueError as exc:
+            raise StatePathError("generation path escapes state root") from exc
+        with self.state.existing_private_directory(relative) as root_descriptor:
             root_before = os.fstat(root_descriptor)
             root_names = sorted(entry.name for entry in os.scandir(root_descriptor))
             if set(root_names) != set(allowed_root_entries):
@@ -727,8 +720,6 @@ class GenerationStore:
                 or _identity(current_payload) != _identity(payload_details)
             ):
                 raise PayloadChanged("generation root changed during inventory")
-        finally:
-            os.close(root_descriptor)
         entries.sort(key=lambda item: str(item["path"]))
         return _PayloadInventory(entries=tuple(entries), directories=tuple(directories))
 

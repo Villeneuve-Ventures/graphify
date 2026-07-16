@@ -180,11 +180,11 @@ class GcStore:
 
     def _read_intent(self, repo_uuid: str) -> GcIntentState | None:
         relative = self._intent_path(repo_uuid)
-        path = self.state.path(relative)
-        if not path.exists():
+        payload = self.state.read_optional_existing_bytes(relative)
+        if payload is None:
             return None
         try:
-            intent = GcIntentState.from_json(self.state.read_existing_bytes(relative))
+            intent = GcIntentState.from_json(payload)
         except Exception as exc:
             raise GcRecoveryRequired(f"GC intent is invalid: {exc}") from exc
         if intent.repo_uuid != repo_uuid:
@@ -192,19 +192,14 @@ class GcStore:
         return intent
 
     def _generation_ids(self, repo_uuid: str) -> tuple[str, ...]:
-        directory = self.state.path(self.generations._workspace(repo_uuid) / "generations")
-        if not directory.exists():
-            return ()
-        details = directory.lstat()
-        if not stat.S_ISDIR(details.st_mode) or directory.is_symlink():
-            raise GcError("generations path is unsafe")
-        result: list[str] = []
-        for entry in directory.iterdir():
-            entry_details = entry.lstat()
-            if not stat.S_ISDIR(entry_details.st_mode) or entry.is_symlink():
-                raise GcError(f"generation path is unsafe: {entry.name}")
-            result.append(entry.name)
-        return tuple(sorted(result))
+        relative = self.generations._workspace(repo_uuid) / "generations"
+        try:
+            return self.state.list_existing_private_directories(
+                relative,
+                allow_missing=True,
+            )
+        except StatePathError as exc:
+            raise GcError(f"generations path is unsafe: {exc}") from exc
 
     @staticmethod
     def _add_pointer_reasons(

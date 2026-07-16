@@ -208,29 +208,98 @@ class DurableStateRoot:
             raise StatePathError(f"state directory is not a real directory: {path}")
         self._require_owner(details, path)
 
+    @staticmethod
+    def _directory_open_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+
+    def _require_private_directory_descriptor(self, descriptor: int, path: Path) -> None:
+        details = os.fstat(descriptor)
+        if not stat.S_ISDIR(details.st_mode):
+            raise StatePathError(f"state directory is not a real directory: {path}")
+        self._require_owner(details, path)
+        if stat.S_IMODE(details.st_mode) != 0o700:
+            raise StatePathError(f"state directory mode is not 0700: {path}")
+
+    @contextmanager
+    def _existing_private_directory(
+        self,
+        relative: str | Path,
+        *,
+        allow_missing: bool = False,
+    ) -> Iterator[int | None]:
+        """Open one private directory through descriptor-relative no-follow traversal."""
+
+        if Path(relative) in {Path(), Path(".")}:
+            destination = self.root
+            parts: tuple[str, ...] = ()
+        else:
+            destination = self.path(relative)
+            parts = destination.relative_to(self.root).parts
+        flags = self._directory_open_flags()
+        try:
+            descriptor = os.open(self.root, flags)
+        except FileNotFoundError as exc:
+            raise StatePathError(f"state directory is missing: {self.root}") from exc
+        except OSError as exc:
+            raise StatePathError(
+                f"state directory cannot be opened safely: {self.root}: {exc}"
+            ) from exc
+        try:
+            self._require_private_directory_descriptor(descriptor, self.root)
+            current = self.root
+            for index, part in enumerate(parts):
+                candidate = current / part
+                try:
+                    child = os.open(part, flags, dir_fd=descriptor)
+                except FileNotFoundError as exc:
+                    if allow_missing and index == len(parts) - 1:
+                        yield None
+                        return
+                    raise StatePathError(f"state directory is missing: {candidate}") from exc
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state directory is linked or not a directory: {candidate}"
+                    ) from exc
+                os.close(descriptor)
+                descriptor = child
+                current = candidate
+                self._require_private_directory_descriptor(descriptor, current)
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def _open_existing_file(
+        self,
+        path: Path,
+        *,
+        allow_missing_parent: bool = False,
+    ) -> int | None:
+        try:
+            relative_parent = path.parent.relative_to(self.root)
+        except ValueError as exc:
+            raise StatePathError(f"state file escapes root: {path}") from exc
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        with self._existing_private_directory(
+            relative_parent,
+            allow_missing=allow_missing_parent,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return None
+            return os.open(path.name, flags, dir_fd=parent_descriptor)
+
     def _require_private_directory_chain(self, destination: Path) -> None:
         """Validate an existing state-directory chain without repairing it."""
 
         if destination != self.root and self.root not in destination.parents:
             raise StatePathError(f"state directory escapes root: {destination}")
-        current = self.root
-        parts = () if destination == self.root else destination.relative_to(self.root).parts
-        candidates = [self.root]
-        for part in parts:
-            current /= part
-            candidates.append(current)
-        for candidate in candidates:
-            try:
-                details = candidate.lstat()
-            except FileNotFoundError as exc:
-                raise StatePathError(f"state directory is missing: {candidate}") from exc
-            if not stat.S_ISDIR(details.st_mode) or candidate.is_symlink():
-                raise StatePathError(
-                    f"state directory is linked or not a directory: {candidate}"
-                )
-            self._require_owner(details, candidate)
-            if stat.S_IMODE(details.st_mode) != 0o700:
-                raise StatePathError(f"state directory mode is not 0700: {candidate}")
+        relative = Path(".") if destination == self.root else destination.relative_to(self.root)
+        with self._existing_private_directory(relative):
+            pass
 
     def path(self, relative: str | Path) -> Path:
         pure = PurePosixPath(Path(relative).as_posix())
@@ -272,23 +341,56 @@ class DurableStateRoot:
             )
 
     def require_existing_directory_chain(self, relative: str | Path) -> Path:
-        """Validate every existing directory component without mutating state."""
+        """Validate a private directory chain without mutating or following links."""
 
         destination = self.path(relative)
-        self._require_owned_directory(self.root)
-        current = self.root
-        for part in destination.relative_to(self.root).parts:
-            current = current / part
-            try:
-                details = current.lstat()
-            except FileNotFoundError as exc:
-                raise StatePathError(f"state directory is missing: {current}") from exc
-            if not stat.S_ISDIR(details.st_mode) or current.is_symlink():
-                raise StatePathError(
-                    f"state directory is linked or not a directory: {current}"
-                )
-            self._require_owner(details, current)
+        self._require_private_directory_chain(destination)
         return destination
+
+    @contextmanager
+    def existing_private_directory(self, relative: str | Path) -> Iterator[int]:
+        """Hold an owned 0700 directory opened by descriptor-relative traversal."""
+
+        with self._existing_private_directory(relative) as descriptor:
+            if descriptor is None:  # pragma: no cover - allow_missing is false
+                raise StatePathError(f"state directory is missing: {self.path(relative)}")
+            yield descriptor
+
+    def list_existing_private_directories(
+        self,
+        relative: str | Path,
+        *,
+        allow_missing: bool = False,
+    ) -> tuple[str, ...]:
+        """List owned 0700 child directories without following any path component."""
+
+        destination = self.path(relative)
+        with self._existing_private_directory(
+            destination.relative_to(self.root),
+            allow_missing=allow_missing,
+        ) as descriptor:
+            if descriptor is None:
+                return ()
+            try:
+                with os.scandir(descriptor) as entries:
+                    names = sorted(entry.name for entry in entries)
+            except OSError as exc:
+                raise StatePathError(
+                    f"state directory cannot be enumerated safely: {destination}: {exc}"
+                ) from exc
+            for name in names:
+                child_path = destination / name
+                try:
+                    child = os.open(name, self._directory_open_flags(), dir_fd=descriptor)
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state directory entry is linked or not a directory: {child_path}"
+                    ) from exc
+                try:
+                    self._require_private_directory_descriptor(child, child_path)
+                finally:
+                    os.close(child)
+            return tuple(names)
 
     @contextmanager
     def lock(
@@ -367,12 +469,14 @@ class DurableStateRoot:
                 f"{name} lock cannot be acquired after {stack[-1][1]} lock"
             )
         path = self.path(relative)
-        self._require_private_directory_chain(path.parent)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(path, flags)
+            descriptor = self._open_existing_file(path)
         except FileNotFoundError as exc:
             raise StatePathError(f"{kind} lock is missing: {path}") from exc
+        except OSError as exc:
+            raise StatePathError(f"{kind} lock cannot be opened safely: {path}") from exc
+        if descriptor is None:  # pragma: no cover - allow_missing_parent is false
+            raise StatePathError(f"{kind} lock is missing: {path}")
         try:
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
@@ -685,8 +789,21 @@ class DurableStateRoot:
     def read_existing_bytes(self, relative: str | Path) -> bytes:
         """Read existing state without mkdir, chmod, replacement, or cleanup."""
 
-        self._require_owned_directory(self.root)
         return self._read_regular(self.path(relative))
+
+    def read_optional_existing_bytes(self, relative: str | Path) -> bytes | None:
+        """Read optional existing state while still validating its private parent chain."""
+
+        path = self.path(relative)
+        try:
+            descriptor = self._open_existing_file(path, allow_missing_parent=True)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
+        if descriptor is None:
+            return None
+        return self._read_regular_descriptor(descriptor, path)
 
     def read_current(
         self,
@@ -888,11 +1005,15 @@ class DurableStateRoot:
         return record
 
     def _read_regular(self, path: Path) -> bytes:
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            descriptor = os.open(path, flags)
+            descriptor = self._open_existing_file(path)
         except OSError as exc:
             raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
+        if descriptor is None:  # pragma: no cover - allow_missing_parent is false
+            raise StateCorrupt(f"state record parent is missing: {path.parent}")
+        return self._read_regular_descriptor(descriptor, path)
+
+    def _read_regular_descriptor(self, descriptor: int, path: Path) -> bytes:
         try:
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:

@@ -337,7 +337,7 @@ def test_journal_rejects_uncommitted_event_id_from_another_workspace(
         ),
     )
     segment = _segment(harness.state_root, 1)
-    segment.parent.mkdir(parents=True)
+    store.state.ensure_directory(segment.parent.relative_to(harness.state_root))
     segment.write_bytes(encode_journal_frame(event))
     segment.chmod(0o600)
 

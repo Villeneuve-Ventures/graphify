@@ -256,7 +256,7 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         holder.wait(timeout=5)
 
     gc_directory = harness.state_root / "workspaces" / REPO_UUID / "gc"
-    gc_directory.mkdir(parents=True, exist_ok=True)
+    gc_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     workspace_directory = harness.state_root / "workspaces" / REPO_UUID
     orphans = (
         harness.state_root / f".registry.json.tmp-121-{'a' * 32}",
@@ -338,6 +338,67 @@ def test_gc_plan_rejects_insecure_root_without_repairing_it(tmp_path: Path) -> N
         )
 
     assert metadata_snapshot(harness.state_root) == before
+
+
+@pytest.mark.parametrize(
+    ("unsafe_path", "error"),
+    (
+        ("evidence_symlink", StateCorrupt),
+        ("evidence_mode", StateCorrupt),
+        ("gc_symlink", StatePathError),
+        ("generations_mode", StatePathError),
+        ("generation_mode", StatePathError),
+    ),
+)
+def test_gc_plan_rejects_unsafe_state_directory_chains_without_mutation(
+    tmp_path: Path,
+    unsafe_path: str,
+    error: type[Exception],
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    external: Path | None = None
+    if unsafe_path.startswith("evidence"):
+        target = harness.state_root / "evidence"
+    elif unsafe_path == "gc_symlink":
+        target = harness.state_root / "workspaces" / REPO_UUID / "gc"
+        target.mkdir(mode=0o700)
+    elif unsafe_path == "generations_mode":
+        target = harness.state_root / "workspaces" / REPO_UUID / "generations"
+    else:
+        target = harness.state_root / "workspaces" / REPO_UUID / "generations" / "gen-current"
+    if unsafe_path.endswith("symlink"):
+        external = tmp_path / f"outside-{unsafe_path}"
+        target.rename(external)
+        target.symlink_to(external, target_is_directory=True)
+    else:
+        target.chmod(0o755)
+
+    before_tree = tree_snapshot(harness.state_root)
+    before_metadata = metadata_snapshot(harness.state_root)
+    before_external_tree = tree_snapshot(external) if external is not None else None
+    before_external_metadata = metadata_snapshot(external) if external is not None else None
+
+    with pytest.raises(error):
+        gc.plan(
+            gc_grant,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            monotonic_ns=30_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before_tree
+    assert metadata_snapshot(harness.state_root) == before_metadata
+    if external is not None:
+        assert tree_snapshot(external) == before_external_tree
+        assert metadata_snapshot(external) == before_external_metadata
 
 
 @pytest.mark.parametrize(
