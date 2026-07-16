@@ -174,6 +174,14 @@ class CrashAt:
             raise InjectedFault(event)
 
 
+class MutableLeaseIdentity:
+    def __init__(self, owner: LeaseOwner) -> None:
+        self.owner = owner
+
+    def current_owner(self) -> LeaseOwner:
+        return self.owner
+
+
 class ShortWriteAndEintrSyscalls(PosixSyscalls):
     def __init__(self) -> None:
         self.interrupted = False
@@ -400,6 +408,33 @@ def test_uuid_collision_adoption_and_enrollment_evidence_rotation(tmp_path: Path
     )
 
 
+def test_same_git_common_directory_cannot_be_reenrolled_under_a_new_uuid(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "first-uuid"),
+        expected_revision=0,
+    )
+    (repo / ".graphify/workspace.toml").write_text(
+        _workspace_toml(SECOND_UUID),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(UUIDCollisionError, match="common directory|common-directory"):
+        store.enroll(
+            discover_source(repo),
+            _authorization(IdentityAction.ENROLL, "replacement-uuid"),
+            expected_revision=1,
+        )
+
+    document = store.load()
+    assert document.to_dict()["revision"] == 1
+    assert [entry["repo_uuid"] for entry in document.to_dict()["workspaces"]] == [REPO_UUID]
+
+
 def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> None:
     original = _create_repo(tmp_path / "original", REPO_UUID)
     linked = _linked_worktree(original, tmp_path / "linked", "linked-source")
@@ -416,6 +451,30 @@ def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> Non
         _authorization(IdentityAction.REBIND, "bind-linked"),
         expected_revision=enrolled.to_dict()["revision"],
     )
+    enrolled_entry = _workspace_entry(enrolled)
+    rebound_entry = _workspace_entry(rebound)
+    assert (
+        rebound_entry["active_source_evidence"]
+        == enrolled_entry["active_source_evidence"]
+    )
+    rebind_evidence = store.read_evidence(
+        rebound_entry["uuid_enrollment"]["current_evidence_sha256"]
+    )
+    assert rebind_evidence["action"] == "REBIND"
+    assert rebind_evidence["source"] == discover_source(linked).registry_source
+    corrupt_root = tmp_path / "corrupt-rebind-state"
+    shutil.copytree(tmp_path / "state", corrupt_root)
+    corrupt_document = rebound.to_dict()
+    corrupt_entry = corrupt_document["workspaces"][0]
+    corrupt_entry["active_source_evidence"]["rebind_evidence_sha256"] = (
+        rebound_entry["uuid_enrollment"]["current_evidence_sha256"]
+    )
+    corrupt_entry["active_source_evidence"]["source_sha256"] = rebind_evidence[
+        "source_sha256"
+    ]
+    (corrupt_root / "registry.json").write_bytes(canonical_json_bytes(corrupt_document))
+    with pytest.raises(StateCorrupt):
+        RegistryStore(corrupt_root, capabilities=SUPPORTED).load()
     adopted = store.adopt(
         discover_source(clone),
         _authorization(IdentityAction.ADOPT, "adopt-clone"),
@@ -427,7 +486,7 @@ def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> Non
         _commit_change(clone, "clone-diverged"),
     }
     assert len(divergent_heads) == 3
-    owner = LeaseOwner(boot_id="boot-a", pid=101, process_start_id="101:1")
+    owner = leases.current_owner()
 
     with pytest.raises(RevisionConflict, match="active_source_revision"):
         store.activate_source(
@@ -537,6 +596,8 @@ def test_lease_allocation_fails_before_workspace_write_when_active_source_is_mis
         _authorization(IdentityAction.ENROLL, "enroll"),
         expected_revision=0,
     )
+    workspace_root = state_root / "workspaces" / REPO_UUID
+    before_workspace = _tree_snapshot(workspace_root)
     repo.rename(tmp_path / "moved")
     leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
 
@@ -544,7 +605,7 @@ def test_lease_allocation_fails_before_workspace_write_when_active_source_is_mis
         leases.acquire(
             REPO_UUID,
             "BUILD",
-            LeaseOwner(boot_id="boot-a", pid=150, process_start_id="150:1"),
+            leases.current_owner(),
             expected_registry_revision=1,
             expected_active_source_revision=1,
             expected_operation_epoch=1,
@@ -553,7 +614,7 @@ def test_lease_allocation_fails_before_workspace_write_when_active_source_is_mis
             monotonic_ns=100,
             ttl_ns=50,
         )
-    assert not (state_root / "workspaces").exists()
+    assert _tree_snapshot(workspace_root) == before_workspace
 
 
 @pytest.mark.parametrize(
@@ -614,6 +675,92 @@ def test_registry_retries_eintr_and_short_writes(tmp_path: Path) -> None:
 
     assert document.to_dict()["revision"] == 1
     assert store.load().canonical == document.canonical
+
+
+@pytest.mark.parametrize(
+    ("operation", "error_number"),
+    [
+        ("write", errno.ENOSPC),
+        ("write", errno.EDQUOT),
+        ("write", errno.EIO),
+        ("fsync", errno.EIO),
+        ("replace", errno.EIO),
+    ],
+)
+def test_lease_allocator_syscall_faults_preserve_the_initialized_fence_floor(
+    tmp_path: Path,
+    operation: str,
+    error_number: int,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    failing = LeaseStore(
+        state_root,
+        registry,
+        capabilities=SUPPORTED,
+        syscalls=FailOnceSyscalls(operation, error_number),
+    )
+
+    with pytest.raises(OSError) as failure:
+        failing.acquire(
+            REPO_UUID,
+            "BUILD",
+            failing.current_owner(),
+            expected_registry_revision=1,
+            expected_active_source_revision=1,
+            expected_operation_epoch=1,
+            expected_migration_epoch=0,
+            acquired_at=datetime(2026, 7, 16, 15, 2, tzinfo=timezone.utc),
+            monotonic_ns=100,
+            ttl_ns=50,
+        )
+    assert failure.value.errno == error_number
+
+    recovered = LeaseStore(state_root, registry, capabilities=SUPPORTED).inspect(REPO_UUID)
+    assert recovered.revision == 1
+    assert recovered.fence_high_watermark == 1
+    assert recovered.operation_epoch == 1
+    assert recovered.leases == {}
+    assert recovered.lease_epochs == {}
+
+
+def test_lease_allocator_retries_eintr_and_short_writes(tmp_path: Path) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    leases = LeaseStore(
+        state_root,
+        registry,
+        capabilities=SUPPORTED,
+        syscalls=ShortWriteAndEintrSyscalls(),
+    )
+
+    grant = leases.acquire(
+        REPO_UUID,
+        "BUILD",
+        leases.current_owner(),
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 2, tzinfo=timezone.utc),
+        monotonic_ns=100,
+        ttl_ns=50,
+    )
+
+    assert grant.lease.to_dict()["fence_token"] == 2
+    assert leases.assert_current(grant, monotonic_ns=120)
 
 
 def test_failed_directory_sync_reports_commit_unknown_and_recovers_monotonically(
@@ -700,7 +847,7 @@ def test_fenced_lease_allocation_heartbeat_acceptance_and_stale_rejection(
         expected_revision=0,
     )
     leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
-    owner = LeaseOwner(boot_id="boot-a", pid=200, process_start_id="200:1")
+    owner = leases.current_owner()
     grant = leases.acquire(
         REPO_UUID,
         "BUILD",
@@ -752,7 +899,7 @@ def test_fenced_lease_allocation_heartbeat_acceptance_and_stale_rejection(
             ttl_ns=100,
         )
 
-    successor_owner = LeaseOwner(boot_id="boot-a", pid=200, process_start_id="200:2")
+    successor_owner = leases.current_owner()
     successor = leases.acquire(
         REPO_UUID,
         "PROMOTE",
@@ -771,7 +918,9 @@ def test_fenced_lease_allocation_heartbeat_acceptance_and_stale_rejection(
         leases.assert_current(heartbeat, monotonic_ns=1_162)
 
 
-def test_fence_tokens_do_not_reset_after_release_reboot_or_commit_unknown(tmp_path: Path) -> None:
+def test_workspace_and_semantic_domains_keep_independent_operation_epochs(
+    tmp_path: Path,
+) -> None:
     repo = _create_repo(tmp_path / "repo", REPO_UUID)
     state_root = tmp_path / "state"
     registry = RegistryStore(state_root, capabilities=SUPPORTED)
@@ -781,7 +930,165 @@ def test_fence_tokens_do_not_reset_after_release_reboot_or_commit_unknown(tmp_pa
         expected_revision=0,
     )
     leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    owner = leases.current_owner()
+    workspace = leases.acquire(
+        REPO_UUID,
+        "BUILD",
+        owner,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 3, tzinfo=timezone.utc),
+        monotonic_ns=1_000,
+        ttl_ns=1_000,
+    )
+    semantic = leases.acquire(
+        REPO_UUID,
+        "SEMANTIC_CLAIM",
+        owner,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=2,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 3, tzinfo=timezone.utc),
+        monotonic_ns=1_010,
+        ttl_ns=1_000,
+    )
+
+    assert workspace.operation_epoch == 2
+    assert semantic.operation_epoch == 3
+    assert leases.assert_current(workspace, monotonic_ns=1_020)
+    assert leases.assert_current(semantic, monotonic_ns=1_020)
+    heartbeat = leases.heartbeat(
+        workspace,
+        heartbeat_at=datetime(2026, 7, 16, 15, 4, tzinfo=timezone.utc),
+        monotonic_ns=1_030,
+        ttl_ns=1_000,
+    )
+    assert heartbeat.operation_epoch == workspace.operation_epoch
+    assert leases.assert_current(heartbeat, monotonic_ns=1_040)
+
+    leases.release(semantic)
+    leases.release(heartbeat)
+    state = leases.inspect(REPO_UUID)
+    assert state.leases == {}
+    assert state.lease_epochs == {}
+    assert state.operation_epoch == 3
+
+
+def test_trusted_runtime_identity_rejects_forged_reboot_and_pid_reuse(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    before = LeaseOwner(boot_id="boot-before", pid=700, process_start_id="700:1")
+    identity = MutableLeaseIdentity(before)
+    leases = LeaseStore(
+        state_root,
+        registry,
+        capabilities=SUPPORTED,
+        identity_provider=identity,
+    )
+    grant = leases.acquire(
+        REPO_UUID,
+        "BUILD",
+        before,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 4, tzinfo=timezone.utc),
+        monotonic_ns=1_000,
+        ttl_ns=1_000,
+    )
+
+    forged_reboot = LeaseOwner(boot_id="boot-forged", pid=701, process_start_id="701:1")
+    with pytest.raises(StaleLease, match="stale_owner"):
+        leases.acquire(
+            REPO_UUID,
+            "PROMOTE",
+            forged_reboot,
+            expected_registry_revision=1,
+            expected_active_source_revision=1,
+            expected_operation_epoch=2,
+            expected_migration_epoch=0,
+            acquired_at=datetime(2026, 7, 16, 15, 5, tzinfo=timezone.utc),
+            monotonic_ns=1_010,
+            ttl_ns=100,
+        )
+    assert leases.assert_current(grant, monotonic_ns=1_020)
+
+    identity.owner = LeaseOwner(boot_id="boot-before", pid=700, process_start_id="700:2")
+    with pytest.raises(StaleLease, match="stale_owner"):
+        leases.assert_current(grant, monotonic_ns=1_030)
+    with pytest.raises(LeaseBusy):
+        leases.acquire(
+            REPO_UUID,
+            "PROMOTE",
+            identity.owner,
+            expected_registry_revision=1,
+            expected_active_source_revision=1,
+            expected_operation_epoch=2,
+            expected_migration_epoch=0,
+            acquired_at=datetime(2026, 7, 16, 15, 5, tzinfo=timezone.utc),
+            monotonic_ns=1_030,
+            ttl_ns=100,
+        )
+
+    identity.owner = LeaseOwner(boot_id="boot-after", pid=700, process_start_id="700:1")
+    with pytest.raises(StaleLease, match="stale_owner"):
+        leases.assert_current(grant, monotonic_ns=5)
+    with pytest.raises(StaleLease, match="stale_owner"):
+        leases.heartbeat(
+            grant,
+            heartbeat_at=datetime(2026, 7, 16, 15, 6, tzinfo=timezone.utc),
+            monotonic_ns=5,
+            ttl_ns=100,
+        )
+    with pytest.raises(StaleLease, match="stale_owner"):
+        leases.release(grant)
+    assert set(leases.inspect(REPO_UUID).leases) == {"workspace"}
+
+    successor = leases.acquire(
+        REPO_UUID,
+        "PROMOTE",
+        identity.owner,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=2,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 6, tzinfo=timezone.utc),
+        monotonic_ns=5,
+        ttl_ns=100,
+    )
+    assert successor.lease.to_dict()["fence_token"] == 3
+    assert leases.assert_current(successor, monotonic_ns=6)
+
+
+def test_fence_tokens_do_not_reset_after_release_reboot_or_commit_unknown(tmp_path: Path) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
     owner = LeaseOwner(boot_id="boot-a", pid=300, process_start_id="300:1")
+    identity = MutableLeaseIdentity(owner)
+    leases = LeaseStore(
+        state_root,
+        registry,
+        capabilities=SUPPORTED,
+        identity_provider=identity,
+    )
     first = leases.acquire(
         REPO_UUID,
         "BUILD",
@@ -796,18 +1103,20 @@ def test_fence_tokens_do_not_reset_after_release_reboot_or_commit_unknown(tmp_pa
     )
     leases.release(first)
 
+    identity.owner = LeaseOwner(boot_id="boot-a", pid=301, process_start_id="301:1")
     crash = CrashAt("workspace:current_replaced")
     crashing = LeaseStore(
         state_root,
         registry,
         capabilities=SUPPORTED,
         fault_hook=crash,
+        identity_provider=identity,
     )
     with pytest.raises((InjectedFault, CommitUnknown)):
         crashing.acquire(
             REPO_UUID,
             "MIGRATE",
-            LeaseOwner(boot_id="boot-a", pid=301, process_start_id="301:1"),
+            identity.owner,
             expected_registry_revision=1,
             expected_active_source_revision=1,
             expected_operation_epoch=2,
@@ -818,7 +1127,13 @@ def test_fence_tokens_do_not_reset_after_release_reboot_or_commit_unknown(tmp_pa
         )
     assert crash.fired
 
-    recovered = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    identity.owner = LeaseOwner(boot_id="boot-b", pid=300, process_start_id="300:1")
+    recovered = LeaseStore(
+        state_root,
+        registry,
+        capabilities=SUPPORTED,
+        identity_provider=identity,
+    )
     state = recovered.inspect(REPO_UUID)
     assert state.fence_high_watermark >= 3
     assert state.operation_epoch >= 3
@@ -827,7 +1142,7 @@ def test_fence_tokens_do_not_reset_after_release_reboot_or_commit_unknown(tmp_pa
     successor = recovered.acquire(
         REPO_UUID,
         "BUILD",
-        LeaseOwner(boot_id="boot-b", pid=300, process_start_id="300:1"),
+        identity.owner,
         expected_registry_revision=1,
         expected_active_source_revision=1,
         expected_operation_epoch=state.operation_epoch,
@@ -839,6 +1154,58 @@ def test_fence_tokens_do_not_reset_after_release_reboot_or_commit_unknown(tmp_pa
     assert successor.lease.to_dict()["fence_token"] > state.fence_high_watermark
     with pytest.raises(StaleLease):
         recovered.assert_current(first, monotonic_ns=6)
+
+
+def test_missing_initialized_workspace_records_fail_closed_without_fence_reset(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    grant = leases.acquire(
+        REPO_UUID,
+        "BUILD",
+        leases.current_owner(),
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 6, tzinfo=timezone.utc),
+        monotonic_ns=100,
+        ttl_ns=50,
+    )
+    assert grant.lease.to_dict()["fence_token"] == 2
+    leases.release(grant)
+
+    workspace_root = state_root / "workspaces" / REPO_UUID
+    for name in (
+        "workspace.json",
+        "workspace.previous.json",
+        "workspace.pending.json",
+    ):
+        (workspace_root / name).unlink(missing_ok=True)
+
+    with pytest.raises(StateCorrupt, match="all records are missing"):
+        leases.inspect(REPO_UUID)
+    with pytest.raises(StateCorrupt, match="all records are missing"):
+        leases.acquire(
+            REPO_UUID,
+            "PROMOTE",
+            leases.current_owner(),
+            expected_registry_revision=1,
+            expected_active_source_revision=1,
+            expected_operation_epoch=2,
+            expected_migration_epoch=0,
+            acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+            monotonic_ns=200,
+            ttl_ns=50,
+        )
 
 
 @pytest.mark.parametrize(
@@ -867,7 +1234,7 @@ def test_workspace_lease_recovery_never_reuses_fences_across_crash_schedules(
     seed = leases.acquire(
         REPO_UUID,
         "BUILD",
-        LeaseOwner(boot_id="boot-a", pid=350, process_start_id="350:1"),
+        leases.current_owner(),
         expected_registry_revision=1,
         expected_active_source_revision=1,
         expected_operation_epoch=1,
@@ -892,7 +1259,7 @@ def test_workspace_lease_recovery_never_reuses_fences_across_crash_schedules(
         crashing.acquire(
             REPO_UUID,
             "PROMOTE",
-            LeaseOwner(boot_id="boot-a", pid=351, process_start_id="351:1"),
+            crashing.current_owner(),
             expected_registry_revision=1,
             expected_active_source_revision=1,
             expected_operation_epoch=2,
@@ -910,7 +1277,7 @@ def test_workspace_lease_recovery_never_reuses_fences_across_crash_schedules(
     successor = recovered.acquire(
         REPO_UUID,
         "BUILD",
-        LeaseOwner(boot_id="boot-a", pid=352, process_start_id="352:1"),
+        recovered.current_owner(),
         expected_registry_revision=1,
         expected_active_source_revision=1,
         expected_operation_epoch=3,
@@ -942,11 +1309,7 @@ def test_deterministic_concurrent_lease_race_has_one_owner_and_monotonic_fence(
             grant = leases.acquire(
                 REPO_UUID,
                 "BUILD",
-                LeaseOwner(
-                    boot_id="boot-a",
-                    pid=400 + index,
-                    process_start_id=f"{400 + index}:1",
-                ),
+                leases.current_owner(),
                 expected_registry_revision=1,
                 expected_active_source_revision=1,
                 expected_operation_epoch=1,
@@ -1001,7 +1364,7 @@ def test_registry_before_workspace_lock_order_is_enforced_and_observable(tmp_pat
     grant = leases.acquire(
         REPO_UUID,
         "BUILD",
-        LeaseOwner(boot_id="boot-a", pid=450, process_start_id="450:1"),
+        leases.current_owner(),
         expected_registry_revision=1,
         expected_active_source_revision=1,
         expected_operation_epoch=1,
@@ -1035,7 +1398,7 @@ def test_registry_and_lease_operations_never_write_source_checkouts(tmp_path: Pa
         discover_source(linked),
         _authorization(IdentityAction.ACTIVATE, "activate"),
         leases=leases,
-        owner=LeaseOwner(boot_id="boot-a", pid=500, process_start_id="500:1"),
+        owner=leases.current_owner(),
         expected_registry_revision=rebound.to_dict()["revision"],
         expected_active_source_revision=1,
         expected_operation_epoch=1,
@@ -1048,7 +1411,7 @@ def test_registry_and_lease_operations_never_write_source_checkouts(tmp_path: Pa
     grant = leases.acquire(
         REPO_UUID,
         "SEMANTIC_CLAIM",
-        LeaseOwner(boot_id="boot-a", pid=501, process_start_id="501:1"),
+        leases.current_owner(),
         expected_registry_revision=activation.registry.to_dict()["revision"],
         expected_active_source_revision=entry["active_source_revision"],
         expected_operation_epoch=activation.grant.operation_epoch,
@@ -1141,7 +1504,7 @@ def test_ambiguous_or_corrupt_runtime_state_fails_closed_without_counter_reset(
     grant = leases.acquire(
         REPO_UUID,
         "BUILD",
-        LeaseOwner(boot_id="boot-a", pid=600, process_start_id="600:1"),
+        leases.current_owner(),
         expected_registry_revision=1,
         expected_active_source_revision=1,
         expected_operation_epoch=1,

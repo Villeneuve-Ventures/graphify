@@ -9,7 +9,12 @@ import json
 from pathlib import Path
 from typing import Any, cast, Iterator, TYPE_CHECKING
 
-from graphify.workspace.contracts import Registry, canonical_json_bytes, canonical_sha256
+from graphify.workspace.contracts import (
+    Registry,
+    WorkspaceLeaseState,
+    canonical_json_bytes,
+    canonical_sha256,
+)
 from graphify.workspace.identity import (
     IdentityAction,
     IdentityError,
@@ -27,6 +32,7 @@ from graphify.workspace.persistence import (
     RuntimeCapabilities,
     StateCorrupt,
     Syscalls,
+    WORKSPACE_LOCK_RANK,
 )
 
 if TYPE_CHECKING:
@@ -229,6 +235,14 @@ class RegistryStore:
         source = evidence["source"]
         if evidence.get("source_sha256") != canonical_sha256(source):
             raise StateCorrupt(f"identity evidence {digest} source hash does not match")
+        for field in ("git_common_device", "git_common_inode"):
+            identity_value = evidence.get(field)
+            if (
+                isinstance(identity_value, bool)
+                or not isinstance(identity_value, int)
+                or identity_value < 0
+            ):
+                raise StateCorrupt(f"identity evidence {digest} has an invalid {field}")
         registry_revision = evidence.get("registry_revision")
         if (
             isinstance(registry_revision, bool)
@@ -250,6 +264,9 @@ class RegistryStore:
             entry["repo_uuid"] for entry in workspaces
         ):
             raise StateCorrupt("registry workspaces are not in canonical UUID order")
+        source_paths: dict[str, str] = {}
+        common_paths: dict[str, str] = {}
+        common_identities: dict[tuple[int, int], str] = {}
         for entry in workspaces:
             repo_uuid = str(entry["repo_uuid"])
             active = entry["active_source"]
@@ -260,6 +277,16 @@ class RegistryStore:
             if active in aliases:
                 raise StateCorrupt(f"registry active source is also an alias for {repo_uuid}")
             bound_sources = [active, *aliases]
+            entry_source_paths = {str(source["path"]) for source in bound_sources}
+            entry_common_paths = {str(source["git_common_dir"]) for source in bound_sources}
+            for path in entry_source_paths:
+                prior_uuid = source_paths.setdefault(path, repo_uuid)
+                if prior_uuid != repo_uuid:
+                    raise StateCorrupt(f"source path is bound to multiple UUIDs: {path}")
+            for path in entry_common_paths:
+                prior_uuid = common_paths.setdefault(path, repo_uuid)
+                if prior_uuid != repo_uuid:
+                    raise StateCorrupt(f"Git common directory is bound to multiple UUIDs: {path}")
             for source in bound_sources:
                 for remote in source["remote_aliases"]:
                     evidence = self.read_evidence(remote["evidence_sha256"])
@@ -272,17 +299,17 @@ class RegistryStore:
                         )
 
             enrollment = entry["uuid_enrollment"]
-            self._validate_identity_evidence(
+            immutable = self._validate_identity_evidence(
                 enrollment["immutable_evidence_sha256"],
                 repo_uuid=repo_uuid,
                 allowed_actions={"ENROLL"},
                 maximum_registry_revision=revision,
                 bound_sources=bound_sources,
             )
-            self._validate_identity_evidence(
+            current = self._validate_identity_evidence(
                 enrollment["current_evidence_sha256"],
                 repo_uuid=repo_uuid,
-                allowed_actions={"ENROLL", "ADOPT", "ROTATE"},
+                allowed_actions={"ENROLL", "ADOPT", "REBIND", "ROTATE"},
                 maximum_registry_revision=revision,
                 bound_sources=bound_sources,
             )
@@ -290,13 +317,30 @@ class RegistryStore:
             rebind = self._validate_identity_evidence(
                 active_evidence["rebind_evidence_sha256"],
                 repo_uuid=repo_uuid,
-                allowed_actions={"ENROLL", "REBIND", "ACTIVATE"},
+                allowed_actions={"ENROLL", "ACTIVATE"},
                 maximum_registry_revision=revision,
-                bound_sources=bound_sources,
+                bound_sources=[active],
             )
+            expected_active_hash = canonical_sha256(active)
+            if (
+                active_evidence["source_sha256"] != expected_active_hash
+                or rebind["source_sha256"] != expected_active_hash
+            ):
+                raise StateCorrupt(f"active-source evidence is not source-bound for {repo_uuid}")
             for field in ("active_source_revision", "operation_epoch", "fence_token"):
                 if rebind[field] != active_evidence[field]:
                     raise StateCorrupt(f"active-source evidence {field} is stale for {repo_uuid}")
+            for evidence in (immutable, current, rebind):
+                common_identity = (
+                    int(evidence["git_common_device"]),
+                    int(evidence["git_common_inode"]),
+                )
+                prior_uuid = common_identities.setdefault(common_identity, repo_uuid)
+                if prior_uuid != repo_uuid:
+                    raise StateCorrupt(
+                        "Git common-directory identity is bound to multiple UUIDs: "
+                        f"{common_identity}"
+                    )
 
     def _commit_locked(self, value: dict[str, Any]) -> Registry:
         document = Registry.from_mapping(value)
@@ -356,6 +400,83 @@ class RegistryStore:
             }
         )
 
+    def _assert_source_identity_available(
+        self,
+        entries: list[dict[str, Any]],
+        source: SourceIdentity,
+    ) -> None:
+        for entry in entries:
+            bound_sources = [entry["active_source"], *entry["aliases"]]
+            if any(
+                item["path"] == str(source.root)
+                or item["git_common_dir"] == source.registry_source["git_common_dir"]
+                for item in bound_sources
+            ):
+                raise UUIDCollisionError(
+                    "source or Git common directory is already enrolled under "
+                    f"{entry['repo_uuid']}"
+                )
+            evidence_digests = {
+                entry["uuid_enrollment"]["immutable_evidence_sha256"],
+                entry["uuid_enrollment"]["current_evidence_sha256"],
+                entry["active_source_evidence"]["rebind_evidence_sha256"],
+            }
+            for digest in evidence_digests:
+                evidence = self.read_evidence(digest)
+                if (
+                    evidence.get("git_common_device") == source.git_common_device
+                    and evidence.get("git_common_inode") == source.git_common_inode
+                ):
+                    raise UUIDCollisionError(
+                        "Git common-directory identity is already enrolled under "
+                        f"{entry['repo_uuid']}"
+                    )
+
+    def _initialize_workspace_state_locked(self, repo_uuid: str) -> None:
+        directory = Path("workspaces") / WorkspaceLeaseState.canonical_repo_uuid(repo_uuid)
+        current = directory / "workspace.json"
+        previous = directory / "workspace.previous.json"
+        pending = directory / "workspace.pending.json"
+        initial = WorkspaceLeaseState(
+            repo_uuid=repo_uuid,
+            revision=1,
+            fence_high_watermark=1,
+            operation_epoch=1,
+            migration_epoch=0,
+            leases={},
+            lease_epochs={},
+        )
+        with self.state.lock(
+            directory / "workspace.lock",
+            rank=WORKSPACE_LOCK_RANK,
+            name="workspace",
+        ):
+            recovered = cast(
+                WorkspaceLeaseState | None,
+                self.state.recover_record(
+                    label="workspace",
+                    current=current,
+                    previous=previous,
+                    pending=pending,
+                    decoder=WorkspaceLeaseState.from_json,
+                    revision=lambda state: state.revision,
+                    allow_missing=True,
+                ),
+            )
+            if recovered is None:
+                self.state.commit_record(
+                    label="workspace",
+                    current=current,
+                    previous=previous,
+                    pending=pending,
+                    payload=initial.canonical,
+                    decoder=WorkspaceLeaseState.from_json,
+                )
+            elif recovered.canonical != initial.canonical:
+                raise StateCorrupt(
+                    f"orphan workspace state for {repo_uuid} is not a fresh enrollment"
+                )
+
     def enroll(
         self,
         source: SourceIdentity,
@@ -373,6 +494,7 @@ class RegistryStore:
                 raise UUIDCollisionError(
                     f"{source.repo_uuid} is already enrolled; use ADOPT or REBIND"
                 )
+            self._assert_source_identity_available(entries, source)
             evidence_digest = self._authorized_evidence(
                 source,
                 authorization,
@@ -381,6 +503,7 @@ class RegistryStore:
                 operation_epoch=1,
                 fence_token=1,
             )
+            self._initialize_workspace_state_locked(source.repo_uuid)
             entries.append(
                 {
                     "repo_uuid": source.repo_uuid,
@@ -493,7 +616,7 @@ class RegistryStore:
             )
             if not self._known_source(entry, source):
                 entry["aliases"].append(source.registry_source)
-            entry["active_source_evidence"]["rebind_evidence_sha256"] = evidence_digest
+            entry["uuid_enrollment"]["current_evidence_sha256"] = evidence_digest
             self._normalized_entry(entry)
             return self._commit_locked(self._document_value(current, revision + 1, entries))
 

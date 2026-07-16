@@ -18,8 +18,9 @@ layout.
 `graphify.workspace.registry` has a monotonic registry revision. Each workspace
 record has one required `active_source`, a monotonic
 `active_source_revision`, immutable/current UUID-enrollment evidence, and
-active-source/rebind evidence bound to both the revision and canonical source
-hash. That evidence also records the distinct positive operation epoch and
+active-source evidence bound to both the revision and exact canonical active
+source hash. Alias rebind authorization is recorded as the current identity
+evidence without replacing active-source evidence. The active evidence also records the distinct positive operation epoch and
 accepted fence token for the audited activation CAS; a registry commit with
 missing, zero, or revision-stale activation evidence is invalid. Every source
 records one or more normalized HTTPS/SSH remote aliases in canonical URL order,
@@ -86,14 +87,20 @@ is never a safety primitive. The frozen shared operation identities include
 activation and pointer recovery as well as build, migration, promotion,
 rollback, repair, GC, and semantic claim work.
 
-P2 persists the fence high-water mark, operation epoch, migration epoch, and
-current lease records under each workspace. Allocation, heartbeat, acceptance,
+P2 durably initializes the fence floor during enrollment, then persists the
+fence high-water mark, global operation allocator, migration epoch, current
+lease records, and each live domain's accepted operation epoch under the
+workspace. Missing initialized records fail closed rather than recreating the
+floor. Allocation, heartbeat, acceptance,
 and release recover a registry snapshot before taking the workspace lock and
 recheck current registry state under that lock; activation holds registry then
 workspace locks. Fence values advance before ownership is accepted, survive
 recovery and clean reboot, and never reset through release or expiry. An
-expired lease, a stale fence, a changed owner identity, a changed active-source
-revision, or an advanced operation epoch cannot authorize a later commit. Wall
+expired lease, a stale fence, a runtime owner/boot/process mismatch, a changed
+active-source revision, an advanced operation epoch in the same lease domain,
+or an advanced migration epoch cannot authorize a later commit. Runtime owner
+identity comes from OS-owned boot and process-start facts rather than caller
+assertion. Wall
 timestamps remain audit/liveness metadata; monotonic deadlines are the only
 expiry input.
 

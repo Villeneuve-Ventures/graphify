@@ -73,5 +73,7 @@ acquire a writer-operation lease.
 
 Activation, migration, promotion, rollback, repair, pointer recovery, and GC
 share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved
-semantic domain. P2 allocates and validates these leases but performs none of
+semantic domain. Each live domain retains its own accepted operation epoch, so
+allocating a semantic claim cannot invalidate or strand an otherwise-current
+workspace lease. P2 allocates and validates these leases but performs none of
 the deferred P3-P5 operations named by them.

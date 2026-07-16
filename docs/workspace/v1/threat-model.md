@@ -30,6 +30,11 @@ the same boundary. Sudden hardware power-loss durability is not claimed.
 P2 executes registry and lease transitions only; generation, pointer, journal,
 adapter, service, and installation transitions remain absent.
 
+Enrollment creates the durable per-workspace fence floor. Losing all initialized
+workspace records is treated as corruption, never as permission to restart the
+counter. Lease ownership is bound to OS-owned boot and process-start identity;
+caller-provided identity cannot assert a reboot or reuse a live PID.
+
 ## Protected risks
 
 V1 is designed to protect against accidental corruption, crashes, stale and

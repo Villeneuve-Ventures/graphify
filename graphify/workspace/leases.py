@@ -5,8 +5,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import os
 from pathlib import Path
-from typing import Any, cast, Iterator
+import subprocess
+import sys
+from typing import Any, cast, Iterator, Protocol
 
 from graphify.workspace.contracts import FencedLease, Registry, WorkspaceLeaseState
 from graphify.workspace.identity import SourceAmbiguousError, discover_source
@@ -59,6 +63,79 @@ class LeaseOwner:
             "process_start_id": self.process_start_id,
         }
 
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any]) -> "LeaseOwner":
+        return cls(
+            boot_id=str(value["boot_id"]),
+            pid=int(value["pid"]),
+            process_start_id=str(value["process_start_id"]),
+        )
+
+
+class LeaseIdentityProvider(Protocol):
+    """Trusted runtime identity used to bind lease liveness to this process."""
+
+    def current_owner(self) -> LeaseOwner: ...
+
+
+class SystemLeaseIdentityProvider:
+    """Read boot and process-start identity from OS-owned runtime state."""
+
+    @staticmethod
+    def _digest(label: str, value: str) -> str:
+        return hashlib.sha256(f"{label}\0{value}".encode()).hexdigest()
+
+    @classmethod
+    def _linux_owner(cls, pid: int) -> LeaseOwner:
+        try:
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+            stat_value = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+            remainder = stat_value[stat_value.rindex(")") + 2 :].split()
+            process_start = remainder[19]
+        except (OSError, IndexError, ValueError) as exc:
+            raise LeaseError(f"cannot read trusted Linux process identity: {exc}") from exc
+        return LeaseOwner(
+            boot_id=cls._digest("linux-boot", boot),
+            pid=pid,
+            process_start_id=cls._digest("linux-process-start", process_start),
+        )
+
+    @classmethod
+    def _darwin_owner(cls, pid: int) -> LeaseOwner:
+        environment = {"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+        try:
+            boot = subprocess.run(
+                ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            ).stdout.strip()
+            process_start = subprocess.run(
+                ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise LeaseError(f"cannot read trusted macOS process identity: {exc}") from exc
+        if not boot or not process_start:
+            raise LeaseError("trusted macOS process identity is empty")
+        return LeaseOwner(
+            boot_id=cls._digest("darwin-boot", boot),
+            pid=pid,
+            process_start_id=cls._digest("darwin-process-start", process_start),
+        )
+
+    def current_owner(self) -> LeaseOwner:
+        pid = os.getpid()
+        if sys.platform == "linux":
+            return self._linux_owner(pid)
+        if sys.platform == "darwin":
+            return self._darwin_owner(pid)
+        raise LeaseError(f"trusted lease identity is unsupported on {sys.platform}")
+
 
 @dataclass(frozen=True)
 class LeaseGrant:
@@ -99,6 +176,7 @@ class LeaseStore:
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
+        identity_provider: LeaseIdentityProvider | None = None,
     ) -> None:
         self.registry = registry
         self.state = DurableStateRoot(
@@ -109,6 +187,22 @@ class LeaseStore:
         )
         if self.state.root != self.registry.state.root:
             raise LeaseError("lease and registry stores must share one external state root")
+        self.identity_provider = identity_provider or SystemLeaseIdentityProvider()
+
+    def current_owner(self) -> LeaseOwner:
+        """Return the OS-backed owner identity accepted by this store."""
+
+        return self.identity_provider.current_owner()
+
+    def _require_current_owner(self, owner: LeaseOwner) -> LeaseOwner:
+        trusted = self.current_owner()
+        if owner != trusted:
+            raise StaleLease("stale_owner: owner identity does not match the current runtime")
+        return trusted
+
+    def _require_grant_owner(self, grant: LeaseGrant) -> LeaseOwner:
+        owner = LeaseOwner.from_mapping(cast(dict[str, Any], grant.lease.to_dict()["owner"]))
+        return self._require_current_owner(owner)
 
     @staticmethod
     def _directory(repo_uuid: str) -> Path:
@@ -146,20 +240,12 @@ class LeaseStore:
             pending=pending,
             decoder=WorkspaceLeaseState.from_json,
             revision=lambda state: state.revision,
-            allow_missing=True,
+            allow_missing=False,
         )
         active_evidence = entry["active_source_evidence"]
         fence_floor = int(active_evidence["fence_token"])
         operation_floor = int(active_evidence["operation_epoch"])
-        if recovered is None:
-            return WorkspaceLeaseState(
-                repo_uuid=repo_uuid,
-                revision=0,
-                fence_high_watermark=fence_floor,
-                operation_epoch=operation_floor,
-                migration_epoch=0,
-                leases={},
-            )
+        assert recovered is not None
         if recovered.repo_uuid != repo_uuid:
             raise StateCorrupt("workspace lease state is installed under the wrong UUID")
         return WorkspaceLeaseState(
@@ -169,6 +255,7 @@ class LeaseStore:
             operation_epoch=max(recovered.operation_epoch, operation_floor),
             migration_epoch=recovered.migration_epoch,
             leases=dict(recovered.leases),
+            lease_epochs=dict(recovered.lease_epochs),
         )
 
     def _commit_state_locked(self, state: WorkspaceLeaseState) -> WorkspaceLeaseState:
@@ -264,6 +351,7 @@ class LeaseStore:
         verify_active: bool = False,
         recheck_registry: bool = False,
     ) -> LeaseGrant:
+        owner = self._require_current_owner(owner)
         if ttl_ns <= 0 or monotonic_ns < 0:
             raise LeaseError("ttl_ns must be positive and monotonic_ns must be non-negative")
         entry = _registry_entry(document, repo_uuid)
@@ -326,6 +414,8 @@ class LeaseStore:
             )
             leases = dict(state.leases)
             leases[domain] = lease
+            lease_epochs = dict(state.lease_epochs)
+            lease_epochs[domain] = operation_epoch
             committed = self._commit_state_locked(
                 WorkspaceLeaseState(
                     repo_uuid=repo_uuid,
@@ -334,6 +424,7 @@ class LeaseStore:
                     operation_epoch=operation_epoch,
                     migration_epoch=migration_epoch,
                     leases=leases,
+                    lease_epochs=lease_epochs,
                 )
             )
             return LeaseGrant(
@@ -359,10 +450,9 @@ class LeaseStore:
             raise StaleLease("fence token is no longer current")
         if current_value["owner"] != grant_value["owner"]:
             raise StaleLease("stale_owner: owner identity no longer matches")
-        if (
-            state.operation_epoch != grant.operation_epoch
-            or state.migration_epoch != grant.migration_epoch
-        ):
+        if state.lease_epochs.get(domain) != grant.operation_epoch:
+            raise StaleLease("stale_epoch: lease-domain operation epoch advanced")
+        if state.migration_epoch != grant.migration_epoch:
             raise StaleLease("stale_epoch: operation or migration epoch advanced")
         return domain, current
 
@@ -374,6 +464,7 @@ class LeaseStore:
             raise StaleLease("stale_source: active source revision advanced")
 
     def assert_current(self, grant: LeaseGrant, *, monotonic_ns: int) -> FencedLease:
+        self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
         document = self.registry.load()
         with self.workspace_lock(repo_uuid):
@@ -395,6 +486,7 @@ class LeaseStore:
     ) -> LeaseGrant:
         if ttl_ns <= 0:
             raise LeaseError("ttl_ns must be positive")
+        self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
         document = self.registry.load()
         with self.workspace_lock(repo_uuid):
@@ -417,13 +509,14 @@ class LeaseStore:
                     operation_epoch=state.operation_epoch,
                     migration_epoch=state.migration_epoch,
                     leases=leases,
+                    lease_epochs=dict(state.lease_epochs),
                 )
             )
             return LeaseGrant(
                 lease=committed.leases[domain],
                 registry_revision=int(document.to_dict()["revision"]),
                 active_source_revision=grant.active_source_revision,
-                operation_epoch=committed.operation_epoch,
+                operation_epoch=grant.operation_epoch,
                 migration_epoch=committed.migration_epoch,
             )
 
@@ -444,6 +537,7 @@ class LeaseStore:
         validate_active: bool,
         recheck_registry: bool = False,
     ) -> WorkspaceLeaseState:
+        self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
         with self.workspace_lock(repo_uuid):
             if recheck_registry:
@@ -454,6 +548,8 @@ class LeaseStore:
             domain, _current = self._matching_lease(state, grant)
             leases = dict(state.leases)
             del leases[domain]
+            lease_epochs = dict(state.lease_epochs)
+            del lease_epochs[domain]
             return self._commit_state_locked(
                 WorkspaceLeaseState(
                     repo_uuid=state.repo_uuid,
@@ -462,6 +558,7 @@ class LeaseStore:
                     operation_epoch=state.operation_epoch,
                     migration_epoch=state.migration_epoch,
                     leases=leases,
+                    lease_epochs=lease_epochs,
                 )
             )
 
@@ -477,8 +574,9 @@ __all__ = [
     "LeaseError",
     "LeaseExpired",
     "LeaseGrant",
+    "LeaseIdentityProvider",
     "LeaseOwner",
     "LeaseStore",
     "StaleLease",
-    "WorkspaceLeaseState",
+    "SystemLeaseIdentityProvider",
 ]

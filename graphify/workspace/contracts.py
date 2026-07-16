@@ -1259,6 +1259,7 @@ class WorkspaceLeaseState:
     operation_epoch: int
     migration_epoch: int
     leases: dict[str, FencedLease]
+    lease_epochs: dict[str, int]
 
     @staticmethod
     def canonical_repo_uuid(value: object) -> str:
@@ -1279,6 +1280,7 @@ class WorkspaceLeaseState:
             "operation_epoch": self.operation_epoch,
             "migration_epoch": self.migration_epoch,
             "leases": {name: lease.to_dict() for name, lease in sorted(self.leases.items())},
+            "lease_epochs": dict(sorted(self.lease_epochs.items())),
         }
 
     @property
@@ -1300,6 +1302,7 @@ class WorkspaceLeaseState:
                 "operation_epoch",
                 "migration_epoch",
                 "leases",
+                "lease_epochs",
             },
         )
         if data["contract"] != "graphify.workspace.lease_state.internal":
@@ -1315,8 +1318,15 @@ class WorkspaceLeaseState:
         operation_epoch = _integer(data["operation_epoch"], "$.operation_epoch", minimum=1)
         migration_epoch = _integer(data["migration_epoch"], "$.migration_epoch")
         raw_leases = _mapping(data["leases"], "$.leases")
+        raw_lease_epochs = _mapping(data["lease_epochs"], "$.lease_epochs")
         if not set(raw_leases).issubset({"workspace", "semantic"}):
             raise ContractError("$.leases: unsupported lease domain")
+        if set(raw_lease_epochs) != set(raw_leases):
+            raise ContractError("$.lease_epochs: must exactly cover current lease domains")
+        lease_epochs = {
+            domain: _integer(epoch, f"$.lease_epochs.{domain}", minimum=1)
+            for domain, epoch in raw_lease_epochs.items()
+        }
         leases: dict[str, FencedLease] = {}
         for domain, raw_lease in raw_leases.items():
             lease_mapping = _mapping(raw_lease, f"$.leases.{domain}")
@@ -1336,6 +1346,7 @@ class WorkspaceLeaseState:
             operation_epoch=operation_epoch,
             migration_epoch=migration_epoch,
             leases=leases,
+            lease_epochs=lease_epochs,
         )
 
     @classmethod

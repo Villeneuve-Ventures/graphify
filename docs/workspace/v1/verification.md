@@ -51,16 +51,20 @@
 
 - enrollment, adoption, evidence rotation, rebind, and activation each require
   matching operator authorization and preserve immutable UUID identity;
-- UUID collisions fail until shared-history and remote evidence support an
-  explicit adoption;
+- UUID and Git common-directory collisions fail until shared-history and remote
+  evidence support an explicit same-UUID adoption; alias rebind evidence never
+  substitutes for exact active-source evidence;
 - registry and workspace commits recover at every pending/previous/current
   durable-write boundary and reject corrupt or ambiguous state;
 - global registry mutations serialize across processes, and deterministic lease
   races produce one owner and one monotonic fence sequence;
 - active-source activation is a revision-checked CAS; resolution never guesses
   among aliases;
-- lease expiry uses monotonic time, and stale fence, owner, source, operation,
+- lease expiry uses monotonic time; OS-backed boot/process identity rejects
+  forged reboot and PID reuse; and stale fence, owner, source, domain operation,
   and migration epochs fail acceptance;
+- enrollment initializes the durable fence floor, missing initialized records
+  fail closed, and workspace/semantic domains remain independently releasable;
 - state roots reject unsupported platforms, links, source overlap, and split
   registry/lease roots; recursive before/after source snapshots remain equal;
   and
