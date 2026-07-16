@@ -15,6 +15,7 @@ from graphify.workspace.contracts import (
     JournalEvent,
     JournalFrameTruncated,
     JournalHeadState,
+    PointerSet,
     canonical_json_bytes,
     decode_journal_frame,
     encode_journal_frame,
@@ -37,8 +38,21 @@ _PRECERTIFICATION_NEXT = {
     "ALLOCATED": frozenset({"STAGING", "FAILED"}),
     "STAGING": frozenset({"BUILT", "FAILED"}),
     "BUILT": frozenset({"VALIDATING", "FAILED"}),
-    "VALIDATING": frozenset({"CERTIFIED", "FAILED"}),
+    "VALIDATING": frozenset({"VALIDATING", "CERTIFIED", "FAILED"}),
 }
+_TRANSITION_OPERATIONS = {
+    "ALLOCATED": frozenset({"BUILD", "MIGRATE"}),
+    "STAGING": frozenset({"BUILD", "MIGRATE"}),
+    "BUILT": frozenset({"BUILD", "MIGRATE"}),
+    "VALIDATING": frozenset({"BUILD", "MIGRATE"}),
+    "CERTIFIED": frozenset({"BUILD", "MIGRATE"}),
+    "FAILED": frozenset({"BUILD", "MIGRATE"}),
+    "PROMOTED": frozenset({"PROMOTE"}),
+    "ROLLED_BACK": frozenset({"ROLLBACK"}),
+    "REPAIRED": frozenset({"POINTER_RECOVERY", "REPAIR"}),
+    "SUPERSEDED": frozenset({"PROMOTE", "ROLLBACK"}),
+}
+_VISIBLE_POINTER_TRANSITIONS = frozenset({"PROMOTED", "ROLLED_BACK", "REPAIRED"})
 
 
 class JournalError(RuntimeError):
@@ -101,6 +115,8 @@ class JournalStore:
         if self.state.root != leases.state.root:
             raise JournalError("journal and lease stores must share one external state root")
         self.fault_hook = fault_hook or (lambda _event: None)
+        self._generation_authority = object()
+        self._pointer_authority = object()
 
     @staticmethod
     def _directory(repo_uuid: str) -> Path:
@@ -150,6 +166,7 @@ class JournalStore:
     @staticmethod
     def _validate_lifecycle(events: list[JournalEvent]) -> None:
         latest: dict[str, str] = {}
+        latest_event: dict[str, JournalEvent] = {}
         certified: set[str] = set()
         logical: dict[tuple[str, str, int, int], bytes] = {}
         event_ids: dict[str, bytes] = {}
@@ -177,6 +194,17 @@ class JournalStore:
                     raise JournalCorrupt(
                         f"invalid lifecycle transition for {generation_id}: {prior} -> {transition}"
                     )
+                if transition == prior == "VALIDATING":
+                    prior_value = latest_event[generation_id].to_dict()
+                    if (
+                        int(value["operation_epoch"])
+                        <= int(prior_value["operation_epoch"])
+                        or int(value["fence_token"])
+                        <= int(prior_value["fence_token"])
+                    ):
+                        raise JournalCorrupt(
+                            "revalidation requires a strictly newer operation and fence"
+                        )
                 if transition == "CERTIFIED":
                     certified.add(generation_id)
             elif generation_id not in certified:
@@ -184,6 +212,7 @@ class JournalStore:
                     f"post-certification transition precedes CERTIFIED for {generation_id}"
                 )
             latest[generation_id] = transition
+            latest_event[generation_id] = event
 
     def _decode_segment(self, relative: Path) -> tuple[bytes, JournalEvent]:
         frame = self.state.read_bytes(relative)
@@ -244,6 +273,7 @@ class JournalStore:
         if head is not None and head.repo_uuid != repo_uuid:
             raise JournalCorrupt("journal head is installed under the wrong workspace")
 
+        self.state.cleanup_atomic_temps(self._segments_directory(repo_uuid))
         segments = self._segment_names(repo_uuid)
         committed = 0 if head is None else head.sequence
         if len(segments) < committed:
@@ -309,6 +339,43 @@ class JournalStore:
         material = hashlib.sha256(canonical_json_bytes(logical)).hexdigest()
         return str(uuid.uuid5(_EVENT_NAMESPACE, f"{repo_uuid}:{material}"))
 
+    def _require_transition_authority(
+        self,
+        operation: LeaseOperation,
+        *,
+        transition: str,
+        generation_id: str,
+        receipt_sha256: str | None,
+        pointer_revision: int | None,
+    ) -> None:
+        allowed = _TRANSITION_OPERATIONS.get(transition)
+        if allowed is None or operation.operation not in allowed:
+            raise JournalConflict(
+                f"operation {operation.operation} cannot append transition {transition}"
+            )
+        if transition not in _VISIBLE_POINTER_TRANSITIONS:
+            return
+        relative = LeaseStore._directory(operation.repo_uuid) / "pointers.json"
+        try:
+            pointer = PointerSet.from_json(self.state.read_existing_bytes(relative))
+        except Exception as exc:
+            raise JournalConflict(
+                f"{transition} requires a valid visible pointer: {exc}"
+            ) from exc
+        value = pointer.to_dict()
+        current = cast(dict[str, Any], value["current"])
+        if (
+            value["repo_uuid"] != operation.repo_uuid
+            or value["pointer_revision"] != pointer_revision
+            or value["operation_epoch"] != operation.grant.operation_epoch
+            or value["fence_token"] != operation.fence_token
+            or current["generation_id"] != generation_id
+            or current["receipt_sha256"] != receipt_sha256
+        ):
+            raise JournalConflict(
+                f"{transition} does not match the visible pointer replacement"
+            )
+
     def append_locked(
         self,
         operation: LeaseOperation,
@@ -318,7 +385,34 @@ class JournalStore:
         receipt_sha256: str | None,
         pointer_revision: int | None,
         occurred_at: datetime,
+        _authority: object | None = None,
     ) -> JournalEvent:
+        """Append one canonical event under its owning operation.
+
+        ``occurred_at`` is part of the event's canonical logical identity. A
+        retry under the same operation epoch and fence must therefore reuse the
+        exact timestamp; a successor fence records a distinct event identity.
+        """
+
+        allowed = _TRANSITION_OPERATIONS.get(transition)
+        if allowed is None or operation.operation not in allowed:
+            raise JournalConflict(
+                f"operation {operation.operation} cannot append transition {transition}"
+            )
+        if transition == "CERTIFIED" and _authority is not self._generation_authority:
+            raise JournalConflict("CERTIFIED must be appended by GenerationStore")
+        if (
+            transition in {"PROMOTED", "ROLLED_BACK", "REPAIRED", "SUPERSEDED"}
+            and _authority is not self._pointer_authority
+        ):
+            raise JournalConflict(f"{transition} must be appended by PointerStore")
+        self._require_transition_authority(
+            operation,
+            transition=transition,
+            generation_id=generation_id,
+            receipt_sha256=receipt_sha256,
+            pointer_revision=pointer_revision,
+        )
         snapshot = self.recover_locked(operation)
         logical = {
             "transition": transition,
@@ -397,6 +491,50 @@ class JournalStore:
         )
         self.fault_hook(f"journal:{transition}:head_durable")
         return event
+
+    def append_generation_locked(
+        self,
+        operation: LeaseOperation,
+        *,
+        transition: str,
+        generation_id: str,
+        receipt_sha256: str | None,
+        pointer_revision: int | None,
+        occurred_at: datetime,
+    ) -> JournalEvent:
+        if transition not in _PRECERTIFICATION | {"CERTIFIED"}:
+            raise JournalConflict(f"{transition} is not a generation transition")
+        return self.append_locked(
+            operation,
+            transition=transition,
+            generation_id=generation_id,
+            receipt_sha256=receipt_sha256,
+            pointer_revision=pointer_revision,
+            occurred_at=occurred_at,
+            _authority=self._generation_authority,
+        )
+
+    def append_pointer_locked(
+        self,
+        operation: LeaseOperation,
+        *,
+        transition: str,
+        generation_id: str,
+        receipt_sha256: str,
+        pointer_revision: int,
+        occurred_at: datetime,
+    ) -> JournalEvent:
+        if transition not in {"PROMOTED", "ROLLED_BACK", "REPAIRED", "SUPERSEDED"}:
+            raise JournalConflict(f"{transition} is not a pointer transition")
+        return self.append_locked(
+            operation,
+            transition=transition,
+            generation_id=generation_id,
+            receipt_sha256=receipt_sha256,
+            pointer_revision=pointer_revision,
+            occurred_at=occurred_at,
+            _authority=self._pointer_authority,
+        )
 
     def append(
         self,

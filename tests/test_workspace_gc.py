@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import hashlib
 from pathlib import Path
 import subprocess
@@ -10,12 +11,13 @@ from typing import Any
 
 import pytest
 
-from graphify.workspace.contracts import CapacityPolicy
-from graphify.workspace.gc import GcProtection, GcStore
+from graphify.workspace.contracts import CapacityPolicy, GcIntentState
+from graphify.workspace.gc import GcProtection, GcRecoveryRequired, GcStore
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
-from graphify.workspace.persistence import CommitUnknown, InjectedFault
-from graphify.workspace.pointers import PointerCAS, PointerRecoveryRequired, PointerStore
+from graphify.workspace.leases import LeaseRecoveryRequired
+from graphify.workspace.persistence import CommitUnknown, InjectedFault, PosixSyscalls
+from graphify.workspace.pointers import PointerCAS, PointerStore
 
 from tests.workspace_p3_helpers import REPO_UUID, START, acquire, create_harness, tree_snapshot
 
@@ -79,6 +81,38 @@ SUCCESSOR_WRITER_OPERATIONS = (
     "REPAIR",
     "POINTER_RECOVERY",
 )
+POST_CRASH_BLOCKED_OPERATIONS = (
+    "ACTIVATE",
+    "BUILD",
+    "MIGRATE",
+    "PROMOTE",
+    "REPAIR",
+    "ROLLBACK",
+)
+
+
+class _FailOncePurgeSyscalls(PosixSyscalls):
+    def __init__(self, operation: str, error_number: int) -> None:
+        self.operation = operation
+        self.error_number = error_number
+        self.failed = False
+
+    def _fail(self, operation: str) -> None:
+        if not self.failed and self.operation == operation:
+            self.failed = True
+            raise OSError(self.error_number, f"injected purge {operation}")
+
+    def unlink(self, path: Path) -> None:
+        self._fail("unlink")
+        super().unlink(path)
+
+    def rmdir(self, path: Path) -> None:
+        self._fail("rmdir")
+        super().rmdir(path)
+
+    def fsync(self, descriptor: int) -> None:
+        self._fail("fsync")
+        super().fsync(descriptor)
 
 
 def _runtime(tmp_path: Path):
@@ -263,7 +297,7 @@ def test_gc_commit_unknown_blocks_pointer_writer_until_successor_reconciles(
             armed = False
             raise InjectedFault(event)
 
-    harness, generations, pointers, receipts = _runtime(tmp_path)
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
     gc_grant = acquire(harness, "GC", tick=3)
     gc = GcStore(
         harness.state_root,
@@ -290,28 +324,8 @@ def test_gc_commit_unknown_blocks_pointer_writer_until_successor_reconciles(
         )
     harness.leases.release(gc_grant)
 
-    promote = acquire(harness, "PROMOTE", tick=4)
-    current = receipts["gen-current"]
-    stale = PointerCAS(
-        expected_pointer_revision=1,
-        expected_active_source_revision=promote.active_source_revision,
-        expected_source_epoch=1,
-        expected_operation_epoch=promote.operation_epoch,
-        expected_migration_epoch=promote.migration_epoch,
-        expected_state_schema_version=1,
-        expected_fence_token=int(promote.lease.to_dict()["fence_token"]),
-        candidate_generation_id="gen-current",
-        candidate_receipt_sha256=current.sha256,
-        expected_current_receipt_sha256=current.sha256,
-    )
-    with pytest.raises(PointerRecoveryRequired, match="GC intent"):
-        pointers.promote(
-            promote,
-            stale,
-            occurred_at=START,
-            monotonic_ns=40_001,
-        )
-    harness.leases.release(promote)
+    with pytest.raises(LeaseRecoveryRequired, match="GC intent"):
+        acquire(harness, "PROMOTE", tick=4)
 
     recovery = acquire(harness, "POINTER_RECOVERY", tick=5)
     completion = gc.reconcile(
@@ -323,6 +337,119 @@ def test_gc_commit_unknown_blocks_pointer_writer_until_successor_reconciles(
     )
     assert completion is not None and completion.quarantined == ("gen-unused",)
     assert not (harness.state_root / "workspaces" / REPO_UUID / "gc/intent.json").exists()
+
+
+@pytest.mark.parametrize("operation", POST_CRASH_BLOCKED_OPERATIONS)
+def test_unresolved_gc_intent_blocks_every_nonrecovery_workspace_operation(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    armed = True
+
+    def fail(event: str) -> None:
+        nonlocal armed
+        if armed and event == "gc:gen-unused:quarantine:renamed":
+            armed = False
+            raise InjectedFault(event)
+
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=fail,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    with pytest.raises(CommitUnknown):
+        gc.execute(
+            gc_grant,
+            plan,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        )
+    harness.leases.release(gc_grant)
+
+    with pytest.raises(LeaseRecoveryRequired, match="GC intent"):
+        acquire(harness, operation, tick=4)
+
+    recovery = acquire(harness, "POINTER_RECOVERY", tick=5)
+    assert gc.reconcile(
+        recovery,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        completed_at=START,
+        monotonic_ns=50_001,
+    ) is not None
+    harness.leases.release(recovery)
+
+
+def test_gc_recovery_rejects_intent_bound_to_another_workspace_path(
+    tmp_path: Path,
+) -> None:
+    armed = True
+
+    def fail(event: str) -> None:
+        nonlocal armed
+        if armed and event == "gc:intent_durable":
+            armed = False
+            raise InjectedFault(event)
+
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=fail,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    with pytest.raises(InjectedFault):
+        gc.execute(
+            gc_grant,
+            plan,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        )
+    harness.leases.release(gc_grant)
+    intent_path = gc.state.path(gc._intent_path(REPO_UUID))
+    value = GcIntentState.from_json(intent_path.read_bytes()).to_dict()
+    value["repo_uuid"] = "22222222-2222-4222-8222-222222222222"
+    intent_path.write_bytes(GcIntentState.from_mapping(value).canonical)
+    intent_path.chmod(0o600)
+    recovery = acquire(harness, "POINTER_RECOVERY", tick=4)
+
+    with pytest.raises(GcRecoveryRequired, match="another workspace"):
+        gc.reconcile(
+            recovery,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=40_001,
+        )
+
+    assert (
+        harness.state_root / "workspaces" / REPO_UUID / "generations" / "gen-unused"
+    ).is_dir()
+    harness.leases.release(recovery)
 
 
 @pytest.mark.parametrize(("field", "reason"), PROTECTION_FIELDS)
@@ -466,6 +593,64 @@ def test_gc_phase_holds_the_exclusive_workspace_domain_against_successor_writers
     harness.leases.release(successor_grant)
 
 
+@pytest.mark.parametrize("phase", GC_SERIALIZATION_PHASES)
+def test_current_reader_arrives_during_every_gc_phase_without_observing_quarantine(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    paused = threading.Event()
+    resume = threading.Event()
+    armed = False
+
+    def pause_at_phase(event: str) -> None:
+        nonlocal armed
+        if armed and event == phase:
+            armed = False
+            paused.set()
+            if not resume.wait(timeout=5):
+                raise TimeoutError(f"reader did not release {phase}")
+
+    harness, generations, pointers, receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=pause_at_phase,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    armed = True
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        collection = executor.submit(
+            gc.execute,
+            gc_grant,
+            plan,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        )
+        assert paused.wait(timeout=5), phase
+        with pointers.read_current(REPO_UUID) as read:
+            assert read.receipt.sha256 == receipts["gen-current"].sha256
+            assert read.generation_path.name == "gen-current"
+        resume.set()
+        completion = collection.result(timeout=5)
+
+    assert completion.quarantined == ("gen-unused",)
+    loaded = pointers.load(REPO_UUID)
+    assert loaded is not None
+    assert loaded.to_dict()["current"]["generation_id"] == "gen-current"
+    harness.leases.release(gc_grant)
+
+
 @pytest.mark.parametrize("phase", GC_RECOVERY_PHASES)
 def test_gc_reconciles_every_durable_intent_quarantine_and_completion_boundary(
     tmp_path: Path,
@@ -596,3 +781,75 @@ def test_gc_purge_retries_after_each_visibility_boundary(tmp_path: Path, phase: 
         / "gc"
         / f"gen-unused.{gc_grant.operation_epoch}"
     ).exists()
+
+
+@pytest.mark.parametrize(
+    ("operation", "error_number"),
+    [
+        ("unlink", errno.EIO),
+        ("unlink", errno.EINTR),
+        ("rmdir", errno.EIO),
+        ("rmdir", errno.EINTR),
+        ("fsync", errno.EIO),
+    ],
+)
+def test_gc_purge_syscall_failures_retry_to_one_durable_record(
+    tmp_path: Path,
+    operation: str,
+    error_number: int,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    baseline = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    plan = baseline.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    baseline.execute(
+        gc_grant,
+        plan,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        occurred_at=START,
+        monotonic_ns=30_002,
+    )
+    syscalls = _FailOncePurgeSyscalls(operation, error_number)
+    faulty = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        syscalls=syscalls,
+    )
+
+    with pytest.raises(OSError) as raised:
+        faulty.purge(
+            gc_grant,
+            plan_sha256=plan.sha256,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=30_003,
+        )
+    assert raised.value.errno == error_number
+
+    purge = faulty.purge(
+        gc_grant,
+        plan_sha256=plan.sha256,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        completed_at=START,
+        monotonic_ns=30_004,
+    )
+    assert purge.purged == ("gen-unused",)
+    purge_path = faulty.state.path(faulty._purge_path(REPO_UUID, plan.sha256))
+    assert purge_path.is_file()

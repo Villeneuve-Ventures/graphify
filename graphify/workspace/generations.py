@@ -52,6 +52,10 @@ class CapacityExceeded(GenerationError):
     code = "capacity_exceeded"
 
 
+class _CapacityScanChanged(RuntimeError):
+    pass
+
+
 class PayloadChanged(GenerationError):
     code = "payload_changed"
 
@@ -238,7 +242,7 @@ class GenerationStore:
                 total += details.st_size
         return total
 
-    def _usage(self, reservations: Sequence[CapacityReservation]) -> _Usage:
+    def _scan_usage_once(self) -> dict[tuple[str, str], int]:
         usage: dict[tuple[str, str], int] = {}
         workspaces = self.state.root / "workspaces"
         if workspaces.exists():
@@ -252,12 +256,13 @@ class GenerationStore:
                     parent = workspace / relative
                     if parent.exists():
                         candidates.extend((candidate, candidate.name) for candidate in parent.iterdir())
-                quarantine = workspace / "quarantine" / "gc"
-                if quarantine.exists():
-                    candidates.extend(
-                        (candidate, candidate.name.rsplit(".", 1)[0])
-                        for candidate in quarantine.iterdir()
-                    )
+                for quarantine_kind in ("gc", "corrupt"):
+                    quarantine = workspace / "quarantine" / quarantine_kind
+                    if quarantine.exists():
+                        candidates.extend(
+                            (candidate, candidate.name.rsplit(".", 1)[0])
+                            for candidate in quarantine.iterdir()
+                        )
                 for candidate, generation_id in candidates:
                     candidate_details = candidate.lstat()
                     if not stat.S_ISDIR(candidate_details.st_mode) or candidate.is_symlink():
@@ -265,7 +270,39 @@ class GenerationStore:
                             f"unsafe generation in capacity scan: {candidate}"
                         )
                     key = (repo_uuid, generation_id)
-                    usage[key] = max(usage.get(key, 0), self._tree_bytes(candidate))
+                    if key in usage:
+                        raise _CapacityScanChanged(
+                            "generation occupies multiple active/staging/quarantine locations: "
+                            f"{repo_uuid}/{generation_id}"
+                        )
+                    usage[key] = self._tree_bytes(candidate)
+        return usage
+
+    def _usage(self, reservations: Sequence[CapacityReservation]) -> _Usage:
+        previous: dict[tuple[str, str], int] | None = None
+        repeated_change: str | None = None
+        usage: dict[tuple[str, str], int] | None = None
+        for _attempt in range(5):
+            try:
+                observed = self._scan_usage_once()
+            except FileNotFoundError:
+                previous = None
+                repeated_change = None
+                continue
+            except _CapacityScanChanged as exc:
+                detail = str(exc)
+                if detail == repeated_change:
+                    raise CapacityExceeded(detail) from exc
+                previous = None
+                repeated_change = detail
+                continue
+            repeated_change = None
+            if previous is not None and observed == previous:
+                usage = observed
+                break
+            previous = observed
+        if usage is None:
+            raise CapacityExceeded("capacity filesystem snapshot did not stabilize")
         for reservation in reservations:
             key = (reservation.repo_uuid, reservation.generation_id)
             usage[key] = max(usage.get(key, 0), reservation.reserved_bytes)
@@ -321,6 +358,50 @@ class GenerationStore:
     ) -> CapacityReservation:
         state = self._load_capacity_locked()
         reservations = [] if state is None else list(state.reservations)
+        existing = next(
+            (
+                item
+                for item in reservations
+                if (item.repo_uuid, item.generation_id)
+                == (operation.repo_uuid, generation_id)
+            ),
+            None,
+        )
+        if existing is not None:
+            if (
+                existing.reserved_bytes != expected_payload_bytes
+                or existing.policy_sha256 != policy.sha256
+                or existing.active_source_revision
+                != operation.grant.active_source_revision
+            ):
+                raise GenerationConflict("generation has a different durable capacity reservation")
+            if (
+                existing.operation_epoch == operation.grant.operation_epoch
+                and existing.fence_token == operation.fence_token
+            ):
+                return existing
+            if (
+                existing.operation_epoch >= operation.grant.operation_epoch
+                or existing.fence_token >= operation.fence_token
+            ):
+                raise GenerationConflict("generation reservation is owned by a newer fence")
+            adopted = CapacityReservation(
+                repo_uuid=operation.repo_uuid,
+                generation_id=generation_id,
+                reserved_bytes=existing.reserved_bytes,
+                policy_sha256=existing.policy_sha256,
+                active_source_revision=existing.active_source_revision,
+                operation_epoch=operation.grant.operation_epoch,
+                fence_token=operation.fence_token,
+                created_at=_timestamp(occurred_at),
+            )
+            reservations[reservations.index(existing)] = adopted
+            self._commit_capacity_locked(
+                reservations,
+                prior_revision=0 if state is None else state.revision,
+            )
+            self.fault_hook(f"generation:{generation_id}:capacity_adopted")
+            return adopted
         self._preflight(
             repo_uuid=operation.repo_uuid,
             generation_id=generation_id,
@@ -338,19 +419,6 @@ class GenerationStore:
             fence_token=operation.fence_token,
             created_at=_timestamp(occurred_at),
         )
-        existing = next(
-            (
-                item
-                for item in reservations
-                if (item.repo_uuid, item.generation_id)
-                == (reservation.repo_uuid, reservation.generation_id)
-            ),
-            None,
-        )
-        if existing is not None:
-            if existing != reservation:
-                raise GenerationConflict("generation has a different durable capacity reservation")
-            return existing
         reservations.append(reservation)
         self._commit_capacity_locked(
             reservations,
@@ -406,43 +474,87 @@ class GenerationStore:
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"BUILD", "MIGRATE"}),
-        ) as operation:
-            lock_document = self._lock_document(generation_id)
-            final_path = self.state.path(self._generation(operation.repo_uuid, generation_id))
-            if final_path.exists():
+            registry_required=True,
+        ) as capacity_operation:
+            final_path = self.state.path(
+                self._generation(capacity_operation.repo_uuid, generation_id)
+            )
+            capacity_state = self._load_capacity_locked()
+            existing = (
+                None
+                if capacity_state is None
+                else next(
+                    (
+                        item
+                        for item in capacity_state.reservations
+                        if (item.repo_uuid, item.generation_id)
+                        == (capacity_operation.repo_uuid, generation_id)
+                    ),
+                    None,
+                )
+            )
+            if final_path.exists() and existing is None:
                 raise GenerationConflict("generation is already certified")
             reservation = self._reserve_locked(
-                operation,
+                capacity_operation,
                 generation_id=generation_id,
                 expected_payload_bytes=expected_payload_bytes,
                 policy=capacity_policy,
                 occurred_at=occurred_at,
             )
+
+        with self.leases.current_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            allowed_operations=frozenset({"BUILD", "MIGRATE"}),
+        ) as operation:
+            final_path = self.state.path(self._generation(operation.repo_uuid, generation_id))
             staging_relative = self._staging(operation.repo_uuid, generation_id)
-            staging_path = self.state.ensure_directory(staging_relative)
-            lock_relative = self._lock(operation.repo_uuid, generation_id)
-            self.state.install_once_bytes(
-                lock_relative,
-                lock_document.canonical,
-                label=f"generation:{generation_id}:lock",
-            )
-            self.fault_hook(f"generation:{generation_id}:lock_durable")
-            self.journal.append_locked(
-                operation,
-                transition="ALLOCATED",
-                generation_id=generation_id,
-                receipt_sha256=None,
-                pointer_revision=None,
-                occurred_at=occurred_at,
-            )
-            self.journal.append_locked(
-                operation,
-                transition="STAGING",
-                generation_id=generation_id,
-                receipt_sha256=None,
-                pointer_revision=None,
-                occurred_at=occurred_at,
-            )
+            staging_path = self.state.path(staging_relative)
+            if final_path.exists() and staging_path.exists():
+                raise GenerationConflict("generation exists in both staging and final locations")
+            if final_path.exists():
+                self.verify_generation(operation.repo_uuid, generation_id)
+            else:
+                staging_path = self.state.ensure_directory(staging_relative)
+                lock_document = self._lock_document(generation_id)
+                lock_relative = self._lock(operation.repo_uuid, generation_id)
+                self.state.install_once_bytes(
+                    lock_relative,
+                    lock_document.canonical,
+                    label=f"generation:{generation_id}:lock",
+                )
+                self.fault_hook(f"generation:{generation_id}:lock_durable")
+
+            snapshot = self.journal.recover_locked(operation)
+            events = snapshot.for_generation(generation_id)
+            latest = None if not events else str(events[-1].to_dict()["transition"])
+            if latest is None:
+                if final_path.exists():
+                    raise GenerationConflict("installed generation has no lifecycle journal")
+                self.journal.append_generation_locked(
+                    operation,
+                    transition="ALLOCATED",
+                    generation_id=generation_id,
+                    receipt_sha256=None,
+                    pointer_revision=None,
+                    occurred_at=occurred_at,
+                )
+                latest = "ALLOCATED"
+            if latest == "ALLOCATED":
+                self.journal.append_generation_locked(
+                    operation,
+                    transition="STAGING",
+                    generation_id=generation_id,
+                    receipt_sha256=None,
+                    pointer_revision=None,
+                    occurred_at=occurred_at,
+                )
+                latest = "STAGING"
+            if latest not in {"STAGING", "BUILT", "VALIDATING", "CERTIFIED"}:
+                raise GenerationConflict(
+                    f"generation lifecycle cannot be adopted from {latest}"
+                )
             return GenerationAllocation(
                 repo_uuid=operation.repo_uuid,
                 generation_id=generation_id,
@@ -563,6 +675,8 @@ class GenerationStore:
             )
             if not stat.S_ISDIR(payload_details.st_mode):
                 raise GenerationError("graphify-out must be a real directory")
+            if stat.S_IMODE(payload_details.st_mode) not in _ALLOWED_DIRECTORY_MODES:
+                raise GenerationError("payload directory mode is not allowed: graphify-out")
             payload_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
             payload_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             payload_descriptor = os.open("graphify-out", payload_flags, dir_fd=root_descriptor)
@@ -613,20 +727,57 @@ class GenerationStore:
         operation: LeaseOperation,
         allocation: GenerationAllocation,
     ) -> None:
+        canonical_staging = self.state.path(
+            self._staging(operation.repo_uuid, allocation.generation_id)
+        )
         expected = (
             operation.repo_uuid,
+            canonical_staging,
             operation.grant.active_source_revision,
             operation.grant.operation_epoch,
             operation.fence_token,
         )
         actual = (
             allocation.repo_uuid,
+            allocation.staging_path,
             allocation.active_source_revision,
             allocation.operation_epoch,
             allocation.fence_token,
         )
         if actual != expected:
             raise GenerationConflict("allocation is stale for the current fenced operation")
+        state = self._load_capacity_locked()
+        reservation = (
+            None
+            if state is None
+            else next(
+                (
+                    item
+                    for item in state.reservations
+                    if (item.repo_uuid, item.generation_id)
+                    == (allocation.repo_uuid, allocation.generation_id)
+                ),
+                None,
+            )
+        )
+        if reservation is None:
+            raise GenerationConflict("allocation has no durable capacity reservation")
+        durable = (
+            reservation.reserved_bytes,
+            reservation.policy_sha256,
+            reservation.active_source_revision,
+            reservation.operation_epoch,
+            reservation.fence_token,
+        )
+        supplied = (
+            allocation.expected_payload_bytes,
+            allocation.capacity_policy_sha256,
+            allocation.active_source_revision,
+            allocation.operation_epoch,
+            allocation.fence_token,
+        )
+        if supplied != durable:
+            raise GenerationConflict("allocation differs from its durable capacity reservation")
 
     def _receipt(
         self,
@@ -718,6 +869,44 @@ class GenerationStore:
             raise GenerationError("generation coordination lock identity does not match")
         return receipt
 
+    def _validate_recovery_receipt(
+        self,
+        operation: LeaseOperation,
+        allocation: GenerationAllocation,
+        request: CertificationRequest,
+        declared_entries: Sequence[Mapping[str, object]],
+        receipt: GenerationReceipt,
+        *,
+        validating_events: Sequence[Any],
+    ) -> None:
+        expected = self._receipt(operation, allocation, request, declared_entries).to_dict()
+        actual = receipt.to_dict()
+        expected_without_fence = {
+            key: value
+            for key, value in expected.items()
+            if key not in {"operation_epoch", "fence_token"}
+        }
+        actual_without_fence = {
+            key: value
+            for key, value in actual.items()
+            if key not in {"operation_epoch", "fence_token"}
+        }
+        if actual_without_fence != expected_without_fence:
+            raise GenerationConflict("durable receipt differs from the requested certification")
+        receipt_epoch = int(actual["operation_epoch"])
+        receipt_fence = int(actual["fence_token"])
+        if (
+            receipt_epoch > operation.grant.operation_epoch
+            or receipt_fence > operation.fence_token
+        ):
+            raise GenerationConflict("durable receipt belongs to a newer fenced operation")
+        if not any(
+            int(event.to_dict()["operation_epoch"]) == receipt_epoch
+            and int(event.to_dict()["fence_token"]) == receipt_fence
+            for event in validating_events
+        ):
+            raise GenerationConflict("durable receipt has no matching VALIDATING event")
+
     def _certify_locked(
         self,
         operation: LeaseOperation,
@@ -729,9 +918,39 @@ class GenerationStore:
     ) -> GenerationReceipt:
         final_relative = self._generation(operation.repo_uuid, allocation.generation_id)
         final_path = self.state.path(final_relative)
+        snapshot = self.journal.recover_locked(operation)
+        events = snapshot.for_generation(allocation.generation_id)
+        latest = None if not events else str(events[-1].to_dict()["transition"])
+        validating_events = tuple(
+            event for event in events if event.to_dict()["transition"] == "VALIDATING"
+        )
         if final_path.exists():
             receipt = self.verify_generation(operation.repo_uuid, allocation.generation_id)
-            self.journal.append_locked(
+            self._validate_recovery_receipt(
+                operation,
+                allocation,
+                request,
+                declared_entries,
+                receipt,
+                validating_events=validating_events,
+            )
+            certified = tuple(
+                event for event in events if event.to_dict()["transition"] == "CERTIFIED"
+            )
+            if certified:
+                if not any(
+                    event.to_dict()["receipt_sha256"] == receipt.sha256
+                    for event in certified
+                ):
+                    raise GenerationConflict(
+                        "certified journal event does not bind the installed receipt"
+                    )
+                return receipt
+            if latest != "VALIDATING":
+                raise GenerationConflict(
+                    f"installed generation cannot certify from lifecycle {latest}"
+                )
+            self.journal.append_generation_locked(
                 operation,
                 transition="CERTIFIED",
                 generation_id=allocation.generation_id,
@@ -739,30 +958,51 @@ class GenerationStore:
                 pointer_revision=0,
                 occurred_at=occurred_at,
             )
-            self._clear_reservation_locked(operation.repo_uuid, allocation.generation_id)
             return receipt
 
-        self.journal.append_locked(
-            operation,
-            transition="BUILT",
-            generation_id=allocation.generation_id,
-            receipt_sha256=None,
-            pointer_revision=None,
-            occurred_at=occurred_at,
-        )
-        self.journal.append_locked(
-            operation,
-            transition="VALIDATING",
-            generation_id=allocation.generation_id,
-            receipt_sha256=None,
-            pointer_revision=None,
-            occurred_at=occurred_at,
-        )
-        receipt_relative = self._staging(
-            operation.repo_uuid,
-            allocation.generation_id,
-        ) / "receipt.json"
+        if latest == "STAGING":
+            self.journal.append_generation_locked(
+                operation,
+                transition="BUILT",
+                generation_id=allocation.generation_id,
+                receipt_sha256=None,
+                pointer_revision=None,
+                occurred_at=occurred_at,
+            )
+            latest = "BUILT"
+        staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
+        self.state.cleanup_atomic_temps(staging_relative)
+        receipt_relative = staging_relative / "receipt.json"
         receipt_present = self.state.path(receipt_relative).exists()
+        latest_event = None if not events else events[-1]
+        validating_requires_successor_recheck = (
+            latest == "VALIDATING"
+            and latest_event is not None
+            and (
+                int(latest_event.to_dict()["operation_epoch"])
+                != operation.grant.operation_epoch
+                or int(latest_event.to_dict()["fence_token"]) != operation.fence_token
+            )
+        )
+        if latest == "BUILT" or (
+            validating_requires_successor_recheck and not receipt_present
+        ):
+            self.journal.append_generation_locked(
+                operation,
+                transition="VALIDATING",
+                generation_id=allocation.generation_id,
+                receipt_sha256=None,
+                pointer_revision=None,
+                occurred_at=occurred_at,
+            )
+            latest = "VALIDATING"
+            snapshot = self.journal.recover_locked(operation)
+            events = snapshot.for_generation(allocation.generation_id)
+            validating_events = tuple(
+                event for event in events if event.to_dict()["transition"] == "VALIDATING"
+            )
+        if latest != "VALIDATING":
+            raise GenerationConflict(f"generation cannot certify from lifecycle {latest}")
         inventory = self._inventory(
             allocation.staging_path,
             allowed_root_entries=(
@@ -771,7 +1011,24 @@ class GenerationStore:
                 else frozenset({"graphify-out"})
             ),
         )
-        receipt = self._receipt(operation, allocation, request, declared_entries)
+        if receipt_present:
+            try:
+                receipt = cast(
+                    GenerationReceipt,
+                    GenerationReceipt.from_json(self.state.read_existing_bytes(receipt_relative)),
+                )
+            except Exception as exc:
+                raise GenerationConflict(f"durable staged receipt is invalid: {exc}") from exc
+            self._validate_recovery_receipt(
+                operation,
+                allocation,
+                request,
+                declared_entries,
+                receipt,
+                validating_events=validating_events,
+            )
+        else:
+            receipt = self._receipt(operation, allocation, request, declared_entries)
         if canonical_json_bytes(list(inventory.entries)) != canonical_json_bytes(
             list(declared_entries)
         ):
@@ -792,11 +1049,12 @@ class GenerationStore:
             list(inventory.entries)
         ):
             raise PayloadChanged("payload changed during sealing")
-        self.state.install_once_bytes(
-            receipt_relative,
-            receipt.canonical,
-            label=f"generation:{allocation.generation_id}:receipt",
-        )
+        if not receipt_present:
+            self.state.install_once_bytes(
+                receipt_relative,
+                receipt.canonical,
+                label=f"generation:{allocation.generation_id}:receipt",
+            )
         self.state.fsync_regular_file(receipt_relative)
         self.state.fsync_directory(receipt_relative.parent)
         self.fault_hook(f"generation:{allocation.generation_id}:receipt_durable")
@@ -813,7 +1071,7 @@ class GenerationStore:
         verified = self.verify_generation(operation.repo_uuid, allocation.generation_id)
         if verified.canonical != receipt.canonical:
             raise GenerationError("installed receipt differs from sealed receipt")
-        self.journal.append_locked(
+        self.journal.append_generation_locked(
             operation,
             transition="CERTIFIED",
             generation_id=allocation.generation_id,
@@ -821,7 +1079,6 @@ class GenerationStore:
             pointer_revision=0,
             occurred_at=occurred_at,
         )
-        self._clear_reservation_locked(operation.repo_uuid, allocation.generation_id)
         return receipt
 
     def certify(
@@ -838,21 +1095,38 @@ class GenerationStore:
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"BUILD", "MIGRATE"}),
+            registry_required=True,
+        ) as capacity_operation:
+            self._require_allocation(capacity_operation, allocation)
+        with self.leases.current_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            allowed_operations=frozenset({"BUILD", "MIGRATE"}),
         ) as operation:
-            self._require_allocation(operation, allocation)
             lock = self._lock(operation.repo_uuid, allocation.generation_id)
             with self.state.existing_generation_lock(
                 lock,
                 generation_id=allocation.generation_id,
                 exclusive=True,
             ):
-                return self._certify_locked(
+                receipt = self._certify_locked(
                     operation,
                     allocation,
                     request,
                     declared_entries=declared_entries,
                     occurred_at=occurred_at,
                 )
+        with self.leases.current_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            allowed_operations=frozenset({"BUILD", "MIGRATE"}),
+            registry_required=True,
+        ) as capacity_operation:
+            self._clear_reservation_locked(
+                capacity_operation.repo_uuid,
+                allocation.generation_id,
+            )
+        return receipt
 
 
 __all__ = [

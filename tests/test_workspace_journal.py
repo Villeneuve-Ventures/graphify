@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import timedelta
 import errno
 from pathlib import Path
+import subprocess
+import sys
 from typing import cast
 import uuid
 
@@ -113,6 +115,84 @@ def test_journal_append_is_idempotent_and_rejects_divergent_logical_retry(
             occurred_at=START + timedelta(seconds=1),
             monotonic_ns=10_002,
         )
+
+
+def test_journal_rejects_transition_owned_by_another_operation(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    _append_allocated(store, grant)
+
+    with pytest.raises(JournalConflict, match="operation BUILD cannot append transition PROMOTED"):
+        store.append(
+            grant,
+            transition="PROMOTED",
+            generation_id="gen-journal",
+            receipt_sha256="a" * 64,
+            pointer_revision=1,
+            occurred_at=START,
+            monotonic_ns=10_002,
+        )
+
+
+def test_successor_cleans_real_process_death_atomic_segment_temp(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path)
+    script = (
+        "from datetime import datetime, timezone\n"
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from graphify.workspace.journal import JournalStore\n"
+        "from graphify.workspace.leases import LeaseStore\n"
+        "from graphify.workspace.persistence import PosixSyscalls, RuntimeCapabilities\n"
+        "from graphify.workspace.registry import RegistryStore\n"
+        "class KillWrite(PosixSyscalls):\n"
+        "    def write(self, descriptor, data):\n"
+        "        os._exit(91)\n"
+        "root=Path(sys.argv[1]); repo_uuid=sys.argv[2]\n"
+        "caps=RuntimeCapabilities.supported_test_fixture()\n"
+        "registry=RegistryStore(root, capabilities=caps)\n"
+        "leases=LeaseStore(root, registry, capabilities=caps)\n"
+        "document=registry.load(); entry=document.to_dict()['workspaces'][0]\n"
+        "state=leases.inspect(repo_uuid)\n"
+        "grant=leases.acquire(repo_uuid, 'BUILD', leases.current_owner(), "
+        "expected_registry_revision=int(document.to_dict()['revision']), "
+        "expected_active_source_revision=int(entry['active_source_revision']), "
+        "expected_operation_epoch=state.operation_epoch, "
+        "expected_migration_epoch=state.migration_epoch, "
+        "acquired_at=datetime(2026,7,16,19,0,tzinfo=timezone.utc), "
+        "monotonic_ns=100, ttl_ns=1)\n"
+        "journal=JournalStore(root, leases, capabilities=caps, syscalls=KillWrite())\n"
+        "journal.append(grant, transition='ALLOCATED', generation_id='gen-killed', "
+        "receipt_sha256=None, pointer_revision=None, "
+        "occurred_at=datetime(2026,7,16,19,0,tzinfo=timezone.utc), monotonic_ns=100)\n"
+    )
+    killed = subprocess.run(
+        [sys.executable, "-c", script, str(harness.state_root), REPO_UUID],
+        cwd=Path.cwd(),
+        check=False,
+    )
+    assert killed.returncode == 91
+    segments = harness.state_root / "workspaces" / REPO_UUID / "journal" / "segments"
+    assert [path.name for path in segments.iterdir()] and any(
+        path.name.startswith(".00000000000000000001.gwf.tmp-")
+        for path in segments.iterdir()
+    )
+
+    successor = acquire(harness, "BUILD", tick=3)
+    reopened = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    snapshot = reopened.recover(successor, monotonic_ns=30_001)
+
+    assert snapshot.events == ()
+    assert list(segments.iterdir()) == []
+    harness.leases.release(successor)
 
 
 def test_journal_discards_only_one_uncommitted_torn_tail(tmp_path: Path) -> None:

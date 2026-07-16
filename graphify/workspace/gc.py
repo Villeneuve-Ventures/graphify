@@ -176,9 +176,12 @@ class GcStore:
         if not path.exists():
             return None
         try:
-            return GcIntentState.from_json(self.state.read_existing_bytes(relative))
+            intent = GcIntentState.from_json(self.state.read_existing_bytes(relative))
         except Exception as exc:
             raise GcRecoveryRequired(f"GC intent is invalid: {exc}") from exc
+        if intent.repo_uuid != repo_uuid:
+            raise GcRecoveryRequired("GC intent belongs to another workspace")
+        return intent
 
     def _generation_ids(self, repo_uuid: str) -> tuple[str, ...]:
         directory = self.state.path(self.generations._workspace(repo_uuid) / "generations")
@@ -221,7 +224,7 @@ class GcStore:
         reasons = protections.reasons()
         pointer_revision = 0
         if pointer is not None:
-            self.pointers.verify_pointer(pointer)
+            self.pointers.verify_pointer(pointer, expected_repo_uuid=operation.repo_uuid)
             pointer_revision = int(pointer.to_dict()["pointer_revision"])
             self._add_pointer_reasons(reasons, pointer, prefix="visible")
         prior = self.pointers.retained_prior(operation.repo_uuid)
@@ -284,6 +287,7 @@ class GcStore:
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
         ) as operation:
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             if self._read_intent(operation.repo_uuid) is not None:
                 raise GcRecoveryRequired("an unresolved GC intent must be reconciled")
             return self._plan_locked(
@@ -373,6 +377,7 @@ class GcStore:
 
     def _read_completion(self, intent: GcIntentState) -> GcCompletionState | None:
         relative = self._completion_path(intent.repo_uuid, intent.plan_sha256)
+        self.state.cleanup_atomic_temps(relative.parent)
         path = self.state.path(relative)
         if not path.exists():
             return None
@@ -405,6 +410,7 @@ class GcStore:
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
         ) as operation:
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             if self._read_intent(operation.repo_uuid) is not None:
                 raise GcRecoveryRequired("an unresolved GC intent must be reconciled")
             refreshed = self._plan_locked(
@@ -466,6 +472,7 @@ class GcStore:
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC", "POINTER_RECOVERY"}),
         ) as operation:
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             intent = self._read_intent(operation.repo_uuid)
             if intent is None:
                 return None
@@ -503,6 +510,7 @@ class GcStore:
     def _remove_quarantine(self, path: Path) -> None:
         if path.is_symlink() or not path.is_dir():
             raise GcError(f"quarantine path is unsafe: {path}")
+        self.state._require_owner(path.lstat(), path)
         for root, directories, files in os.walk(path, topdown=False, followlinks=False):
             root_path = Path(root)
             for name in files:
@@ -510,22 +518,17 @@ class GcStore:
                 details = candidate.lstat()
                 if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
                     raise GcError(f"unsafe file in quarantine: {candidate}")
-                os.unlink(candidate)
+                self.state._require_owner(details, candidate)
+                self.state.syscalls.unlink(candidate)
             for name in directories:
                 candidate = root_path / name
                 details = candidate.lstat()
                 if not stat.S_ISDIR(details.st_mode) or candidate.is_symlink():
                     raise GcError(f"unsafe directory in quarantine: {candidate}")
-                os.rmdir(candidate)
-        os.rmdir(path)
-        parent_descriptor = os.open(
-            path.parent,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-        )
-        try:
-            os.fsync(parent_descriptor)
-        finally:
-            os.close(parent_descriptor)
+                self.state._require_owner(details, candidate)
+                self.state.syscalls.rmdir(candidate)
+        self.state.syscalls.rmdir(path)
+        self.state.fsync_directory(path.parent.relative_to(self.state.root))
 
     def purge(
         self,
@@ -542,21 +545,33 @@ class GcStore:
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
         ) as operation:
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             if self._read_intent(operation.repo_uuid) is not None:
                 raise GcRecoveryRequired("GC intent must be reconciled before purge")
             purge_relative = self._purge_path(operation.repo_uuid, plan_sha256)
             if self.state.path(purge_relative).exists():
                 try:
-                    return GcPurgeState.from_json(self.state.read_existing_bytes(purge_relative))
+                    purge = GcPurgeState.from_json(
+                        self.state.read_existing_bytes(purge_relative)
+                    )
                 except Exception as exc:
                     raise GcError(f"GC purge record is invalid: {exc}") from exc
+                if purge.repo_uuid != operation.repo_uuid or purge.plan_sha256 != plan_sha256:
+                    raise GcError("GC purge record belongs to another workspace or plan")
+                return purge
             completion_relative = self._completion_path(operation.repo_uuid, plan_sha256)
+            self.state.cleanup_atomic_temps(completion_relative.parent)
             try:
                 completion = GcCompletionState.from_json(
                     self.state.read_existing_bytes(completion_relative)
                 )
             except Exception as exc:
                 raise GcError(f"GC completion is unavailable: {exc}") from exc
+            if (
+                completion.repo_uuid != operation.repo_uuid
+                or completion.plan_sha256 != plan_sha256
+            ):
+                raise GcError("GC completion belongs to another workspace or plan")
             refreshed = self._plan_locked(
                 operation,
                 capacity_policy=capacity_policy,
@@ -585,6 +600,10 @@ class GcStore:
                     if quarantine.exists():
                         self._remove_quarantine(quarantine)
                         self.fault_hook(f"gc:{generation_id}:purged")
+                    else:
+                        self.state.fsync_directory(
+                            quarantine.parent.relative_to(self.state.root)
+                        )
             purge = GcPurgeState.from_mapping(
                 {
                     "contract": "graphify.workspace.gc_purge.internal",

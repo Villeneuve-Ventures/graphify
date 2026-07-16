@@ -9,6 +9,7 @@ import errno
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import stat
 import subprocess
 from typing import Callable, Iterator, Protocol, Sequence, TypeVar
@@ -22,6 +23,10 @@ GENERATION_LOCK_RANK = 30
 _LOCK_STACK: ContextVar[tuple[tuple[int, str], ...]] = ContextVar(
     "graphify_workspace_lock_stack",
     default=(),
+)
+_ATOMIC_TEMP_RE = re.compile(
+    r"^\.(?P<destination>.+)\.tmp-(?P<pid>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$",
+    re.ASCII,
 )
 
 
@@ -119,6 +124,8 @@ class Syscalls(Protocol):
 
     def unlink(self, path: Path) -> None: ...
 
+    def rmdir(self, path: Path) -> None: ...
+
     def mkdir(self, path: Path, mode: int) -> None: ...
 
 
@@ -136,6 +143,9 @@ class PosixSyscalls:
 
     def unlink(self, path: Path) -> None:
         os.unlink(path)
+
+    def rmdir(self, path: Path) -> None:
+        os.rmdir(path)
 
     def mkdir(self, path: Path, mode: int) -> None:
         os.mkdir(path, mode)
@@ -482,6 +492,55 @@ class DurableStateRoot:
         finally:
             os.close(descriptor)
 
+    def cleanup_atomic_temps(
+        self,
+        relative: str | Path,
+        *,
+        destination_name: str | None = None,
+    ) -> tuple[Path, ...]:
+        """Remove exact owned orphan files created by ``_atomic_replace``.
+
+        The caller must hold the writer lock for ``relative``. Unsafe entries
+        that match the private temp namespace fail closed; unrelated dotfiles
+        remain visible to the caller's ordinary directory validation.
+        """
+
+        try:
+            self._require_owned_directory(self.root)
+        except FileNotFoundError:
+            return ()
+        directory = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
+        try:
+            details = directory.lstat()
+        except FileNotFoundError:
+            return ()
+        if not stat.S_ISDIR(details.st_mode) or directory.is_symlink():
+            raise StatePathError(f"atomic-temp parent is not a real directory: {directory}")
+        self._require_owner(details, directory)
+        removed: list[Path] = []
+        for entry in directory.iterdir():
+            match = _ATOMIC_TEMP_RE.fullmatch(entry.name)
+            if match is None or (
+                destination_name is not None
+                and match.group("destination") != destination_name
+            ):
+                continue
+            entry_details = entry.lstat()
+            if (
+                not stat.S_ISREG(entry_details.st_mode)
+                or entry_details.st_nlink != 1
+                or entry.is_symlink()
+            ):
+                raise StatePathError(f"atomic-temp orphan is unsafe: {entry}")
+            self._require_owner(entry_details, entry)
+            if stat.S_IMODE(entry_details.st_mode) != 0o600:
+                raise StatePathError(f"atomic-temp orphan mode is not 0600: {entry}")
+            self.syscalls.unlink(entry)
+            removed.append(entry)
+        if removed:
+            self._fsync_directory(directory)
+        return tuple(removed)
+
     @contextmanager
     def existing_generation_lock(
         self,
@@ -505,7 +564,10 @@ class DurableStateRoot:
             )
         path = self.path(relative)
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError as exc:
+            raise StatePathError(f"generation lock is missing: {path}") from exc
         try:
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
@@ -615,6 +677,11 @@ class DurableStateRoot:
             "pending": self.path(pending),
             "previous": self.path(previous),
         }
+        parents = {path.parent for path in paths.values()}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        parent = next(iter(parents))
+        self.cleanup_atomic_temps(parent.relative_to(self.root))
         candidates: dict[str, tuple[bytes, RecordT, int]] = {}
         invalid: dict[str, Exception] = {}
         for name, path in paths.items():
@@ -675,6 +742,11 @@ class DurableStateRoot:
         current_path = self.path(current)
         previous_path = self.path(previous)
         pending_path = self.path(pending)
+        parents = {current_path.parent, previous_path.parent, pending_path.parent}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        parent = next(iter(parents))
+        self.cleanup_atomic_temps(parent.relative_to(self.root))
         commit_may_recover = False
 
         def pending_replaced() -> None:
@@ -740,6 +812,10 @@ class DurableStateRoot:
     ) -> None:
         self._ensure_root()
         self._ensure_parent(destination)
+        self.cleanup_atomic_temps(
+            destination.parent.relative_to(self.root),
+            destination_name=destination.name,
+        )
         try:
             details = destination.lstat()
         except FileNotFoundError:
