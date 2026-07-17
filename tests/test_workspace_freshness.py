@@ -320,6 +320,22 @@ def test_unsupported_remote_shortcut_after_query_fails_closed(tmp_path: Path) ->
     assert result.output is None
 
 
+def test_symlinked_source_is_unsupported_before_query(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    source = runtime.repo / "alias.md"
+    try:
+        source.symlink_to(runtime.repo / "README.md")
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not support symlinks")
+
+    result = runtime.authority.query(REPO_UUID, QUERY)
+
+    assert result.decision == "withhold"
+    assert result.reason == "unsupported"
+    assert result.query_executed is False
+    assert result.output is None
+
+
 def test_expired_freshness_deadline_fails_before_query(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
 

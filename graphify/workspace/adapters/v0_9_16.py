@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 from importlib.metadata import PackageNotFoundError, version as distribution_version
 import json
@@ -19,7 +20,7 @@ from networkx.readwrite import json_graph
 
 # Engine-private imports are deliberately confined to this versioned adapter.
 from graphify.build import build_from_json
-from graphify.detect import _is_noise_dir, detect
+from graphify.detect import _find_vcs_root, detect
 from graphify.export import to_json
 from graphify.extract import extract
 from graphify.security import check_graph_file_size_cap
@@ -47,7 +48,15 @@ from .base import (
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _CACHE_NAME_RE = re.compile(r"^[0-9a-f]{64}\.json$")
 _LEGACY_HASH_RE = re.compile(r"^(?:[0-9a-f]{32}|[0-9a-f]{64})$")
-_POLICY_NAMES = frozenset({".gitignore", ".graphifyignore", ".graphifyinclude"})
+_STABLE_STAT_FIELDS = (
+    "st_dev",
+    "st_ino",
+    "st_mode",
+    "st_nlink",
+    "st_size",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
 
 
 @dataclass(frozen=True)
@@ -76,7 +85,19 @@ def _read_regular_once(
     path: Path,
     *,
     collect: bool = False,
+    max_bytes: int | None = None,
 ) -> tuple[str, os.stat_result, bytes | None]:
+    if max_bytes is not None and max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    try:
+        installed_before = path.lstat()
+    except FileNotFoundError as exc:
+        raise ObservationUnstable(f"source file disappeared before open: {path}") from exc
+    except OSError as exc:
+        raise ObservationUnavailable(f"source file cannot be inspected safely: {path}: {exc}") from exc
+    if not stat.S_ISREG(installed_before.st_mode) or installed_before.st_nlink != 1:
+        raise ObservationUnsupported(f"source entry is not a singular regular file: {path}")
+
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -88,16 +109,40 @@ def _read_regular_once(
     except FileNotFoundError as exc:
         raise ObservationUnstable(f"source file disappeared before open: {path}") from exc
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ObservationUnsupported(
+                f"source entry is not a singular regular file: {path}"
+            ) from exc
         raise ObservationUnavailable(f"source file cannot be opened safely: {path}: {exc}") from exc
     try:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             raise ObservationUnsupported(f"source entry is not a singular regular file: {path}")
+        try:
+            installed_at_open = path.lstat()
+        except FileNotFoundError as exc:
+            raise ObservationUnstable(f"source file disappeared before hashing: {path}") from exc
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"source file cannot be inspected before hashing: {path}: {exc}"
+            ) from exc
+        if not stat.S_ISREG(installed_at_open.st_mode):
+            raise ObservationUnstable(f"source file changed before hashing: {path}")
+        if any(
+            getattr(candidate, field) != getattr(before, field)
+            for candidate in (installed_before, installed_at_open)
+            for field in _STABLE_STAT_FIELDS
+        ):
+            raise ObservationUnstable(f"source file changed before hashing: {path}")
         digest = hashlib.sha256()
         chunks: list[bytes] | None = [] if collect else None
-        while True:
+        remaining = max_bytes
+        while remaining is None or remaining > 0:
             try:
-                chunk = os.read(descriptor, 1024 * 1024)
+                chunk = os.read(
+                    descriptor,
+                    1024 * 1024 if remaining is None else min(1024 * 1024, remaining),
+                )
             except InterruptedError:
                 continue
             if not chunk:
@@ -105,30 +150,38 @@ def _read_regular_once(
             digest.update(chunk)
             if chunks is not None:
                 chunks.append(chunk)
+            if remaining is not None:
+                remaining -= len(chunk)
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
-    stable_fields = (
-        "st_dev",
-        "st_ino",
-        "st_mode",
-        "st_nlink",
-        "st_size",
-        "st_mtime_ns",
-        "st_ctime_ns",
-    )
-    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+    if any(
+        getattr(before, field) != getattr(after, field)
+        for field in _STABLE_STAT_FIELDS
+    ):
         raise ObservationUnstable(f"source file changed while hashing: {path}")
     try:
         installed = path.lstat()
     except FileNotFoundError as exc:
         raise ObservationUnstable(f"source file disappeared after hashing: {path}") from exc
+    except OSError as exc:
+        raise ObservationUnavailable(f"source file cannot be re-inspected safely: {path}: {exc}") from exc
     if not stat.S_ISREG(installed.st_mode) or any(
-        getattr(installed, field) != getattr(after, field) for field in stable_fields
+        getattr(installed, field) != getattr(after, field) for field in _STABLE_STAT_FIELDS
     ):
         raise ObservationUnstable(f"source file changed after hashing: {path}")
     payload = None if chunks is None else b"".join(chunks)
     return digest.hexdigest(), after, payload
+
+
+def _comparison_reader(path: Path, max_bytes: int | None) -> bytes:
+    _digest, _details, payload = _read_regular_once(
+        path,
+        collect=True,
+        max_bytes=max_bytes,
+    )
+    assert payload is not None
+    return payload
 
 
 def _entry(path: Path, root: Path, file_type: str) -> SourceEntry:
@@ -164,22 +217,43 @@ def _git_head(root: Path) -> str:
     return value
 
 
-def _policy_paths(root: Path) -> tuple[Path, ...]:
-    paths: set[Path] = set()
+def _policy_label(path: Path, root: Path) -> str:
+    if path.name == "exclude" and path.parent.name == "info":
+        return "@git/info/exclude"
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        vcs_root = _find_vcs_root(root)
+        if vcs_root is not None:
+            try:
+                return f"@vcs/{path.relative_to(vcs_root).as_posix()}"
+            except ValueError:
+                pass
+    raise ObservationUnsupported(f"detector returned an external policy path: {path}")
+
+
+def _policy_entry(path: Path, root: Path) -> SourceEntry:
+    digest, details, _payload = _read_regular_once(path)
+    return SourceEntry(
+        path=_policy_label(path, root),
+        file_type="policy",
+        size=details.st_size,
+        sha256=digest,
+        mode=f"{stat.S_IMODE(details.st_mode):04o}",
+    )
+
+
+def _policy_paths(root: Path, detection: Mapping[str, object]) -> tuple[Path, ...]:
+    raw_paths = detection.get("comparison_policy_paths")
+    if not isinstance(raw_paths, list) or not all(
+        isinstance(value, str) for value in raw_paths
+    ):
+        raise ObservationUnavailable("detector did not report comparison policy inputs")
+    paths = {Path(value) for value in raw_paths}
     workspace = root / ".graphify" / "workspace.toml"
     if workspace.exists() or workspace.is_symlink():
         paths.add(workspace)
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        directory = Path(dirpath)
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if name != ".graphify" and not _is_noise_dir(name, directory)
-        ]
-        for name in filenames:
-            if name in _POLICY_NAMES:
-                paths.add(directory / name)
-    return tuple(sorted(paths, key=lambda path: path.relative_to(root).as_posix()))
+    return tuple(sorted(paths, key=lambda path: _policy_label(path, root)))
 
 
 def _excluded_label(value: str, root: Path) -> str:
@@ -215,7 +289,12 @@ class Graphify0916Adapter:
         if output == root or root in output.parents:
             raise ObservationUnsupported("engine output root must be external to source")
         output.mkdir(parents=True, exist_ok=True)
-        detection = detect(root, cache_root=output, read_only=True)
+        detection = detect(
+            root,
+            cache_root=output,
+            read_only=True,
+            comparison_reader=_comparison_reader,
+        )
         if detection.get("walk_errors"):
             raise ObservationUnavailable("source directory enumeration was incomplete")
         code_files = tuple(str(path) for path in detection["files"].get("code", []))
@@ -302,7 +381,12 @@ class Graphify0916Adapter:
     ) -> _InventoryPass:
         _deadline(deadline_ns)
         commit_before = _git_head(root)
-        detection = detect(root, read_only=True, google_workspace=False)
+        detection = detect(
+            root,
+            read_only=True,
+            google_workspace=False,
+            comparison_reader=_comparison_reader,
+        )
         _emit(hook, "inventory_detected", pass_index=pass_index)
         if detection.get("walk_errors"):
             raise ObservationUnavailable("source directory enumeration was incomplete")
@@ -333,7 +417,8 @@ class Graphify0916Adapter:
         entries.sort(key=lambda item: item.path)
 
         policy_entries = tuple(
-            _entry(path, root, "policy").to_dict() for path in _policy_paths(root)
+            _policy_entry(path, root).to_dict()
+            for path in _policy_paths(root, detection)
         )
         excluded = sorted(
             _excluded_label(value, root)

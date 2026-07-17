@@ -31,12 +31,15 @@ repository migration remain later work.
 
 ## No-write detection seam
 
-`graphify.detect.detect(..., read_only=True)` is the fork-owned comparison seam.
-It bypasses persistent word-count/stat caches and suppresses Office and Google
-Workspace conversion sidecars. Office inputs remain visible as their original
-source files for hashing. Google Workspace shortcuts are surfaced as an
-unsupported comparison because authoritative remote content cannot be observed
-without export or network effects.
+`graphify.detect.detect(..., read_only=True, comparison_reader=...)` is the
+fork-owned comparison seam. Certified callers must supply the descriptor-safe
+reader used for classifier probes and every effective ignore/include policy
+read; there is no fallback to ordinary `Path.open` or `read_text`. It bypasses
+persistent word-count/stat caches and suppresses Office and Google Workspace
+conversion sidecars. Office inputs remain visible as their original source
+files for hashing. Google Workspace shortcuts are surfaced as an unsupported
+comparison because authoritative remote content cannot be observed without
+export or network effects.
 
 Ordinary detection given an explicit `cache_root` redirects conversion
 sidecars beneath that output root. The P4 structural build uses read-only
@@ -61,8 +64,9 @@ anchor even when caches and durable artifacts are redirected externally.
    and metadata stability. Complete inventory passes repeat until two
    consecutive results agree.
 4. Compare pointer/source revisions, operation and fence values, schema,
-   source commit, inventory, policy/ignore digest, detector identity, receipt,
-   payload manifest, and compatibility digest to the sealed generation.
+   source commit, inventory, the digest of every effective policy input
+   (including Git `info/exclude` and ancestor policies), detector identity,
+   receipt, payload manifest, and compatibility digest to the sealed generation.
 5. Recheck the deadline, then run the adapter's native directed `0.9.16`
    traversal against the immutable payload. This library path deliberately
    bypasses optional query logging.

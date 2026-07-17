@@ -18,6 +18,7 @@ from graphify.workspace.adapters import (
     CompatibilityTuple,
     ObservationUnavailable,
     ObservationUnstable,
+    ObservationUnsupported,
     QueryRejected,
     QueryRequest,
     RetainedStateInvalid,
@@ -38,6 +39,25 @@ def _tree_bytes(root: Path) -> dict[str, tuple[int, int, str | None]]:
         digest = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
         result[relative] = (stat.S_IFMT(details.st_mode), details.st_size, digest)
     return result
+
+
+def _init_git_repo(root: Path, *tracked: str) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", *(tracked or (".",))], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Graphify Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=root,
+        check=True,
+    )
 
 
 def test_supported_tuple_selects_the_only_versioned_adapter() -> None:
@@ -295,13 +315,14 @@ def test_observer_rejects_in_place_change_after_hashing(
     source = tmp_path / "source.py"
     source.write_bytes(b"before\n")
     original_lstat = Path.lstat
-    raced = False
+    lstat_calls = 0
 
     def racing_lstat(path: Path) -> os.stat_result:
-        nonlocal raced
-        if path == source and not raced:
-            raced = True
-            source.write_bytes(b"changed after descriptor hashing\n")
+        nonlocal lstat_calls
+        if path == source:
+            lstat_calls += 1
+            if lstat_calls == 3:
+                source.write_bytes(b"changed after descriptor hashing\n")
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", racing_lstat)
@@ -344,6 +365,157 @@ def test_observer_rejects_named_pipe_without_blocking(tmp_path: Path) -> None:
     )
 
     assert probe.returncode == 0, probe.stderr
+
+
+@pytest.mark.parametrize("remove_no_follow", [False, True])
+def test_observer_rejects_symlink_before_reading_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remove_no_follow: bool,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    target = tmp_path / "target.py"
+    target.write_bytes(b"target bytes must not be read\n")
+    source = tmp_path / "alias.py"
+    try:
+        source.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not support symlinks")
+    if remove_no_follow:
+        monkeypatch.delattr(adapter_module.os, "O_NOFOLLOW", raising=False)
+    original_read = adapter_module.os.read
+    reads = 0
+
+    def tracked_read(descriptor: int, length: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        return original_read(descriptor, length)
+
+    monkeypatch.setattr(adapter_module.os, "read", tracked_read)
+
+    with pytest.raises(ObservationUnsupported, match="singular regular file"):
+        adapter_module._read_regular_once(source)
+
+    assert reads == 0
+
+
+def test_observer_rechecks_path_before_reading_when_no_follow_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source.py"
+    target = tmp_path / "target.py"
+    source.write_bytes(b"target bytes must not be read\n")
+    symlink_probe = tmp_path / "symlink-probe"
+    try:
+        symlink_probe.symlink_to(source)
+        symlink_probe.unlink()
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not support symlinks")
+    original_open = adapter_module.os.open
+    original_read = adapter_module.os.read
+    reads = 0
+
+    def swapping_open(path: Path, flags: int) -> int:
+        source.rename(target)
+        source.symlink_to(target)
+        return original_open(path, flags)
+
+    def tracked_read(descriptor: int, length: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        return original_read(descriptor, length)
+
+    monkeypatch.delattr(adapter_module.os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(adapter_module.os, "open", swapping_open)
+    monkeypatch.setattr(adapter_module.os, "read", tracked_read)
+
+    with pytest.raises(ObservationUnstable, match="changed before hashing"):
+        adapter_module._read_regular_once(source)
+
+    assert reads == 0
+
+
+@pytest.mark.parametrize("unsafe_name", ["script", "notes.md", ".gitignore"])
+def test_read_only_observation_rejects_classifier_inputs_without_blocking(
+    tmp_path: Path,
+    unsafe_name: str,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("named pipes are unavailable on this platform")
+
+    import sys
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    os.mkfifo(source / unsafe_name)
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import sys",
+                    "from pathlib import Path",
+                    "from graphify.workspace.adapters import AdapterIntent, ObservationUnsupported, SUPPORTED_COMPATIBILITY, select_adapter",
+                    "adapter = select_adapter(SUPPORTED_COMPATIBILITY, intent=AdapterIntent.QUERY).require_adapter()",
+                    "try:",
+                    "    adapter.observe(Path(sys.argv[1]))",
+                    "except ObservationUnsupported:",
+                    "    raise SystemExit(0)",
+                    "raise SystemExit('unsafe classifier input was accepted')",
+                )
+            ),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
+@pytest.mark.parametrize("policy_kind", ["git_info_exclude", "ancestor_include"])
+def test_observer_hashes_every_effective_policy_input(
+    tmp_path: Path,
+    policy_kind: str,
+) -> None:
+    repo = tmp_path / "repo"
+    source = repo / "source"
+    repo.mkdir()
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    _init_git_repo(repo, "source/app.py")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+    before = adapter.observe(source)
+    if policy_kind == "git_info_exclude":
+        policy = repo / ".git" / "info" / "exclude"
+        policy.write_text(
+            policy.read_text(encoding="utf-8")
+            + "\n# policy changed without inventory drift\n",
+            encoding="utf-8",
+        )
+    else:
+        policy = repo / ".graphifyinclude"
+        policy.write_text("# ancestor policy changed\n", encoding="utf-8")
+
+    after = adapter.observe(source)
+
+    assert after.source_commit == before.source_commit
+    assert after.entries == before.entries
+    assert after.inventory_sha256 == before.inventory_sha256
+    assert after.policy_sha256 != before.policy_sha256
 
 
 def test_0916_structural_query_rejects_malformed_graph(tmp_path: Path) -> None:
@@ -427,9 +599,17 @@ def test_detection_redirects_conversion_sidecars_to_explicit_output(
 
     sidecar = output / "graphify-out" / "converted" / "book.md"
     assert detected["files"]["document"] == [str(sidecar)]
+    assert "comparison_policy_paths" not in detected
     assert sidecar.is_file()
     assert not (source / "graphify-out").exists()
     assert _tree_bytes(source) == before
+
+
+def test_read_only_detection_requires_an_explicit_comparison_reader(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="requires a comparison reader"):
+        detect(tmp_path, read_only=True)
 
 
 def test_read_only_detection_suppresses_stat_cache_and_office_sidecars(
@@ -440,34 +620,7 @@ def test_read_only_detection_suppresses_stat_cache_and_office_sidecars(
     source.mkdir()
     (source / "notes.md").write_text("read only detection\n", encoding="utf-8")
     (source / "book.xlsx").write_bytes(b"synthetic office fixture")
-    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Graphify Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "add",
-            ".",
-        ],
-        cwd=source,
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Graphify Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "-qm",
-            "fixture",
-        ],
-        cwd=source,
-        check=True,
-    )
+    _init_git_repo(source)
     before = _tree_bytes(source)
 
     def forbidden(*_args: object, **_kwargs: object) -> object:

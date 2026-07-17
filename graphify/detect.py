@@ -8,6 +8,7 @@ import shlex
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
+from typing import Callable
 
 from graphify.google_workspace import (
     GOOGLE_WORKSPACE_EXTENSIONS,
@@ -15,6 +16,20 @@ from graphify.google_workspace import (
     google_workspace_enabled,
 )
 from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME, out_path
+
+
+ComparisonReader = Callable[[Path, int | None], bytes]
+
+
+def _read_detector_text(
+    path: Path,
+    comparison_reader: ComparisonReader | None,
+    *,
+    max_bytes: int | None = None,
+) -> str:
+    if comparison_reader is None:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    return comparison_reader(path, max_bytes).decode("utf-8", errors="ignore")
 
 
 class FileType(str, Enum):
@@ -182,7 +197,11 @@ _PAPER_SIGNALS = [
 _PAPER_SIGNAL_THRESHOLD = 3  # need at least this many signals to call it a paper
 
 
-def _is_sensitive(path: Path) -> bool:
+def _is_sensitive(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> bool:
     """Return True if this file likely contains secrets and should be skipped."""
     # Stage 1: any PARENT directory is a known secrets dir (parts[:-1] excludes
     # the filename itself so a root-level file named "credentials" is not falsely
@@ -203,20 +222,31 @@ def _is_sensitive(path: Path) -> bool:
     # id_rsa, ...) still apply to everything regardless of extension.
     if _generic_keyword_hit(name):
         ext = path.suffix.lower()
-        is_source_code = classify_file(path) == FileType.CODE and ext not in _SECRET_PRONE_DATA_EXTS
+        is_source_code = (
+            classify_file(path, comparison_reader=comparison_reader) == FileType.CODE
+            and ext not in _SECRET_PRONE_DATA_EXTS
+        )
         return not is_source_code
     return False
 
 
-def _looks_like_paper(path: Path) -> bool:
+def _looks_like_paper(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> bool:
     """Heuristic: does this text file read like an academic paper?"""
-    try:
-        # Only scan first 3000 chars for speed
-        text = path.read_text(encoding="utf-8", errors="ignore")[:3000]
-        hits = sum(1 for pattern in _PAPER_SIGNALS if pattern.search(text))
-        return hits >= _PAPER_SIGNAL_THRESHOLD
-    except Exception:
-        return False
+    if comparison_reader is None:
+        try:
+            text = _read_detector_text(path, None)[:3000]
+        except Exception:
+            return False
+    else:
+        # UTF-8 uses at most four bytes per code point, so 12,000 bytes cover
+        # the same first-3,000-character heuristic without an unbounded read.
+        text = _read_detector_text(path, comparison_reader, max_bytes=12_000)[:3000]
+    hits = sum(1 for pattern in _PAPER_SIGNALS if pattern.search(text))
+    return hits >= _PAPER_SIGNAL_THRESHOLD
 
 
 _ASSET_DIR_MARKERS = {".imageset", ".xcassets", ".appiconset", ".colorset", ".launchimage"}
@@ -360,7 +390,11 @@ def _env_command_args(args: list[str], *, allow_split: bool = True) -> list[str]
     return []
 
 
-def _shebang_interpreter(path: Path) -> str | None:
+def _shebang_interpreter(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> str | None:
     """Return the interpreter name from a shebang line.
 
     Handles forms that a naive parser misses:
@@ -375,9 +409,15 @@ def _shebang_interpreter(path: Path) -> str | None:
     Returns the basename of the resolved interpreter, or None if there is
     no shebang / the file is unreadable / parsing fails.
     """
+    if comparison_reader is None:
+        try:
+            with path.open("rb") as f:
+                first = f.read(256)
+        except OSError:
+            return None
+    else:
+        first = comparison_reader(path, 256)
     try:
-        with path.open("rb") as f:
-            first = f.read(256)
         if not first.startswith(b"#!"):
             return None
         line = first.split(b"\n")[0].decode(errors="replace")[2:].strip()
@@ -391,19 +431,27 @@ def _shebang_interpreter(path: Path) -> str | None:
                 return None
             interp = Path(env_args[0]).name
         return interp
-    except (OSError, ValueError):
+    except ValueError:
         return None
 
 
-def _shebang_file_type(path: Path) -> FileType | None:
+def _shebang_file_type(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> FileType | None:
     """Peek at the first line of an extensionless file for a shebang."""
-    interp = _shebang_interpreter(path)
+    interp = _shebang_interpreter(path, comparison_reader=comparison_reader)
     if interp in _SHEBANG_CODE_INTERPRETERS:
         return FileType.CODE
     return None
 
 
-def classify_file(path: Path) -> FileType | None:
+def classify_file(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> FileType | None:
     # Package manifests (apm.yml, pyproject.toml, go.mod, pom.xml) are parsed
     # deterministically, so route them to the AST path (CODE) rather than the LLM
     # document path — otherwise apm.yml (a .yml "document") would be LLM-extracted
@@ -416,7 +464,7 @@ def classify_file(path: Path) -> FileType | None:
         return FileType.CODE
     ext = path.suffix.lower()
     if not ext:
-        return _shebang_file_type(path)
+        return _shebang_file_type(path, comparison_reader=comparison_reader)
     if ext in CODE_EXTENSIONS:
         return FileType.CODE
     if ext in PAPER_EXTENSIONS:
@@ -428,7 +476,7 @@ def classify_file(path: Path) -> FileType | None:
         return FileType.IMAGE
     if ext in DOC_EXTENSIONS:
         # Check if it's a converted paper
-        if _looks_like_paper(path):
+        if _looks_like_paper(path, comparison_reader=comparison_reader):
             return FileType.PAPER
         return FileType.DOCUMENT
     if ext in OFFICE_EXTENSIONS:
@@ -790,7 +838,11 @@ def _find_vcs_root(start: Path) -> Path | None:
         current = parent
 
 
-def _git_info_exclude(vcs_root: Path) -> Path | None:
+def _git_info_exclude(
+    vcs_root: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> Path | None:
     """Resolve ``$GIT_DIR/info/exclude`` for the repo rooted at ``vcs_root``.
 
     ``info/exclude`` is where git records local-only, uncommitted excludes — and
@@ -803,11 +855,15 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
     """
     dot_git = vcs_root / ".git"
     git_dir: Path | None = None
-    if dot_git.is_dir():
+    if comparison_reader is not None and dot_git.is_symlink():
+        _read_detector_text(dot_git, comparison_reader)
+    elif dot_git.is_dir():
         git_dir = dot_git
-    elif dot_git.is_file():
+    elif dot_git.is_file() or (
+        comparison_reader is not None and dot_git.exists()
+    ):
         try:
-            content = dot_git.read_text(encoding="utf-8", errors="ignore").strip()
+            content = _read_detector_text(dot_git, comparison_reader).strip()
         except OSError:
             content = ""
         if content.startswith("gitdir:"):
@@ -818,9 +874,14 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
             # A linked worktree's gitdir holds a `commondir` file pointing at the
             # shared git dir, where info/exclude actually lives.
             commondir = gd / "commondir"
-            if commondir.exists():
+            if commondir.exists() or (
+                comparison_reader is not None and commondir.is_symlink()
+            ):
                 try:
-                    cd_raw = commondir.read_text(encoding="utf-8", errors="ignore").strip()
+                    cd_raw = _read_detector_text(
+                        commondir,
+                        comparison_reader,
+                    ).strip()
                 except OSError:
                     cd_raw = ""
                 if cd_raw:
@@ -829,10 +890,17 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
     if git_dir is None:
         return None
     exclude = git_dir / "info" / "exclude"
+    if comparison_reader is not None:
+        return exclude if exclude.exists() or exclude.is_symlink() else None
     return exclude if exclude.is_file() else None
 
 
-def _load_dir_own_ignore(d: Path) -> list[tuple[Path, str]]:
+def _load_dir_own_ignore(
+    d: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+    policy_paths: set[Path] | None = None,
+) -> list[tuple[Path, str]]:
     """Read .gitignore/.graphifyignore directly inside *d* (not its ancestors).
 
     Merges .gitignore and .graphifyignore for this one directory (#1363):
@@ -851,15 +919,27 @@ def _load_dir_own_ignore(d: Path) -> list[tuple[Path, str]]:
     patterns: list[tuple[Path, str]] = []
     for fname in (".gitignore", ".graphifyignore"):
         ignore_file = d / fname
-        if ignore_file.exists():
-            for raw in ignore_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if ignore_file.exists() or (
+            comparison_reader is not None and ignore_file.is_symlink()
+        ):
+            if policy_paths is not None:
+                policy_paths.add(ignore_file)
+            for raw in _read_detector_text(
+                ignore_file,
+                comparison_reader,
+            ).splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
                     patterns.append((d, line))
     return patterns
 
 
-def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
+def _load_graphifyignore(
+    root: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+    policy_paths: set[Path] | None = None,
+) -> list[tuple[Path, str]]:
     """Read .graphifyignore files and return (anchor_dir, pattern) pairs.
 
     Patterns are returned outer-first so that inner (closer) rules are
@@ -892,15 +972,29 @@ def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
     # per-directory .gitignore/.graphifyignore — so load it first (lowest priority
     # under last-match-wins) anchored at the VCS root, letting a nearer `!`
     # re-include still override it (#1810).
-    info_exclude = _git_info_exclude(ceiling)
+    info_exclude = _git_info_exclude(
+        ceiling,
+        comparison_reader=comparison_reader,
+    )
     if info_exclude is not None:
-        for raw in info_exclude.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if policy_paths is not None:
+            policy_paths.add(info_exclude)
+        for raw in _read_detector_text(
+            info_exclude,
+            comparison_reader,
+        ).splitlines():
             line = _parse_gitignore_line(raw)
             if line:
                 patterns.append((ceiling, line))
 
     for d in dirs:
-        patterns.extend(_load_dir_own_ignore(d))
+        patterns.extend(
+            _load_dir_own_ignore(
+                d,
+                comparison_reader=comparison_reader,
+                policy_paths=policy_paths,
+            )
+        )
     return patterns
 
 
@@ -991,7 +1085,12 @@ def _is_ignored(
     return _eval(path)
 
 
-def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
+def _load_graphifyinclude(
+    root: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+    policy_paths: set[Path] | None = None,
+) -> list[tuple[Path, str]]:
     """Read .graphifyinclude allowlist patterns from root and ancestors.
 
     Include patterns opt matching hidden files/dirs into traversal. Sensitive
@@ -1013,8 +1112,15 @@ def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
     patterns: list[tuple[Path, str]] = []
     for d in dirs:
         include_file = d / ".graphifyinclude"
-        if include_file.exists():
-            for raw in include_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if include_file.exists() or (
+            comparison_reader is not None and include_file.is_symlink()
+        ):
+            if policy_paths is not None:
+                policy_paths.add(include_file)
+            for raw in _read_detector_text(
+                include_file,
+                comparison_reader,
+            ).splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
                     patterns.append((d, line))
@@ -1135,20 +1241,26 @@ def detect(
     extra_excludes: list[str] | None = None,
     cache_root: Path | None = None,
     read_only: bool = False,
+    comparison_reader: ComparisonReader | None = None,
 ) -> dict:
     """Detect supported corpus files.
 
-    ``read_only`` is the workspace comparison seam. It bypasses the persistent
-    stat/word-count cache and never materializes Office or Google Workspace
-    conversion sidecars. Office source files remain in the returned inventory;
-    Google Workspace shortcuts are reported as unsupported for certified
-    comparison because their authoritative remote content cannot be observed
-    without export/network side effects.
+    ``read_only`` is the workspace comparison seam. It requires a caller-owned
+    ``comparison_reader`` for every classifier and policy content probe,
+    bypasses the persistent stat/word-count cache, and never materializes Office
+    or Google Workspace conversion sidecars. Office source files remain in the
+    returned inventory; Google Workspace shortcuts are reported as unsupported
+    for certified comparison because their authoritative remote content cannot
+    be observed without export/network side effects.
 
     When ordinary detection is given ``cache_root``, conversion sidecars follow
     the other detector outputs into that root instead of appearing in the source
     checkout.
     """
+    if read_only and comparison_reader is None:
+        raise ValueError("read_only detection requires a comparison reader")
+    if comparison_reader is not None and not read_only:
+        raise ValueError("comparison_reader is only valid for read_only detection")
     root = root.resolve()
     if follow_symlinks is None:
         follow_symlinks = False
@@ -1177,7 +1289,12 @@ def detect(
 
     skipped_sensitive: list[str] = []
     unclassified: list[str] = []
-    ignore_patterns = _load_graphifyignore(root)
+    comparison_policy_paths: set[Path] | None = set() if read_only else None
+    ignore_patterns = _load_graphifyignore(
+        root,
+        comparison_reader=comparison_reader,
+        policy_paths=comparison_policy_paths,
+    )
     ignore_cache: dict[Path, bool] = {}  # shared across all _is_ignored calls in this scan
     # CLI --exclude patterns are anchored at the scan root and appended last
     # so they win over any .graphifyignore/.gitignore rules (#947).
@@ -1186,7 +1303,11 @@ def detect(
             line = _parse_gitignore_line(pat)
             if line:
                 ignore_patterns.append((root, line))
-    include_patterns = _load_graphifyinclude(root)
+    include_patterns = _load_graphifyinclude(
+        root,
+        comparison_reader=comparison_reader,
+        policy_paths=comparison_policy_paths,
+    )
 
     # Always include graphify-out/memory/ - query results filed back into the graph
     memory_dir = root / GRAPHIFY_OUT / "memory"
@@ -1235,7 +1356,13 @@ def detect(
                 # Load it now, before pruning dp's children, so a nested ignore
                 # file governs its own subtree the same way git honors it (#1206).
                 if dp != root:
-                    ignore_patterns.extend(_load_dir_own_ignore(dp))
+                    ignore_patterns.extend(
+                        _load_dir_own_ignore(
+                            dp,
+                            comparison_reader=comparison_reader,
+                            policy_paths=comparison_policy_paths,
+                        )
+                    )
                 # Prune noise dirs in-place so os.walk never descends into them.
                 # Dot dirs are allowed — users often want .github/, .claude/, etc.
                 # Framework caches (.next, .nuxt, …) are caught by _is_noise_dir.
@@ -1288,10 +1415,10 @@ def detect(
         if not _resolves_under_root(p, root):
             skipped_sensitive.append(str(p) + " [symlink target outside scan root]")
             continue
-        if _is_sensitive(p):
+        if _is_sensitive(p, comparison_reader=comparison_reader):
             skipped_sensitive.append(str(p))
             continue
-        ftype = classify_file(p)
+        ftype = classify_file(p, comparison_reader=comparison_reader)
         if not ftype:
             # Considered but unclassifiable: an extension not in any supported set,
             # or an extensionless, non-shebang file (Dockerfile, Gemfile, Makefile,
@@ -1365,7 +1492,7 @@ def detect(
             f"Consider running on a subfolder."
         )
 
-    return {
+    result = {
         "files": {k.value: v for k, v in files.items()},
         "total_files": total_files,
         "total_words": total_words,
@@ -1378,6 +1505,11 @@ def detect(
         "graphifyignore_patterns": len(ignore_patterns),
         "scan_root": str(root.resolve()),
     }
+    if read_only:
+        result["comparison_policy_paths"] = sorted(
+            str(path) for path in (comparison_policy_paths or ())
+        )
+    return result
 
 
 def _os_path(path: Path) -> str:
