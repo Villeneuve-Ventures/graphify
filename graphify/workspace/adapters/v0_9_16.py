@@ -249,10 +249,7 @@ class Graphify0916Adapter:
                 raise QueryRejected("graph payload must be an object")
             if "links" not in raw and "edges" in raw:
                 raw = dict(raw, links=raw["edges"])
-            try:
-                graph = json_graph.node_link_graph(raw, edges="links")
-            except TypeError:  # pragma: no cover - older NetworkX compatibility
-                graph = json_graph.node_link_graph(raw)
+            graph = json_graph.node_link_graph(raw, edges="links")
         except (
             OSError,
             UnicodeDecodeError,

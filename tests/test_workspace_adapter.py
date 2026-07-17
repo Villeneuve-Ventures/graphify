@@ -16,6 +16,8 @@ from graphify.workspace.adapters import (
     AdapterIntent,
     CompatibilityLane,
     CompatibilityTuple,
+    QueryRejected,
+    QueryRequest,
     RetainedStateInvalid,
     SUPPORTED_COMPATIBILITY,
     UnsupportedCompatibility,
@@ -199,6 +201,22 @@ def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path:
     assert (output / "graphify-out" / "cache").is_dir()
     assert not (source / "graphify-out").exists()
     assert _tree_bytes(source) == before
+
+
+def test_0916_structural_query_rejects_malformed_graph(tmp_path: Path) -> None:
+    payload = tmp_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text(
+        '{"nodes": [], "links": null}\n',
+        encoding="utf-8",
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(QueryRejected, match="graph payload cannot be queried"):
+        adapter.query_structural(payload, QueryRequest(question="malformed graph"))
 
 
 def test_detection_redirects_conversion_sidecars_to_explicit_output(
