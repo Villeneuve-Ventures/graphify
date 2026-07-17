@@ -1962,6 +1962,42 @@ def test_registry_runtime_rejects_alias_ambiguity_and_missing_evidence(tmp_path:
         missing.load()
 
 
+@pytest.mark.parametrize("unsafe_kind", ("record_mode", "parent_link"))
+def test_registry_evidence_read_preserves_digest_context_for_unsafe_state(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    document = store.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "evidence-read-context"),
+        expected_revision=0,
+    ).to_dict()
+    digest = document["workspaces"][0]["uuid_enrollment"][
+        "immutable_evidence_sha256"
+    ]
+    evidence_directory = state_root / "evidence"
+    external: Path | None = None
+    if unsafe_kind == "record_mode":
+        (evidence_directory / f"{digest}.json").chmod(0o644)
+    else:
+        external = tmp_path / "external-evidence"
+        evidence_directory.rename(external)
+        evidence_directory.symlink_to(external, target_is_directory=True)
+
+    before_state = _tree_snapshot(state_root)
+    before_external = _tree_snapshot(external) if external is not None else None
+
+    with pytest.raises(StateCorrupt, match=rf"evidence {digest} is unreadable"):
+        store.read_evidence(digest)
+
+    assert _tree_snapshot(state_root) == before_state
+    if external is not None:
+        assert _tree_snapshot(external) == before_external
+
+
 def test_ambiguous_or_corrupt_runtime_state_fails_closed_without_counter_reset(
     tmp_path: Path,
 ) -> None:

@@ -31,6 +31,7 @@ from graphify.workspace.persistence import (
     REGISTRY_LOCK_RANK,
     RuntimeCapabilities,
     StateCorrupt,
+    StatePathError,
     Syscalls,
     WORKSPACE_LOCK_RANK,
 )
@@ -191,7 +192,7 @@ class RegistryStore:
         try:
             payload = self.state.read_existing_bytes(path.relative_to(self.state.root))
             value = json.loads(payload)
-        except (OSError, ValueError) as exc:
+        except (StateCorrupt, StatePathError, OSError, ValueError) as exc:
             raise StateCorrupt(f"evidence {digest} is unreadable: {exc}") from exc
         if not isinstance(value, dict) or canonical_json_bytes(value) != payload:
             raise StateCorrupt(f"evidence {digest} is not canonical JSON")
