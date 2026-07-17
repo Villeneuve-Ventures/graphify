@@ -88,6 +88,8 @@ _REMOTE_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=:@-]+", re.ASCII)
 _JOURNAL_MAGIC = b"GWF1"
 _JOURNAL_FRAME_VERSION = 1
 _JOURNAL_HEADER = struct.Struct(">4sBQ32s")
+_CAPACITY_STATE_FORMAT_VERSION = 2
+_LEGACY_UNBOUND_COMPATIBILITY = "legacy-unbound"
 _FENCED_LEASE_OPERATIONS = frozenset(
     {
         "ACTIVATE",
@@ -1513,17 +1515,32 @@ class CapacityReservationState:
 
     revision: int
     reservations: tuple[CapacityReservation, ...]
+    format_version: int = _CAPACITY_STATE_FORMAT_VERSION
 
     def to_dict(self) -> dict[str, Any]:
+        if self.format_version not in {1, _CAPACITY_STATE_FORMAT_VERSION}:
+            raise UnsupportedContractVersion(
+                "$.format_version: expected 1 or "
+                f"{_CAPACITY_STATE_FORMAT_VERSION}, got {self.format_version}"
+            )
         ordered = sorted(
             self.reservations,
             key=lambda item: (item.repo_uuid, item.generation_id),
         )
+        serialized: list[dict[str, Any]] = []
+        for item in ordered:
+            value = item.to_dict()
+            if self.format_version == 1:
+                if item.compatibility_sha256 == _LEGACY_UNBOUND_COMPATIBILITY:
+                    del value["compatibility_sha256"]
+                else:
+                    _digest(item.compatibility_sha256, "$.compatibility_sha256")
+            serialized.append(value)
         return {
             "contract": "graphify.workspace.capacity_reservations.internal",
-            "format_version": 1,
+            "format_version": self.format_version,
             "revision": self.revision,
-            "reservations": [item.to_dict() for item in ordered],
+            "reservations": serialized,
         }
 
     @property
@@ -1540,32 +1557,53 @@ class CapacityReservationState:
         )
         if data["contract"] != "graphify.workspace.capacity_reservations.internal":
             raise ContractError("$.contract: unsupported internal capacity reservation state")
-        _exact_version(data["format_version"], "$.format_version")
+        format_version = _integer(data["format_version"], "$.format_version", minimum=1)
+        if format_version not in {1, _CAPACITY_STATE_FORMAT_VERSION}:
+            raise UnsupportedContractVersion(
+                "$.format_version: expected 1 or "
+                f"{_CAPACITY_STATE_FORMAT_VERSION}, got {format_version}"
+            )
         revision = _integer(data["revision"], "$.revision", minimum=1)
         reservations: list[CapacityReservation] = []
         keys: list[tuple[str, str]] = []
         for index, raw in enumerate(_list(data["reservations"], "$.reservations")):
             path = f"$.reservations[{index}]"
             item = _mapping(raw, path)
+            required = {
+                "repo_uuid",
+                "generation_id",
+                "reserved_bytes",
+                "policy_sha256",
+                "active_source_revision",
+                "operation_epoch",
+                "fence_token",
+                "created_at",
+            }
+            if format_version == _CAPACITY_STATE_FORMAT_VERSION:
+                required.add("compatibility_sha256")
+            optional = {"compatibility_sha256"} if format_version == 1 else set()
             _exact_keys(
                 item,
                 path,
-                {
-                    "repo_uuid",
-                    "generation_id",
-                    "reserved_bytes",
-                    "policy_sha256",
-                    "compatibility_sha256",
-                    "active_source_revision",
-                    "operation_epoch",
-                    "fence_token",
-                    "created_at",
-                },
+                required,
+                optional,
             )
             repo_uuid = _uuid(item["repo_uuid"], f"{path}.repo_uuid")
             generation_id = _string(item["generation_id"], f"{path}.generation_id")
             if not _GENERATION_RE.fullmatch(generation_id):
                 raise ContractError(f"{path}.generation_id: invalid generation identity")
+            compatibility_sha256 = _LEGACY_UNBOUND_COMPATIBILITY
+            if "compatibility_sha256" in item:
+                raw_compatibility = _string(
+                    item["compatibility_sha256"],
+                    f"{path}.compatibility_sha256",
+                )
+                compatibility_sha256 = (
+                    raw_compatibility
+                    if format_version == _CAPACITY_STATE_FORMAT_VERSION
+                    and raw_compatibility == _LEGACY_UNBOUND_COMPATIBILITY
+                    else _digest(raw_compatibility, f"{path}.compatibility_sha256")
+                )
             reservation = CapacityReservation(
                 repo_uuid=repo_uuid,
                 generation_id=generation_id,
@@ -1575,10 +1613,7 @@ class CapacityReservationState:
                     minimum=1,
                 ),
                 policy_sha256=_digest(item["policy_sha256"], f"{path}.policy_sha256"),
-                compatibility_sha256=_digest(
-                    item["compatibility_sha256"],
-                    f"{path}.compatibility_sha256",
-                ),
+                compatibility_sha256=compatibility_sha256,
                 active_source_revision=_integer(
                     item["active_source_revision"],
                     f"{path}.active_source_revision",
@@ -1600,7 +1635,11 @@ class CapacityReservationState:
             keys.append((repo_uuid, generation_id))
         if keys != sorted(keys) or len(keys) != len(set(keys)):
             raise ContractError("$.reservations: entries must be unique and sorted")
-        return cls(revision=revision, reservations=tuple(reservations))
+        return cls(
+            revision=revision,
+            reservations=tuple(reservations),
+            format_version=format_version,
+        )
 
     @classmethod
     def from_json(cls, value: str | bytes) -> "CapacityReservationState":

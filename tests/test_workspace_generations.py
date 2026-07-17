@@ -15,8 +15,10 @@ import pytest
 from graphify.workspace.adapters import AdapterIntent, UnsupportedCompatibility
 from graphify.workspace.contracts import (
     CapacityPolicy,
+    CapacityReservationState,
     CompatibilityManifest,
     ContractError,
+    canonical_json_bytes,
 )
 from graphify.workspace.identity import discover_source
 from graphify.workspace.leases import LeaseGrant, LeaseRecoveryRequired
@@ -59,6 +61,203 @@ POLICY = CapacityPolicy.from_mapping(
         "reserve_bytes": 1024,
     }
 )
+
+
+def _install_legacy_capacity_state(
+    harness: Any,
+    grant: LeaseGrant,
+    *,
+    generation_id: str,
+    compatibility_sha256: str | None = None,
+) -> None:
+    reservation: dict[str, object] = {
+        "repo_uuid": REPO_UUID,
+        "generation_id": generation_id,
+        "reserved_bytes": 1024,
+        "policy_sha256": POLICY.sha256,
+        "active_source_revision": grant.active_source_revision,
+        "operation_epoch": grant.operation_epoch,
+        "fence_token": int(grant.lease.to_dict()["fence_token"]),
+        "created_at": "2026-07-16T19:00:01Z",
+    }
+    if compatibility_sha256 is not None:
+        reservation["compatibility_sha256"] = compatibility_sha256
+    payload = canonical_json_bytes(
+        {
+            "contract": "graphify.workspace.capacity_reservations.internal",
+            "format_version": 1,
+            "revision": 1,
+            "reservations": [reservation],
+        }
+    )
+    harness.leases.state.commit_record(
+        label="capacity",
+        current=Path("capacity.json"),
+        previous=Path("capacity.previous.json"),
+        pending=Path("capacity.pending.json"),
+        payload=payload,
+        decoder=CapacityReservationState.from_json,
+    )
+
+
+def test_allocation_migrates_legacy_capacity_state_without_claiming_compatibility(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    _install_legacy_capacity_state(
+        harness,
+        grant,
+        generation_id="gen-legacy-unbound",
+    )
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=2048,
+        capacity_policy=POLICY,
+        generation_id="gen-after-upgrade",
+        occurred_at=START + timedelta(seconds=2),
+        monotonic_ns=10_001,
+    )
+
+    state = CapacityReservationState.from_json((harness.state_root / "capacity.json").read_bytes())
+    reservations = {item.generation_id: item for item in state.reservations}
+    assert state.format_version == 2
+    assert state.revision == 2
+    assert reservations["gen-legacy-unbound"].compatibility_sha256 == "legacy-unbound"
+    assert reservations["gen-after-upgrade"].compatibility_sha256 == COMPATIBILITY_SHA256
+    assert allocation.compatibility_sha256 == COMPATIBILITY_SHA256
+
+
+def test_allocation_rejects_reusing_legacy_unbound_reservation_without_state_mutation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    _install_legacy_capacity_state(
+        harness,
+        grant,
+        generation_id="gen-legacy-unbound",
+    )
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        GenerationConflict,
+        match="different durable capacity reservation",
+    ):
+        store.allocate(
+            grant,
+            expected_payload_bytes=1024,
+            capacity_policy=POLICY,
+            generation_id="gen-legacy-unbound",
+            occurred_at=START + timedelta(seconds=2),
+            monotonic_ns=10_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_allocation_recovers_bound_format_one_current_and_format_two_pending(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    _install_legacy_capacity_state(
+        harness,
+        grant,
+        generation_id="gen-bound-format-one",
+        compatibility_sha256=COMPATIBILITY_SHA256,
+    )
+    current_path = harness.state_root / "capacity.json"
+    original = current_path.read_bytes()
+    bound_state = CapacityReservationState.from_json(original)
+    assert bound_state.canonical == original
+    assert bound_state.format_version == 1
+    assert bound_state.reservations[0].compatibility_sha256 == COMPATIBILITY_SHA256
+
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+
+    def fail_after_pending(event: str) -> None:
+        if event == "capacity:pending_durable":
+            raise InjectedFault(event)
+
+    failing_store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=fail_after_pending,
+    )
+    with pytest.raises(CommitUnknown, match="capacity recovery intent"):
+        failing_store.allocate(
+            grant,
+            expected_payload_bytes=2048,
+            capacity_policy=POLICY,
+            generation_id="gen-after-bound-upgrade",
+            occurred_at=START + timedelta(seconds=2),
+            monotonic_ns=10_001,
+        )
+
+    pending_path = harness.state_root / "capacity.pending.json"
+    assert CapacityReservationState.from_json(current_path.read_bytes()).format_version == 1
+    assert CapacityReservationState.from_json(pending_path.read_bytes()).format_version == 2
+
+    recovered_store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = recovered_store.allocate(
+        grant,
+        expected_payload_bytes=2048,
+        capacity_policy=POLICY,
+        generation_id="gen-after-bound-upgrade",
+        occurred_at=START + timedelta(seconds=2),
+        monotonic_ns=10_001,
+    )
+
+    recovered = CapacityReservationState.from_json(current_path.read_bytes())
+    previous = CapacityReservationState.from_json(
+        (harness.state_root / "capacity.previous.json").read_bytes()
+    )
+    reservations = {item.generation_id: item for item in recovered.reservations}
+    assert recovered.format_version == 2
+    assert previous.format_version == 1
+    assert not pending_path.exists()
+    assert reservations["gen-bound-format-one"].compatibility_sha256 == COMPATIBILITY_SHA256
+    assert reservations["gen-after-bound-upgrade"].compatibility_sha256 == COMPATIBILITY_SHA256
+    assert allocation.compatibility_sha256 == COMPATIBILITY_SHA256
 
 
 def test_generation_store_selects_stage_adapter_before_state(
