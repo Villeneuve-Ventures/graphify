@@ -310,6 +310,42 @@ def test_observer_rejects_in_place_change_after_hashing(
         adapter_module._read_regular_once(source)
 
 
+def test_observer_rejects_named_pipe_without_blocking(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("named pipes are unavailable on this platform")
+
+    import sys
+
+    source = tmp_path / "blocked.py"
+    os.mkfifo(source)
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import sys",
+                    "from pathlib import Path",
+                    "from graphify.workspace.adapters import ObservationUnsupported",
+                    "from graphify.workspace.adapters.v0_9_16 import _read_regular_once",
+                    "try:",
+                    "    _read_regular_once(Path(sys.argv[1]))",
+                    "except ObservationUnsupported:",
+                    "    raise SystemExit(0)",
+                    "raise SystemExit('named pipe was accepted')",
+                )
+            ),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
 def test_0916_structural_query_rejects_malformed_graph(tmp_path: Path) -> None:
     payload = tmp_path / "graphify-out"
     payload.mkdir()
@@ -324,6 +360,46 @@ def test_0916_structural_query_rejects_malformed_graph(tmp_path: Path) -> None:
 
     with pytest.raises(QueryRejected, match="graph payload cannot be queried"):
         adapter.query_structural(payload, QueryRequest(question="malformed graph"))
+
+
+def test_0916_structural_query_preserves_native_directed_traversal(
+    tmp_path: Path,
+) -> None:
+    payload = tmp_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [
+                    {"id": "source", "label": "upstream"},
+                    {"id": "target", "label": "target"},
+                ],
+                "links": [
+                    {
+                        "source": "source",
+                        "target": "target",
+                        "relation": "calls",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    result = adapter.query_structural(
+        payload,
+        QueryRequest(question="target", depth=1),
+    )
+
+    assert "NODE target" in result
+    assert "upstream" not in result
 
 
 def test_detection_redirects_conversion_sidecars_to_explicit_output(

@@ -331,6 +331,48 @@ def test_expired_freshness_deadline_fails_before_query(tmp_path: Path) -> None:
     assert result.output is None
 
 
+def test_deadline_expiring_after_pre_observation_skips_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    now = 0
+    calls = 0
+
+    def monotonic_ns() -> int:
+        return now
+
+    def hook(event: str, _details: Mapping[str, object]) -> None:
+        nonlocal now
+        if event == "freshness:pre_observed":
+            now = 5
+
+    def query(payload: Path) -> str:
+        nonlocal calls
+        calls += 1
+        return _query(payload)
+
+    monkeypatch.setattr(time, "monotonic_ns", monotonic_ns)
+
+    result = runtime.authority._run(
+        REPO_UUID,
+        query,
+        timeout_ns=5,
+        hook=hook,
+    )
+
+    assert result.decision == "withhold"
+    assert result.reason == "timeout"
+    assert result.query_executed is False
+    assert result.output is None
+    assert result.release is not None
+    release = result.release.to_dict()
+    assert release["release_decision"] == "withhold"
+    assert release["reason"] == "timeout"
+    assert release["pre_observation"] == release["post_observation"]
+    assert calls == 0
+
+
 def test_inter_observation_aba_is_documented_not_overclaimed(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     original = (runtime.repo / "README.md").read_bytes()

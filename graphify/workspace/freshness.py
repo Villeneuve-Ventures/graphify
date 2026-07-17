@@ -272,6 +272,20 @@ class FreshnessAuthority:
                             query_executed=False,
                         )
                     _emit(hook, "freshness:before_query")
+                    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                        release = self._release_document(
+                            pre_value,
+                            pre_value,
+                            decision="withhold",
+                            reason="timeout",
+                        )
+                        return FreshnessResult(
+                            decision="withhold",
+                            reason="timeout",
+                            output=None,
+                            release=release,
+                            query_executed=False,
+                        )
                     query_executed = True
                     output = query(reading.generation_path / "graphify-out")
                     _emit(hook, "freshness:after_query")

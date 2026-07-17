@@ -77,7 +77,12 @@ def _read_regular_once(
     *,
     collect: bool = False,
 ) -> tuple[str, os.stat_result, bytes | None]:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except FileNotFoundError as exc:
@@ -263,6 +268,7 @@ class Graphify0916Adapter:
                 raise QueryRejected("graph payload must be an object")
             if "links" not in raw and "edges" in raw:
                 raw = dict(raw, links=raw["edges"])
+            raw = dict(raw, directed=True)
             graph = json_graph.node_link_graph(raw, edges="links")
         except (
             OSError,

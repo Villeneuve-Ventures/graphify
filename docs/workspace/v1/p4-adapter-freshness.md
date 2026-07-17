@@ -56,15 +56,16 @@ anchor even when caches and durable artifacts are redirected externally.
    then open the current generation through its pre-created shared coordination
    lock. This preserves registry-before-generation lock ordering.
 3. Discover source identity and collect a complete no-write pre-query
-   observation. Each selected file is opened without following the final
-   symlink, hashed through one descriptor, and checked for identity and metadata
-   stability. Complete inventory passes repeat until two consecutive results
-   agree.
+   observation. Each selected file is opened nonblocking and without following
+   the final symlink, hashed through one descriptor, and checked for identity
+   and metadata stability. Complete inventory passes repeat until two
+   consecutive results agree.
 4. Compare pointer/source revisions, operation and fence values, schema,
    source commit, inventory, policy/ignore digest, detector identity, receipt,
    payload manifest, and compatibility digest to the sealed generation.
-5. Run the adapter's native `0.9.16` traversal against the immutable payload.
-   This library path deliberately bypasses optional query logging.
+5. Recheck the deadline, then run the adapter's native directed `0.9.16`
+   traversal against the immutable payload. This library path deliberately
+   bypasses optional query logging.
 6. Repeat source identity and the complete observation, revalidate source
    identity once more, and revalidate the pointer/receipt while both shared
    locks remain held.
