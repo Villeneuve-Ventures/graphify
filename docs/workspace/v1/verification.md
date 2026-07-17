@@ -87,8 +87,53 @@ After code changes, run the absolute repo-local Graphify binary to update the
 repo graph. Because the release checkout has no committed graph, bootstrap
 output remains ignored and must not widen the P1 product diff.
 
-P2 verification does not satisfy P3-P5 generation, journal, pointer, adapter,
-freshness, queue, service, performance, installation, or live-cutover gates.
+## P3 runtime gates
+
+- capacity limits and the filesystem reserve fail before allocation mutation,
+  with registry-serialized durable reservations for concurrent workspaces and
+  a bounded two-observation filesystem scan that tolerates concurrent renames
+  but rejects persistent duplicate locations;
+- filesystem reserve preflight counts unconsumed bytes promised by every
+  durable reservation before admitting another cross-workspace allocation;
+- successor fences adopt only byte-, policy-, source-, and generation-identical
+  reservations, forged allocation objects fail against durable state, and
+  activation is blocked while a reservation remains outstanding; a successor
+  revalidates before sealing a new receipt, may finish a fully sealed
+  predecessor receipt after binding it to the predecessor's validating event,
+  and idempotently returns an already-certified result after durable capacity
+  release;
+- descriptor-relative payload inventories reject links, special files,
+  hardlinks, extras, unstable identities, invalid root or descendant modes,
+  and noncanonical declarations;
+- certification syncs the exact payload and receipt, atomically installs one
+  generation, reopens and verifies it, then appends owner-bound `CERTIFIED`;
+- journal recovery adopts one complete uncommitted hash-linked segment,
+  discards only one truncated tail, cleans validated private temporary files
+  left by real process death, recomputes repo-bound event IDs, and rejects
+  cross-workspace grafts, committed corruption, or an ambiguous suffix;
+- promotion retains the prior pointer before one visible replacement, stale
+  candidates become `SUPERSEDED`, corrupt pending state fails closed, pointer
+  documents remain workspace-bound, and recovery emits and immediately verifies
+  a fresh higher revision without quarantining a valid retained generation;
+  stale pending/current revisions and missing certification history fail closed,
+  while every interrupted repair boundary resumes without exposing partially
+  verified references;
+- shared readers open retained locks read-only, perform no durable write, and
+  exclude GC's exclusive counterpart;
+- offline GC proves a no-write dry run, writes a durable intent, rechecks under
+  lexical generation locks, quarantines with both directories synced, records
+  completion, reconciles `commit_unknown`, and purges only by a separate
+  explicit operation;
+- durable GC and pointer intents block conflicting operations before mutation,
+  copied cross-workspace recovery records fail closed, and current readers stay
+  safe at every GC phase; purge retries injected unlink, rmdir, interruption,
+  and parent-fsync failures before recording completion; and
+- focused failpoint and deterministic concurrency schedules cover segment,
+  generation, pointer, reader-lock, GC, clean-reboot, dead-builder adoption, and
+  cross-workspace lock-scope boundaries.
+
+P3 verification does not satisfy P4/P5 adapter, freshness, queue, service,
+performance, installation, or live-cutover gates.
 
 The P1 fixture bundle is deliberately limited to synthetic contract fixtures;
 it is not claimed as the representative repository corpus required by the

@@ -49,8 +49,9 @@ external journal/pointer records.
 Every payload entry is a regular file with path, size, SHA-256, and allowed
 mode. The v1 root is exactly `graphify-out`, and every entry path must be a
 strict descendant of that root. Extra files, links, special files, duplicate
-paths, sibling paths, root-only entries, and path escapes are invalid. P3 will
-implement durable validation and sealing.
+paths, sibling paths, root-only entries, and path escapes are invalid. P3
+implements durable validation and sealing around caller-supplied staged
+payloads; it does not invoke Graphify extraction or query logic.
 
 ## Journal event and frame
 
@@ -111,13 +112,14 @@ operation, or migration epoch invalidates that lease's commit authority.
 last-good, pointer revision, source/operation/schema epochs, and the distinct
 accepted fence token used by a future compare-and-swap.
 `graphify.workspace.prior_pointer` is a copied retained predecessor; its
-replacement revision must be strictly greater. P3 will implement the one
-same-filesystem atomic visible-pointer replacement and recovery semantics.
+replacement revision must be strictly greater. P3 implements one
+same-filesystem atomic visible-pointer replacement and monotonic repair.
 
 `graphify.workspace.generation_coordination_lock` freezes a small lock identity
 installed before certification and retained in v1. Query will open it read-only
 and take a kernel shared advisory lock. Offline GC will take the exclusive
-counterpart and recheck reachability. P1 creates no lock files.
+counterpart and recheck reachability. P3 installs each lock identity durably
+before `CERTIFIED` and retains it across quarantine and purge.
 
 ## Freshness release
 

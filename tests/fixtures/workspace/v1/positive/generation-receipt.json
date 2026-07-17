@@ -17,7 +17,7 @@
   "coordination_lock_id": "generation:0001",
   "sealed_query_payload": {
     "root": "graphify-out",
-    "manifest_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "manifest_sha256": "ece5ff53c68ede5ea27f888bfc0cdaa08f70a5b55b2261b73690431997e433ae",
     "entries": [
       {
         "path": "graphify-out/graph.json",

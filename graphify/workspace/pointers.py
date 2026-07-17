@@ -1,0 +1,1046 @@
+"""Atomic pointer promotion, rollback, monotonic repair, and shared readers."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator, cast
+
+from graphify.workspace.contracts import (
+    STATE_SCHEMA_VERSION,
+    GenerationReceipt,
+    PointerSet,
+    PriorPointerRecord,
+)
+from graphify.workspace.generations import GenerationError, GenerationStore
+from graphify.workspace.journal import JournalSnapshot, JournalStore
+from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
+from graphify.workspace.persistence import (
+    DurableStateRoot,
+    FaultHook,
+    RuntimeCapabilities,
+    StatePathError,
+    Syscalls,
+)
+
+
+class PointerError(RuntimeError):
+    """Base class for stable pointer failures."""
+
+    code = "pointer_error"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{self.code}: {detail}")
+
+
+class PointerConflict(PointerError):
+    code = "pointer_conflict"
+
+
+class PointerSuperseded(PointerConflict):
+    code = "pointer_superseded"
+
+
+class PointerCorrupt(PointerError):
+    code = "pointer_corrupt"
+
+
+class PointerRecoveryRequired(PointerError):
+    code = "pointer_recovery_required"
+
+
+@dataclass(frozen=True)
+class PointerCAS:
+    expected_pointer_revision: int
+    expected_active_source_revision: int
+    expected_source_epoch: int
+    expected_operation_epoch: int
+    expected_migration_epoch: int
+    expected_state_schema_version: int
+    expected_fence_token: int
+    candidate_generation_id: str
+    candidate_receipt_sha256: str
+    expected_current_receipt_sha256: str | None
+
+
+@dataclass(frozen=True)
+class GenerationRead:
+    pointer: PointerSet
+    receipt: GenerationReceipt
+    generation_path: Path
+
+
+def _timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        raise PointerError("pointer timestamps must be timezone-aware")
+    normalized = value.astimezone(timezone.utc)
+    timespec = "microseconds" if normalized.microsecond else "seconds"
+    return normalized.isoformat(timespec=timespec).replace("+00:00", "Z")
+
+
+class PointerStore:
+    """Own the only visible pointer replacement and its recovery protocol."""
+
+    def __init__(
+        self,
+        state_root: Path,
+        leases: LeaseStore,
+        generations: GenerationStore,
+        journal: JournalStore,
+        *,
+        capabilities: RuntimeCapabilities | None = None,
+        fault_hook: FaultHook | None = None,
+        syscalls: Syscalls | None = None,
+    ) -> None:
+        self.leases = leases
+        self.generations = generations
+        self.journal = journal
+        self.state = DurableStateRoot(
+            state_root,
+            capabilities=capabilities,
+            fault_hook=fault_hook,
+            syscalls=syscalls,
+        )
+        roots = {self.state.root, leases.state.root, generations.state.root, journal.state.root}
+        if len(roots) != 1:
+            raise PointerError("pointer dependencies must share one external state root")
+        self.fault_hook = fault_hook or (lambda _event: None)
+
+    @staticmethod
+    def _workspace(repo_uuid: str) -> Path:
+        return LeaseStore._directory(repo_uuid)
+
+    @classmethod
+    def _current(cls, repo_uuid: str) -> Path:
+        return cls._workspace(repo_uuid) / "pointers.json"
+
+    @classmethod
+    def _prior(cls, repo_uuid: str) -> Path:
+        return cls._workspace(repo_uuid) / "pointers.previous.json"
+
+    @classmethod
+    def _pending(cls, repo_uuid: str) -> Path:
+        return cls._workspace(repo_uuid) / "pointers.pending.json"
+
+    @classmethod
+    def _gc_intent(cls, repo_uuid: str) -> Path:
+        return cls._workspace(repo_uuid) / "gc" / "intent.json"
+
+    def _exists(self, relative: Path) -> bool:
+        try:
+            return self.state.private_file_exists(relative)
+        except StatePathError as exc:
+            raise PointerCorrupt(f"pointer state path is unsafe: {relative}") from exc
+
+    def _read_pointer(
+        self,
+        relative: Path,
+        *,
+        allow_missing: bool,
+        expected_repo_uuid: str | None = None,
+    ) -> PointerSet | None:
+        if not self._exists(relative):
+            if allow_missing:
+                return None
+            raise PointerCorrupt(f"pointer record is missing: {relative}")
+        try:
+            pointer = cast(
+                PointerSet,
+                PointerSet.from_json(self.state.read_existing_bytes(relative)),
+            )
+        except Exception as exc:
+            raise PointerCorrupt(f"pointer record is invalid: {relative}: {exc}") from exc
+        if (
+            expected_repo_uuid is not None
+            and pointer.to_dict()["repo_uuid"] != expected_repo_uuid
+        ):
+            raise PointerCorrupt(
+                f"pointer record belongs to another workspace: {relative}"
+            )
+        return pointer
+
+    def retained_prior(self, repo_uuid: str) -> PriorPointerRecord | None:
+        relative = self._prior(repo_uuid)
+        if not self._exists(relative):
+            return None
+        try:
+            prior = cast(
+                PriorPointerRecord,
+                PriorPointerRecord.from_json(self.state.read_existing_bytes(relative)),
+            )
+        except Exception as exc:
+            raise PointerCorrupt(f"prior pointer record is invalid: {exc}") from exc
+        if prior.to_dict()["pointer_set"]["repo_uuid"] != repo_uuid:
+            raise PointerCorrupt("prior pointer record belongs to another workspace")
+        return prior
+
+    def _assert_no_gc_intent(self, repo_uuid: str) -> None:
+        if self._exists(self._gc_intent(repo_uuid)):
+            raise PointerRecoveryRequired("unresolved GC intent blocks pointer mutation")
+
+    @staticmethod
+    def _validate_pending_relationship(
+        current: PointerSet | None,
+        pending: PointerSet | None,
+        prior: PriorPointerRecord | None,
+    ) -> None:
+        if pending is None:
+            return
+        pending_revision = int(pending.to_dict()["pointer_revision"])
+        if current is not None and current.canonical != pending.canonical:
+            current_revision = int(current.to_dict()["pointer_revision"])
+            if pending_revision <= current_revision:
+                raise PointerCorrupt("pending pointer is stale relative to visible current")
+            if prior is None:
+                raise PointerCorrupt("pending pointer has no retained prior binding")
+        if prior is None:
+            if pending_revision != 1:
+                raise PointerCorrupt("noninitial pending pointer has no retained prior binding")
+            return
+        prior_value = prior.to_dict()
+        replaced_by_revision = int(prior_value["replaced_by_revision"])
+        pending_is_visible = current is not None and current.canonical == pending.canonical
+        if (
+            not pending_is_visible
+            and replaced_by_revision != pending_revision
+        ) or (pending_is_visible and replaced_by_revision < pending_revision):
+            raise PointerCorrupt("pending pointer revision does not match retained prior")
+        prior_pointer = cast(
+            PointerSet,
+            PointerSet.from_mapping(prior_value["pointer_set"]),
+        )
+        if int(prior_pointer.to_dict()["pointer_revision"]) >= replaced_by_revision:
+            raise PointerCorrupt("retained prior is not older than pending pointer")
+        if (
+            current is not None
+            and current.canonical != pending.canonical
+            and prior_pointer.canonical != current.canonical
+        ):
+            current_value = current.to_dict()
+            pending_value = pending.to_dict()
+            if (
+                current_value["current"] != pending_value["current"]
+                or current_value["last_good"] != pending_value["last_good"]
+            ):
+                raise PointerCorrupt("pending pointer is not based on visible current")
+
+    def load(self, repo_uuid: str, *, allow_missing: bool = False) -> PointerSet | None:
+        """Read one visible pointer without recovery or any mutating syscall."""
+
+        if self._exists(self._pending(repo_uuid)):
+            raise PointerRecoveryRequired("a durable pointer intent requires fenced recovery")
+        return self._read_pointer(
+            self._current(repo_uuid),
+            allow_missing=allow_missing,
+            expected_repo_uuid=repo_uuid,
+        )
+
+    @staticmethod
+    def _ref(receipt: GenerationReceipt) -> dict[str, str]:
+        value = receipt.to_dict()
+        return {
+            "generation_id": str(value["generation_id"]),
+            "receipt_sha256": receipt.sha256,
+        }
+
+    def _verify_ref(self, repo_uuid: str, reference: dict[str, Any]) -> GenerationReceipt:
+        generation_id = str(reference["generation_id"])
+        receipt = self.generations.verify_generation(repo_uuid, generation_id)
+        if receipt.sha256 != reference["receipt_sha256"]:
+            raise PointerCorrupt(f"pointer receipt hash is stale for {generation_id}")
+        return receipt
+
+    def verify_pointer(
+        self,
+        pointer: PointerSet,
+        *,
+        expected_repo_uuid: str | None = None,
+    ) -> dict[str, GenerationReceipt]:
+        value = pointer.to_dict()
+        repo_uuid = str(value["repo_uuid"])
+        if expected_repo_uuid is not None and repo_uuid != expected_repo_uuid:
+            raise PointerCorrupt("pointer belongs to another workspace")
+        result = {"current": self._verify_ref(repo_uuid, cast(dict[str, Any], value["current"]))}
+        if value["last_good"] is not None:
+            result["last_good"] = self._verify_ref(
+                repo_uuid,
+                cast(dict[str, Any], value["last_good"]),
+            )
+        current_value = result["current"].to_dict()
+        if (
+            int(value["active_source_revision"])
+            != int(current_value["active_source_revision"])
+            or int(value["source_epoch"]) != int(current_value["source_epoch"])
+        ):
+            raise PointerCorrupt("pointer source authority does not match its current receipt")
+        return result
+
+    def _verify_repair_refs(
+        self,
+        repo_uuid: str,
+        pointer: PointerSet,
+    ) -> tuple[dict[str, GenerationReceipt], set[str]]:
+        value = pointer.to_dict()
+        receipts: dict[str, GenerationReceipt] = {}
+        corrupt_generations: set[str] = set()
+        for name in ("current", "last_good"):
+            reference = value[name]
+            if reference is None:
+                continue
+            ref = cast(dict[str, Any], reference)
+            generation_id = str(ref["generation_id"])
+            generation_path = self.state.path(
+                self.generations._generation(repo_uuid, generation_id)
+            )
+            if not generation_path.exists():
+                continue
+            try:
+                receipt = self.generations.verify_generation(repo_uuid, generation_id)
+            except GenerationError:
+                corrupt_generations.add(generation_id)
+                continue
+            if receipt.sha256 == ref["receipt_sha256"]:
+                receipts[name] = receipt
+        if "current" in receipts:
+            current_value = receipts["current"].to_dict()
+            if (
+                int(value["active_source_revision"])
+                != int(current_value["active_source_revision"])
+                or int(value["source_epoch"]) != int(current_value["source_epoch"])
+            ):
+                del receipts["current"]
+        return receipts, corrupt_generations
+
+    @staticmethod
+    def _journal_certifies(
+        snapshot: JournalSnapshot,
+        *,
+        generation_id: str,
+        receipt_sha256: str,
+    ) -> bool:
+        certified = False
+        forbidden = False
+        for event in snapshot.for_generation(generation_id):
+            value = event.to_dict()
+            if value["transition"] == "CERTIFIED" and value["receipt_sha256"] == receipt_sha256:
+                certified = True
+            if value["transition"] in {"FAILED", "SUPERSEDED"}:
+                forbidden = True
+        return certified and not forbidden
+
+    @staticmethod
+    def _journal_records_pointer(
+        snapshot: JournalSnapshot,
+        pointer: PointerSet,
+        *,
+        transition: str,
+    ) -> bool:
+        value = pointer.to_dict()
+        current = cast(dict[str, Any], value["current"])
+        return any(
+            event.to_dict()["transition"] == transition
+            and event.to_dict()["generation_id"] == current["generation_id"]
+            and event.to_dict()["receipt_sha256"] == current["receipt_sha256"]
+            and event.to_dict()["pointer_revision"] == value["pointer_revision"]
+            and event.to_dict()["operation_epoch"] == value["operation_epoch"]
+            and event.to_dict()["fence_token"] == value["fence_token"]
+            for event in snapshot.events
+        )
+
+    def _preliminary_pointer(self, repo_uuid: str) -> PointerSet | None:
+        if self._exists(self._pending(repo_uuid)):
+            raise PointerRecoveryRequired("a durable pointer intent requires fenced recovery")
+        return self._read_pointer(
+            self._current(repo_uuid),
+            allow_missing=True,
+            expected_repo_uuid=repo_uuid,
+        )
+
+    def _lock_set(
+        self,
+        repo_uuid: str,
+        candidate_generation_id: str,
+        preliminary: PointerSet | None,
+    ) -> list[tuple[str, Path]]:
+        generation_ids = {candidate_generation_id}
+        if preliminary is not None:
+            preliminary_value = preliminary.to_dict()
+            current = cast(dict[str, Any], preliminary_value["current"])
+            generation_ids.add(str(current["generation_id"]))
+            if preliminary_value["last_good"] is not None:
+                last_good = cast(dict[str, Any], preliminary_value["last_good"])
+                generation_ids.add(str(last_good["generation_id"]))
+        return [
+            (generation_id, self.generations._lock(repo_uuid, generation_id))
+            for generation_id in sorted(generation_ids)
+        ]
+
+    def _validate_cas(
+        self,
+        operation: LeaseOperation,
+        cas: PointerCAS,
+        current: PointerSet | None,
+        candidate: GenerationReceipt,
+    ) -> None:
+        current_value = None if current is None else current.to_dict()
+        current_revision = 0 if current_value is None else int(current_value["pointer_revision"])
+        current_receipt = (
+            None
+            if current_value is None
+            else cast(dict[str, Any], current_value["current"])["receipt_sha256"]
+        )
+        if cas.expected_pointer_revision != current_revision:
+            raise PointerSuperseded(
+                f"pointer revision expected {cas.expected_pointer_revision}, found {current_revision}"
+            )
+        expected = (
+            cas.expected_active_source_revision,
+            cas.expected_operation_epoch,
+            cas.expected_migration_epoch,
+            cas.expected_state_schema_version,
+            cas.expected_fence_token,
+            cas.expected_source_epoch,
+            cas.candidate_generation_id,
+            cas.candidate_receipt_sha256,
+            cas.expected_current_receipt_sha256,
+        )
+        candidate_value = candidate.to_dict()
+        actual = (
+            operation.grant.active_source_revision,
+            operation.grant.operation_epoch,
+            operation.grant.migration_epoch,
+            STATE_SCHEMA_VERSION,
+            operation.fence_token,
+            int(candidate_value["source_epoch"]),
+            str(candidate_value["generation_id"]),
+            candidate.sha256,
+            current_receipt,
+        )
+        if expected != actual:
+            raise PointerConflict(
+                "pointer CAS source/operation/schema/fence/receipt tuple is stale"
+            )
+        if int(candidate_value["active_source_revision"]) != operation.grant.active_source_revision:
+            raise PointerConflict("candidate receipt was certified for another active source")
+
+    def _pointer_document(
+        self,
+        operation: LeaseOperation,
+        *,
+        revision: int,
+        candidate: GenerationReceipt,
+        last_good: dict[str, str] | None,
+    ) -> PointerSet:
+        candidate_value = candidate.to_dict()
+        return cast(
+            PointerSet,
+            PointerSet.from_mapping(
+                {
+                    "contract": "graphify.workspace.pointer_set",
+                    "schema_version": 1,
+                    "repo_uuid": operation.repo_uuid,
+                    "pointer_revision": revision,
+                    "active_source_revision": operation.grant.active_source_revision,
+                    "source_epoch": candidate_value["source_epoch"],
+                    "operation_epoch": operation.grant.operation_epoch,
+                    "fence_token": operation.fence_token,
+                    "state_schema_version": STATE_SCHEMA_VERSION,
+                    "current": self._ref(candidate),
+                    "last_good": last_good,
+                }
+            ),
+        )
+
+    def _retain_prior(
+        self,
+        repo_uuid: str,
+        current: PointerSet,
+        *,
+        replaced_by_revision: int,
+        retained_at: datetime,
+        label: str,
+    ) -> None:
+        prior = cast(
+            PriorPointerRecord,
+            PriorPointerRecord.from_mapping(
+                {
+                    "contract": "graphify.workspace.prior_pointer",
+                    "schema_version": 1,
+                    "retained_at": _timestamp(retained_at),
+                    "replaced_by_revision": replaced_by_revision,
+                    "pointer_set": current.to_dict(),
+                }
+            ),
+        )
+        self.state.atomic_replace_bytes(self._prior(repo_uuid), prior.canonical, label=label)
+
+    def _quarantine_corrupt(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        revision: int,
+    ) -> None:
+        source = self.generations._generation(repo_uuid, generation_id)
+        source_path = self.state.path(source)
+        if not source_path.exists():
+            return
+        destination = (
+            self._workspace(repo_uuid) / "quarantine" / "corrupt" / f"{generation_id}.{revision}"
+        )
+        self.state.rename_contained(
+            source,
+            destination,
+            label=f"pointer:quarantine:{generation_id}",
+        )
+        self.fault_hook(f"pointer:{generation_id}:quarantined")
+
+    def _persist_move(
+        self,
+        operation: LeaseOperation,
+        *,
+        current: PointerSet | None,
+        candidate: GenerationReceipt,
+        pointer: PointerSet,
+        transition: str,
+        occurred_at: datetime,
+        corrupt_generations: tuple[str, ...],
+    ) -> PointerSet:
+        label = transition.lower()
+        if current is not None:
+            self._retain_prior(
+                operation.repo_uuid,
+                current,
+                replaced_by_revision=int(pointer.to_dict()["pointer_revision"]),
+                retained_at=occurred_at,
+                label=f"pointer:{label}:prior",
+            )
+            self.fault_hook(f"pointer:{label}:prior_durable")
+        self.state.atomic_replace_bytes(
+            self._pending(operation.repo_uuid),
+            pointer.canonical,
+            label=f"pointer:{label}:pending",
+        )
+        self.fault_hook(f"pointer:{label}:pending_durable")
+        self.state.atomic_replace_bytes(
+            self._current(operation.repo_uuid),
+            pointer.canonical,
+            label=f"pointer:{label}:visible",
+        )
+        self.fault_hook(f"pointer:{label}:visible")
+        pointer_revision = int(pointer.to_dict()["pointer_revision"])
+        self.journal.append_pointer_locked(
+            operation,
+            transition=transition,
+            generation_id=str(candidate.to_dict()["generation_id"]),
+            receipt_sha256=candidate.sha256,
+            pointer_revision=pointer_revision,
+            occurred_at=occurred_at,
+        )
+        self.fault_hook(f"pointer:{label}:journal_durable")
+        for generation_id in corrupt_generations:
+            self._quarantine_corrupt(
+                operation.repo_uuid,
+                generation_id,
+                revision=pointer_revision,
+            )
+        self.state.unlink_and_sync(
+            self._pending(operation.repo_uuid),
+            label=f"pointer:{label}:complete",
+        )
+        self.fault_hook(f"pointer:{label}:complete")
+        return pointer
+
+    def _move(
+        self,
+        grant: LeaseGrant,
+        cas: PointerCAS,
+        *,
+        transition: str,
+        allowed_operation: str,
+        occurred_at: datetime,
+        monotonic_ns: int,
+    ) -> PointerSet:
+        with self.leases.current_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            allowed_operations=frozenset({allowed_operation}),
+        ) as operation:
+            self._assert_no_gc_intent(operation.repo_uuid)
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
+            preliminary = self._preliminary_pointer(operation.repo_uuid)
+            locks = self._lock_set(
+                operation.repo_uuid,
+                cas.candidate_generation_id,
+                preliminary,
+            )
+            with self.state.existing_generation_locks(locks, exclusive=True):
+                current = self._preliminary_pointer(operation.repo_uuid)
+                candidate = self.generations.verify_generation(
+                    operation.repo_uuid,
+                    cas.candidate_generation_id,
+                )
+                snapshot = self.journal.recover_locked(operation)
+                if not self._journal_certifies(
+                    snapshot,
+                    generation_id=cas.candidate_generation_id,
+                    receipt_sha256=candidate.sha256,
+                ):
+                    raise PointerConflict("candidate is not eligible for pointer movement")
+                candidate_is_current = False
+                if current is not None:
+                    current_ref = cast(dict[str, Any], current.to_dict()["current"])
+                    candidate_is_current = (
+                        current_ref["generation_id"] == cas.candidate_generation_id
+                        and current_ref["receipt_sha256"] == candidate.sha256
+                    )
+                try:
+                    self._validate_cas(operation, cas, current, candidate)
+                except PointerSuperseded:
+                    if current is None or candidate_is_current:
+                        raise
+                    pointer_revision = int(current.to_dict()["pointer_revision"])
+                    self.journal.append_pointer_locked(
+                        operation,
+                        transition="SUPERSEDED",
+                        generation_id=cas.candidate_generation_id,
+                        receipt_sha256=candidate.sha256,
+                        pointer_revision=pointer_revision,
+                        occurred_at=occurred_at,
+                    )
+                    raise
+                if candidate_is_current:
+                    return cast(PointerSet, current)
+                corrupt_generations: set[str] = set()
+                last_good = None
+                if current is not None:
+                    current_value = current.to_dict()
+                    current_ref = cast(dict[str, Any], current_value["current"])
+                    try:
+                        old_receipt = self._verify_ref(operation.repo_uuid, current_ref)
+                    except (GenerationError, PointerError):
+                        corrupt_generations.add(str(current_ref["generation_id"]))
+                        if current_value["last_good"] is not None:
+                            last_good_ref = cast(dict[str, Any], current_value["last_good"])
+                            try:
+                                verified_last_good = self._verify_ref(
+                                    operation.repo_uuid,
+                                    last_good_ref,
+                                )
+                            except (GenerationError, PointerError):
+                                corrupt_generations.add(str(last_good_ref["generation_id"]))
+                            else:
+                                last_good = self._ref(verified_last_good)
+                    else:
+                        last_good = self._ref(old_receipt)
+                revision = 1 if current is None else int(current.to_dict()["pointer_revision"]) + 1
+                pointer = self._pointer_document(
+                    operation,
+                    revision=revision,
+                    candidate=candidate,
+                    last_good=last_good,
+                )
+                return self._persist_move(
+                    operation,
+                    current=current,
+                    candidate=candidate,
+                    pointer=pointer,
+                    transition=transition,
+                    occurred_at=occurred_at,
+                    corrupt_generations=tuple(sorted(corrupt_generations)),
+                )
+
+    def promote(
+        self,
+        grant: LeaseGrant,
+        cas: PointerCAS,
+        *,
+        occurred_at: datetime,
+        monotonic_ns: int,
+    ) -> PointerSet:
+        return self._move(
+            grant,
+            cas,
+            transition="PROMOTED",
+            allowed_operation="PROMOTE",
+            occurred_at=occurred_at,
+            monotonic_ns=monotonic_ns,
+        )
+
+    def rollback(
+        self,
+        grant: LeaseGrant,
+        cas: PointerCAS,
+        *,
+        occurred_at: datetime,
+        monotonic_ns: int,
+    ) -> PointerSet:
+        return self._move(
+            grant,
+            cas,
+            transition="ROLLED_BACK",
+            allowed_operation="ROLLBACK",
+            occurred_at=occurred_at,
+            monotonic_ns=monotonic_ns,
+        )
+
+    @staticmethod
+    def _pointer_refs(pointer: PointerSet | None) -> set[str]:
+        if pointer is None:
+            return set()
+        value = pointer.to_dict()
+        result = {str(cast(dict[str, Any], value["current"])["generation_id"])}
+        if value["last_good"] is not None:
+            result.add(str(cast(dict[str, Any], value["last_good"])["generation_id"]))
+        return result
+
+    def recover(
+        self,
+        grant: LeaseGrant,
+        *,
+        occurred_at: datetime,
+        monotonic_ns: int,
+    ) -> PointerSet:
+        with self.leases.current_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            allowed_operations=frozenset({"POINTER_RECOVERY", "REPAIR"}),
+        ) as operation:
+            self._assert_no_gc_intent(operation.repo_uuid)
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
+            try:
+                current = self._read_pointer(
+                    self._current(operation.repo_uuid),
+                    allow_missing=True,
+                    expected_repo_uuid=operation.repo_uuid,
+                )
+            except PointerCorrupt:
+                current = None
+            pending = self._read_pointer(
+                self._pending(operation.repo_uuid),
+                allow_missing=True,
+                expected_repo_uuid=operation.repo_uuid,
+            )
+            prior = self.retained_prior(operation.repo_uuid)
+            prior_pointer = (
+                None
+                if prior is None
+                else cast(PointerSet, PointerSet.from_mapping(prior.to_dict()["pointer_set"]))
+            )
+            self._validate_pending_relationship(current, pending, prior)
+            if pending is None and current is not None:
+                try:
+                    current_receipts = self.verify_pointer(
+                        current,
+                        expected_repo_uuid=operation.repo_uuid,
+                    )
+                except (GenerationError, PointerError):
+                    pass
+                else:
+                    snapshot = self.journal.recover_locked(operation)
+                    journal_pointer_revisions = [
+                        int(event.to_dict()["pointer_revision"])
+                        for event in snapshot.events
+                        if event.to_dict()["pointer_revision"] is not None
+                    ]
+                    current_revision = int(current.to_dict()["pointer_revision"])
+                    if journal_pointer_revisions and max(
+                        journal_pointer_revisions
+                    ) > current_revision:
+                        raise PointerCorrupt(
+                            "visible pointer is stale relative to durable journal history"
+                        )
+                    visible_event_matches = any(
+                        self._journal_records_pointer(
+                            snapshot,
+                            current,
+                            transition=transition,
+                        )
+                        for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")
+                    )
+                    if not visible_event_matches:
+                        raise PointerCorrupt(
+                            "visible pointer has no matching durable journal event"
+                        )
+                    prior_revision = (
+                        0
+                        if prior is None
+                        else int(prior.to_dict()["replaced_by_revision"])
+                    )
+                    if (
+                        int(current_receipts["current"].to_dict()["active_source_revision"])
+                        == operation.grant.active_source_revision
+                        and prior_revision <= current_revision
+                        and self._journal_certifies(
+                            snapshot,
+                            generation_id=str(
+                                current_receipts["current"].to_dict()["generation_id"]
+                            ),
+                            receipt_sha256=current_receipts["current"].sha256,
+                        )
+                    ):
+                        return current
+            generation_ids = (
+                self._pointer_refs(current)
+                | self._pointer_refs(pending)
+                | self._pointer_refs(prior_pointer)
+            )
+            locks = [
+                (generation_id, self.generations._lock(operation.repo_uuid, generation_id))
+                for generation_id in sorted(generation_ids)
+                if self.state.path(
+                    self.generations._lock(operation.repo_uuid, generation_id)
+                ).exists()
+            ]
+            with self.state.existing_generation_locks(locks, exclusive=True):
+                valid: list[tuple[str, PointerSet, dict[str, GenerationReceipt]]] = []
+                verified_by_name: dict[str, dict[str, GenerationReceipt]] = {}
+                corrupt_generations: set[str] = set()
+                for name, pointer in (
+                    ("current", current),
+                    ("pending", pending),
+                    ("prior", prior_pointer),
+                ):
+                    if pointer is None:
+                        continue
+                    receipts, corrupt = self._verify_repair_refs(
+                        operation.repo_uuid,
+                        pointer,
+                    )
+                    verified_by_name[name] = receipts
+                    corrupt_generations.update(corrupt)
+                    current_receipt = receipts.get("current")
+                    if (
+                        current_receipt is not None
+                        and int(
+                            current_receipt.to_dict()["active_source_revision"]
+                        )
+                        == operation.grant.active_source_revision
+                    ):
+                        valid.append((name, pointer, receipts))
+                if not valid:
+                    raise PointerCorrupt("no fully verified pointer source can be repaired")
+                by_name = {name: (pointer, receipts) for name, pointer, receipts in valid}
+                if "pending" in by_name:
+                    chosen_name = "pending"
+                    _chosen, chosen_receipts = by_name["pending"]
+                elif "current" in by_name:
+                    chosen_name = "current"
+                    _chosen, chosen_receipts = by_name["current"]
+                else:
+                    chosen_name = "prior"
+                    _chosen, chosen_receipts = by_name["prior"]
+                candidate = chosen_receipts["current"]
+                snapshot = self.journal.recover_locked(operation)
+                pending_value = None if pending is None else pending.to_dict()
+                pending_belongs_to_operation = (
+                    pending_value is not None
+                    and int(pending_value["operation_epoch"])
+                    == operation.grant.operation_epoch
+                    and int(pending_value["fence_token"]) == operation.fence_token
+                )
+                if pending_belongs_to_operation:
+                    assert pending is not None
+                    assert pending_value is not None
+                    pending_receipts = self.verify_pointer(
+                        pending,
+                        expected_repo_uuid=operation.repo_uuid,
+                    )
+                    candidate = pending_receipts["current"]
+                    if (
+                        int(candidate.to_dict()["active_source_revision"])
+                        != operation.grant.active_source_revision
+                    ):
+                        raise PointerCorrupt(
+                            "pending repair does not match current active-source authority"
+                        )
+                    if not self._journal_certifies(
+                        snapshot,
+                        generation_id=str(candidate.to_dict()["generation_id"]),
+                        receipt_sha256=candidate.sha256,
+                    ):
+                        raise PointerCorrupt(
+                            "repair candidate is failed, superseded, or uncertified"
+                        )
+                    if current is None or current.canonical != pending.canonical:
+                        self.state.atomic_replace_bytes(
+                            self._current(operation.repo_uuid),
+                            pending.canonical,
+                            label="pointer:repaired:visible",
+                        )
+                        self.fault_hook("pointer:repaired:visible")
+                    if not self._journal_records_pointer(
+                        snapshot,
+                        pending,
+                        transition="REPAIRED",
+                    ):
+                        self.journal.append_pointer_locked(
+                            operation,
+                            transition="REPAIRED",
+                            generation_id=str(candidate.to_dict()["generation_id"]),
+                            receipt_sha256=candidate.sha256,
+                            pointer_revision=int(pending_value["pointer_revision"]),
+                            occurred_at=occurred_at,
+                        )
+                    self.fault_hook("pointer:repaired:journal_durable")
+                    repaired_refs = self._pointer_refs(pending)
+                    for generation_id in sorted(corrupt_generations - repaired_refs):
+                        self._quarantine_corrupt(
+                            operation.repo_uuid,
+                            generation_id,
+                            revision=int(pending_value["pointer_revision"]),
+                        )
+                    self.state.unlink_and_sync(
+                        self._pending(operation.repo_uuid),
+                        label="pointer:repaired:complete",
+                    )
+                    self.fault_hook("pointer:repaired:complete")
+                    self.verify_pointer(pending, expected_repo_uuid=operation.repo_uuid)
+                    return pending
+                if (
+                    current is not None
+                    and pending is not None
+                    and current.canonical == pending.canonical
+                    and "current" in by_name
+                    and "pending" in by_name
+                    and self._journal_records_pointer(
+                        snapshot,
+                        current,
+                        transition="REPAIRED",
+                    )
+                ):
+                    repaired_refs = self._pointer_refs(current)
+                    pointer_revision = int(current.to_dict()["pointer_revision"])
+                    for generation_id in sorted(corrupt_generations - repaired_refs):
+                        self._quarantine_corrupt(
+                            operation.repo_uuid,
+                            generation_id,
+                            revision=pointer_revision,
+                        )
+                    self.state.unlink_and_sync(
+                        self._pending(operation.repo_uuid),
+                        label="pointer:repaired:complete",
+                    )
+                    self.fault_hook("pointer:repaired:complete")
+                    self.verify_pointer(current, expected_repo_uuid=operation.repo_uuid)
+                    return current
+                if not self._journal_certifies(
+                    snapshot,
+                    generation_id=str(candidate.to_dict()["generation_id"]),
+                    receipt_sha256=candidate.sha256,
+                ):
+                    raise PointerCorrupt("repair candidate is failed, superseded, or uncertified")
+                revisions = [
+                    int(pointer.to_dict()["pointer_revision"])
+                    for pointer in (current, pending, prior_pointer)
+                    if pointer is not None
+                ]
+                if prior is not None:
+                    revisions.append(int(prior.to_dict()["replaced_by_revision"]))
+                revisions.extend(
+                    int(event.to_dict()["pointer_revision"])
+                    for event in snapshot.events
+                    if event.to_dict()["pointer_revision"] is not None
+                )
+                revision = max(revisions, default=0) + 1
+                last_good: dict[str, str] | None = None
+                if "current" in by_name:
+                    former, former_receipts = by_name["current"]
+                    former_ref = cast(dict[str, Any], former.to_dict()["current"])
+                    if former_ref["generation_id"] != candidate.to_dict()["generation_id"]:
+                        last_good = self._ref(former_receipts["current"])
+                if last_good is None:
+                    for source_name in dict.fromkeys(
+                        (chosen_name, "current", "pending", "prior")
+                    ):
+                        receipt = verified_by_name.get(source_name, {}).get("last_good")
+                        if (
+                            receipt is not None
+                            and receipt.to_dict()["generation_id"]
+                            != candidate.to_dict()["generation_id"]
+                        ):
+                            last_good = self._ref(receipt)
+                            break
+                repaired = self._pointer_document(
+                    operation,
+                    revision=revision,
+                    candidate=candidate,
+                    last_good=last_good,
+                )
+                visible_current = current if "current" in by_name else None
+                if (
+                    visible_current is not None
+                    and pending is not None
+                    and visible_current.canonical == pending.canonical
+                    and prior is not None
+                ):
+                    visible_current = prior_pointer
+                repaired_refs = self._pointer_refs(repaired)
+                result = self._persist_move(
+                    operation,
+                    current=visible_current,
+                    candidate=candidate,
+                    pointer=repaired,
+                    transition="REPAIRED",
+                    occurred_at=occurred_at,
+                    corrupt_generations=tuple(
+                        sorted(
+                            generation_id
+                            for generation_id in corrupt_generations
+                            if generation_id not in repaired_refs
+                        )
+                    ),
+                )
+                self.verify_pointer(result, expected_repo_uuid=operation.repo_uuid)
+                return result
+
+    @contextmanager
+    def read_current(self, repo_uuid: str) -> Iterator[GenerationRead]:
+        while True:
+            pointer = self._read_pointer(
+                self._current(repo_uuid),
+                allow_missing=False,
+                expected_repo_uuid=repo_uuid,
+            )
+            assert pointer is not None
+            value = pointer.to_dict()
+            current = cast(dict[str, Any], value["current"])
+            generation_id = str(current["generation_id"])
+            lock = self.generations._lock(repo_uuid, generation_id)
+            with self.state.existing_generation_lock(
+                lock,
+                generation_id=generation_id,
+                exclusive=False,
+            ):
+                reloaded = self._read_pointer(
+                    self._current(repo_uuid),
+                    allow_missing=False,
+                    expected_repo_uuid=repo_uuid,
+                )
+                if reloaded is None or reloaded.canonical != pointer.canonical:
+                    continue
+                receipt = self.generations.verify_generation(repo_uuid, generation_id)
+                if receipt.sha256 != current["receipt_sha256"]:
+                    raise PointerCorrupt("current pointer receipt hash does not match generation")
+                yield GenerationRead(
+                    pointer=pointer,
+                    receipt=receipt,
+                    generation_path=self.state.path(
+                        self.generations._generation(repo_uuid, generation_id)
+                    ),
+                )
+                return
+
+
+__all__ = [
+    "GenerationRead",
+    "PointerCAS",
+    "PointerConflict",
+    "PointerCorrupt",
+    "PointerError",
+    "PointerRecoveryRequired",
+    "PointerStore",
+    "PointerSuperseded",
+]

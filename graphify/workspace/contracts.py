@@ -3,7 +3,7 @@
 The JSON Schemas shipped beside this module are normative.  These frozen
 reference models provide a dependency-free implementation of the invariants
 that matter for hashing, version rejection, round trips, and journal framing.
-The P2-internal lease-state envelope also lives here so runtime modules do not
+The P2/P3 internal durable envelopes also live here so runtime modules do not
 invent a second serialization or validation authority.
 They do not read or mutate a real registry, generation, lease, pointer, source
 checkout, service, or global installation.
@@ -111,6 +111,10 @@ class UnsupportedContractVersion(ContractError):
     """A known contract uses a schema version this build cannot interpret."""
 
 
+class JournalFrameTruncated(ContractError):
+    """A journal frame ends before its declared boundary."""
+
+
 JsonValue = None | bool | int | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
@@ -159,6 +163,17 @@ def canonical_json_bytes(value: object) -> bytes:
 
 def canonical_sha256(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def payload_manifest_sha256(root: str, entries: Sequence[Mapping[str, object]]) -> str:
+    """Hash the canonical sealed-payload manifest body.
+
+    The public receipt field was frozen in P1. P3 binds that field to the exact
+    canonical root and ordered entries without adding or changing any public
+    schema member.
+    """
+
+    return canonical_sha256({"root": root, "entries": list(entries)})
 
 
 def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -582,12 +597,22 @@ def _validate_generation_receipt(data: Mapping[str, object]) -> None:
     root = _relative_path(payload["root"], "$.sealed_query_payload.root")
     if root != "graphify-out":
         raise ContractError("$.sealed_query_payload.root: v1 requires 'graphify-out'")
-    _digest(payload["manifest_sha256"], "$.sealed_query_payload.manifest_sha256")
+    manifest_sha256 = _digest(
+        payload["manifest_sha256"],
+        "$.sealed_query_payload.manifest_sha256",
+    )
     _validate_payload_entries(
         payload["entries"],
         "$.sealed_query_payload.entries",
         required_root=root,
     )
+    if manifest_sha256 != payload_manifest_sha256(
+        root,
+        cast(Sequence[Mapping[str, object]], payload["entries"]),
+    ):
+        raise ContractError(
+            "$.sealed_query_payload.manifest_sha256: must bind root and entries"
+        )
     validations = _list(data["validations"], "$.validations")
     if not validations:
         raise ContractError("$.validations: at least one validation is required")
@@ -1361,6 +1386,549 @@ class WorkspaceLeaseState:
         return document
 
 
+@dataclass(frozen=True)
+class CapacityPolicy:
+    """Required operator-supplied P3 capacity policy.
+
+    This internal runtime contract deliberately has no defaults and is not a
+    member of the frozen public v1 schema catalog.
+    """
+
+    global_max_bytes: int
+    global_max_generations: int
+    workspace_max_bytes: int
+    workspace_max_generations: int
+    reserve_bytes: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract": "graphify.workspace.capacity_policy.internal",
+            "format_version": 1,
+            "global_max_bytes": self.global_max_bytes,
+            "global_max_generations": self.global_max_generations,
+            "workspace_max_bytes": self.workspace_max_bytes,
+            "workspace_max_generations": self.workspace_max_generations,
+            "reserve_bytes": self.reserve_bytes,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical).hexdigest()
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "CapacityPolicy":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "global_max_bytes",
+                "global_max_generations",
+                "workspace_max_bytes",
+                "workspace_max_generations",
+                "reserve_bytes",
+            },
+        )
+        if data["contract"] != "graphify.workspace.capacity_policy.internal":
+            raise ContractError("$.contract: unsupported internal capacity policy")
+        _exact_version(data["format_version"], "$.format_version")
+        global_max_bytes = _integer(data["global_max_bytes"], "$.global_max_bytes", minimum=1)
+        global_max_generations = _integer(
+            data["global_max_generations"],
+            "$.global_max_generations",
+            minimum=1,
+        )
+        workspace_max_bytes = _integer(
+            data["workspace_max_bytes"],
+            "$.workspace_max_bytes",
+            minimum=1,
+        )
+        workspace_max_generations = _integer(
+            data["workspace_max_generations"],
+            "$.workspace_max_generations",
+            minimum=1,
+        )
+        reserve_bytes = _integer(data["reserve_bytes"], "$.reserve_bytes", minimum=1)
+        if workspace_max_bytes > global_max_bytes:
+            raise ContractError("$.workspace_max_bytes: must not exceed global_max_bytes")
+        if workspace_max_generations > global_max_generations:
+            raise ContractError(
+                "$.workspace_max_generations: must not exceed global_max_generations"
+            )
+        return cls(
+            global_max_bytes=global_max_bytes,
+            global_max_generations=global_max_generations,
+            workspace_max_bytes=workspace_max_bytes,
+            workspace_max_generations=workspace_max_generations,
+            reserve_bytes=reserve_bytes,
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "CapacityPolicy":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal capacity policy is not canonical JSON")
+        return document
+
+
+@dataclass(frozen=True)
+class CapacityReservation:
+    repo_uuid: str
+    generation_id: str
+    reserved_bytes: int
+    policy_sha256: str
+    active_source_revision: int
+    operation_epoch: int
+    fence_token: int
+    created_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repo_uuid": self.repo_uuid,
+            "generation_id": self.generation_id,
+            "reserved_bytes": self.reserved_bytes,
+            "policy_sha256": self.policy_sha256,
+            "active_source_revision": self.active_source_revision,
+            "operation_epoch": self.operation_epoch,
+            "fence_token": self.fence_token,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True)
+class CapacityReservationState:
+    """Registry-serialized crash-durable capacity reservations."""
+
+    revision: int
+    reservations: tuple[CapacityReservation, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        ordered = sorted(
+            self.reservations,
+            key=lambda item: (item.repo_uuid, item.generation_id),
+        )
+        return {
+            "contract": "graphify.workspace.capacity_reservations.internal",
+            "format_version": 1,
+            "revision": self.revision,
+            "reservations": [item.to_dict() for item in ordered],
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "CapacityReservationState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {"contract", "format_version", "revision", "reservations"},
+        )
+        if data["contract"] != "graphify.workspace.capacity_reservations.internal":
+            raise ContractError("$.contract: unsupported internal capacity reservation state")
+        _exact_version(data["format_version"], "$.format_version")
+        revision = _integer(data["revision"], "$.revision", minimum=1)
+        reservations: list[CapacityReservation] = []
+        keys: list[tuple[str, str]] = []
+        for index, raw in enumerate(_list(data["reservations"], "$.reservations")):
+            path = f"$.reservations[{index}]"
+            item = _mapping(raw, path)
+            _exact_keys(
+                item,
+                path,
+                {
+                    "repo_uuid",
+                    "generation_id",
+                    "reserved_bytes",
+                    "policy_sha256",
+                    "active_source_revision",
+                    "operation_epoch",
+                    "fence_token",
+                    "created_at",
+                },
+            )
+            repo_uuid = _uuid(item["repo_uuid"], f"{path}.repo_uuid")
+            generation_id = _string(item["generation_id"], f"{path}.generation_id")
+            if not _GENERATION_RE.fullmatch(generation_id):
+                raise ContractError(f"{path}.generation_id: invalid generation identity")
+            reservation = CapacityReservation(
+                repo_uuid=repo_uuid,
+                generation_id=generation_id,
+                reserved_bytes=_integer(
+                    item["reserved_bytes"],
+                    f"{path}.reserved_bytes",
+                    minimum=1,
+                ),
+                policy_sha256=_digest(item["policy_sha256"], f"{path}.policy_sha256"),
+                active_source_revision=_integer(
+                    item["active_source_revision"],
+                    f"{path}.active_source_revision",
+                    minimum=1,
+                ),
+                operation_epoch=_integer(
+                    item["operation_epoch"],
+                    f"{path}.operation_epoch",
+                    minimum=1,
+                ),
+                fence_token=_integer(
+                    item["fence_token"],
+                    f"{path}.fence_token",
+                    minimum=1,
+                ),
+                created_at=_date_time(item["created_at"], f"{path}.created_at"),
+            )
+            reservations.append(reservation)
+            keys.append((repo_uuid, generation_id))
+        if keys != sorted(keys) or len(keys) != len(set(keys)):
+            raise ContractError("$.reservations: entries must be unique and sorted")
+        return cls(revision=revision, reservations=tuple(reservations))
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "CapacityReservationState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal capacity reservations are not canonical JSON")
+        return document
+
+
+@dataclass(frozen=True)
+class JournalHeadState:
+    """Canonical internal durable head for one-frame sealed segments."""
+
+    repo_uuid: str
+    revision: int
+    sequence: int
+    event_id: str
+    event_sha256: str
+    segment_name: str
+    segment_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract": "graphify.workspace.journal_head.internal",
+            "format_version": 1,
+            "repo_uuid": self.repo_uuid,
+            "revision": self.revision,
+            "sequence": self.sequence,
+            "event_id": self.event_id,
+            "event_sha256": self.event_sha256,
+            "segment_name": self.segment_name,
+            "segment_sha256": self.segment_sha256,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "JournalHeadState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "repo_uuid",
+                "revision",
+                "sequence",
+                "event_id",
+                "event_sha256",
+                "segment_name",
+                "segment_sha256",
+            },
+        )
+        if data["contract"] != "graphify.workspace.journal_head.internal":
+            raise ContractError("$.contract: unsupported internal journal head")
+        _exact_version(data["format_version"], "$.format_version")
+        repo_uuid = _uuid(data["repo_uuid"], "$.repo_uuid")
+        revision = _integer(data["revision"], "$.revision", minimum=1)
+        sequence = _integer(data["sequence"], "$.sequence", minimum=1)
+        if revision != sequence:
+            raise ContractError("$.revision: journal head revision must equal sequence")
+        event_id = _uuid(data["event_id"], "$.event_id")
+        event_sha256 = _digest(data["event_sha256"], "$.event_sha256")
+        segment_name = _string(data["segment_name"], "$.segment_name")
+        if segment_name != f"{sequence:020d}.gwf":
+            raise ContractError("$.segment_name: must bind the journal sequence")
+        segment_sha256 = _digest(data["segment_sha256"], "$.segment_sha256")
+        return cls(
+            repo_uuid=repo_uuid,
+            revision=revision,
+            sequence=sequence,
+            event_id=event_id,
+            event_sha256=event_sha256,
+            segment_name=segment_name,
+            segment_sha256=segment_sha256,
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "JournalHeadState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal journal head is not canonical JSON")
+        return document
+
+
+def _generation_ids(value: object, path: str) -> tuple[str, ...]:
+    result: list[str] = []
+    for index, raw in enumerate(_list(value, path)):
+        generation_id = _string(raw, f"{path}[{index}]")
+        if not _GENERATION_RE.fullmatch(generation_id):
+            raise ContractError(f"{path}[{index}]: invalid generation identity")
+        result.append(generation_id)
+    if result != sorted(result) or len(result) != len(set(result)):
+        raise ContractError(f"{path}: generation identities must be unique and sorted")
+    return tuple(result)
+
+
+@dataclass(frozen=True)
+class GcIntentState:
+    """Current durable offline-GC intent; not a public v1 schema member."""
+
+    repo_uuid: str
+    operation_epoch: int
+    fence_token: int
+    active_source_revision: int
+    migration_epoch: int
+    pointer_revision: int
+    capacity_policy_sha256: str
+    plan_sha256: str
+    candidates: tuple[str, ...]
+    occurred_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract": "graphify.workspace.gc_intent.internal",
+            "format_version": 1,
+            "repo_uuid": self.repo_uuid,
+            "operation_epoch": self.operation_epoch,
+            "fence_token": self.fence_token,
+            "active_source_revision": self.active_source_revision,
+            "migration_epoch": self.migration_epoch,
+            "pointer_revision": self.pointer_revision,
+            "capacity_policy_sha256": self.capacity_policy_sha256,
+            "plan_sha256": self.plan_sha256,
+            "candidates": list(self.candidates),
+            "occurred_at": self.occurred_at,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical).hexdigest()
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "GcIntentState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "repo_uuid",
+                "operation_epoch",
+                "fence_token",
+                "active_source_revision",
+                "migration_epoch",
+                "pointer_revision",
+                "capacity_policy_sha256",
+                "plan_sha256",
+                "candidates",
+                "occurred_at",
+            },
+        )
+        if data["contract"] != "graphify.workspace.gc_intent.internal":
+            raise ContractError("$.contract: unsupported internal GC intent")
+        _exact_version(data["format_version"], "$.format_version")
+        return cls(
+            repo_uuid=_uuid(data["repo_uuid"], "$.repo_uuid"),
+            operation_epoch=_integer(data["operation_epoch"], "$.operation_epoch", minimum=1),
+            fence_token=_integer(data["fence_token"], "$.fence_token", minimum=1),
+            active_source_revision=_integer(
+                data["active_source_revision"],
+                "$.active_source_revision",
+                minimum=1,
+            ),
+            migration_epoch=_integer(data["migration_epoch"], "$.migration_epoch"),
+            pointer_revision=_integer(data["pointer_revision"], "$.pointer_revision"),
+            capacity_policy_sha256=_digest(
+                data["capacity_policy_sha256"],
+                "$.capacity_policy_sha256",
+            ),
+            plan_sha256=_digest(data["plan_sha256"], "$.plan_sha256"),
+            candidates=_generation_ids(data["candidates"], "$.candidates"),
+            occurred_at=_date_time(data["occurred_at"], "$.occurred_at"),
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "GcIntentState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal GC intent is not canonical JSON")
+        return document
+
+
+@dataclass(frozen=True)
+class GcCompletionState:
+    """Immutable durable completion for one GC intent."""
+
+    repo_uuid: str
+    operation_epoch: int
+    intent_sha256: str
+    plan_sha256: str
+    quarantined: tuple[str, ...]
+    completed_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract": "graphify.workspace.gc_completion.internal",
+            "format_version": 1,
+            "repo_uuid": self.repo_uuid,
+            "operation_epoch": self.operation_epoch,
+            "intent_sha256": self.intent_sha256,
+            "plan_sha256": self.plan_sha256,
+            "quarantined": list(self.quarantined),
+            "completed_at": self.completed_at,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "GcCompletionState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "repo_uuid",
+                "operation_epoch",
+                "intent_sha256",
+                "plan_sha256",
+                "quarantined",
+                "completed_at",
+            },
+        )
+        if data["contract"] != "graphify.workspace.gc_completion.internal":
+            raise ContractError("$.contract: unsupported internal GC completion")
+        _exact_version(data["format_version"], "$.format_version")
+        return cls(
+            repo_uuid=_uuid(data["repo_uuid"], "$.repo_uuid"),
+            operation_epoch=_integer(data["operation_epoch"], "$.operation_epoch", minimum=1),
+            intent_sha256=_digest(data["intent_sha256"], "$.intent_sha256"),
+            plan_sha256=_digest(data["plan_sha256"], "$.plan_sha256"),
+            quarantined=_generation_ids(data["quarantined"], "$.quarantined"),
+            completed_at=_date_time(data["completed_at"], "$.completed_at"),
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "GcCompletionState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal GC completion is not canonical JSON")
+        return document
+
+
+@dataclass(frozen=True)
+class GcPurgeState:
+    """Immutable durable audit record for explicit quarantine deletion."""
+
+    repo_uuid: str
+    operation_epoch: int
+    plan_sha256: str
+    purged: tuple[str, ...]
+    completed_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract": "graphify.workspace.gc_purge.internal",
+            "format_version": 1,
+            "repo_uuid": self.repo_uuid,
+            "operation_epoch": self.operation_epoch,
+            "plan_sha256": self.plan_sha256,
+            "purged": list(self.purged),
+            "completed_at": self.completed_at,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "GcPurgeState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "repo_uuid",
+                "operation_epoch",
+                "plan_sha256",
+                "purged",
+                "completed_at",
+            },
+        )
+        if data["contract"] != "graphify.workspace.gc_purge.internal":
+            raise ContractError("$.contract: unsupported internal GC purge")
+        _exact_version(data["format_version"], "$.format_version")
+        return cls(
+            repo_uuid=_uuid(data["repo_uuid"], "$.repo_uuid"),
+            operation_epoch=_integer(data["operation_epoch"], "$.operation_epoch", minimum=1),
+            plan_sha256=_digest(data["plan_sha256"], "$.plan_sha256"),
+            purged=_generation_ids(data["purged"], "$.purged"),
+            completed_at=_date_time(data["completed_at"], "$.completed_at"),
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "GcPurgeState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal GC purge is not canonical JSON")
+        return document
+
+
 class PointerSet(ContractDocument):
     CONTRACT = "graphify.workspace.pointer_set"
 
@@ -1590,7 +2158,7 @@ def encode_journal_frame(event: JournalEvent | Mapping[str, object]) -> bytes:
 def decode_journal_frame(frame: bytes) -> JournalEvent:
     """Decode exactly one complete v1 frame and reject truncation or tampering."""
     if len(frame) < _JOURNAL_HEADER.size:
-        raise ContractError("journal frame is truncated before its header")
+        raise JournalFrameTruncated("journal frame is truncated before its header")
     magic, version, length, checksum = _JOURNAL_HEADER.unpack(frame[: _JOURNAL_HEADER.size])
     if magic != _JOURNAL_MAGIC:
         raise ContractError("journal frame magic does not match GWF1")
@@ -1599,7 +2167,11 @@ def decode_journal_frame(frame: bytes) -> JournalEvent:
             f"journal frame version: expected {_JOURNAL_FRAME_VERSION}, got {version}"
         )
     payload = frame[_JOURNAL_HEADER.size :]
-    if len(payload) != length:
+    if len(payload) < length:
+        raise JournalFrameTruncated(
+            f"journal frame is truncated: expected {length}, got {len(payload)}"
+        )
+    if len(payload) > length:
         raise ContractError(f"journal frame length mismatch: expected {length}, got {len(payload)}")
     if hashlib.sha256(payload).digest() != checksum:
         raise ContractError("journal frame checksum mismatch")

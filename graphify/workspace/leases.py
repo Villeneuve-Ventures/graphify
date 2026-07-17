@@ -14,13 +14,19 @@ import sys
 from typing import Any, cast, Iterator, Protocol
 from uuid import UUID
 
-from graphify.workspace.contracts import FencedLease, Registry, WorkspaceLeaseState
+from graphify.workspace.contracts import (
+    CapacityReservationState,
+    FencedLease,
+    Registry,
+    WorkspaceLeaseState,
+)
 from graphify.workspace.identity import SourceAmbiguousError, discover_source
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
     RuntimeCapabilities,
     StateCorrupt,
+    StatePathError,
     Syscalls,
     WORKSPACE_LOCK_RANK,
 )
@@ -42,6 +48,10 @@ class LeaseBusy(LeaseError):
 
 class LeaseExpired(LeaseError):
     code = "lease_expired"
+
+
+class LeaseRecoveryRequired(LeaseError):
+    code = "lease_recovery_required"
 
 
 class StaleLease(LeaseError):
@@ -209,6 +219,28 @@ class LeaseGrant:
     migration_epoch: int
 
 
+@dataclass(frozen=True)
+class LeaseOperation:
+    """A current fenced operation held under its serialized workspace lock."""
+
+    registry: Registry
+    state: WorkspaceLeaseState
+    lease: FencedLease
+    grant: LeaseGrant
+
+    @property
+    def repo_uuid(self) -> str:
+        return str(self.lease.to_dict()["repo_uuid"])
+
+    @property
+    def operation(self) -> str:
+        return str(self.lease.to_dict()["operation"])
+
+    @property
+    def fence_token(self) -> int:
+        return int(self.lease.to_dict()["fence_token"])
+
+
 def _lease_domain(operation: str) -> str:
     return WorkspaceLeaseState.lease_domain(operation)
 
@@ -281,6 +313,16 @@ class LeaseStore:
         ):
             yield
 
+    @contextmanager
+    def read_only_workspace_lock(self, repo_uuid: str) -> Iterator[None]:
+        directory = self._directory(repo_uuid)
+        with self.state.existing_lock(
+            directory / "workspace.lock",
+            rank=WORKSPACE_LOCK_RANK,
+            name="workspace",
+        ):
+            yield
+
     def _paths(self, repo_uuid: str) -> tuple[Path, Path, Path]:
         directory = self._directory(repo_uuid)
         return (
@@ -289,14 +331,68 @@ class LeaseStore:
             directory / "workspace.pending.json",
         )
 
+    def _durable_record_exists(self, relative: Path) -> bool:
+        try:
+            return self.state.private_file_exists(relative)
+        except StatePathError as exc:
+            raise LeaseRecoveryRequired(f"recovery barrier is unsafe: {relative}") from exc
+
+    def _assert_recovery_barriers_locked(
+        self,
+        repo_uuid: str,
+        operation: str,
+        *,
+        recover: bool = True,
+    ) -> None:
+        workspace = self._directory(repo_uuid)
+        gc_intent = workspace / "gc" / "intent.json"
+        if self._durable_record_exists(gc_intent) and operation not in {
+            "GC",
+            "POINTER_RECOVERY",
+        }:
+            raise LeaseRecoveryRequired("unresolved GC intent requires fenced reconciliation")
+        pointer_intent = workspace / "pointers.pending.json"
+        if self._durable_record_exists(pointer_intent) and operation != "POINTER_RECOVERY":
+            raise LeaseRecoveryRequired("unresolved pointer intent requires fenced recovery")
+        if operation != "ACTIVATE":
+            return
+        try:
+            loader = (
+                self.state.recover_record
+                if recover
+                else self.state.read_stable_record
+            )
+            capacity = loader(
+                label="capacity",
+                current=Path("capacity.json"),
+                previous=Path("capacity.previous.json"),
+                pending=Path("capacity.pending.json"),
+                decoder=CapacityReservationState.from_json,
+                revision=lambda value: value.revision,
+                allow_missing=True,
+            )
+        except StateCorrupt as exc:
+            raise LeaseRecoveryRequired(
+                f"capacity reservation state requires recovery: {exc}"
+            ) from exc
+        if capacity is not None and any(
+            reservation.repo_uuid == repo_uuid for reservation in capacity.reservations
+        ):
+            raise LeaseRecoveryRequired(
+                "outstanding generation reservation must complete before activation"
+            )
+
     def _load_state_locked(
         self,
         document: Registry,
         repo_uuid: str,
+        *,
+        recover: bool = True,
     ) -> WorkspaceLeaseState:
         entry = _registry_entry(document, repo_uuid)
         current, previous, pending = self._paths(repo_uuid)
-        recovered = self.state.recover_record(
+        loader = self.state.recover_record if recover else self.state.read_stable_record
+        recovered = loader(
             label="workspace",
             current=current,
             previous=previous,
@@ -438,6 +534,7 @@ class LeaseStore:
                 expected_operation_epoch=expected_operation_epoch,
                 expected_migration_epoch=expected_migration_epoch,
             )
+            self._assert_recovery_barriers_locked(repo_uuid, operation)
             domain = _lease_domain(operation)
             existing = state.leases.get(domain)
             if existing is not None:
@@ -535,6 +632,93 @@ class LeaseStore:
                     raise LeaseExpired("liveness deadline has passed")
                 return current
 
+    @contextmanager
+    def current_operation(
+        self,
+        grant: LeaseGrant,
+        *,
+        monotonic_ns: int,
+        allowed_operations: frozenset[str] | None = None,
+        registry_required: bool = False,
+    ) -> Iterator[LeaseOperation]:
+        """Keep a grant current for one serialized P3 mutation.
+
+        Normal mutations retain only the workspace lock after taking a stable
+        registry snapshot. The live workspace lease prevents activation or a
+        successor fence from committing. Callers that mutate global state such
+        as capacity reservations opt into the short ``registry_required`` path.
+        """
+
+        self._require_grant_owner(grant)
+        repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
+
+        def checked_operation(document: Registry) -> LeaseOperation:
+            self._check_active(document, grant)
+            state = self._load_state_locked(document, repo_uuid)
+            _domain, current = self._matching_lease(state, grant)
+            operation = str(current.to_dict()["operation"])
+            if allowed_operations is not None and operation not in allowed_operations:
+                raise StaleLease(f"operation {operation} is not authorized for this mutation")
+            if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
+                raise LeaseExpired("liveness deadline has passed")
+            self._assert_recovery_barriers_locked(repo_uuid, operation)
+            return LeaseOperation(
+                registry=document,
+                state=state,
+                lease=current,
+                grant=grant,
+            )
+
+        if registry_required:
+            with self.registry.recovered_snapshot() as document:
+                with self.workspace_lock(repo_uuid):
+                    yield checked_operation(document)
+            return
+
+        with self.registry.recovered_snapshot() as document:
+            self._check_active(document, grant)
+            snapshot = document
+        with self.workspace_lock(repo_uuid):
+            yield checked_operation(snapshot)
+
+    @contextmanager
+    def current_operation_read_only(
+        self,
+        grant: LeaseGrant,
+        *,
+        monotonic_ns: int,
+        allowed_operations: frozenset[str] | None = None,
+    ) -> Iterator[LeaseOperation]:
+        """Validate a grant under existing locks without repairing durable state."""
+
+        self._require_grant_owner(grant)
+        repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
+        with self.registry.read_only_snapshot() as document:
+            with self.read_only_workspace_lock(repo_uuid):
+                self._check_active(document, grant)
+                state = self._load_state_locked(document, repo_uuid, recover=False)
+                _domain, current = self._matching_lease(state, grant)
+                operation = str(current.to_dict()["operation"])
+                if allowed_operations is not None and operation not in allowed_operations:
+                    raise StaleLease(
+                        f"operation {operation} is not authorized for this mutation"
+                    )
+                if monotonic_ns >= int(
+                    current.to_dict()["liveness_deadline_monotonic_ns"]
+                ):
+                    raise LeaseExpired("liveness deadline has passed")
+                self._assert_recovery_barriers_locked(
+                    repo_uuid,
+                    operation,
+                    recover=False,
+                )
+                yield LeaseOperation(
+                    registry=document,
+                    state=state,
+                    lease=current,
+                    grant=grant,
+                )
+
     def heartbeat(
         self,
         grant: LeaseGrant,
@@ -628,7 +812,9 @@ __all__ = [
     "LeaseExpired",
     "LeaseGrant",
     "LeaseIdentityProvider",
+    "LeaseOperation",
     "LeaseOwner",
+    "LeaseRecoveryRequired",
     "LeaseStore",
     "StaleLease",
     "SystemLeaseIdentityProvider",

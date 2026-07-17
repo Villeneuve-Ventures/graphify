@@ -1,8 +1,10 @@
-"""Versioned workspace contracts plus the bounded P2 registry/lease runtime.
+"""Versioned workspace contracts plus the bounded P2/P3 control-plane runtime.
 
 P2 adds external registry persistence, operator-authorized UUID/source
-identity, explicit active-source CAS, and fenced leases. Generations, journals,
-pointers, adapters, freshness, queues, services, and commands remain deferred.
+identity, explicit active-source CAS, and fenced leases. P3 adds immutable
+generation certification, a framed lifecycle journal, atomic pointers and
+recovery, retained coordination locks, explicit capacity policy, and offline
+GC. Adapters, freshness, queues, services, and commands remain deferred.
 """
 
 from graphify.workspace.contracts import (
@@ -17,6 +19,7 @@ from graphify.workspace.contracts import (
     UPSTREAM_BASELINE_COMMIT,
     WORKSPACE_SCHEMA_FILES,
     ArtifactManifest,
+    CapacityPolicy,
     CompatibilityManifest,
     CompensationPlan,
     ContractDocument,
@@ -27,6 +30,7 @@ from graphify.workspace.contracts import (
     GenerationReceipt,
     InstallerTransaction,
     JournalEvent,
+    JournalFrameTruncated,
     OfflineRollback,
     PointerSet,
     PriorPointerRecord,
@@ -59,9 +63,34 @@ from graphify.workspace.leases import (
     LeaseGrant,
     LeaseIdentityProvider,
     LeaseOwner,
+    LeaseRecoveryRequired,
     LeaseStore,
     StaleLease,
     SystemLeaseIdentityProvider,
+)
+from graphify.workspace.gc import (
+    GcError,
+    GcPlan,
+    GcPlanStale,
+    GcProtection,
+    GcRecoveryRequired,
+    GcStore,
+)
+from graphify.workspace.generations import (
+    CapacityExceeded,
+    CertificationRequest,
+    GenerationAllocation,
+    GenerationConflict,
+    GenerationError,
+    GenerationStore,
+    PayloadChanged,
+)
+from graphify.workspace.journal import (
+    JournalConflict,
+    JournalCorrupt,
+    JournalError,
+    JournalSnapshot,
+    JournalStore,
 )
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -78,6 +107,16 @@ from graphify.workspace.registry import (
     RegistryStore,
     RevisionConflict,
 )
+from graphify.workspace.pointers import (
+    GenerationRead,
+    PointerCAS,
+    PointerConflict,
+    PointerCorrupt,
+    PointerError,
+    PointerRecoveryRequired,
+    PointerStore,
+    PointerSuperseded,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -91,6 +130,8 @@ __all__ = [
     "UPSTREAM_BASELINE_COMMIT",
     "WORKSPACE_SCHEMA_FILES",
     "ArtifactManifest",
+    "CapacityExceeded",
+    "CapacityPolicy",
     "ActivationResult",
     "AuthorizationError",
     "CompatibilityManifest",
@@ -101,22 +142,49 @@ __all__ = [
     "FencedLease",
     "FreshnessRelease",
     "GenerationCoordinationLock",
+    "GenerationAllocation",
+    "GenerationConflict",
+    "GenerationError",
+    "GenerationRead",
     "GenerationReceipt",
+    "GenerationStore",
+    "CertificationRequest",
+    "GcError",
+    "GcPlan",
+    "GcPlanStale",
+    "GcProtection",
+    "GcRecoveryRequired",
+    "GcStore",
     "InstallerTransaction",
     "IdentityAction",
     "IdentityError",
     "JournalEvent",
+    "JournalConflict",
+    "JournalCorrupt",
+    "JournalError",
+    "JournalFrameTruncated",
+    "JournalSnapshot",
+    "JournalStore",
     "LeaseBusy",
     "LeaseError",
     "LeaseExpired",
     "LeaseGrant",
     "LeaseIdentityProvider",
     "LeaseOwner",
+    "LeaseRecoveryRequired",
     "LeaseStore",
     "LockOrderError",
     "OfflineRollback",
     "OperatorAuthorization",
+    "PayloadChanged",
+    "PointerCAS",
+    "PointerConflict",
+    "PointerCorrupt",
+    "PointerError",
+    "PointerRecoveryRequired",
     "PointerSet",
+    "PointerStore",
+    "PointerSuperseded",
     "PriorPointerRecord",
     "Registry",
     "RegistryError",

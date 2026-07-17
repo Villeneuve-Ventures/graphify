@@ -1,14 +1,16 @@
 # Graphify workspace contract v1
 
-Status: P2 registry, identity, active-source, and fenced-lease runtime for
-`graphifyy 0.9.16+workspace.1`; the v1 contract fields remain frozen.
+Status: P3 control-plane persistence runtime for
+`graphifyy 0.9.16+workspace.1`; the public v1 contract fields remain frozen.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
 operator-authorized UUID/source binding, explicit active-source selection, and
-fenced lease allocation. It does not provide a `graphify workspace` command.
-P3 through P5 still own generations, journals, pointers, engine adaptation,
-freshness observation, semantic queues, services, and commands.
+fenced lease allocation. P3 adds caller-supplied generation staging and
+certification, a framed segmented journal, atomic pointer movement and repair,
+retained coordination locks, explicit capacity preflight, and offline GC. It
+does not provide a `graphify workspace` command. P4 and P5 still own engine
+adaptation, freshness observation, semantic queues, services, and commands.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build
@@ -26,8 +28,9 @@ or fork engine logic inside the package.
   cross-field and cross-document validation is normative where JSON Schema
   cannot express relational invariants such as keyed ordering, digest binding,
   revision binding, or exact compensation coverage.
-- `graphify.workspace.persistence`, `.identity`, `.registry`, and `.leases`
-  implement only the P2 runtime boundary. Lifecycle mutation fails closed
+- `graphify.workspace.persistence`, `.identity`, `.registry`, `.leases`,
+  `.generations`, `.journal`, `.pointers`, and `.gc` implement the P2/P3
+  runtime boundary. Lifecycle mutation fails closed
   outside non-elevated macOS on local APFS; tests use an explicit injected
   capability seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,
@@ -39,6 +42,7 @@ or fork engine logic inside the package.
 
 - [Architecture](architecture.md)
 - [State contracts](state-contract.md)
+- [P3 runtime](p3-runtime.md)
 - [Compatibility and artifacts](compatibility.md)
 - [Installation and rollback](installation.md)
 - [Migration boundary](migration.md)
@@ -47,4 +51,6 @@ or fork engine logic inside the package.
 
 Any change to a v1 field, enum, canonical encoding, or invariant requires a new
 schema version or an explicitly compatible additive revision. Unknown versions
-fail before a state-changing operation. P2 does not modify the frozen fields.
+fail before a state-changing operation. P3 adds internal canonical envelopes
+for capacity reservations, journal heads, and GC recovery without adding a
+public v1 schema member or field.

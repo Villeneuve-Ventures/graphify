@@ -253,9 +253,13 @@ def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
     required = {
         "graphify/workspace/__init__.py",
         "graphify/workspace/contracts.py",
+        "graphify/workspace/gc.py",
+        "graphify/workspace/generations.py",
         "graphify/workspace/identity.py",
+        "graphify/workspace/journal.py",
         "graphify/workspace/leases.py",
         "graphify/workspace/persistence.py",
+        "graphify/workspace/pointers.py",
         "graphify/workspace/registry.py",
         "graphify/workspace/schemas/v1/common.schema.json",
     }
