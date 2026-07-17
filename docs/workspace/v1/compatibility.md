@@ -33,10 +33,13 @@ usage.
 - Unknown engine, distribution, extractor/cache ABI, adapter, state-schema, or
   CLI tuples are rejected before later implementations may stage or move state.
 - Older code does not write newer schemas.
-- A read-only downgrade and state migration contract will be implemented later;
-  state migration must create a new generation rather than rewrite its source.
+- Retained `0.9.12` manifest/cache/artifact state is readable without mutation
+  through the `0.9.16` adapter. Live quiescence and generation migration remain
+  later work; migration must create a new generation rather than rewrite its
+  source.
 - New upstream releases enter a non-promoting whole-artifact lane. A tag alone
-  never widens support.
+  never widens support. The lane has probe metadata only: no executable adapter,
+  staging, or promotion authority.
 
 ## Artifact set
 

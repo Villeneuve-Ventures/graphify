@@ -1,0 +1,11 @@
+{
+  "nodes": [
+    {
+      "id": "legacy_app",
+      "label": "legacy_app",
+      "type": "function",
+      "source_file": "/legacy/repo/app.py"
+    }
+  ],
+  "edges": []
+}

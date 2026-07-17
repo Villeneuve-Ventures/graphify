@@ -1127,7 +1127,28 @@ def _resolves_under_root(path: Path, root: Path) -> bool:
     return True
 
 
-def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None) -> dict:
+def detect(
+    root: Path,
+    *,
+    follow_symlinks: bool | None = None,
+    google_workspace: bool | None = None,
+    extra_excludes: list[str] | None = None,
+    cache_root: Path | None = None,
+    read_only: bool = False,
+) -> dict:
+    """Detect supported corpus files.
+
+    ``read_only`` is the workspace comparison seam. It bypasses the persistent
+    stat/word-count cache and never materializes Office or Google Workspace
+    conversion sidecars. Office source files remain in the returned inventory;
+    Google Workspace shortcuts are reported as unsupported for certified
+    comparison because their authoritative remote content cannot be observed
+    without export/network side effects.
+
+    When ordinary detection is given ``cache_root``, conversion sidecars follow
+    the other detector outputs into that root instead of appearing in the source
+    checkout.
+    """
     root = root.resolve()
     if follow_symlinks is None:
         follow_symlinks = False
@@ -1146,6 +1167,11 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         # PDFs/docx aren't re-parsed on every run just to size the corpus (#1656).
         # cache_root (when given, e.g. from `extract --out`) keeps this cache out
         # of the scanned corpus (#1747).
+        if read_only:
+            # Certified comparison hashes each selected file exactly once through
+            # its descriptor-safe observer. Corpus sizing is irrelevant there,
+            # and counting here would introduce an extra content read.
+            return 0
         from graphify import cache as _cache
         return _cache.cached_word_count(path, root, count_words, cache_root=cache_root)
 
@@ -1246,7 +1272,9 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
 
     all_files.sort(key=lambda p: str(p))
 
-    converted_dir = root / GRAPHIFY_OUT / "converted"
+    output_root = root if cache_root is None else Path(cache_root).resolve()
+    converted_dir = output_root / GRAPHIFY_OUT / "converted"
+    comparison_unsupported: list[str] = []
 
     for p in all_files:
         # For memory dir files, skip hidden/noise filtering
@@ -1273,6 +1301,10 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             continue
         if ftype:
             if p.suffix.lower() in GOOGLE_WORKSPACE_EXTENSIONS:
+                if read_only:
+                    files[ftype].append(str(p))
+                    comparison_unsupported.append(str(p))
+                    continue
                 if not google_workspace:
                     skipped_sensitive.append(
                         str(p)
@@ -1295,6 +1327,10 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                 continue
             # Office files: convert to markdown sidecar so subagents can read them
             if p.suffix.lower() in OFFICE_EXTENSIONS:
+                if read_only:
+                    files[ftype].append(str(p))
+                    total_words += _wc(p)
+                    continue
                 md_path = convert_office_file(p, converted_dir)
                 if md_path:
                     if _is_ignored(md_path, root, ignore_patterns, _cache=ignore_cache):
@@ -1338,6 +1374,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         "skipped_sensitive": skipped_sensitive,
         "unclassified": sorted(unclassified),
         "walk_errors": walk_errors,
+        "comparison_unsupported": sorted(comparison_unsupported),
         "graphifyignore_patterns": len(ignore_patterns),
         "scan_root": str(root.resolve()),
     }

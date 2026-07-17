@@ -19,8 +19,10 @@ adoption succeeds.
 
 ## Later import requirements
 
-Retained `0.9.12` state import and live `0.9.16` use are P4/P6-P8 work. A new
-workspace lease cannot fence a legacy writer. Import requires either the
+P4 can interpret and hash retained `0.9.12` manifests, caches, and artifacts
+without mutation, and can execute the published `0.9.16` adapter. It does not
+copy retained state or migrate a repository. P6-P8 still own those shadow
+migrations. A new workspace lease cannot fence a legacy writer. Import requires either the
 legacy implementation's native exclusive lock with writers disabled, or a
 fail-closed stable-snapshot protocol with identical complete before/after byte
 and identity manifests. Import never mutates legacy bytes.

@@ -21,9 +21,10 @@ P1 freezes only these seams:
 
 P2 implements the registry writer, identity/source enrollment, explicit
 active-source CAS, and lease allocator. P3 implements lifecycle mechanics for
-caller-supplied staged generations, pointers, journals, and offline GC. Neither
-phase implements a Graphify engine adapter, freshness scanner, semantic queue,
-service, or workspace CLI; those remain dependency-ordered P4/P5 work.
+caller-supplied staged generations, pointers, journals, and offline GC. P4
+implements the sole `0.9.16` adapter, read-only `0.9.12` retained-state reader,
+no-write comparison seam, and observed-current release authority. Semantic
+queues, services, and the workspace CLI remain dependency-ordered P5 work.
 
 ## Authority split
 
@@ -72,8 +73,9 @@ skipped between recovery and workspace CAS. The locks are released before the
 long-lived operation begins, so builds remain serialized only for their short
 lease transition rather than for extraction work. P3 extends the nested order
 with generation coordination locks in lexical generation-ID order and pointer
-validation/CAS. Queries will take only the pre-created generation's shared
-advisory lock and will not acquire a writer-operation lease.
+validation/CAS. P4 queries hold the existing registry lock shared, then the
+pre-created generation lock shared; they do not acquire a writer-operation
+lease and create no coordination object.
 
 Activation, migration, promotion, rollback, repair, pointer recovery, and GC
 share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved
@@ -81,5 +83,6 @@ semantic domain. Each live domain retains its own accepted operation epoch, so
 allocating a semantic claim cannot invalidate or strand an otherwise-current
 workspace lease. Migration may invalidate semantic commit authority, but the
 exact trusted owner/fence can still release that stale record. P2 allocates and
-validates these leases; P3 consumes only the lifecycle-operation subset. P4/P5
-remain responsible for adapter, freshness, semantic, service, and command use.
+validates these leases; P3 consumes only the lifecycle-operation subset. P4
+owns adapter and freshness use. P5 remains responsible for semantic, service,
+and command use.

@@ -132,8 +132,32 @@ output remains ignored and must not widen the P1 product diff.
   generation, pointer, reader-lock, GC, clean-reboot, dead-builder adoption, and
   cross-workspace lock-scope boundaries.
 
-P3 verification does not satisfy P4/P5 adapter, freshness, queue, service,
-performance, installation, or live-cutover gates.
+## P4 adapter and freshness gates
+
+- all Graphify-private engine imports are confined to the one versioned
+  `0.9.16` adapter package;
+- exact tuple selection executes `0.9.16`, mixed tuples reject before later
+  state use, and coherent future tuples remain probe-only and non-promoting;
+- retained `0.9.12` manifest, AST/semantic cache, and graph/report fixtures are
+  interpreted without mutation and retain semantic hash attribution;
+- read-only detection suppresses stat/word-count persistence and conversion
+  sidecars, while explicit ordinary output roots redirect sidecars outside the
+  source checkout;
+- two consecutive complete descriptor-checked inventory passes form each side
+  of the query, with source identity and pointer/receipt revalidated at the
+  release boundary;
+- deterministic schedules cover edit, create, delete, rename, replacement,
+  policy change, post-pass identity change, persistent churn, pointer change,
+  wholly inter-observation ABA, and post-boundary mutation;
+- native query bypasses optional query logging, and recursive bytes, metadata,
+  xattrs, read-only source modes, and filesystem-event observation prove no
+  source or workspace write; and
+- focused adapter/freshness/compatibility tests run before the full repository,
+  security, packaging, graph-refresh, exact-head CI, and independent-review
+  gates.
+
+P4 verification does not satisfy P5 semantic queue, service, workspace CLI,
+installation, performance, or live-cutover gates.
 
 The P1 fixture bundle is deliberately limited to synthetic contract fixtures;
 it is not claimed as the representative repository corpus required by the

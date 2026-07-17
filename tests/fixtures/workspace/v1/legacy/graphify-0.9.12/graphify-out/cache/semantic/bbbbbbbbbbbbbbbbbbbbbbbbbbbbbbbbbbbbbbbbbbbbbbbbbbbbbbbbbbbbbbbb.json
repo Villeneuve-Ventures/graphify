@@ -1,0 +1,12 @@
+{
+  "nodes": [
+    {
+      "id": "legacy_guide",
+      "label": "Legacy Guide",
+      "type": "document",
+      "source_file": "/legacy/repo/docs/guide.md"
+    }
+  ],
+  "edges": [],
+  "hyperedges": []
+}

@@ -1,11 +1,33 @@
-"""Versioned workspace contracts plus the bounded P2/P3 control-plane runtime.
+"""Versioned workspace contracts plus the bounded P2-P4 library runtime.
 
 P2 adds external registry persistence, operator-authorized UUID/source
 identity, explicit active-source CAS, and fenced leases. P3 adds immutable
 generation certification, a framed lifecycle journal, atomic pointers and
 recovery, retained coordination locks, explicit capacity policy, and offline
-GC. Adapters, freshness, queues, services, and commands remain deferred.
+GC. P4 adds one 0.9.16 adapter, retained 0.9.12 import, and two-sided
+observed-current freshness. Queues, services, and commands remain deferred.
 """
+
+from graphify.workspace.adapters import (
+    AdapterIntent,
+    AdapterSelection,
+    CompatibilityLane,
+    CompatibilityTuple,
+    EngineAdapter,
+    LegacyStateSnapshot,
+    ObservationTimeout,
+    ObservationUnavailable,
+    ObservationUnstable,
+    ObservationUnsupported,
+    QueryRejected,
+    QueryRequest,
+    RetainedStateInvalid,
+    SUPPORTED_COMPATIBILITY,
+    SourceObservation,
+    StructuralBuild,
+    UnsupportedCompatibility,
+    select_adapter,
+)
 
 from graphify.workspace.contracts import (
     ADAPTER_CONTRACT_VERSION,
@@ -117,9 +139,15 @@ from graphify.workspace.pointers import (
     PointerStore,
     PointerSuperseded,
 )
+from graphify.workspace.freshness import (
+    FreshnessAuthority,
+    FreshnessResult,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
+    "AdapterIntent",
+    "AdapterSelection",
     "CANDIDATE_DISTRIBUTION_VERSION",
     "CLI_CONTRACT_VERSION",
     "ENGINE_BASELINE",
@@ -135,12 +163,17 @@ __all__ = [
     "ActivationResult",
     "AuthorizationError",
     "CompatibilityManifest",
+    "CompatibilityLane",
+    "CompatibilityTuple",
     "CompensationPlan",
     "CommitUnknown",
     "ContractDocument",
     "ContractError",
+    "EngineAdapter",
     "FencedLease",
     "FreshnessRelease",
+    "FreshnessAuthority",
+    "FreshnessResult",
     "GenerationCoordinationLock",
     "GenerationAllocation",
     "GenerationConflict",
@@ -173,9 +206,14 @@ __all__ = [
     "LeaseOwner",
     "LeaseRecoveryRequired",
     "LeaseStore",
+    "LegacyStateSnapshot",
     "LockOrderError",
     "OfflineRollback",
     "OperatorAuthorization",
+    "ObservationTimeout",
+    "ObservationUnavailable",
+    "ObservationUnstable",
+    "ObservationUnsupported",
     "PayloadChanged",
     "PointerCAS",
     "PointerConflict",
@@ -185,20 +223,27 @@ __all__ = [
     "PointerSet",
     "PointerStore",
     "PointerSuperseded",
+    "QueryRejected",
+    "QueryRequest",
     "PriorPointerRecord",
     "Registry",
     "RegistryError",
     "RegistryStore",
     "RevisionConflict",
     "RuntimeCapabilities",
+    "RetainedStateInvalid",
     "SourceAmbiguousError",
     "SourceDiscoveryError",
     "SourceIdentity",
+    "SourceObservation",
+    "StructuralBuild",
+    "SUPPORTED_COMPATIBILITY",
     "StaleLease",
     "SystemLeaseIdentityProvider",
     "StateCorrupt",
     "StatePathError",
     "UnsupportedContractVersion",
+    "UnsupportedCompatibility",
     "UnsupportedRuntime",
     "UUIDCollisionError",
     "WorkspaceConfig",
@@ -210,5 +255,6 @@ __all__ = [
     "encode_journal_frame",
     "load_schema",
     "parse_contract",
+    "select_adapter",
     "validate_installer_compensation",
 ]

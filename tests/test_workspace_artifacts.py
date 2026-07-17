@@ -83,6 +83,10 @@ def _synthetic_repo(root: Path) -> tuple[Path, Path]:
     _write(root / "graphify/skills/codex/references/query.md", "# query\n")
     _write(root / "graphify/workspace/__init__.py", "# reference package\n")
     _write(root / "graphify/workspace/contracts.py", "# reference model\n")
+    _write(root / "graphify/workspace/freshness.py", "# freshness runtime\n")
+    _write(root / "graphify/workspace/adapters/__init__.py", "# adapter package\n")
+    _write(root / "graphify/workspace/adapters/base.py", "# adapter contract\n")
+    _write(root / "graphify/workspace/adapters/v0_9_16.py", "# 0.9.16 adapter\n")
     for module_name in (
         "gc.py",
         "generations.py",

@@ -1033,6 +1033,27 @@ class PointerStore:
                 )
                 return
 
+    def revalidate_read(self, repo_uuid: str, reading: GenerationRead) -> None:
+        """Revalidate a protected read without releasing its shared lock.
+
+        Callers use this immediately before an output-release boundary. The
+        method performs no recovery or mutation; any pointer or receipt change
+        is a conflict and the caller must discard its output.
+        """
+
+        pointer = self.load(repo_uuid)
+        if pointer is None or pointer.canonical != reading.pointer.canonical:
+            raise PointerConflict("current pointer changed during protected read")
+        receipts = self.verify_pointer(pointer, expected_repo_uuid=repo_uuid)
+        if receipts["current"].canonical != reading.receipt.canonical:
+            raise PointerConflict("current receipt changed during protected read")
+        current = cast(dict[str, Any], pointer.to_dict()["current"])
+        expected_path = self.state.path(
+            self.generations._generation(repo_uuid, str(current["generation_id"]))
+        )
+        if expected_path != reading.generation_path:
+            raise PointerConflict("current generation path changed during protected read")
+
 
 __all__ = [
     "GenerationRead",

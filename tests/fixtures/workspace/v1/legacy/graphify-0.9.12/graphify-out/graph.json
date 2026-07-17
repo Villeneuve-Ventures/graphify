@@ -1,0 +1,13 @@
+{
+  "nodes": [
+    {
+      "id": "legacy_app",
+      "label": "legacy_app",
+      "type": "function"
+    }
+  ],
+  "edges": [],
+  "metadata": {
+    "graphify_version": "0.9.12"
+  }
+}

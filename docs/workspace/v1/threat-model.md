@@ -29,7 +29,8 @@ after a successful durable-write completion. Later lifecycle records must reuse
 the same boundary. Sudden hardware power-loss durability is not claimed.
 
 P3 executes generation, journal, pointer, and explicit offline-GC transitions.
-Adapter, freshness, service, command, and installation transitions remain
+P4 adds read-only adapter/freshness operations and external-output structural
+builds. Service, command, installation, route, and migration transitions remain
 absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized

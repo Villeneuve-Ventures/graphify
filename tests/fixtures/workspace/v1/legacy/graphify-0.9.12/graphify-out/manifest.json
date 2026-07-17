@@ -1,0 +1,12 @@
+{
+  "/legacy/repo/README.md": {
+    "mtime": 1710000001.0,
+    "hash": "22222222222222222222222222222222"
+  },
+  "/legacy/repo/app.py": 1710000000.0,
+  "/legacy/repo/docs/guide.md": {
+    "mtime": 1710000002.0,
+    "ast_hash": "",
+    "semantic_hash": "33333333333333333333333333333333"
+  }
+}

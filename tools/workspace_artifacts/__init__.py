@@ -235,6 +235,7 @@ def build_static_bundles(
     for module_name in (
         "__init__.py",
         "contracts.py",
+        "freshness.py",
         "gc.py",
         "generations.py",
         "identity.py",
@@ -250,6 +251,13 @@ def build_static_bundles(
                 (repo_root / "graphify" / "workspace" / module_name).read_bytes(),
             )
         )
+    contract_members.extend(
+        _tree_members(
+            repo_root,
+            repo_root / "graphify" / "workspace" / "adapters",
+            "reference/graphify/workspace/adapters",
+        )
+    )
     contract_bundle = output_root / "contract-bundle.zip"
     _write_deterministic_zip(contract_bundle, contract_members)
 
@@ -264,14 +272,17 @@ def build_static_bundles(
         "source_epoch": FIXED_SOURCE_EPOCH,
         "sanitization": "synthetic-contract-fixtures-no-repository-content",
         "representative_scope": (
-            "p1-contract-only; representative MTR/mac-mini/Aletheia corpus tiers "
-            "are authority-required P5 verification inputs and are not copied in P1"
+            "p1-p4 synthetic contract/runtime fixtures; representative "
+            "MTR/mac-mini/Aletheia corpus tiers "
+            "are authority-required P5 verification inputs and are not copied "
+            "into this synthetic bundle"
         ),
         "golden_outcomes": [
             "accept-positive",
             "reject-negative",
             "canonical-round-trip",
             "reject-future-version",
+            "retained-0.9.12-read-only-import",
             "offline-compensation",
         ],
         "entries": fixture_entries,
