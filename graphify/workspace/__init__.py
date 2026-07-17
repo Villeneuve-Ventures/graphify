@@ -4,8 +4,8 @@ P2 adds external registry persistence, operator-authorized UUID/source
 identity, explicit active-source CAS, and fenced leases. P3 adds immutable
 generation certification, a framed lifecycle journal, atomic pointers and
 recovery, retained coordination locks, explicit capacity policy, and offline
-GC. P4 adds one 0.9.16 adapter, retained 0.9.12 import, and two-sided
-observed-current freshness. Queues, services, and commands remain deferred.
+GC. P4 adds one 0.9.16 adapter and two-sided observed-current freshness.
+Queues, services, and commands remain deferred.
 """
 
 from graphify.workspace.adapters import (
@@ -14,14 +14,12 @@ from graphify.workspace.adapters import (
     CompatibilityLane,
     CompatibilityTuple,
     EngineAdapter,
-    LegacyStateSnapshot,
     ObservationTimeout,
     ObservationUnavailable,
     ObservationUnstable,
     ObservationUnsupported,
     QueryRejected,
     QueryRequest,
-    RetainedStateInvalid,
     SUPPORTED_COMPATIBILITY,
     SourceObservation,
     StructuralBuild,
@@ -206,7 +204,6 @@ __all__ = [
     "LeaseOwner",
     "LeaseRecoveryRequired",
     "LeaseStore",
-    "LegacyStateSnapshot",
     "LockOrderError",
     "OfflineRollback",
     "OperatorAuthorization",
@@ -231,7 +228,6 @@ __all__ = [
     "RegistryStore",
     "RevisionConflict",
     "RuntimeCapabilities",
-    "RetainedStateInvalid",
     "SourceAmbiguousError",
     "SourceDiscoveryError",
     "SourceIdentity",

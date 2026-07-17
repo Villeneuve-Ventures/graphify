@@ -159,6 +159,40 @@ def test_static_contract_fixture_skill_and_runtime_bundles_are_deterministic(
     assert trusted_one == trusted_two
 
 
+def test_contract_bundle_ignores_generated_adapter_bytecode(tmp_path: Path) -> None:
+    clean_root = tmp_path / "clean-repo"
+    dirty_root = tmp_path / "dirty-repo"
+    clean_wheel, clean_runtime = _synthetic_repo(clean_root)
+    dirty_wheel, dirty_runtime = _synthetic_repo(dirty_root)
+    _write(
+        dirty_root / "graphify/workspace/adapters/__pycache__/base.cpython-314.pyc",
+        b"ambient bytecode",
+    )
+    _write(
+        dirty_root / "graphify/workspace/adapters/__pycache__/ambient.py",
+        "AMBIENT = True\n",
+    )
+
+    clean = build_static_bundles(
+        repo_root=clean_root,
+        output_root=tmp_path / "clean-out",
+        wheel=clean_wheel,
+        runtime_manifest=clean_runtime,
+    )
+    dirty = build_static_bundles(
+        repo_root=dirty_root,
+        output_root=tmp_path / "dirty-out",
+        wheel=dirty_wheel,
+        runtime_manifest=dirty_runtime,
+    )
+
+    assert clean["contract-bundle.zip"].read_bytes() == dirty["contract-bundle.zip"].read_bytes()
+    with zipfile.ZipFile(dirty["contract-bundle.zip"]) as archive:
+        assert not any(
+            "__pycache__" in name or name.endswith(".pyc") for name in archive.namelist()
+        )
+
+
 def test_cyclonedx_normalization_removes_uv_time_and_uuid_drift() -> None:
     first = {
         "bomFormat": "CycloneDX",

@@ -148,15 +148,26 @@ def _write_deterministic_zip(path: Path, members: Iterable[_ZipMember]) -> None:
             archive.writestr(info, member.data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
-def _tree_members(root: Path, base: Path, archive_prefix: str) -> list[_ZipMember]:
+def _tree_members(
+    root: Path,
+    base: Path,
+    archive_prefix: str,
+    *,
+    allowed_suffixes: frozenset[str] | None = None,
+) -> list[_ZipMember]:
     if not base.is_dir() or base.is_symlink():
         raise ArtifactError(f"required bundle directory missing or unsafe: {base}")
     members: list[_ZipMember] = []
     for path in sorted(base.rglob("*")):
         if not path.is_file():
             continue
+        relative = path.relative_to(base)
+        if "__pycache__" in relative.parts:
+            continue
+        if allowed_suffixes is not None and path.suffix not in allowed_suffixes:
+            continue
         _relative_file(root, path)
-        suffix = path.relative_to(base).as_posix()
+        suffix = relative.as_posix()
         members.append(_ZipMember(f"{archive_prefix}/{suffix}", path.read_bytes()))
     if not members:
         raise ArtifactError(f"bundle directory contains no regular files: {base}")
@@ -256,6 +267,7 @@ def build_static_bundles(
             repo_root,
             repo_root / "graphify" / "workspace" / "adapters",
             "reference/graphify/workspace/adapters",
+            allowed_suffixes=frozenset({".py"}),
         )
     )
     contract_bundle = output_root / "contract-bundle.zip"
@@ -282,7 +294,6 @@ def build_static_bundles(
             "reject-negative",
             "canonical-round-trip",
             "reject-future-version",
-            "retained-0.9.12-read-only-import",
             "offline-compensation",
         ],
         "entries": fixture_entries,

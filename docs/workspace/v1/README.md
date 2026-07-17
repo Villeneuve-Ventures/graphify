@@ -9,10 +9,10 @@ operator-authorized UUID/source binding, explicit active-source selection, and
 fenced lease allocation. P3 adds caller-supplied generation staging and
 certification, a framed segmented journal, atomic pointer movement and repair,
 retained coordination locks, explicit capacity preflight, and offline GC. P4
-adds the sole `0.9.16` engine adapter, read-only `0.9.12` retained-state
-interpretation, the no-write comparison seam, and two-sided observed-current
-release. It does not provide a `graphify workspace` command. Semantic queues,
-services, and commands remain P5 work.
+adds the sole `0.9.16` engine adapter, the no-write comparison seam, and
+two-sided observed-current release. It does not provide a retained-state import
+path or a `graphify workspace` command. Semantic queues, services, and commands
+remain P5 work.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build

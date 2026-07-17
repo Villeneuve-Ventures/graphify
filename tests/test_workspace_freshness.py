@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+import errno
 import hashlib
 import os
 from pathlib import Path
@@ -332,6 +333,36 @@ def test_symlinked_source_is_unsupported_before_query(tmp_path: Path) -> None:
 
     assert result.decision == "withhold"
     assert result.reason == "unsupported"
+    assert result.query_executed is False
+    assert result.output is None
+
+
+def test_source_read_io_failure_withholds_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    runtime = _runtime(tmp_path)
+    source = runtime.repo / "README.md"
+    source_identity = source.stat()
+    original_read = adapter_module.os.read
+
+    def failing_read(descriptor: int, size: int) -> bytes:
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (
+            source_identity.st_dev,
+            source_identity.st_ino,
+        ):
+            raise OSError(errno.EIO, "injected source read failure")
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(adapter_module.os, "read", failing_read)
+
+    result = runtime.authority.query(REPO_UUID, QUERY)
+
+    assert result.decision == "withhold"
+    assert result.reason == "source_unavailable"
     assert result.query_executed is False
     assert result.output is None
 

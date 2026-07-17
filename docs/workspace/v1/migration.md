@@ -17,15 +17,13 @@ pointers, leases, journals, or services. An inherited UUID in a separate Git
 common directory must fail collision until an audited operator-authorized
 adoption succeeds.
 
-## Later import requirements
+## Later migration requirements
 
-P4 can interpret and hash retained `0.9.12` manifests, caches, and artifacts
-without mutation, and can execute the published `0.9.16` adapter. It does not
-copy retained state or migrate a repository. P6-P8 still own those shadow
-migrations. A new workspace lease cannot fence a legacy writer. Import requires either the
-legacy implementation's native exclusive lock with writers disabled, or a
-fail-closed stable-snapshot protocol with identical complete before/after byte
-and identity manifests. Import never mutates legacy bytes.
+P4 executes the published `0.9.16` adapter and defines no pre-workspace-state
+reader. P6-P8 shadow migrations must build and certify a new `0.9.16`
+generation from source rather than import or rewrite an existing `graphify-out`
+tree. A new workspace lease cannot fence a legacy writer, so those later phases
+must still quiesce legacy writers before stable-route activation.
 
 Market Trend Radar, mac-mini-trading-os, and Aletheia remain untouched by P1.
 Their shadow migrations will pin the exact P5 candidate binary, runtime, skill,

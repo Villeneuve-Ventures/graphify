@@ -138,17 +138,31 @@ output remains ignored and must not widen the P1 product diff.
   `0.9.16` adapter package;
 - exact tuple selection executes `0.9.16`, mixed tuples reject before later
   state use, and coherent future tuples remain probe-only and non-promoting;
-- retained `0.9.12` manifest, AST/semantic cache, and graph/report fixtures are
-  interpreted without mutation and retain semantic hash attribution;
+- no pre-workspace retained-state reader or import intent is exposed, and only
+  the exact supported tuple can stage or promote a newly built generation;
 - read-only detection suppresses stat/word-count persistence and conversion
   sidecars, while explicit ordinary output roots redirect sidecars outside the
   source checkout;
 - two consecutive complete descriptor-checked inventory passes form each side
-  of the query, with source identity and pointer/receipt revalidated at the
-  release boundary;
+  of the query; detector probes, source entries, policies, and query payloads
+  share rooted no-follow reads, with source identity and pointer/receipt
+  revalidated at the release boundary;
+- linked worktrees pin the checkout, per-worktree Git directory, and shared Git
+  common directory independently; only `.git`, `commondir`, and
+  `info/exclude` routing/policy reads can cross the checkout boundary;
+- structural extraction consumes only a descriptor-validated external source
+  snapshot in a private build directory, publishes through a pinned empty output
+  descriptor with pre/post ancestry binding checks, normalizes staged payload
+  modes independently of caller umask, and deterministic contract bundles
+  exclude generated adapter cache trees;
+- query text, term work, context filters, depth, and token budgets reject above
+  their workspace bounds before freshness locks are acquired;
 - deterministic schedules cover edit, create, delete, rename, replacement,
-  policy change, post-pass identity change, persistent churn, pointer change,
-  wholly inter-observation ABA, and post-boundary mutation;
+  source, classifier, policy, query-payload, and output ancestor-to-symlink
+  replacement, plus a real-directory detection/snapshot replacement, with zero
+  external access, policy change,
+  post-pass identity change, persistent churn, pointer change, wholly
+  inter-observation ABA, and post-boundary mutation;
 - native query bypasses optional query logging, and recursive bytes,
   write-sensitive metadata, xattrs, read-only source modes, and filesystem-event
   observation prove no source or workspace write; and

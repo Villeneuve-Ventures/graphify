@@ -10,6 +10,15 @@ from typing import Any, Callable, Mapping, Protocol
 from graphify.workspace.contracts import CompatibilityManifest, canonical_json_bytes
 
 
+_MAX_QUERY_DEPTH = 8
+_MAX_QUERY_TOKEN_BUDGET = 32_768
+_MAX_QUERY_QUESTION_BYTES = 4_096
+_MAX_QUERY_TERM_UNITS = 256
+_MAX_QUERY_CONTEXT_FILTERS = 16
+_MAX_QUERY_CONTEXT_FILTER_BYTES = 128
+_MAX_QUERY_CONTEXT_FILTER_TOTAL_BYTES = 1_024
+
+
 class AdapterError(RuntimeError):
     """Base class for stable adapter failures."""
 
@@ -39,17 +48,12 @@ class ObservationTimeout(AdapterError):
     code = "observation_timeout"
 
 
-class RetainedStateInvalid(AdapterError):
-    code = "retained_state_invalid"
-
-
 class QueryRejected(AdapterError):
     code = "query_rejected"
 
 
 class AdapterIntent(str, Enum):
     EXECUTE = "execute"
-    IMPORT = "import"
     QUERY = "query"
     STAGE = "stage"
     PROMOTE = "promote"
@@ -125,30 +129,6 @@ class SourceObservation:
 
 
 @dataclass(frozen=True)
-class LegacyManifestEntry:
-    path: str
-    mtime: int | float
-    ast_hash: str
-    semantic_hash: str
-
-
-@dataclass(frozen=True)
-class RetainedFile:
-    path: str
-    size: int
-    sha256: str
-
-
-@dataclass(frozen=True)
-class LegacyStateSnapshot:
-    source_version: str
-    manifest_entries: tuple[LegacyManifestEntry, ...]
-    cache_entries: tuple[str, ...]
-    artifact_entries: tuple[str, ...]
-    files: tuple[RetainedFile, ...]
-
-
-@dataclass(frozen=True)
 class StructuralBuild:
     engine_baseline: str
     node_count: int
@@ -168,14 +148,44 @@ class QueryRequest:
     def __post_init__(self) -> None:
         if not self.question or self.question.strip() != self.question:
             raise QueryRejected("question must be non-empty and trimmed")
+        if len(self.question.encode("utf-8")) > _MAX_QUERY_QUESTION_BYTES:
+            raise QueryRejected(
+                f"question must not exceed {_MAX_QUERY_QUESTION_BYTES} UTF-8 bytes"
+            )
+        # Every engine-emitted query term consumes at least one non-space code
+        # point, so this bounds segmented and non-segmented term work without
+        # importing version-private tokenizer logic into the stable protocol.
+        term_units = sum(len(part) for part in self.question.split())
+        if term_units > _MAX_QUERY_TERM_UNITS:
+            raise QueryRejected(
+                f"question must not exceed {_MAX_QUERY_TERM_UNITS} non-space term units"
+            )
         if self.mode not in {"bfs", "dfs"}:
             raise QueryRejected("mode must be bfs or dfs")
         if self.depth < 0:
             raise QueryRejected("depth must be non-negative")
+        if self.depth > _MAX_QUERY_DEPTH:
+            raise QueryRejected(f"depth must not exceed {_MAX_QUERY_DEPTH}")
         if self.token_budget <= 0:
             raise QueryRejected("token_budget must be positive")
+        if self.token_budget > _MAX_QUERY_TOKEN_BUDGET:
+            raise QueryRejected(f"token_budget must not exceed {_MAX_QUERY_TOKEN_BUDGET}")
         if any(not item or item.strip() != item for item in self.context_filters):
             raise QueryRejected("context filters must be non-empty and trimmed")
+        if len(self.context_filters) > _MAX_QUERY_CONTEXT_FILTERS:
+            raise QueryRejected(
+                f"context filters must not exceed {_MAX_QUERY_CONTEXT_FILTERS} entries"
+            )
+        filter_sizes = tuple(len(item.encode("utf-8")) for item in self.context_filters)
+        if any(size > _MAX_QUERY_CONTEXT_FILTER_BYTES for size in filter_sizes):
+            raise QueryRejected(
+                f"each context filter must not exceed {_MAX_QUERY_CONTEXT_FILTER_BYTES} UTF-8 bytes"
+            )
+        if sum(filter_sizes) > _MAX_QUERY_CONTEXT_FILTER_TOTAL_BYTES:
+            raise QueryRejected(
+                "context filters must not exceed "
+                f"{_MAX_QUERY_CONTEXT_FILTER_TOTAL_BYTES} aggregate UTF-8 bytes"
+            )
 
 
 ObservationHook = Callable[[str, Mapping[str, object]], None]
@@ -198,14 +208,6 @@ class EngineAdapter(Protocol):
         deadline_ns: int | None = None,
         hook: ObservationHook | None = None,
     ) -> SourceObservation: ...
-
-    def read_retained_state(
-        self,
-        retained_root: Path,
-        *,
-        source_version: str,
-    ) -> LegacyStateSnapshot: ...
-
 
 @dataclass(frozen=True)
 class AdapterSelection:
@@ -234,8 +236,6 @@ __all__ = [
     "CompatibilityTuple",
     "EngineAdapter",
     "JsonMapping",
-    "LegacyManifestEntry",
-    "LegacyStateSnapshot",
     "ObservationHook",
     "ObservationTimeout",
     "ObservationUnavailable",
@@ -243,8 +243,6 @@ __all__ = [
     "ObservationUnsupported",
     "QueryRejected",
     "QueryRequest",
-    "RetainedFile",
-    "RetainedStateInvalid",
     "SourceEntry",
     "SourceObservation",
     "StructuralBuild",

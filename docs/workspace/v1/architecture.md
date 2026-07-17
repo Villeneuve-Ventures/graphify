@@ -22,9 +22,10 @@ P1 freezes only these seams:
 P2 implements the registry writer, identity/source enrollment, explicit
 active-source CAS, and lease allocator. P3 implements lifecycle mechanics for
 caller-supplied staged generations, pointers, journals, and offline GC. P4
-implements the sole `0.9.16` adapter, read-only `0.9.12` retained-state reader,
-no-write comparison seam, and observed-current release authority. Semantic
-queues, services, and the workspace CLI remain dependency-ordered P5 work.
+implements the sole `0.9.16` adapter, no-write comparison seam, and
+observed-current release authority. Pre-workspace state has no import or
+promotion lane. Semantic queues, services, and the workspace CLI remain
+dependency-ordered P5 work.
 
 ## Authority split
 
