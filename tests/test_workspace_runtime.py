@@ -269,6 +269,22 @@ def _enroll_process(
         results.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
+def _hold_registry_lock(
+    state_root: str,
+    *,
+    shared: bool,
+    started: Any,
+    acquired: Any,
+    release: Any,
+) -> None:
+    store = RegistryStore(Path(state_root), capabilities=SUPPORTED)
+    lock = store.read_only_snapshot() if shared else store.exclusive_lock()
+    started.set()
+    with lock:
+        acquired.set()
+        release.wait(timeout=15)
+
+
 def test_runtime_rejects_unsupported_platform_without_test_capability(tmp_path: Path) -> None:
     unsupported = RuntimeCapabilities(
         system="Linux",
@@ -1231,6 +1247,78 @@ def test_registry_mutations_serialize_across_processes(tmp_path: Path) -> None:
         REPO_UUID,
         SECOND_UUID,
     }
+
+
+def test_registry_shared_readers_overlap_while_writer_waits(tmp_path: Path) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    context = multiprocessing.get_context("spawn")
+    reader_releases = [context.Event(), context.Event()]
+    reader_started = [context.Event(), context.Event()]
+    reader_acquired = [context.Event(), context.Event()]
+    writer_started = context.Event()
+    writer_acquired = context.Event()
+    writer_release = context.Event()
+    processes = [
+        context.Process(
+            target=_hold_registry_lock,
+            kwargs={
+                "state_root": str(state_root),
+                "shared": True,
+                "started": reader_started[index],
+                "acquired": reader_acquired[index],
+                "release": reader_releases[index],
+            },
+        )
+        for index in range(2)
+    ]
+    writer = context.Process(
+        target=_hold_registry_lock,
+        kwargs={
+            "state_root": str(state_root),
+            "shared": False,
+            "started": writer_started,
+            "acquired": writer_acquired,
+            "release": writer_release,
+        },
+    )
+    try:
+        processes[0].start()
+        assert reader_started[0].wait(timeout=5)
+        assert reader_acquired[0].wait(timeout=5)
+        processes[1].start()
+        assert reader_started[1].wait(timeout=5)
+        readers_overlapped = reader_acquired[1].wait(timeout=2)
+        if not readers_overlapped:
+            reader_releases[0].set()
+            assert reader_acquired[1].wait(timeout=5)
+
+        writer.start()
+        assert writer_started.wait(timeout=5)
+        writer_waited = not writer_acquired.wait(timeout=1)
+        reader_releases[0].set()
+        reader_releases[1].set()
+        assert writer_acquired.wait(timeout=5)
+        writer_release.set()
+    finally:
+        for event in (*reader_releases, writer_release):
+            event.set()
+        for process in (*processes, writer):
+            if process.pid is not None:
+                process.join(timeout=10)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+
+    assert readers_overlapped
+    assert writer_waited
+    assert all(process.exitcode == 0 for process in (*processes, writer))
 
 
 def test_fenced_lease_allocation_heartbeat_acceptance_and_stale_rejection(

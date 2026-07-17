@@ -1487,6 +1487,7 @@ class CapacityReservation:
     generation_id: str
     reserved_bytes: int
     policy_sha256: str
+    compatibility_sha256: str
     active_source_revision: int
     operation_epoch: int
     fence_token: int
@@ -1498,6 +1499,7 @@ class CapacityReservation:
             "generation_id": self.generation_id,
             "reserved_bytes": self.reserved_bytes,
             "policy_sha256": self.policy_sha256,
+            "compatibility_sha256": self.compatibility_sha256,
             "active_source_revision": self.active_source_revision,
             "operation_epoch": self.operation_epoch,
             "fence_token": self.fence_token,
@@ -1553,6 +1555,7 @@ class CapacityReservationState:
                     "generation_id",
                     "reserved_bytes",
                     "policy_sha256",
+                    "compatibility_sha256",
                     "active_source_revision",
                     "operation_epoch",
                     "fence_token",
@@ -1572,6 +1575,10 @@ class CapacityReservationState:
                     minimum=1,
                 ),
                 policy_sha256=_digest(item["policy_sha256"], f"{path}.policy_sha256"),
+                compatibility_sha256=_digest(
+                    item["compatibility_sha256"],
+                    f"{path}.compatibility_sha256",
+                ),
                 active_source_revision=_integer(
                     item["active_source_revision"],
                     f"{path}.active_source_revision",

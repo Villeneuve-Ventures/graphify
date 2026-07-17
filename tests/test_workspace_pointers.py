@@ -9,11 +9,16 @@ import shutil
 import subprocess
 import sys
 import threading
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from graphify.workspace.contracts import CapacityPolicy, PriorPointerRecord
+from graphify.workspace.adapters import UnsupportedCompatibility
+from graphify.workspace.contracts import (
+    CapacityPolicy,
+    CompatibilityManifest,
+    PriorPointerRecord,
+)
 from graphify.workspace.generations import (
     CertificationRequest,
     GenerationError,
@@ -33,6 +38,8 @@ from graphify.workspace.pointers import (
 )
 
 from tests.workspace_p3_helpers import (
+    COMPATIBILITY_MANIFEST,
+    COMPATIBILITY_SHA256,
     REPO_UUID,
     START,
     acquire,
@@ -67,7 +74,7 @@ def _request(commit: str) -> CertificationRequest:
         observation_manifest_sha256="2" * 64,
         queue_watermark=0,
         semantic_completeness="not_required",
-        compatibility_sha256="3" * 64,
+        compatibility_sha256=COMPATIBILITY_SHA256,
         validations=("payload_manifest", "coordination_lock_precreated"),
     )
 
@@ -129,6 +136,7 @@ def test_pointer_gc_barrier_rejects_linked_parent_without_mutation(tmp_path: Pat
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     pointers = PointerStore(
@@ -136,6 +144,7 @@ def test_pointer_gc_barrier_rejects_linked_parent_without_mutation(tmp_path: Pat
         harness.leases,
         generations,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     workspace = harness.state_root / "workspaces" / REPO_UUID
@@ -174,6 +183,7 @@ def _promotion_runtime(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     receipts = {
@@ -193,6 +203,7 @@ def _promotion_runtime(
         harness.leases,
         generations,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=fault_hook,
     )
@@ -223,6 +234,87 @@ def test_raw_journal_caller_cannot_append_pointer_owned_transition(
             occurred_at=START + timedelta(seconds=2),
             monotonic_ns=20_002,
         )
+
+
+def test_promotion_rejects_different_manifest_generation_without_state_mutation(
+    tmp_path: Path,
+) -> None:
+    manifest_value = COMPATIBILITY_MANIFEST.to_dict()
+    alternate_manifest = cast(
+        CompatibilityManifest,
+        CompatibilityManifest.from_mapping(
+            {**manifest_value, "distribution_build": "alternate-published-build"}
+        ),
+    )
+    assert alternate_manifest.sha256 != COMPATIBILITY_SHA256
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    alternate_generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=alternate_manifest,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = alternate_generations.allocate(
+        build,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-alternate-manifest",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("alternate\n", encoding="utf-8")
+    declared = alternate_generations.inspect_staged_payload(allocation)
+    receipt = alternate_generations.certify(
+        build,
+        allocation,
+        replace(
+            _request(hashlib.sha1(b"gen-alternate-manifest").hexdigest()),
+            compatibility_sha256=alternate_manifest.sha256,
+        ),
+        declared_entries=declared,
+        occurred_at=START,
+        monotonic_ns=10_002,
+    )
+    harness.leases.release(build)
+    promote = acquire(harness, "PROMOTE", tick=2)
+    current_generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    pointers = PointerStore(
+        harness.state_root,
+        harness.leases,
+        current_generations,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        UnsupportedCompatibility,
+        match="candidate receipt does not match",
+    ):
+        pointers.promote(
+            promote,
+            _cas(promote, receipt, revision=0, current_sha256=None),
+            occurred_at=START + timedelta(seconds=2),
+            monotonic_ns=20_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
 
 
 def test_two_certified_candidates_race_promotion_and_only_one_wins(tmp_path: Path) -> None:
@@ -507,6 +599,7 @@ def test_pointer_promotion_retains_prior_before_visibility_and_loser_is_supersed
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     first = _certify(generations, build, "gen-a", "a\n", monotonic_ns=10_001)
@@ -519,6 +612,7 @@ def test_pointer_promotion_retains_prior_before_visibility_and_loser_is_supersed
         harness.leases,
         generations,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=events.append,
     )
@@ -616,6 +710,7 @@ def test_shared_reader_is_nonmutating_and_holds_retained_generation_lock(tmp_pat
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     receipt = _certify(generations, build, "gen-reader", "reader\n", monotonic_ns=10_001)
@@ -626,6 +721,7 @@ def test_shared_reader_is_nonmutating_and_holds_retained_generation_lock(tmp_pat
         harness.leases,
         generations,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     pointers.promote(
@@ -666,23 +762,26 @@ def test_shared_reader_is_nonmutating_and_holds_retained_generation_lock(tmp_pat
             (
                 "from pathlib import Path\n"
                 "from graphify.workspace.persistence import RuntimeCapabilities\n"
+                "from graphify.workspace.contracts import CompatibilityManifest\n"
                 "from graphify.workspace.registry import RegistryStore\n"
                 "from graphify.workspace.leases import LeaseStore\n"
                 "from graphify.workspace.journal import JournalStore\n"
                 "from graphify.workspace.generations import GenerationStore\n"
                 "from graphify.workspace.pointers import PointerStore\n"
                 "root=Path(__import__('sys').argv[1]); repo=__import__('sys').argv[2]\n"
+                "manifest=CompatibilityManifest.from_json(__import__('sys').argv[3].encode())\n"
                 "caps=RuntimeCapabilities.supported_test_fixture()\n"
                 "registry=RegistryStore(root, capabilities=caps)\n"
                 "leases=LeaseStore(root, registry, capabilities=caps)\n"
                 "journal=JournalStore(root, leases, capabilities=caps)\n"
-                "generations=GenerationStore(root, leases, journal, capabilities=caps)\n"
-                "pointers=PointerStore(root, leases, generations, journal, capabilities=caps)\n"
+                "generations=GenerationStore(root, leases, journal, compatibility_manifest=manifest, capabilities=caps)\n"
+                "pointers=PointerStore(root, leases, generations, journal, compatibility_manifest=manifest, capabilities=caps)\n"
                 "pointer=pointers.load(repo); receipt=generations.verify_generation(repo, 'gen-reader')\n"
                 "print(pointer.to_dict()['pointer_revision'], receipt.sha256)\n"
             ),
             str(harness.state_root),
             REPO_UUID,
+            COMPATIBILITY_MANIFEST.canonical.decode("utf-8"),
         ],
         check=True,
         capture_output=True,
@@ -709,6 +808,7 @@ def test_clean_reboot_identity_reopens_completed_generation_journal_and_pointer(
         "import os, sys\n"
         "from pathlib import Path\n"
         "from graphify.workspace.generations import GenerationStore\n"
+        "from graphify.workspace.contracts import CompatibilityManifest\n"
         "from graphify.workspace.journal import JournalStore\n"
         "from graphify.workspace.leases import LeaseOwner, LeaseStore\n"
         "from graphify.workspace.persistence import RuntimeCapabilities\n"
@@ -718,13 +818,14 @@ def test_clean_reboot_identity_reopens_completed_generation_journal_and_pointer(
         "    def current_owner(self):\n"
         "        return LeaseOwner('boot-after-clean-reboot', os.getpid(), 'reboot:1')\n"
         "root=Path(sys.argv[1]); repo_uuid=sys.argv[2]\n"
+        "manifest=CompatibilityManifest.from_json(sys.argv[3].encode())\n"
         "caps=RuntimeCapabilities.supported_test_fixture()\n"
         "registry=RegistryStore(root, capabilities=caps)\n"
         "leases=LeaseStore(root, registry, capabilities=caps, "
         "identity_provider=RebootIdentity())\n"
         "journal=JournalStore(root, leases, capabilities=caps)\n"
-        "generations=GenerationStore(root, leases, journal, capabilities=caps)\n"
-        "pointers=PointerStore(root, leases, generations, journal, capabilities=caps)\n"
+        "generations=GenerationStore(root, leases, journal, compatibility_manifest=manifest, capabilities=caps)\n"
+        "pointers=PointerStore(root, leases, generations, journal, compatibility_manifest=manifest, capabilities=caps)\n"
         "document=registry.load(); entry=document.to_dict()['workspaces'][0]\n"
         "state=leases.inspect(repo_uuid)\n"
         "grant=leases.acquire(repo_uuid, 'POINTER_RECOVERY', leases.current_owner(), "
@@ -744,7 +845,14 @@ def test_clean_reboot_identity_reopens_completed_generation_journal_and_pointer(
         "print(pointer.to_dict()['pointer_revision'], receipt.sha256, len(events))\n"
     )
     rebooted = subprocess.run(
-        [sys.executable, "-c", script, str(harness.state_root), REPO_UUID],
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(harness.state_root),
+            REPO_UUID,
+            COMPATIBILITY_MANIFEST.canonical.decode("utf-8"),
+        ],
         cwd=Path.cwd(),
         check=True,
         capture_output=True,
@@ -776,6 +884,7 @@ def test_visible_pointer_commit_unknown_repairs_to_new_monotonic_revision(tmp_pa
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     receipt = _certify(generations, build, "gen-repair", "repair\n", monotonic_ns=10_001)
@@ -786,6 +895,7 @@ def test_visible_pointer_commit_unknown_repairs_to_new_monotonic_revision(tmp_pa
         harness.leases,
         generations,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=fail,
     )

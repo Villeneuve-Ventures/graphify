@@ -8,16 +8,22 @@ import os
 import shutil
 from types import SimpleNamespace
 import threading
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from graphify.workspace.contracts import CapacityPolicy, ContractError
+from graphify.workspace.adapters import AdapterIntent, UnsupportedCompatibility
+from graphify.workspace.contracts import (
+    CapacityPolicy,
+    CompatibilityManifest,
+    ContractError,
+)
 from graphify.workspace.identity import discover_source
 from graphify.workspace.leases import LeaseGrant, LeaseRecoveryRequired
 from graphify.workspace.generations import (
     CapacityExceeded,
     CertificationRequest,
+    GenerationConflict,
     GenerationError,
     GenerationStore,
     PayloadChanged,
@@ -26,6 +32,8 @@ from graphify.workspace.journal import JournalStore
 from graphify.workspace.persistence import CommitUnknown, InjectedFault, StatePathError
 
 from tests.workspace_p3_helpers import (
+    COMPATIBILITY_MANIFEST,
+    COMPATIBILITY_SHA256,
     REPO_UUID,
     START,
     acquire,
@@ -53,6 +61,99 @@ POLICY = CapacityPolicy.from_mapping(
 )
 
 
+def test_generation_store_selects_stage_adapter_before_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    before = tree_snapshot(harness.state_root)
+    intents: list[AdapterIntent] = []
+
+    def reject(_compatibility: object, *, intent: AdapterIntent) -> object:
+        intents.append(intent)
+        raise UnsupportedCompatibility("injected unsupported tuple")
+
+    monkeypatch.setattr("graphify.workspace.generations.select_adapter", reject)
+
+    with pytest.raises(UnsupportedCompatibility, match="injected unsupported tuple"):
+        GenerationStore(
+            harness.state_root,
+            harness.leases,
+            journal,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            capabilities=harness.leases.state.capabilities,
+        )
+
+    assert intents == [AdapterIntent.STAGE]
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_allocation_rejects_reservation_from_different_manifest_without_state_mutation(
+    tmp_path: Path,
+) -> None:
+    alternate_manifest = cast(
+        CompatibilityManifest,
+        CompatibilityManifest.from_mapping(
+            {
+                **COMPATIBILITY_MANIFEST.to_dict(),
+                "distribution_build": "alternate-published-build",
+            }
+        ),
+    )
+    harness = create_harness(tmp_path)
+    first_grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    first_store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    first_store.allocate(
+        first_grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-manifest-switch",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    harness.leases.release(first_grant)
+    second_grant = acquire(harness, "BUILD", tick=2)
+    alternate_store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=alternate_manifest,
+        capabilities=harness.leases.state.capabilities,
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        GenerationConflict,
+        match="different durable capacity reservation",
+    ):
+        alternate_store.allocate(
+            second_grant,
+            expected_payload_bytes=4096,
+            capacity_policy=POLICY,
+            generation_id="gen-manifest-switch",
+            occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=20_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 def _request(source_commit: str) -> CertificationRequest:
     return CertificationRequest(
         source_commit=source_commit,
@@ -61,7 +162,7 @@ def _request(source_commit: str) -> CertificationRequest:
         observation_manifest_sha256="2" * 64,
         queue_watermark=0,
         semantic_completeness="not_required",
-        compatibility_sha256="3" * 64,
+        compatibility_sha256=COMPATIBILITY_SHA256,
         validations=("payload_manifest", "coordination_lock_precreated"),
     )
 
@@ -90,6 +191,7 @@ def test_capacity_preflight_fails_before_allocation_mutates_workspace_state(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     before = tree_snapshot(harness.state_root / "workspaces" / REPO_UUID)
@@ -120,6 +222,7 @@ def test_gc_barrier_rejects_linked_parent_before_allocation_mutates_state(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     workspace = harness.state_root / "workspaces" / REPO_UUID
@@ -163,6 +266,7 @@ def test_capacity_scan_rejects_unsafe_generation_parent_before_mutation(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     generations = harness.state_root / "workspaces" / REPO_UUID / "generations"
@@ -209,6 +313,7 @@ def test_allocate_revalidates_capacity_policy_before_any_state_mutation(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     invalid = replace(POLICY, reserve_bytes=-1)
@@ -253,6 +358,7 @@ def test_capacity_preflight_enforces_global_bytes_and_workspace_generation_count
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     if message == "workspace generation limit":
@@ -296,6 +402,7 @@ def test_capacity_preflight_enforces_filesystem_reserve_before_mutation(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     monkeypatch.setattr(
@@ -329,6 +436,7 @@ def test_filesystem_reserve_counts_unconsumed_cross_workspace_reservations(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     policy = replace(
@@ -430,6 +538,7 @@ def test_global_capacity_reservation_serializes_cross_workspace_allocations(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     policy = replace(
@@ -512,6 +621,7 @@ def test_cross_workspace_certification_does_not_hold_the_global_registry_lock(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=pause_first,
     )
@@ -571,6 +681,7 @@ def test_certification_seals_exact_payload_and_installs_lock_before_certified_ev
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=events.append,
     )
@@ -614,6 +725,60 @@ def test_certification_seals_exact_payload_and_installs_lock_before_certified_ev
     assert lock_path.stat().st_ino == lock_inode
 
 
+@pytest.mark.parametrize("mismatch", ["allocation", "request"])
+def test_certification_rejects_compatibility_mismatch_without_state_mutation(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id=f"gen-compatibility-{mismatch}",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("{}\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    request = _request("a" * 40)
+    if mismatch == "allocation":
+        allocation = replace(allocation, compatibility_sha256="d" * 64)
+    else:
+        request = replace(request, compatibility_sha256="d" * 64)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        UnsupportedCompatibility,
+        match="not bound to the selected compatibility manifest",
+    ):
+        store.certify(
+            grant,
+            allocation,
+            request,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_002,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 @pytest.mark.parametrize(
     "bad_kind",
     ["symlink", "hardlink", "fifo", "extra_root", "root_mode"],
@@ -631,6 +796,7 @@ def test_certification_rejects_links_special_files_and_root_extras(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     allocation = store.allocate(
@@ -672,6 +838,7 @@ def test_certification_cleanup_rejects_linked_staging_parent_without_external_de
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     allocation = store.allocate(
@@ -725,6 +892,7 @@ def test_receipt_install_rejects_parent_swap_after_temp_cleanup_without_external
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     allocation = store.allocate(
@@ -802,6 +970,7 @@ def test_certification_fsync_rejects_transient_payload_parent_link(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     allocation = store.allocate(
@@ -885,6 +1054,7 @@ def test_certification_rename_rejects_transient_staging_parent_link(tmp_path: Pa
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=race,
     )
@@ -934,6 +1104,7 @@ def test_certification_reloads_the_durable_reservation_and_stable_lock_error(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     allocation = store.allocate(
@@ -991,6 +1162,7 @@ def test_certification_rejects_noncanonical_manifest_and_mutation_during_sealing
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=mutate,
     )
@@ -1070,6 +1242,7 @@ def test_allocation_recovers_each_reservation_lock_and_journal_boundary(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=fail,
     )
@@ -1113,6 +1286,7 @@ def test_successor_fence_adopts_dead_builder_reservation_and_staging(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     allocation = store.allocate(
@@ -1176,6 +1350,7 @@ def test_successor_revalidates_when_predecessor_died_before_sealing_receipt(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     allocation = store.allocate(
@@ -1258,6 +1433,7 @@ def test_successor_fence_finishes_installed_generation_before_certified_event(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=fail_after_install,
     )
@@ -1334,6 +1510,7 @@ def test_successor_retries_certification_after_durable_capacity_release(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=fail_after_capacity_release,
     )
@@ -1395,6 +1572,7 @@ def test_capacity_counts_corrupt_quarantine_and_rejects_ambiguous_locations(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     policy = replace(POLICY, workspace_max_generations=1)
@@ -1458,6 +1636,7 @@ def test_capacity_scan_retries_a_transient_cross_workspace_rename(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     source_relative = store._generation(REPO_UUID, "gen-race")
@@ -1544,6 +1723,7 @@ def test_certification_recovers_receipt_and_generation_visibility_boundaries(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
         fault_hook=fail,
     )

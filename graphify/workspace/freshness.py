@@ -229,7 +229,7 @@ class FreshnessAuthority:
             query_executed=query_executed,
         )
 
-    def run(
+    def _run(
         self,
         repo_uuid: str,
         query: Callable[[Path], OutputT],
@@ -394,7 +394,7 @@ class FreshnessAuthority:
     ) -> FreshnessResult[str]:
         """Execute the adapter's no-log native query inside the release protocol."""
 
-        return self.run(
+        return self._run(
             repo_uuid,
             lambda payload_root: self.adapter.query_structural(payload_root, request),
             timeout_ns=timeout_ns,

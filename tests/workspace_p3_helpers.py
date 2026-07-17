@@ -7,8 +7,9 @@ import os
 from pathlib import Path
 import stat
 import subprocess
-from typing import Any
+from typing import Any, cast
 
+from graphify.workspace.contracts import CompatibilityManifest
 from graphify.workspace.identity import IdentityAction, OperatorAuthorization, discover_source
 from graphify.workspace.leases import LeaseGrant, LeaseStore
 from graphify.workspace.persistence import RuntimeCapabilities
@@ -19,6 +20,14 @@ REPO_UUID = "11111111-1111-4111-8111-111111111111"
 REMOTE = "https://github.com/example/graphify-p3-fixture.git"
 SUPPORTED = RuntimeCapabilities.supported_test_fixture()
 START = datetime(2026, 7, 16, 19, 0, tzinfo=timezone.utc)
+FIXTURES = Path(__file__).parent / "fixtures" / "workspace" / "v1"
+COMPATIBILITY_MANIFEST = cast(
+    CompatibilityManifest,
+    CompatibilityManifest.from_json(
+        (FIXTURES / "positive" / "compatibility-manifest.json").read_bytes()
+    ),
+)
+COMPATIBILITY_SHA256 = COMPATIBILITY_MANIFEST.sha256
 
 
 def _run(repo: Path, *arguments: str) -> str:

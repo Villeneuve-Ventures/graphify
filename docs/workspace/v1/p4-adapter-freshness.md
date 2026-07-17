@@ -69,9 +69,9 @@ did not structurally extract.
    tuple. Drift, unstable inventory, timeout, unsupported comparison, corrupt or
    unavailable authority, and pointer change discard output.
 
-The low-level callback form exists for deterministic fault schedules and
-requires a caller-supplied read-only payload function. The supported native
-query method is the no-log adapter path described above.
+The callback runner is private and exists only for deterministic fault
+schedules. The supported query surface is the no-log adapter path described
+above, so callers cannot substitute a stateful payload function.
 
 `current_only` is an observation protocol, not an atomic checkout snapshot. It
 does not claim strict source linearizability or detection of an edit that is

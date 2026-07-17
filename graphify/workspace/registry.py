@@ -142,6 +142,7 @@ class RegistryStore:
             self.LOCK,
             rank=REGISTRY_LOCK_RANK,
             name="registry",
+            exclusive=False,
         ):
             document = self._load_locked(recover=False)
             if document is None:  # pragma: no cover - narrowed by allow_missing=False

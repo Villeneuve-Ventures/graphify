@@ -8,8 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, cast
 
+from graphify.workspace.adapters import (
+    AdapterIntent,
+    CompatibilityTuple,
+    UnsupportedCompatibility,
+    select_adapter,
+)
 from graphify.workspace.contracts import (
     STATE_SCHEMA_VERSION,
+    CompatibilityManifest,
     GenerationReceipt,
     PointerSet,
     PriorPointerRecord,
@@ -90,10 +97,18 @@ class PointerStore:
         generations: GenerationStore,
         journal: JournalStore,
         *,
+        compatibility_manifest: CompatibilityManifest,
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
     ) -> None:
+        compatibility = CompatibilityTuple.from_manifest(compatibility_manifest)
+        select_adapter(compatibility, intent=AdapterIntent.PROMOTE).require_adapter()
+        self.compatibility_sha256 = compatibility_manifest.sha256
+        if generations.compatibility_sha256 != self.compatibility_sha256:
+            raise UnsupportedCompatibility(
+                "pointer and generation stores require the same compatibility manifest"
+            )
         self.leases = leases
         self.generations = generations
         self.journal = journal
@@ -560,6 +575,7 @@ class PointerStore:
         *,
         transition: str,
         allowed_operation: str,
+        expected_compatibility_sha256: str | None,
         occurred_at: datetime,
         monotonic_ns: int,
     ) -> PointerSet:
@@ -569,7 +585,6 @@ class PointerStore:
             allowed_operations=frozenset({allowed_operation}),
         ) as operation:
             self._assert_no_gc_intent(operation.repo_uuid)
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
             preliminary = self._preliminary_pointer(operation.repo_uuid)
             locks = self._lock_set(
                 operation.repo_uuid,
@@ -582,6 +597,15 @@ class PointerStore:
                     operation.repo_uuid,
                     cas.candidate_generation_id,
                 )
+                if (
+                    expected_compatibility_sha256 is not None
+                    and candidate.to_dict()["compatibility_sha256"]
+                    != expected_compatibility_sha256
+                ):
+                    raise UnsupportedCompatibility(
+                        "candidate receipt does not match the selected compatibility manifest"
+                    )
+                self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
                 snapshot = self.journal.recover_locked(operation)
                 if not self._journal_certifies(
                     snapshot,
@@ -665,6 +689,7 @@ class PointerStore:
             cas,
             transition="PROMOTED",
             allowed_operation="PROMOTE",
+            expected_compatibility_sha256=self.compatibility_sha256,
             occurred_at=occurred_at,
             monotonic_ns=monotonic_ns,
         )
@@ -682,6 +707,7 @@ class PointerStore:
             cas,
             transition="ROLLED_BACK",
             allowed_operation="ROLLBACK",
+            expected_compatibility_sha256=None,
             occurred_at=occurred_at,
             monotonic_ns=monotonic_ns,
         )

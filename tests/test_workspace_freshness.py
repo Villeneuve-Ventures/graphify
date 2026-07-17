@@ -14,7 +14,12 @@ from typing import Any, Callable, Mapping, cast
 import pytest
 
 from graphify.workspace.adapters import QueryRequest
-from graphify.workspace.contracts import CapacityPolicy, CompatibilityManifest, PointerSet
+from graphify.workspace.contracts import (
+    CapacityPolicy,
+    CompatibilityManifest,
+    GenerationReceipt,
+    PointerSet,
+)
 from graphify.workspace.freshness import FreshnessAuthority
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
@@ -80,7 +85,6 @@ def _xattr_snapshot(root: Path) -> dict[str, tuple[tuple[str, bytes], ...]]:
 def _runtime(
     tmp_path: Path,
     *,
-    receipt_compatibility_sha256: str = COMPATIBILITY_SHA256,
     max_inventory_passes: int = 6,
 ) -> FreshnessRuntime:
     harness = create_harness(tmp_path)
@@ -93,6 +97,7 @@ def _runtime(
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     pointers = PointerStore(
@@ -100,6 +105,7 @@ def _runtime(
         harness.leases,
         generations,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     authority = FreshnessAuthority(
@@ -132,7 +138,7 @@ def _runtime(
             observation_manifest_sha256=observation.inventory_sha256,
             queue_watermark=0,
             semantic_completeness="not_required",
-            compatibility_sha256=receipt_compatibility_sha256,
+            compatibility_sha256=COMPATIBILITY_SHA256,
             validations=("payload_manifest", "coordination_lock_precreated"),
         ),
         declared_entries=entries,
@@ -247,7 +253,7 @@ def test_mutation_after_pre_observation_withholds_query_output(
             mutation(runtime.repo)
             mutated = True
 
-    result = runtime.authority.run(REPO_UUID, _query, hook=hook)
+    result = runtime.authority._run(REPO_UUID, _query, hook=hook)
 
     assert result.decision == "withhold"
     assert result.reason == "drift"
@@ -271,7 +277,7 @@ def test_mutation_after_file_hash_in_post_pass_cannot_escape_second_inventory(
             _edit(runtime.repo)
             mutated = True
 
-    result = runtime.authority.run(REPO_UUID, _query, hook=hook)
+    result = runtime.authority._run(REPO_UUID, _query, hook=hook)
 
     assert result.decision == "withhold"
     assert result.reason == "drift"
@@ -291,7 +297,7 @@ def test_persistent_inventory_churn_fails_closed_as_unstable(tmp_path: Path) -> 
                 encoding="utf-8",
             )
 
-    result = runtime.authority.run(REPO_UUID, _query, hook=hook)
+    result = runtime.authority._run(REPO_UUID, _query, hook=hook)
 
     assert result.decision == "withhold"
     assert result.reason == "unstable"
@@ -334,7 +340,7 @@ def test_inter_observation_aba_is_documented_not_overclaimed(tmp_path: Path) -> 
         (runtime.repo / "README.md").write_bytes(original)
         return _query(payload)
 
-    result = runtime.authority.run(REPO_UUID, aba_query)
+    result = runtime.authority._run(REPO_UUID, aba_query)
 
     assert result.decision == "release"
     assert result.reason == "observed_current"
@@ -349,7 +355,7 @@ def test_mutation_after_release_boundary_is_a_subsequent_change(tmp_path: Path) 
         if event == "freshness:release_boundary":
             _edit(runtime.repo)
 
-    result = runtime.authority.run(REPO_UUID, _query, hook=hook)
+    result = runtime.authority._run(REPO_UUID, _query, hook=hook)
 
     assert result.decision == "release"
     assert result.reason == "observed_current"
@@ -370,7 +376,7 @@ def test_pointer_change_before_release_discards_output(tmp_path: Path) -> None:
         pointer_path.write_bytes(PointerSet.from_mapping(current).canonical)
         pointer_path.chmod(0o600)
 
-    result = runtime.authority.run(REPO_UUID, _query, hook=hook)
+    result = runtime.authority._run(REPO_UUID, _query, hook=hook)
 
     assert result.decision == "withhold"
     assert result.reason == "drift"
@@ -406,7 +412,26 @@ def test_source_identity_change_after_post_observation_discards_output(tmp_path:
 
 
 def test_receipt_compatibility_mismatch_fails_before_query(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, receipt_compatibility_sha256="d" * 64)
+    runtime = _runtime(tmp_path)
+    workspace = runtime.state_root / "workspaces" / REPO_UUID
+    pointer_path = workspace / "pointers.json"
+    pointer = cast(PointerSet, PointerSet.from_json(pointer_path.read_bytes()))
+    pointer_value = pointer.to_dict()
+    current = cast(dict[str, Any], pointer_value["current"])
+    receipt_path = (
+        workspace / "generations" / str(current["generation_id"]) / "receipt.json"
+    )
+    receipt = cast(GenerationReceipt, GenerationReceipt.from_json(receipt_path.read_bytes()))
+    unsupported_receipt = cast(
+        GenerationReceipt,
+        GenerationReceipt.from_mapping(
+            {**receipt.to_dict(), "compatibility_sha256": "d" * 64}
+        ),
+    )
+    receipt_path.write_bytes(unsupported_receipt.canonical)
+    current["receipt_sha256"] = unsupported_receipt.sha256
+    unsupported_pointer = cast(PointerSet, PointerSet.from_mapping(pointer_value))
+    pointer_path.write_bytes(unsupported_pointer.canonical)
     called = False
 
     def query(_payload: Path) -> str:
@@ -414,7 +439,7 @@ def test_receipt_compatibility_mismatch_fails_before_query(tmp_path: Path) -> No
         called = True
         return "unexpected"
 
-    result = runtime.authority.run(REPO_UUID, query)
+    result = runtime.authority._run(REPO_UUID, query)
 
     assert result.decision == "withhold"
     assert result.reason == "unsupported"
@@ -433,7 +458,7 @@ def test_unavailable_active_source_fails_closed_without_query(tmp_path: Path) ->
         called = True
         return "unexpected"
 
-    result = runtime.authority.run(REPO_UUID, query)
+    result = runtime.authority._run(REPO_UUID, query)
 
     assert result.decision == "withhold"
     assert result.reason == "source_unavailable"
