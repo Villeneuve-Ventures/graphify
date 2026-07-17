@@ -543,7 +543,7 @@ def test_existing_fifo_lock_is_rejected_without_blocking_or_mutation(tmp_path: P
     (
         ("evidence_symlink", StateCorrupt),
         ("evidence_mode", StateCorrupt),
-        ("gc_symlink", StatePathError),
+        ("gc_symlink", LeaseRecoveryRequired),
         ("generations_mode", StatePathError),
         ("generation_mode", StatePathError),
     ),

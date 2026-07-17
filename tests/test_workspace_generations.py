@@ -108,6 +108,47 @@ def test_capacity_preflight_fails_before_allocation_mutates_workspace_state(
     assert tree_snapshot(harness.state_root / "workspaces" / REPO_UUID) == before
 
 
+def test_gc_barrier_rejects_linked_parent_before_allocation_mutates_state(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    workspace = harness.state_root / "workspaces" / REPO_UUID
+    gc_directory = workspace / "gc"
+    gc_directory.mkdir(mode=0o700)
+    intent = gc_directory / "intent.json"
+    intent.write_bytes(b"retained intent\n")
+    intent.chmod(0o600)
+    gc_directory.rename(workspace / "gc.parked")
+    external = tmp_path / "external-gc"
+    external.mkdir(mode=0o700)
+    gc_directory.symlink_to(external, target_is_directory=True)
+    before = tree_snapshot(harness.state_root)
+    before_external = tree_snapshot(external)
+
+    with pytest.raises(LeaseRecoveryRequired, match="recovery barrier is unsafe"):
+        store.allocate(
+            grant,
+            expected_payload_bytes=1,
+            capacity_policy=POLICY,
+            generation_id="gen-linked-gc-barrier",
+            occurred_at=START,
+            monotonic_ns=10_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+    assert tree_snapshot(external) == before_external
+
+
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "mode"])
 def test_capacity_scan_rejects_unsafe_generation_parent_before_mutation(
     tmp_path: Path,

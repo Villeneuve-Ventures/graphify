@@ -742,6 +742,28 @@ class DurableStateRoot:
             os.close(descriptor)
             return True
 
+    def private_file_exists(self, relative: str | Path) -> bool:
+        """Probe one owned 0600 file without following any path component."""
+
+        path = self.path(relative)
+        try:
+            descriptor = self._open_existing_file(path, allow_missing_parent=True)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise StatePathError(f"state file cannot be opened safely: {path}") from exc
+        if descriptor is None:
+            return False
+        try:
+            self._require_regular_descriptor(
+                descriptor,
+                path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+        finally:
+            os.close(descriptor)
+        return True
+
     def _tree_bytes_descriptor(
         self,
         descriptor: int,

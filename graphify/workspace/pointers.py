@@ -21,6 +21,7 @@ from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
     RuntimeCapabilities,
+    StatePathError,
     Syscalls,
 )
 
@@ -128,14 +129,10 @@ class PointerStore:
         return cls._workspace(repo_uuid) / "gc" / "intent.json"
 
     def _exists(self, relative: Path) -> bool:
-        path = self.state.path(relative)
         try:
-            details = path.lstat()
-        except FileNotFoundError:
-            return False
-        if path.is_symlink() or not path.is_file() or details.st_nlink != 1:
-            raise PointerCorrupt(f"pointer state path is unsafe: {relative}")
-        return True
+            return self.state.private_file_exists(relative)
+        except StatePathError as exc:
+            raise PointerCorrupt(f"pointer state path is unsafe: {relative}") from exc
 
     def _read_pointer(
         self,

@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
-import stat
 import subprocess
 import sys
 from typing import Any, cast, Iterator, Protocol
@@ -27,6 +26,7 @@ from graphify.workspace.persistence import (
     FaultHook,
     RuntimeCapabilities,
     StateCorrupt,
+    StatePathError,
     Syscalls,
     WORKSPACE_LOCK_RANK,
 )
@@ -332,21 +332,10 @@ class LeaseStore:
         )
 
     def _durable_record_exists(self, relative: Path) -> bool:
-        path = self.state.path(relative)
         try:
-            details = path.lstat()
-        except FileNotFoundError:
-            return False
-        if (
-            not stat.S_ISREG(details.st_mode)
-            or details.st_nlink != 1
-            or path.is_symlink()
-        ):
-            raise LeaseRecoveryRequired(f"recovery barrier is unsafe: {relative}")
-        self.state._require_owner(details, path)
-        if stat.S_IMODE(details.st_mode) != 0o600:
-            raise LeaseRecoveryRequired(f"recovery barrier mode is not 0600: {relative}")
-        return True
+            return self.state.private_file_exists(relative)
+        except StatePathError as exc:
+            raise LeaseRecoveryRequired(f"recovery barrier is unsafe: {relative}") from exc
 
     def _assert_recovery_barriers_locked(
         self,

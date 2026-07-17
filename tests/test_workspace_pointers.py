@@ -118,6 +118,46 @@ def _cas(grant: Any, receipt: Any, *, revision: int, current_sha256: str | None)
     )
 
 
+def test_pointer_gc_barrier_rejects_linked_parent_without_mutation(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    pointers = PointerStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    workspace = harness.state_root / "workspaces" / REPO_UUID
+    gc_directory = workspace / "gc"
+    gc_directory.mkdir(mode=0o700)
+    intent = gc_directory / "intent.json"
+    intent.write_bytes(b"retained intent\n")
+    intent.chmod(0o600)
+    gc_directory.rename(workspace / "gc.parked")
+    external = tmp_path / "external-gc"
+    external.mkdir(mode=0o700)
+    gc_directory.symlink_to(external, target_is_directory=True)
+    before = tree_snapshot(harness.state_root)
+    before_external = tree_snapshot(external)
+
+    with pytest.raises(PointerCorrupt, match="pointer state path is unsafe"):
+        pointers._assert_no_gc_intent(REPO_UUID)
+
+    assert tree_snapshot(harness.state_root) == before
+    assert tree_snapshot(external) == before_external
+
+
 def _promotion_runtime(
     tmp_path: Path,
     *,
