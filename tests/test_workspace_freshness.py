@@ -472,6 +472,61 @@ def test_pointer_change_before_release_discards_output(tmp_path: Path) -> None:
     assert result.output is None
 
 
+def test_forged_pointer_lease_authority_is_rejected_before_query(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    pointer_path = runtime.state_root / "workspaces" / REPO_UUID / "pointers.json"
+    pointer = cast(PointerSet, PointerSet.from_json(pointer_path.read_bytes()))
+    forged = pointer.to_dict()
+    forged["operation_epoch"] = int(forged["operation_epoch"]) + 1
+    forged["fence_token"] = int(forged["fence_token"]) + 1
+    pointer_path.write_bytes(PointerSet.from_mapping(forged).canonical)
+    pointer_path.chmod(0o600)
+    before = tree_snapshot(runtime.state_root)
+    called = False
+
+    def query(_payload: Path) -> str:
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    result = runtime.authority._run(REPO_UUID, query)
+
+    assert result.decision == "withhold"
+    assert result.reason == "drift"
+    assert result.query_executed is False
+    assert called is False
+    assert tree_snapshot(runtime.state_root) == before
+
+
+def test_corrupt_current_generation_is_withheld_before_query(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    graph_path = (
+        runtime.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "generations"
+        / "gen-current"
+        / "graphify-out"
+        / "graph.json"
+    )
+    graph_path.unlink()
+    before = tree_snapshot(runtime.state_root)
+    called = False
+
+    def query(_payload: Path) -> str:
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    result = runtime.authority._run(REPO_UUID, query)
+
+    assert result.decision == "withhold"
+    assert result.reason == "drift"
+    assert result.query_executed is False
+    assert called is False
+    assert tree_snapshot(runtime.state_root) == before
+
+
 def test_source_identity_change_after_post_observation_discards_output(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     mutated = False
@@ -547,6 +602,41 @@ def test_unavailable_active_source_fails_closed_without_query(tmp_path: Path) ->
         called = True
         return "unexpected"
 
+    result = runtime.authority._run(REPO_UUID, query)
+
+    assert result.decision == "withhold"
+    assert result.reason == "source_unavailable"
+    assert result.query_executed is False
+    assert result.output is None
+    assert called is False
+
+
+def test_source_disappearing_between_authority_and_observation_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    moved = runtime.repo.with_name("repo-moved-during-pre-observation")
+    original_observe = runtime.authority.adapter.observe
+    disappeared = False
+    called = False
+
+    def disappearing_observe(
+        source_root: Path,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal disappeared
+        if not disappeared:
+            runtime.repo.rename(moved)
+            disappeared = True
+        return original_observe(source_root, **kwargs)
+
+    def query(_payload: Path) -> str:
+        nonlocal called
+        called = True
+        return "unexpected"
+
+    monkeypatch.setattr(runtime.authority.adapter, "observe", disappearing_observe)
     result = runtime.authority._run(REPO_UUID, query)
 
     assert result.decision == "withhold"

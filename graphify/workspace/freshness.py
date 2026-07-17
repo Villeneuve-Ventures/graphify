@@ -33,6 +33,7 @@ from graphify.workspace.identity import (
     SourceIdentity,
     discover_source,
 )
+from graphify.workspace.generations import GenerationError
 from graphify.workspace.persistence import StateCorrupt, StatePathError
 from graphify.workspace.pointers import (
     GenerationRead,
@@ -392,7 +393,7 @@ class FreshnessAuthority:
                 FreshnessResult[OutputT],
                 self._without_observation("unsupported", query_executed=query_executed),
             )
-        except (PointerConflict, PointerError):
+        except (GenerationError, PointerConflict, PointerError):
             return cast(
                 FreshnessResult[OutputT],
                 self._without_observation("drift", query_executed=query_executed),

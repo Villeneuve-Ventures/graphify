@@ -8,7 +8,7 @@ import shlex
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 from graphify.google_workspace import (
     GOOGLE_WORKSPACE_EXTENSIONS,
@@ -19,6 +19,8 @@ from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME, out_path
 
 
 ComparisonReader = Callable[[Path, int | None], bytes]
+ComparisonPinner = Callable[[Path], None]
+ComparisonDirectoryLister = Callable[[Path], tuple[list[str], list[str]]]
 
 
 def _read_detector_text(
@@ -842,6 +844,7 @@ def _git_info_exclude(
     vcs_root: Path,
     *,
     comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
 ) -> Path | None:
     """Resolve ``$GIT_DIR/info/exclude`` for the repo rooted at ``vcs_root``.
 
@@ -856,6 +859,8 @@ def _git_info_exclude(
     dot_git = vcs_root / ".git"
     git_dir: Path | None = None
     if comparison_reader is not None and dot_git.is_symlink():
+        if comparison_pinner is not None:
+            comparison_pinner(dot_git)
         _read_detector_text(dot_git, comparison_reader)
     elif dot_git.is_dir():
         git_dir = dot_git
@@ -863,6 +868,8 @@ def _git_info_exclude(
         comparison_reader is not None and dot_git.exists()
     ):
         try:
+            if comparison_pinner is not None:
+                comparison_pinner(dot_git)
             content = _read_detector_text(dot_git, comparison_reader).strip()
         except OSError:
             content = ""
@@ -878,6 +885,8 @@ def _git_info_exclude(
                 comparison_reader is not None and commondir.is_symlink()
             ):
                 try:
+                    if comparison_pinner is not None:
+                        comparison_pinner(commondir)
                     cd_raw = _read_detector_text(
                         commondir,
                         comparison_reader,
@@ -899,6 +908,7 @@ def _load_dir_own_ignore(
     d: Path,
     *,
     comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
     policy_paths: set[Path] | None = None,
 ) -> list[tuple[Path, str]]:
     """Read .gitignore/.graphifyignore directly inside *d* (not its ancestors).
@@ -924,6 +934,8 @@ def _load_dir_own_ignore(
         ):
             if policy_paths is not None:
                 policy_paths.add(ignore_file)
+            if comparison_pinner is not None:
+                comparison_pinner(ignore_file)
             for raw in _read_detector_text(
                 ignore_file,
                 comparison_reader,
@@ -938,6 +950,7 @@ def _load_graphifyignore(
     root: Path,
     *,
     comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
     policy_paths: set[Path] | None = None,
 ) -> list[tuple[Path, str]]:
     """Read .graphifyignore files and return (anchor_dir, pattern) pairs.
@@ -975,10 +988,13 @@ def _load_graphifyignore(
     info_exclude = _git_info_exclude(
         ceiling,
         comparison_reader=comparison_reader,
+        comparison_pinner=comparison_pinner,
     )
     if info_exclude is not None:
         if policy_paths is not None:
             policy_paths.add(info_exclude)
+        if comparison_pinner is not None:
+            comparison_pinner(info_exclude)
         for raw in _read_detector_text(
             info_exclude,
             comparison_reader,
@@ -992,6 +1008,7 @@ def _load_graphifyignore(
             _load_dir_own_ignore(
                 d,
                 comparison_reader=comparison_reader,
+                comparison_pinner=comparison_pinner,
                 policy_paths=policy_paths,
             )
         )
@@ -1089,6 +1106,7 @@ def _load_graphifyinclude(
     root: Path,
     *,
     comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
     policy_paths: set[Path] | None = None,
 ) -> list[tuple[Path, str]]:
     """Read .graphifyinclude allowlist patterns from root and ancestors.
@@ -1117,6 +1135,8 @@ def _load_graphifyinclude(
         ):
             if policy_paths is not None:
                 policy_paths.add(include_file)
+            if comparison_pinner is not None:
+                comparison_pinner(include_file)
             for raw in _read_detector_text(
                 include_file,
                 comparison_reader,
@@ -1233,6 +1253,28 @@ def _resolves_under_root(path: Path, root: Path) -> bool:
     return True
 
 
+def _comparison_walk(
+    root: Path,
+    *,
+    onerror: Callable[[OSError], None],
+    directory_lister: ComparisonDirectoryLister,
+) -> Iterator[tuple[str, list[str], list[str]]]:
+    """Walk top-down from listings bound to caller-held directory authority."""
+
+    def visit(directory: Path) -> Iterator[tuple[str, list[str], list[str]]]:
+        try:
+            dirnames, filenames = directory_lister(directory)
+        except OSError as exc:
+            onerror(exc)
+            return
+        yield str(directory), dirnames, filenames
+        for name in dirnames:
+            child = directory / name
+            yield from visit(child)
+
+    yield from visit(root)
+
+
 def detect(
     root: Path,
     *,
@@ -1242,16 +1284,20 @@ def detect(
     cache_root: Path | None = None,
     read_only: bool = False,
     comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
+    comparison_directory_lister: ComparisonDirectoryLister | None = None,
 ) -> dict:
     """Detect supported corpus files.
 
     ``read_only`` is the workspace comparison seam. It requires a caller-owned
-    ``comparison_reader`` for every classifier and policy content probe,
-    bypasses the persistent stat/word-count cache, and never materializes Office
-    or Google Workspace conversion sidecars. Office source files remain in the
-    returned inventory; Google Workspace shortcuts are reported as unsupported
-    for certified comparison because their authoritative remote content cannot
-    be observed without export/network side effects.
+    ``comparison_reader`` for every classifier and policy content probe.
+    ``comparison_pinner`` can bind each enumerated input before those probes,
+    while ``comparison_directory_lister`` supplies descriptor-bound listings.
+    Read-only detection bypasses the persistent stat/word-count cache and never
+    materializes Office or Google Workspace conversion sidecars. Office source
+    files remain in the returned inventory; Google Workspace shortcuts are
+    reported as unsupported for certified comparison because their authoritative
+    remote content cannot be observed without export/network side effects.
 
     When ordinary detection is given ``cache_root``, conversion sidecars follow
     the other detector outputs into that root instead of appearing in the source
@@ -1261,7 +1307,19 @@ def detect(
         raise ValueError("read_only detection requires a comparison reader")
     if comparison_reader is not None and not read_only:
         raise ValueError("comparison_reader is only valid for read_only detection")
-    root = root.resolve()
+    if comparison_pinner is not None and (not read_only or comparison_reader is None):
+        raise ValueError(
+            "comparison_pinner requires read_only detection and a comparison reader"
+        )
+    if comparison_directory_lister is not None and comparison_pinner is None:
+        raise ValueError("comparison_directory_lister requires a comparison pinner")
+    if comparison_directory_lister is not None and follow_symlinks:
+        raise ValueError("comparison directory listings do not follow symlinks")
+    root = (
+        Path(os.path.abspath(os.fspath(root)))
+        if read_only
+        else root.resolve()
+    )
     if follow_symlinks is None:
         follow_symlinks = False
     google_workspace = google_workspace_enabled() if google_workspace is None else google_workspace
@@ -1293,6 +1351,7 @@ def detect(
     ignore_patterns = _load_graphifyignore(
         root,
         comparison_reader=comparison_reader,
+        comparison_pinner=comparison_pinner,
         policy_paths=comparison_policy_paths,
     )
     ignore_cache: dict[Path, bool] = {}  # shared across all _is_ignored calls in this scan
@@ -1306,6 +1365,7 @@ def detect(
     include_patterns = _load_graphifyinclude(
         root,
         comparison_reader=comparison_reader,
+        comparison_pinner=comparison_pinner,
         policy_paths=comparison_policy_paths,
     )
 
@@ -1338,10 +1398,20 @@ def detect(
 
     for scan_root in scan_paths:
         in_memory_tree = memory_dir.exists() and str(scan_root).startswith(str(memory_dir))
-        for dirpath, dirnames, filenames in os.walk(
-            scan_root, followlinks=follow_symlinks, onerror=_on_walk_error
-        ):
+        walker = (
+            os.walk(scan_root, followlinks=follow_symlinks, onerror=_on_walk_error)
+            if comparison_directory_lister is None
+            else _comparison_walk(
+                scan_root,
+                onerror=_on_walk_error,
+                directory_lister=comparison_directory_lister,
+            )
+        )
+        for dirpath, dirnames, filenames in walker:
             dp = Path(dirpath)
+            if comparison_pinner is not None:
+                for filename in filenames:
+                    comparison_pinner(dp / filename)
             if follow_symlinks and os.path.islink(dirpath):
                 real = os.path.realpath(dirpath)
                 parent_real = os.path.realpath(os.path.dirname(dirpath))
@@ -1360,6 +1430,7 @@ def detect(
                         _load_dir_own_ignore(
                             dp,
                             comparison_reader=comparison_reader,
+                            comparison_pinner=comparison_pinner,
                             policy_paths=comparison_policy_paths,
                         )
                     )

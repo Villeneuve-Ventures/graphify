@@ -1408,6 +1408,42 @@ def test_recovery_rejects_stale_visible_pointer_behind_durable_journal(
     assert current.to_dict()["pointer_revision"] == 2
 
 
+def test_reader_rejects_stale_visible_pointer_behind_durable_journal(
+    tmp_path: Path,
+) -> None:
+    harness, _journal, _generations, pointers, promote, receipts = _promotion_runtime(tmp_path)
+    old = pointers.promote(
+        promote,
+        _cas(promote, receipts["gen-old"], revision=0, current_sha256=None),
+        occurred_at=START,
+        monotonic_ns=20_001,
+    )
+    pointers.promote(
+        promote,
+        _cas(
+            promote,
+            receipts["gen-new"],
+            revision=1,
+            current_sha256=receipts["gen-old"].sha256,
+        ),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=20_002,
+    )
+    harness.leases.release(promote)
+    pointers.state.atomic_replace_bytes(
+        pointers._current(REPO_UUID),
+        old.canonical,
+        label="test:stale-visible-reader",
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(PointerCorrupt, match="stale relative to durable journal"):
+        with pointers.read_current(REPO_UUID):
+            pytest.fail("stale pointer must not yield a generation read")
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_pointer_records_are_bound_to_their_containing_workspace(
     tmp_path: Path,
 ) -> None:

@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+from typing import Any
 
 import pytest
 
@@ -216,6 +217,60 @@ def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path:
     )
     assert not (source / "graphify-out").exists()
     assert _tree_bytes(source) == before
+
+
+def test_0916_structural_build_rejects_output_inside_source_checkout(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    source = repo / "src"
+    output = repo / "staging"
+    source.mkdir(parents=True)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(repo, "src/app.py")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="external to source checkout"):
+        adapter.build_structural(source, output_root=output)
+
+    assert not output.exists()
+
+
+def test_0916_structural_build_rechecks_checkout_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    repo = tmp_path / "repo"
+    source = repo / "src"
+    output = repo / "staging"
+    source.mkdir(parents=True)
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    original_normalize = adapter_module._normalize_structural_output
+
+    def normalize_then_create_checkout(engine_output: Path) -> None:
+        original_normalize(engine_output)
+        (repo / ".git").mkdir()
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_normalize_structural_output",
+        normalize_then_create_checkout,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="policy root changed"):
+        adapter.build_structural(source, output_root=output)
+
+    assert list(output.iterdir()) == []
 
 
 def test_0916_structural_build_normalizes_payload_modes_under_group_umask(
@@ -1133,13 +1188,16 @@ def test_observer_rejects_detected_ancestor_swaps_without_external_read(
         intent=AdapterIntent.QUERY,
     ).require_adapter()
 
-    with pytest.raises(ObservationUnstable, match="two consecutive equal passes"):
+    with pytest.raises(ObservationUnstable, match="source directory changed"):
         adapter.observe(
             source,
             max_inventory_passes=4,
             hook=toggle_after_detection,
         )
 
+    if package.is_symlink():
+        package.unlink()
+        parked.rename(package)
     assert package.is_dir() and not package.is_symlink()
     assert external_reads == 0
     assert external_file.read_text(encoding="utf-8") == "EXTERNAL_SECRET = True\n"
@@ -1208,6 +1266,351 @@ def test_observer_rejects_classifier_ancestor_swap_without_external_read(
     )
 
 
+def test_observer_rejects_classifier_real_directory_swap_without_external_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphify.detect as detect_module
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    package = source / "pkg"
+    parked = tmp_path / "parked"
+    external = tmp_path / "external"
+    package.mkdir(parents=True)
+    external.mkdir()
+    script = package / "script"
+    script.write_text("#!/bin/sh\necho local\n", encoding="utf-8")
+    external_file = external / "script"
+    external_file.write_text("#!/bin/sh\necho external-secret\n", encoding="utf-8")
+    _init_git_repo(source, "pkg/script")
+    external_identity = external_file.stat()
+    original_classify = detect_module.classify_file
+    original_read = adapter_module.os.read
+    external_reads = 0
+    swaps = 0
+
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal external_reads
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (
+            external_identity.st_dev,
+            external_identity.st_ino,
+        ):
+            external_reads += 1
+        return original_read(descriptor, size)
+
+    def swap_then_classify(
+        path: Path,
+        *,
+        comparison_reader: Callable[[Path, int | None], bytes] | None = None,
+    ) -> object:
+        nonlocal swaps
+        if path == script:
+            if swaps % 2 == 0:
+                package.rename(parked)
+                external.rename(package)
+            else:
+                package.rename(external)
+                parked.rename(package)
+            swaps += 1
+        return original_classify(path, comparison_reader=comparison_reader)
+
+    monkeypatch.setattr(adapter_module.os, "read", tracked_read)
+    monkeypatch.setattr(detect_module, "classify_file", swap_then_classify)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="source ancestor changed before open"):
+        adapter.observe(source, max_inventory_passes=2)
+
+    if package.exists() and swaps % 2 == 1:
+        package.rename(external)
+        parked.rename(package)
+    assert package.is_dir() and not package.is_symlink()
+    assert external_reads == 0
+    assert external_file.read_text(encoding="utf-8") == (
+        "#!/bin/sh\necho external-secret\n"
+    )
+
+
+def test_observer_rejects_directory_swap_between_enumeration_and_file_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphify.detect as detect_module
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    package = source / "container" / "pkg"
+    parked = tmp_path / "parked"
+    external = tmp_path / "external"
+    package.mkdir(parents=True)
+    external.mkdir()
+    script = package / "script"
+    script.write_text("#!/bin/sh\necho local\n", encoding="utf-8")
+    external_file = external / "script"
+    external_file.write_text("#!/bin/sh\necho external-secret\n", encoding="utf-8")
+    _init_git_repo(source, "container/pkg/script")
+    external_identity = external_file.stat()
+    original_walk = detect_module._comparison_walk
+    original_read = adapter_module.os.read
+    external_reads = 0
+    swaps = 0
+
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal external_reads
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (
+            external_identity.st_dev,
+            external_identity.st_ino,
+        ):
+            external_reads += 1
+        return original_read(descriptor, size)
+
+    def swap_after_enumeration(*args: Any, **kwargs: Any) -> Any:
+        nonlocal swaps
+        for row in original_walk(*args, **kwargs):
+            if Path(row[0]) == package:
+                if swaps % 2 == 0:
+                    package.rename(parked)
+                    external.rename(package)
+                else:
+                    package.rename(external)
+                    parked.rename(package)
+                swaps += 1
+            yield row
+
+    monkeypatch.setattr(adapter_module.os, "read", tracked_read)
+    monkeypatch.setattr(detect_module, "_comparison_walk", swap_after_enumeration)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="source directory changed"):
+        adapter.observe(source, max_inventory_passes=2)
+
+    if package.exists() and swaps % 2 == 1:
+        package.rename(external)
+        parked.rename(package)
+    assert package.is_dir() and not package.is_symlink()
+    assert external_reads == 0
+    assert external_file.read_text(encoding="utf-8") == (
+        "#!/bin/sh\necho external-secret\n"
+    )
+
+
+def test_observer_rejects_persistent_swap_before_child_listing_without_external_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    package = source / "container" / "pkg"
+    parked = tmp_path / "parked"
+    external = tmp_path / "external"
+    package.mkdir(parents=True)
+    external.mkdir()
+    (package / "script").write_text("#!/bin/sh\necho local\n", encoding="utf-8")
+    external_file = external / "script"
+    external_file.write_text("#!/bin/sh\necho external-secret\n", encoding="utf-8")
+    _init_git_repo(source, "container/pkg/script")
+    external_identity = external.stat()
+    original_lister = adapter_module._PinnedReadAuthority.list_comparison_directory
+    original_scandir = adapter_module.os.scandir
+    external_scans = 0
+    swapped = False
+
+    def tracked_scandir(path: Any) -> Any:
+        nonlocal external_scans
+        if isinstance(path, int):
+            details = os.fstat(path)
+            if (details.st_dev, details.st_ino) == (
+                external_identity.st_dev,
+                external_identity.st_ino,
+            ):
+                external_scans += 1
+        return original_scandir(path)
+
+    def swap_before_child_listing(self: Any, path: Path) -> tuple[list[str], list[str]]:
+        nonlocal swapped
+        if path == package and not swapped:
+            package.rename(parked)
+            external.rename(package)
+            swapped = True
+        return original_lister(self, path)
+
+    monkeypatch.setattr(adapter_module.os, "scandir", tracked_scandir)
+    monkeypatch.setattr(
+        adapter_module._PinnedReadAuthority,
+        "list_comparison_directory",
+        swap_before_child_listing,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="source ancestor changed before open"):
+        adapter.observe(source, max_inventory_passes=4)
+
+    package.rename(external)
+    parked.rename(package)
+    assert swapped is True
+    assert external_scans == 0
+    assert external_file.read_text(encoding="utf-8") == (
+        "#!/bin/sh\necho external-secret\n"
+    )
+
+
+def test_observer_does_not_promote_replacement_after_pinned_child_disappears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    package = source / "container" / "pkg"
+    parked = tmp_path / "parked"
+    external = tmp_path / "external"
+    package.mkdir(parents=True)
+    external.mkdir()
+    (package / "script").write_text("#!/bin/sh\necho local\n", encoding="utf-8")
+    external_file = external / "script"
+    external_file.write_text("#!/bin/sh\necho external-secret\n", encoding="utf-8")
+    _init_git_repo(source, "container/pkg/script")
+    external_directory_identity = external.stat()
+    external_file_identity = external_file.stat()
+    original_lister = adapter_module._PinnedReadAuthority.list_comparison_directory
+    original_scandir = adapter_module.os.scandir
+    original_read = adapter_module.os.read
+    external_scans = 0
+    external_reads = 0
+    attempts = 0
+
+    def tracked_scandir(path: Any) -> Any:
+        nonlocal external_scans
+        if isinstance(path, int):
+            details = os.fstat(path)
+            if (details.st_dev, details.st_ino) == (
+                external_directory_identity.st_dev,
+                external_directory_identity.st_ino,
+            ):
+                external_scans += 1
+        return original_scandir(path)
+
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal external_reads
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (
+            external_file_identity.st_dev,
+            external_file_identity.st_ino,
+        ):
+            external_reads += 1
+        return original_read(descriptor, size)
+
+    def disappear_then_install(
+        self: Any,
+        path: Path,
+    ) -> tuple[list[str], list[str]]:
+        nonlocal attempts
+        if path != package:
+            return original_lister(self, path)
+        attempts += 1
+        if attempts == 1:
+            package.rename(parked)
+            try:
+                return original_lister(self, path)
+            except ObservationUnstable:
+                external.rename(package)
+                raise
+        return original_lister(self, path)
+
+    monkeypatch.setattr(adapter_module.os, "scandir", tracked_scandir)
+    monkeypatch.setattr(adapter_module.os, "read", tracked_read)
+    monkeypatch.setattr(
+        adapter_module._PinnedReadAuthority,
+        "list_comparison_directory",
+        disappear_then_install,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="ancestor disappeared before open"):
+        adapter.observe(source, max_inventory_passes=4)
+
+    package.rename(external)
+    parked.rename(package)
+    assert attempts == 1
+    assert external_scans == 0
+    assert external_reads == 0
+    assert external_file.read_text(encoding="utf-8") == (
+        "#!/bin/sh\necho external-secret\n"
+    )
+
+
+def test_observer_keeps_listing_bound_when_path_swaps_before_scandir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    package = source / "pkg"
+    parked = tmp_path / "parked"
+    external = tmp_path / "external"
+    package.mkdir(parents=True)
+    external.mkdir()
+    (package / "script").write_text("#!/bin/sh\necho local\n", encoding="utf-8")
+    external_file = external / "script"
+    external_file.write_text("#!/bin/sh\necho external-secret\n", encoding="utf-8")
+    _init_git_repo(source, "pkg/script")
+    package_identity = package.stat()
+    external_identity = external.stat()
+    original_scandir = adapter_module.os.scandir
+    external_scans = 0
+    swapped = False
+
+    def swap_before_scandir(path: Any) -> Any:
+        nonlocal external_scans, swapped
+        if isinstance(path, int):
+            details = os.fstat(path)
+            identity = (details.st_dev, details.st_ino)
+            if identity == (external_identity.st_dev, external_identity.st_ino):
+                external_scans += 1
+            if (
+                identity == (package_identity.st_dev, package_identity.st_ino)
+                and not swapped
+            ):
+                package.rename(parked)
+                external.rename(package)
+                swapped = True
+        return original_scandir(path)
+
+    monkeypatch.setattr(adapter_module.os, "scandir", swap_before_scandir)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="source directory changed"):
+        adapter.observe(source, max_inventory_passes=4)
+
+    package.rename(external)
+    parked.rename(package)
+    assert swapped is True
+    assert external_scans == 0
+    assert external_file.read_text(encoding="utf-8") == (
+        "#!/bin/sh\necho external-secret\n"
+    )
+
+
 def test_observer_rejects_policy_ancestor_swap_without_external_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1271,6 +1674,81 @@ def test_observer_rejects_policy_ancestor_swap_without_external_read(
         adapter.observe(source)
 
     assert swapped is True
+    assert external_reads == 0
+    assert external_policy.read_text(encoding="utf-8") == "external-secret\n"
+
+
+def test_observer_rejects_policy_real_directory_swap_without_external_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphify.detect as detect_module
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    package = source / "pkg"
+    parked = tmp_path / "parked"
+    external = tmp_path / "external"
+    package.mkdir(parents=True)
+    external.mkdir()
+    (package / "app.py").write_text("LOCAL = True\n", encoding="utf-8")
+    policy = package / ".gitignore"
+    policy.write_text("local-only\n", encoding="utf-8")
+    external_policy = external / ".gitignore"
+    external_policy.write_text("external-secret\n", encoding="utf-8")
+    (external / "app.py").write_text("EXTERNAL = True\n", encoding="utf-8")
+    _init_git_repo(source, "pkg/app.py", "pkg/.gitignore")
+    external_identity = external_policy.stat()
+    original_detector_read = detect_module._read_detector_text
+    original_read = adapter_module.os.read
+    external_reads = 0
+    swaps = 0
+
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal external_reads
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (
+            external_identity.st_dev,
+            external_identity.st_ino,
+        ):
+            external_reads += 1
+        return original_read(descriptor, size)
+
+    def swap_then_read_policy(
+        path: Path,
+        comparison_reader: Callable[[Path, int | None], bytes] | None,
+        *,
+        max_bytes: int | None = None,
+    ) -> str:
+        nonlocal swaps
+        if path == policy:
+            if swaps % 2 == 0:
+                package.rename(parked)
+                external.rename(package)
+            else:
+                package.rename(external)
+                parked.rename(package)
+            swaps += 1
+        return original_detector_read(
+            path,
+            comparison_reader,
+            max_bytes=max_bytes,
+        )
+
+    monkeypatch.setattr(adapter_module.os, "read", tracked_read)
+    monkeypatch.setattr(detect_module, "_read_detector_text", swap_then_read_policy)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="source ancestor changed before open"):
+        adapter.observe(source, max_inventory_passes=2)
+
+    if package.exists() and swaps % 2 == 1:
+        package.rename(external)
+        parked.rename(package)
+    assert package.is_dir() and not package.is_symlink()
     assert external_reads == 0
     assert external_policy.read_text(encoding="utf-8") == "external-secret\n"
 
@@ -1516,6 +1994,47 @@ def test_0916_structural_query_rejects_malformed_graph(tmp_path: Path) -> None:
 
     with pytest.raises(QueryRejected, match="graph payload cannot be queried"):
         adapter.query_structural(payload, QueryRequest(question="malformed graph"))
+
+
+def test_0916_structural_query_rejects_initially_symlinked_payload_without_external_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    external_payload = tmp_path / "external" / "graphify-out"
+    external_payload.mkdir(parents=True)
+    external_graph = external_payload / "graph.json"
+    external_graph.write_text(
+        '{"nodes":[{"id":"secret","label":"external-secret"}],"links":[]}\n',
+        encoding="utf-8",
+    )
+    payload = tmp_path / "payload"
+    payload.symlink_to(external_payload, target_is_directory=True)
+    external_identity = external_graph.stat()
+    original_read = adapter_module.os.read
+    external_reads = 0
+
+    def tracked_read(descriptor: int, size: int) -> bytes:
+        nonlocal external_reads
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (
+            external_identity.st_dev,
+            external_identity.st_ino,
+        ):
+            external_reads += 1
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(adapter_module.os, "read", tracked_read)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="ancestor is not a real directory"):
+        adapter.query_structural(payload, QueryRequest(question="external-secret"))
+
+    assert external_reads == 0
 
 
 def test_0916_structural_query_rejects_payload_ancestor_swap_without_external_read(

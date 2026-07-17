@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import os
 from pathlib import Path
 import re
 import stat
@@ -26,6 +27,7 @@ from graphify.workspace.persistence import (
     FaultHook,
     RuntimeCapabilities,
     StateCorrupt,
+    StatePathError,
     Syscalls,
 )
 
@@ -140,24 +142,39 @@ class JournalStore:
         return cls._segments_directory(repo_uuid) / f"{sequence:020d}.gwf"
 
     def _segment_names(self, repo_uuid: str) -> list[tuple[int, Path]]:
-        directory = self.state.path(self._segments_directory(repo_uuid))
-        if not directory.exists():
-            return []
-        details = directory.lstat()
-        if not stat.S_ISDIR(details.st_mode) or directory.is_symlink():
-            raise JournalCorrupt("journal segments path is not a real directory")
+        relative = self._segments_directory(repo_uuid)
+        directory = self.state.path(relative)
         result: list[tuple[int, Path]] = []
-        for entry in directory.iterdir():
-            match = _SEGMENT_RE.fullmatch(entry.name)
-            entry_details = entry.lstat()
-            if (
-                match is None
-                or not stat.S_ISREG(entry_details.st_mode)
-                or entry_details.st_nlink != 1
-                or entry.is_symlink()
-            ):
-                raise JournalCorrupt(f"unexpected journal segment entry: {entry.name}")
-            result.append((int(match.group("sequence")), entry))
+        try:
+            if not self.state.private_directory_exists(relative):
+                return []
+            with self.state.existing_private_directory(relative) as descriptor:
+                with os.scandir(descriptor) as entries:
+                    names = sorted(entry.name for entry in entries)
+                for name in names:
+                    match = _SEGMENT_RE.fullmatch(name)
+                    entry_details = os.stat(
+                        name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                    if (
+                        match is None
+                        or not stat.S_ISREG(entry_details.st_mode)
+                        or entry_details.st_nlink != 1
+                    ):
+                        raise JournalCorrupt(
+                            f"unexpected journal segment entry: {name}"
+                        )
+                    result.append(
+                        (int(match.group("sequence")), directory / name)
+                    )
+        except JournalCorrupt:
+            raise
+        except (OSError, StatePathError) as exc:
+            raise JournalCorrupt(
+                f"journal segments cannot be enumerated safely: {directory}: {exc}"
+            ) from exc
         result.sort(key=lambda item: item[0])
         if [sequence for sequence, _path in result] != list(range(1, len(result) + 1)):
             raise JournalCorrupt("journal segment sequence is not contiguous from one")
@@ -214,8 +231,17 @@ class JournalStore:
             latest[generation_id] = transition
             latest_event[generation_id] = event
 
-    def _decode_segment(self, relative: Path) -> tuple[bytes, JournalEvent]:
-        frame = self.state.read_bytes(relative)
+    def _decode_segment(
+        self,
+        relative: Path,
+        *,
+        existing_only: bool = False,
+    ) -> tuple[bytes, JournalEvent]:
+        frame = (
+            self.state.read_existing_bytes(relative)
+            if existing_only
+            else self.state.read_bytes(relative)
+        )
         try:
             event = decode_journal_frame(frame)
         except JournalFrameTruncated:
@@ -329,6 +355,56 @@ class JournalStore:
                 self._commit_head(repo_uuid, head, label="journal_head_recovery")
                 self.fault_hook("journal:head_recovered")
 
+        self._validate_lifecycle(events)
+        return JournalSnapshot(head=head, events=tuple(events))
+
+    def read_stable(self, repo_uuid: str) -> JournalSnapshot:
+        """Read only fully committed journal authority without recovery writes."""
+
+        current, previous, pending = self._head_paths(repo_uuid)
+        try:
+            head = self.state.read_stable_record(
+                label="journal_head",
+                current=current,
+                previous=previous,
+                pending=pending,
+                decoder=JournalHeadState.from_json,
+                revision=lambda value: value.revision,
+                allow_missing=True,
+            )
+        except (StateCorrupt, StatePathError) as exc:
+            raise JournalCorrupt(str(exc)) from exc
+        if head is not None and head.repo_uuid != repo_uuid:
+            raise JournalCorrupt("journal head is installed under the wrong workspace")
+
+        segments = self._segment_names(repo_uuid)
+        committed = 0 if head is None else head.sequence
+        if len(segments) != committed:
+            raise JournalConflict("journal requires recovery before stable read")
+
+        events: list[JournalEvent] = []
+        frames: list[bytes] = []
+        prior_sha256: str | None = None
+        for sequence, _path in segments:
+            relative = self._segment_path(repo_uuid, sequence)
+            try:
+                frame, event = self._decode_segment(relative, existing_only=True)
+            except JournalFrameTruncated as exc:
+                raise JournalCorrupt("committed journal segment is truncated") from exc
+            value = event.to_dict()
+            self._require_repo_event_id(repo_uuid, event)
+            if int(value["sequence"]) != sequence:
+                raise JournalCorrupt("journal frame sequence does not match its segment")
+            if value["prior_event_sha256"] != prior_sha256:
+                raise JournalCorrupt("journal prior-event hash chain is broken")
+            prior_sha256 = event.sha256
+            frames.append(frame)
+            events.append(event)
+
+        if head is not None:
+            expected = self._head_for(repo_uuid, events[-1], frames[-1])
+            if expected.canonical != head.canonical:
+                raise JournalCorrupt("journal head does not bind the committed segment")
         self._validate_lifecycle(events)
         return JournalSnapshot(head=head, events=tuple(events))
 

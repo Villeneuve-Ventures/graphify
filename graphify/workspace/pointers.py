@@ -22,7 +22,7 @@ from graphify.workspace.contracts import (
     PriorPointerRecord,
 )
 from graphify.workspace.generations import GenerationError, GenerationStore
-from graphify.workspace.journal import JournalSnapshot, JournalStore
+from graphify.workspace.journal import JournalError, JournalSnapshot, JournalStore
 from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
@@ -373,6 +373,39 @@ class PointerStore:
             and event.to_dict()["fence_token"] == value["fence_token"]
             for event in snapshot.events
         )
+
+    def _verify_visible_pointer_journal(
+        self,
+        repo_uuid: str,
+        pointer: PointerSet,
+    ) -> None:
+        try:
+            snapshot = self.journal.read_stable(repo_uuid)
+        except JournalError as exc:
+            raise PointerCorrupt(
+                f"visible pointer journal authority is unavailable: {exc}"
+            ) from exc
+        pointer_revision = int(pointer.to_dict()["pointer_revision"])
+        durable_pointer_revisions = [
+            int(value["pointer_revision"])
+            for event in snapshot.events
+            if (value := event.to_dict())["pointer_revision"] is not None
+        ]
+        if durable_pointer_revisions and max(durable_pointer_revisions) > pointer_revision:
+            raise PointerCorrupt(
+                "visible pointer is stale relative to durable journal history"
+            )
+        if not any(
+            self._journal_records_pointer(
+                snapshot,
+                pointer,
+                transition=transition,
+            )
+            for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")
+        ):
+            raise PointerCorrupt(
+                "visible pointer has no matching durable journal event"
+            )
 
     def _preliminary_pointer(self, repo_uuid: str) -> PointerSet | None:
         if self._exists(self._pending(repo_uuid)):
@@ -1044,11 +1077,7 @@ class PointerStore:
                 generation_id=generation_id,
                 exclusive=False,
             ):
-                reloaded = self._read_pointer(
-                    self._current(repo_uuid),
-                    allow_missing=False,
-                    expected_repo_uuid=repo_uuid,
-                )
+                reloaded = self.load(repo_uuid)
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
                 receipt = self._require_compatible(
@@ -1056,6 +1085,7 @@ class PointerStore:
                 )
                 if receipt.sha256 != current["receipt_sha256"]:
                     raise PointerCorrupt("current pointer receipt hash does not match generation")
+                self._verify_visible_pointer_journal(repo_uuid, pointer)
                 yield GenerationRead(
                     pointer=pointer,
                     receipt=receipt,
@@ -1077,6 +1107,7 @@ class PointerStore:
         if pointer is None or pointer.canonical != reading.pointer.canonical:
             raise PointerConflict("current pointer changed during protected read")
         receipts = self.verify_pointer(pointer, expected_repo_uuid=repo_uuid)
+        self._verify_visible_pointer_journal(repo_uuid, pointer)
         if receipts["current"].canonical != reading.receipt.canonical:
             raise PointerConflict("current receipt changed during protected read")
         current = cast(dict[str, Any], pointer.to_dict()["current"])

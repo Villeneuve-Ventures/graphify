@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import errno
 import hashlib
 from importlib.metadata import PackageNotFoundError, version as distribution_version
@@ -20,7 +20,7 @@ from networkx.readwrite import json_graph
 
 # Engine-private imports are deliberately confined to this versioned adapter.
 from graphify.build import build_from_json
-from graphify.detect import _find_vcs_root, detect
+from graphify.detect import detect
 from graphify.export import to_json
 from graphify.extract import extract
 from graphify.security import _max_graph_file_bytes, check_graph_file_size_cap
@@ -45,6 +45,7 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _GIT_CONTROL_FILE_MAX_BYTES = 4_096
 _PACKED_REFS_MAX_BYTES = 16 * 1024 * 1024
 _MAX_SYMBOLIC_REF_DEPTH = 8
+_VCS_MARKERS = (".git", ".hg", ".svn", "_darcs", ".fossil")
 _STABLE_STAT_FIELDS = (
     "st_dev",
     "st_ino",
@@ -58,6 +59,10 @@ _STABLE_STAT_FIELDS = (
 
 class _RelativePathMissing(ObservationUnstable):
     """Internal marker for an absent descriptor-relative path component."""
+
+
+class _AuthorityChanged(ObservationUnstable):
+    """A pinned directory identity changed and must not become a new baseline."""
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,21 @@ def _stat_changed(reference: os.stat_result, candidate: os.stat_result) -> bool:
     return any(
         getattr(reference, field) != getattr(candidate, field)
         for field in _STABLE_STAT_FIELDS
+    )
+
+
+def _directory_identity_changed(
+    reference: os.stat_result,
+    candidate: os.stat_result,
+) -> bool:
+    return (
+        reference.st_dev,
+        reference.st_ino,
+        stat.S_IFMT(reference.st_mode),
+    ) != (
+        candidate.st_dev,
+        candidate.st_ino,
+        stat.S_IFMT(candidate.st_mode),
     )
 
 
@@ -326,12 +346,16 @@ def _open_relative_directories(
         raise ObservationUnavailable(f"source root descriptor cannot be duplicated: {exc}") from exc
     if expected_identities is not None and len(expected_identities) != len(components):
         os.close(parent_descriptor)
-        raise ObservationUnstable(f"source ancestry changed before open: {path}")
+        raise _AuthorityChanged(f"source ancestry changed before open: {path}")
     for index, component in enumerate(components):
         try:
             next_descriptor = os.open(component, flags, dir_fd=parent_descriptor)
         except FileNotFoundError as exc:
             os.close(parent_descriptor)
+            if expected_identities is not None:
+                raise _AuthorityChanged(
+                    f"source ancestor disappeared before open: {path}"
+                ) from exc
             raise _RelativePathMissing(
                 f"source ancestor disappeared before open: {path}"
             ) from exc
@@ -362,7 +386,7 @@ def _open_relative_directories(
         ):
             os.close(next_descriptor)
             os.close(parent_descriptor)
-            raise ObservationUnstable(f"source ancestor changed before open: {path}")
+            raise _AuthorityChanged(f"source ancestor changed before open: {path}")
         if captured_details is not None:
             captured_details.append(details)
         os.close(parent_descriptor)
@@ -668,15 +692,6 @@ class _PinnedSourceReader:
         finally:
             os.close(parent_descriptor)
 
-    def read(self, path: Path, max_bytes: int | None) -> bytes:
-        _digest, _details, payload = self.observe(
-            path,
-            collect=True,
-            max_bytes=max_bytes,
-        )
-        assert payload is not None
-        return payload
-
     def directory_details(self, path: Path) -> os.stat_result:
         try:
             relative = path.relative_to(self.anchor)
@@ -703,14 +718,89 @@ class _PinnedSourceReader:
             )
         return details
 
+    def list_directory(
+        self,
+        path: Path,
+        *,
+        expected: os.stat_result | None,
+        expected_identities: tuple[tuple[int, int], ...] | None,
+    ) -> tuple[os.stat_result, list[tuple[str, os.stat_result]]]:
+        try:
+            relative = path.relative_to(self.anchor)
+        except ValueError as exc:
+            raise ObservationUnsupported(
+                f"source directory escapes the pinned root: {path}"
+            ) from exc
+        descriptor = _open_relative_directories(
+            self.descriptor,
+            relative.parts,
+            path,
+            expected_identities=expected_identities,
+        )
+        try:
+            before = _source_directory_fstat(
+                descriptor,
+                path,
+                phase="before descriptor-bound enumeration",
+            )
+            if expected is not None:
+                if _directory_identity_changed(expected, before):
+                    raise _AuthorityChanged(
+                        f"source directory identity changed before enumeration: {path}"
+                    )
+                if _stat_changed(expected, before):
+                    raise _AuthorityChanged(
+                        f"source directory changed before enumeration: {path}"
+                    )
+            discovered: list[tuple[str, os.stat_result]] = []
+            try:
+                with os.scandir(descriptor) as entries:
+                    for entry in entries:
+                        try:
+                            details = entry.stat(follow_symlinks=False)
+                        except FileNotFoundError as exc:
+                            raise ObservationUnstable(
+                                f"source entry disappeared during enumeration: {path / entry.name}"
+                            ) from exc
+                        except OSError as exc:
+                            raise ObservationUnavailable(
+                                f"source entry cannot be inspected safely during enumeration: "
+                                f"{path / entry.name}: {exc}"
+                            ) from exc
+                        discovered.append((entry.name, details))
+            except OSError as exc:
+                raise ObservationUnavailable(
+                    f"source directory cannot be enumerated safely: {path}: {exc}"
+                ) from exc
+            after = _source_directory_fstat(
+                descriptor,
+                path,
+                phase="after descriptor-bound enumeration",
+            )
+            if _directory_identity_changed(before, after):
+                raise _AuthorityChanged(
+                    f"source directory identity changed during enumeration: {path}"
+                )
+            if _stat_changed(before, after):
+                raise _AuthorityChanged(
+                    f"source directory changed during enumeration: {path}"
+                )
+            return after, discovered
+        finally:
+            os.close(descriptor)
+
     def require_directory_binding(
         self,
         path: Path,
         expected: os.stat_result,
     ) -> None:
         current = self.directory_details(path)
+        if _directory_identity_changed(expected, current):
+            raise _AuthorityChanged(
+                f"source directory identity changed during observation: {path}"
+            )
         if _stat_changed(expected, current):
-            raise ObservationUnstable(
+            raise _AuthorityChanged(
                 f"source directory changed during observation: {path}"
             )
 
@@ -754,6 +844,14 @@ class _PinnedReadAuthority:
     common_dir: _PinnedSourceReader | None
     git_file: Path | None
     commondir_file: Path | None
+    comparison_paths: dict[Path, _PinnedRegularPath | None] = field(
+        default_factory=dict
+    )
+    comparison_directories: dict[Path, os.stat_result] = field(default_factory=dict)
+
+    @staticmethod
+    def _comparison_key(path: Path) -> Path:
+        return Path(os.path.abspath(os.fspath(path)))
 
     @classmethod
     def open(cls, source_anchor: Path) -> _PinnedReadAuthority:
@@ -762,6 +860,7 @@ class _PinnedReadAuthority:
         common_dir: _PinnedSourceReader | None = None
         git_file: Path | None = None
         commondir_file: Path | None = None
+        comparison_paths: dict[Path, _PinnedRegularPath | None] = {}
         try:
             dot_git = source_anchor / ".git"
             dot_git_details = source.entry_details(dot_git, allow_missing=True)
@@ -784,10 +883,13 @@ class _PinnedReadAuthority:
                 raise ObservationUnsupported(
                     "Git metadata entry must be a real directory or singular regular file"
                 )
+            pinned_git_file = source.pin_regular(dot_git)
+            comparison_paths[cls._comparison_key(dot_git)] = pinned_git_file
             _digest, _details, payload = source.observe(
                 dot_git,
                 collect=True,
                 size_cap=_GIT_CONTROL_FILE_MAX_BYTES,
+                expected_path=pinned_git_file,
             )
             assert payload is not None
             git_dir_path = _control_path(
@@ -807,10 +909,13 @@ class _PinnedReadAuthority:
             if commondir_details is None:
                 common_dir = git_dir
             else:
+                pinned_commondir = git_dir.pin_regular(candidate)
+                comparison_paths[cls._comparison_key(candidate)] = pinned_commondir
                 _digest, _details, commondir_payload = git_dir.observe(
                     candidate,
                     collect=True,
                     size_cap=_GIT_CONTROL_FILE_MAX_BYTES,
+                    expected_path=pinned_commondir,
                 )
                 assert commondir_payload is not None
                 common_dir_path = _control_path(
@@ -838,6 +943,7 @@ class _PinnedReadAuthority:
                 common_dir,
                 git_file,
                 commondir_file,
+                comparison_paths,
             )
         except BaseException:
             if common_dir is not None and common_dir is not git_dir:
@@ -884,10 +990,13 @@ class _PinnedReadAuthority:
     ) -> bytes | None:
         if reader.entry_details(path, allow_missing=allow_missing) is None:
             return None
+        pinned = reader.pin_regular(path)
+        self.comparison_paths[self._comparison_key(path)] = pinned
         _digest, _details, payload = reader.observe(
             path,
             collect=True,
             size_cap=size_cap,
+            expected_path=pinned,
         )
         assert payload is not None
         return payload
@@ -982,7 +1091,117 @@ class _PinnedReadAuthority:
         )
 
     def read(self, path: Path, max_bytes: int | None) -> bytes:
-        return self._reader_for(path).read(path, max_bytes)
+        reader = self._reader_for(path)
+        expected_path = self.require_comparison_path(path)
+        _digest, _details, payload = reader.observe(
+            path,
+            collect=True,
+            max_bytes=max_bytes,
+            expected_path=expected_path,
+        )
+        assert payload is not None
+        return payload
+
+    def _require_comparison_directory_bindings(self, path: Path) -> None:
+        key = self._comparison_key(path)
+        for directory, expected in sorted(
+            self.comparison_directories.items(),
+            key=lambda item: len(item[0].parts),
+        ):
+            if directory == key or directory in key.parents:
+                self.source.require_directory_binding(directory, expected)
+
+    def bind_comparison_directory(
+        self,
+        path: Path,
+        details: os.stat_result,
+    ) -> None:
+        key = self._comparison_key(path)
+        expected = self.comparison_directories.get(key)
+        if expected is not None:
+            if _directory_identity_changed(expected, details):
+                raise _AuthorityChanged(
+                    f"source directory identity changed during enumeration: {path}"
+                )
+            if _stat_changed(expected, details):
+                raise _AuthorityChanged(
+                    f"source directory changed during enumeration: {path}"
+                )
+            return
+        self.comparison_directories[key] = details
+
+    def _comparison_directory_identities(
+        self,
+        path: Path,
+    ) -> tuple[tuple[int, int], ...] | None:
+        try:
+            relative = path.relative_to(self.source.anchor)
+        except ValueError as exc:
+            raise ObservationUnsupported(
+                f"comparison directory escapes the pinned source root: {path}"
+            ) from exc
+        identities: list[tuple[int, int]] = []
+        for index in range(1, len(relative.parts) + 1):
+            ancestor = self.source.anchor.joinpath(*relative.parts[:index])
+            expected = self.comparison_directories.get(ancestor)
+            if expected is None:
+                return None
+            identities.append((expected.st_dev, expected.st_ino))
+        return tuple(identities)
+
+    def list_comparison_directory(
+        self,
+        path: Path,
+    ) -> tuple[list[str], list[str]]:
+        key = self._comparison_key(path)
+        expected = self.comparison_directories.get(key)
+        current, entries = self.source.list_directory(
+            key,
+            expected=expected,
+            expected_identities=self._comparison_directory_identities(key),
+        )
+        self.source.require_directory_binding(key, current)
+        self.bind_comparison_directory(key, current)
+        dirnames: list[str] = []
+        filenames: list[str] = []
+        for name, details in entries:
+            if stat.S_ISDIR(details.st_mode):
+                self.bind_comparison_directory(key / name, details)
+                dirnames.append(name)
+            else:
+                filenames.append(name)
+        return dirnames, filenames
+
+    def pin_comparison(self, path: Path) -> None:
+        key = self._comparison_key(path)
+        if key in self.comparison_paths:
+            return
+        reader = self._reader_for(key)
+        self._require_comparison_directory_bindings(key.parent)
+        details = reader.entry_details(key, allow_missing=True)
+        if (
+            details is None
+            or not stat.S_ISREG(details.st_mode)
+            or details.st_nlink != 1
+        ):
+            self.comparison_paths[key] = None
+            return
+        pinned = reader.pin_regular(key)
+        self._require_comparison_directory_bindings(key.parent)
+        self.comparison_paths[key] = pinned
+
+    def require_comparison_path(self, path: Path) -> _PinnedRegularPath:
+        key = self._comparison_key(path)
+        if key not in self.comparison_paths:
+            raise ObservationUnstable(
+                f"comparison input was not pinned during enumeration: {path}"
+            )
+        pinned = self.comparison_paths[key]
+        if pinned is None:
+            raise ObservationUnsupported(
+                f"comparison input is not a singular regular file: {path}"
+            )
+        return pinned
 
     def observe(
         self,
@@ -991,9 +1210,6 @@ class _PinnedReadAuthority:
         expected_path: _PinnedRegularPath | None = None,
     ) -> tuple[str, os.stat_result, bytes | None]:
         return self._reader_for(path).observe(path, expected_path=expected_path)
-
-    def pin_regular(self, path: Path) -> _PinnedRegularPath:
-        return self._reader_for(path).pin_regular(path)
 
     def require_bindings(self) -> None:
         self.source.require_anchor_binding()
@@ -1109,6 +1325,46 @@ def _absolute_output_path(output_root: Path) -> Path:
     if output == Path(output.anchor):
         raise ObservationUnsupported("engine output root must not be the filesystem root")
     return output
+
+
+def _absolute_source_path(source_root: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(source_root)))
+
+
+def _require_initial_source_root(root: Path) -> None:
+    try:
+        reader = _PinnedSourceReader.open(root)
+    except ObservationUnstable as exc:
+        raise ObservationUnavailable(f"source root is unavailable: {root}") from exc
+    else:
+        reader.close()
+
+
+def _policy_root_for(root: Path) -> Path:
+    current = root
+    home = _absolute_source_path(Path.home())
+    while True:
+        for marker in _VCS_MARKERS:
+            try:
+                (current / marker).lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ObservationUnavailable(
+                    f"source policy root cannot be inspected safely: {current}: {exc}"
+                ) from exc
+            return current
+        parent = current.parent
+        if parent == current or current == home:
+            return root
+        current = parent
+
+
+def _require_policy_root_binding(root: Path, expected: Path) -> None:
+    if _policy_root_for(root) != expected:
+        raise ObservationUnstable(
+            f"source policy root changed during structural build: {root}"
+        )
 
 
 def _open_output_parent(output: Path) -> int:
@@ -1502,15 +1758,18 @@ class Graphify0916Adapter:
             )
 
     def build_structural(self, source_root: Path, *, output_root: Path) -> StructuralBuild:
-        root = Path(source_root).resolve(strict=True)
+        root = _absolute_source_path(source_root)
+        _require_initial_source_root(root)
+        policy_root = _policy_root_for(root)
         output = _absolute_output_path(output_root)
-        if output == root or root in output.parents:
-            raise ObservationUnsupported("engine output root must be external to source")
+        if output == policy_root or policy_root in output.parents:
+            raise ObservationUnsupported(
+                "engine output root must be external to source checkout"
+            )
         output_descriptor, output_identity = _open_empty_output_root(output)
         try:
             with tempfile.TemporaryDirectory(prefix="graphify-workspace-build-") as temporary:
                 engine_output = Path(temporary)
-                policy_root = _find_vcs_root(root) or root
                 with tempfile.TemporaryDirectory(
                     prefix=".graphify-source-",
                     dir=engine_output,
@@ -1519,11 +1778,19 @@ class Graphify0916Adapter:
                     authority = _PinnedReadAuthority.open(policy_root)
                     try:
                         source_details = authority.source.directory_details(root)
+                        authority.bind_comparison_directory(root, source_details)
+                        authority.pin_comparison(
+                            root / ".graphify" / "workspace.toml"
+                        )
                         detection = detect(
                             root,
                             cache_root=engine_output,
                             read_only=True,
                             comparison_reader=authority.read,
+                            comparison_pinner=authority.pin_comparison,
+                            comparison_directory_lister=(
+                                authority.list_comparison_directory
+                            ),
                         )
                         authority.source.require_directory_binding(
                             root,
@@ -1539,7 +1806,7 @@ class Graphify0916Adapter:
                             for path in detection["files"].get("code", [])
                         )
                         pinned_files = {
-                            Path(raw_path): authority.source.pin_regular(Path(raw_path))
+                            Path(raw_path): authority.require_comparison_path(Path(raw_path))
                             for raw_path in code_files
                         }
                         authority.source.require_directory_binding(
@@ -1584,9 +1851,11 @@ class Graphify0916Adapter:
                         "structural graph artifact could not be persisted"
                     )
                 _normalize_structural_output(engine_output)
+                _require_policy_root_binding(root, policy_root)
                 _require_output_binding(output, output_identity)
                 _publish_structural_output(engine_output, output_descriptor)
                 _require_output_binding(output, output_identity)
+                _require_policy_root_binding(root, policy_root)
         finally:
             os.close(output_descriptor)
         return StructuralBuild(
@@ -1605,7 +1874,7 @@ class Graphify0916Adapter:
         from graphify.serve import _query_graph_text
 
         try:
-            root = Path(payload_root).resolve(strict=True)
+            root = _absolute_source_path(payload_root)
             graph_path = root / "graph.json"
             reader = _PinnedSourceReader.open(root)
             try:
@@ -1661,16 +1930,20 @@ class Graphify0916Adapter:
         hook: ObservationHook | None,
     ) -> _InventoryPass:
         _deadline(deadline_ns)
-        policy_root = _find_vcs_root(root) or root
+        policy_root = _policy_root_for(root)
         authority = _PinnedReadAuthority.open(policy_root)
         try:
             source_details = authority.source.directory_details(root)
+            authority.bind_comparison_directory(root, source_details)
             commit_before = authority.git_head()
+            authority.pin_comparison(root / ".graphify" / "workspace.toml")
             detection = detect(
                 root,
                 read_only=True,
                 google_workspace=False,
                 comparison_reader=authority.read,
+                comparison_pinner=authority.pin_comparison,
+                comparison_directory_lister=authority.list_comparison_directory,
             )
             _emit(hook, "inventory_detected", pass_index=pass_index)
             authority.source.require_directory_binding(root, source_details)
@@ -1688,12 +1961,12 @@ class Graphify0916Adapter:
                 for raw_path in paths
             )
             pinned_entries = {
-                path: authority.source.pin_regular(path)
+                path: authority.require_comparison_path(path)
                 for _file_type, path in detected_paths
             }
             policy_paths = _policy_paths(root, authority, detection)
             pinned_policies = {
-                path: authority.pin_regular(path) for path in policy_paths
+                path: authority.require_comparison_path(path) for path in policy_paths
             }
             authority.source.require_directory_binding(root, source_details)
             authority.require_bindings()
@@ -1781,7 +2054,8 @@ class Graphify0916Adapter:
         deadline_ns: int | None = None,
         hook: ObservationHook | None = None,
     ) -> SourceObservation:
-        root = Path(source_root).resolve(strict=True)
+        root = _absolute_source_path(source_root)
+        _require_initial_source_root(root)
         if max_inventory_passes < 2:
             raise ObservationUnstable("at least two complete inventory passes are required")
         previous: _InventoryPass | None = None
@@ -1795,6 +2069,8 @@ class Graphify0916Adapter:
                     deadline_ns=deadline_ns,
                     hook=hook,
                 )
+            except _AuthorityChanged:
+                raise
             except ObservationUnstable as exc:
                 previous = None
                 last_unstable = exc
