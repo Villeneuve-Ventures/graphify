@@ -28,6 +28,8 @@ _ATOMIC_TEMP_RE = re.compile(
     r"^\.(?P<destination>.+)\.tmp-(?P<pid>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$",
     re.ASCII,
 )
+_PRIVATE_DIRECTORY_MODES = frozenset({0o700})
+_PRIVATE_FILE_MODES = frozenset({0o600})
 
 
 class WorkspaceRuntimeError(RuntimeError):
@@ -122,11 +124,26 @@ class Syscalls(Protocol):
 
     def replace(self, source: Path, destination: Path) -> None: ...
 
+    def replace_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None: ...
+
     def unlink(self, path: Path) -> None: ...
+
+    def unlink_at(self, path: str, *, dir_fd: int) -> None: ...
 
     def rmdir(self, path: Path) -> None: ...
 
+    def rmdir_at(self, path: str, *, dir_fd: int) -> None: ...
+
     def mkdir(self, path: Path, mode: int) -> None: ...
+
+    def mkdir_at(self, path: str, mode: int, *, dir_fd: int) -> None: ...
 
 
 class PosixSyscalls:
@@ -141,14 +158,38 @@ class PosixSyscalls:
     def replace(self, source: Path, destination: Path) -> None:
         os.replace(source, destination)
 
+    def replace_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        os.replace(
+            source,
+            destination,
+            src_dir_fd=source_dir_fd,
+            dst_dir_fd=destination_dir_fd,
+        )
+
     def unlink(self, path: Path) -> None:
         os.unlink(path)
+
+    def unlink_at(self, path: str, *, dir_fd: int) -> None:
+        os.unlink(path, dir_fd=dir_fd)
 
     def rmdir(self, path: Path) -> None:
         os.rmdir(path)
 
+    def rmdir_at(self, path: str, *, dir_fd: int) -> None:
+        os.rmdir(path, dir_fd=dir_fd)
+
     def mkdir(self, path: Path, mode: int) -> None:
         os.mkdir(path, mode)
+
+    def mkdir_at(self, path: str, mode: int, *, dir_fd: int) -> None:
+        os.mkdir(path, mode, dir_fd=dir_fd)
 
 
 RecordT = TypeVar("RecordT")
@@ -175,38 +216,110 @@ class DurableStateRoot:
         self.fault_hook = fault_hook or (lambda _event: None)
         self.syscalls = syscalls or PosixSyscalls()
 
+    @contextmanager
+    def _root_directory(
+        self,
+        *,
+        ensure: bool,
+        allow_missing: bool = False,
+    ) -> Iterator[int | None]:
+        """Hold the root and its verified parent across one contained operation."""
+
+        parent = self.root.parent
+        if parent == self.root:
+            raise StatePathError("state root must not be the filesystem root")
+        try:
+            parent_descriptor = os.open(parent, self._directory_open_flags())
+        except OSError as exc:
+            raise StatePathError(
+                f"state root parent must already be an owned directory: {parent}"
+            ) from exc
+        try:
+            opened_parent = self._require_owned_directory_descriptor(
+                parent_descriptor,
+                parent,
+            )
+
+            def require_parent_binding() -> None:
+                try:
+                    bound_parent = parent.lstat()
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state root parent changed while opening: {parent}"
+                    ) from exc
+                if (
+                    not stat.S_ISDIR(bound_parent.st_mode)
+                    or (opened_parent.st_dev, opened_parent.st_ino)
+                    != (bound_parent.st_dev, bound_parent.st_ino)
+                ):
+                    raise StatePathError(
+                        f"state root parent changed while opening: {parent}"
+                    )
+
+            created = False
+            try:
+                root_descriptor = self._open_owned_directory_at(
+                    parent_descriptor,
+                    self.root.name,
+                    self.root,
+                )
+            except FileNotFoundError:
+                if not ensure:
+                    if allow_missing:
+                        require_parent_binding()
+                        yield None
+                        return
+                    raise StatePathError(f"state directory is missing: {self.root}")
+                try:
+                    self.syscalls.mkdir_at(
+                        self.root.name,
+                        0o700,
+                        dir_fd=parent_descriptor,
+                    )
+                    created = True
+                except FileExistsError:
+                    pass
+                root_descriptor = self._open_owned_directory_at(
+                    parent_descriptor,
+                    self.root.name,
+                    self.root,
+                )
+            try:
+                if ensure:
+                    os.fchmod(root_descriptor, 0o700)
+                opened = self._require_private_directory_descriptor(
+                    root_descriptor,
+                    self.root,
+                )
+                bound = os.stat(
+                    self.root.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(bound.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino)
+                ):
+                    raise StatePathError(
+                        f"state root changed while opening: {self.root}"
+                    )
+                require_parent_binding()
+                if created:
+                    self.syscalls.fsync(parent_descriptor)
+                yield root_descriptor
+            finally:
+                os.close(root_descriptor)
+        finally:
+            os.close(parent_descriptor)
+
     def _ensure_root(self) -> None:
-        if self.root.exists() and (self.root.is_symlink() or not self.root.is_dir()):
-            raise StatePathError(f"state root is not a real directory: {self.root}")
-        if not self.root.exists():
-            try:
-                self._require_owned_directory(self.root.parent)
-            except OSError as exc:
-                raise StatePathError(
-                    f"state root parent must already be an owned directory: {self.root.parent}"
-                ) from exc
-            try:
-                self.syscalls.mkdir(self.root, 0o700)
-            except FileExistsError:
-                pass
-            if self.root.is_symlink() or not self.root.is_dir():
-                raise StatePathError(f"state root is not a real directory: {self.root}")
-            os.chmod(self.root, 0o700)
-            self._fsync_directory(self.root.parent)
-        else:
-            os.chmod(self.root, 0o700)
-        self._require_owned_directory(self.root)
+        with self._root_directory(ensure=True):
+            pass
 
     @staticmethod
     def _require_owner(details: os.stat_result, path: Path) -> None:
         if hasattr(os, "geteuid") and details.st_uid != os.geteuid():
             raise StatePathError(f"state path is not owned by the current user: {path}")
-
-    def _require_owned_directory(self, path: Path) -> None:
-        details = path.lstat()
-        if not stat.S_ISDIR(details.st_mode) or path.is_symlink():
-            raise StatePathError(f"state directory is not a real directory: {path}")
-        self._require_owner(details, path)
 
     @staticmethod
     def _directory_open_flags() -> int:
@@ -217,13 +330,136 @@ class DurableStateRoot:
             | getattr(os, "O_NOFOLLOW", 0)
         )
 
-    def _require_private_directory_descriptor(self, descriptor: int, path: Path) -> None:
+    @staticmethod
+    def _regular_open_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+
+    @staticmethod
+    def _stat_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            details.st_dev,
+            details.st_ino,
+            details.st_mode,
+            details.st_nlink,
+            details.st_size,
+            details.st_mtime_ns,
+            details.st_ctime_ns,
+        )
+
+    def _require_directory_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> os.stat_result:
+        details = self._require_owned_directory_descriptor(descriptor, path)
+        if stat.S_IMODE(details.st_mode) not in allowed_modes:
+            if allowed_modes == _PRIVATE_DIRECTORY_MODES:
+                raise StatePathError(f"state directory mode is not 0700: {path}")
+            modes = ", ".join(f"{mode:04o}" for mode in sorted(allowed_modes))
+            raise StatePathError(f"state directory mode is not allowed ({modes}): {path}")
+        return details
+
+    def _require_owned_directory_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+    ) -> os.stat_result:
         details = os.fstat(descriptor)
         if not stat.S_ISDIR(details.st_mode):
             raise StatePathError(f"state directory is not a real directory: {path}")
         self._require_owner(details, path)
-        if stat.S_IMODE(details.st_mode) != 0o700:
-            raise StatePathError(f"state directory mode is not 0700: {path}")
+        return details
+
+    def _require_private_directory_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+    ) -> os.stat_result:
+        return self._require_directory_descriptor(
+            descriptor,
+            path,
+            allowed_modes=_PRIVATE_DIRECTORY_MODES,
+        )
+
+    def _open_directory_at(
+        self,
+        parent_descriptor: int,
+        name: str,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int] | None,
+        allow_missing: bool = False,
+    ) -> int | None:
+        try:
+            descriptor = os.open(name, self._directory_open_flags(), dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise
+        except OSError as exc:
+            raise StatePathError(
+                f"state directory is linked or not a directory: {path}"
+            ) from exc
+        try:
+            if allowed_modes is None:
+                self._require_owned_directory_descriptor(descriptor, path)
+            else:
+                self._require_directory_descriptor(
+                    descriptor,
+                    path,
+                    allowed_modes=allowed_modes,
+                )
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def _open_owned_directory_at(
+        self,
+        parent_descriptor: int,
+        name: str,
+        path: Path,
+    ) -> int:
+        descriptor = self._open_directory_at(
+            parent_descriptor,
+            name,
+            path,
+            allowed_modes=None,
+        )
+        if descriptor is None:  # pragma: no cover - allow_missing is false
+            raise StatePathError(f"state directory is missing: {path}")
+        return descriptor
+
+    def _require_regular_details(
+        self,
+        details: os.stat_result,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> None:
+        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+            raise StatePathError(f"state file is not a singular regular file: {path}")
+        self._require_owner(details, path)
+        if stat.S_IMODE(details.st_mode) not in allowed_modes:
+            raise StatePathError(f"state file mode is not allowed: {path}")
+
+    def _require_regular_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> os.stat_result:
+        details = os.fstat(descriptor)
+        self._require_regular_details(details, path, allowed_modes=allowed_modes)
+        return details
 
     @contextmanager
     def _existing_private_directory(
@@ -240,38 +476,40 @@ class DurableStateRoot:
         else:
             destination = self.path(relative)
             parts = destination.relative_to(self.root).parts
-        flags = self._directory_open_flags()
-        try:
-            descriptor = os.open(self.root, flags)
-        except FileNotFoundError as exc:
-            raise StatePathError(f"state directory is missing: {self.root}") from exc
-        except OSError as exc:
-            raise StatePathError(
-                f"state directory cannot be opened safely: {self.root}: {exc}"
-            ) from exc
-        try:
-            self._require_private_directory_descriptor(descriptor, self.root)
-            current = self.root
-            for index, part in enumerate(parts):
-                candidate = current / part
-                try:
-                    child = os.open(part, flags, dir_fd=descriptor)
-                except FileNotFoundError as exc:
-                    if allow_missing and index == len(parts) - 1:
-                        yield None
-                        return
-                    raise StatePathError(f"state directory is missing: {candidate}") from exc
-                except OSError as exc:
-                    raise StatePathError(
-                        f"state directory is linked or not a directory: {candidate}"
-                    ) from exc
+        with self._root_directory(
+            ensure=False,
+            allow_missing=allow_missing,
+        ) as root_descriptor:
+            if root_descriptor is None:
+                yield None
+                return
+            descriptor = os.dup(root_descriptor)
+            try:
+                current = self.root
+                for part in parts:
+                    candidate = current / part
+                    try:
+                        child = self._open_directory_at(
+                            descriptor,
+                            part,
+                            candidate,
+                            allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                        )
+                    except FileNotFoundError as exc:
+                        if allow_missing:
+                            yield None
+                            return
+                        raise StatePathError(
+                            f"state directory is missing: {candidate}"
+                        ) from exc
+                    if child is None:  # pragma: no cover - allow_missing is false
+                        raise StatePathError(f"state directory is missing: {candidate}")
+                    os.close(descriptor)
+                    descriptor = child
+                    current = candidate
+                yield descriptor
+            finally:
                 os.close(descriptor)
-                descriptor = child
-                current = candidate
-                self._require_private_directory_descriptor(descriptor, current)
-            yield descriptor
-        finally:
-            os.close(descriptor)
 
     def _open_existing_file(
         self,
@@ -283,7 +521,7 @@ class DurableStateRoot:
             relative_parent = path.parent.relative_to(self.root)
         except ValueError as exc:
             raise StatePathError(f"state file escapes root: {path}") from exc
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = self._regular_open_flags()
         with self._existing_private_directory(
             relative_parent,
             allow_missing=allow_missing_parent,
@@ -291,6 +529,51 @@ class DurableStateRoot:
             if parent_descriptor is None:
                 return None
             return os.open(path.name, flags, dir_fd=parent_descriptor)
+
+    @staticmethod
+    def _contained_parts(relative: str | Path) -> tuple[str, ...]:
+        if Path(relative) in {Path(), Path(".")}:
+            return ()
+        pure = PurePosixPath(Path(relative).as_posix())
+        if pure.is_absolute() or not pure.parts or ".." in pure.parts or "." in pure.parts:
+            raise StatePathError(f"contained path must be relative: {relative}")
+        return pure.parts
+
+    @contextmanager
+    def _existing_directory_beneath(
+        self,
+        anchor_descriptor: int,
+        anchor_path: Path,
+        relative: str | Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> Iterator[int]:
+        """Open a directory beneath a held anchor without following links."""
+
+        descriptor = os.dup(anchor_descriptor)
+        current = anchor_path
+        try:
+            for part in self._contained_parts(relative):
+                candidate = current / part
+                try:
+                    child = self._open_directory_at(
+                        descriptor,
+                        part,
+                        candidate,
+                        allowed_modes=allowed_modes,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state directory is linked or not a directory: {candidate}"
+                    ) from exc
+                if child is None:  # pragma: no cover - allow_missing is false
+                    raise StatePathError(f"state directory is missing: {candidate}")
+                os.close(descriptor)
+                descriptor = child
+                current = candidate
+            yield descriptor
+        finally:
+            os.close(descriptor)
 
     def _require_private_directory_chain(self, destination: Path) -> None:
         """Validate an existing state-directory chain without repairing it."""
@@ -311,22 +594,67 @@ class DurableStateRoot:
         return candidate
 
     def ensure_directory(self, relative: str | Path) -> Path:
-        self._ensure_root()
-        if Path(relative) in {Path(), Path(".")}:
-            return self.root
-        destination = self.path(relative)
-        current = self.root
-        for part in destination.relative_to(self.root).parts:
-            child = current / part
+        destination = (
+            self.root
+            if Path(relative) in {Path(), Path(".")}
+            else self.path(relative)
+        )
+        with self._root_directory(ensure=True) as root_descriptor:
+            if root_descriptor is None:  # pragma: no cover - ensure is true
+                raise StatePathError(f"state directory is missing: {self.root}")
+            if destination == self.root:
+                return destination
+            descriptor = os.dup(root_descriptor)
             try:
-                child.lstat()
-            except FileNotFoundError:
-                self.syscalls.mkdir(child, 0o700)
-                self._fsync_directory(current)
-            self._require_owned_directory(child)
-            os.chmod(child, 0o700)
-            current = child
-        return destination
+                current = self.root
+                for part in destination.relative_to(self.root).parts:
+                    child_path = current / part
+                    try:
+                        child_descriptor = self._open_owned_directory_at(
+                            descriptor,
+                            part,
+                            child_path,
+                        )
+                    except FileNotFoundError:
+                        try:
+                            self.syscalls.mkdir_at(part, 0o700, dir_fd=descriptor)
+                        except FileExistsError:
+                            pass
+                        else:
+                            self.syscalls.fsync(descriptor)
+                        child_descriptor = self._open_owned_directory_at(
+                            descriptor,
+                            part,
+                            child_path,
+                        )
+                    try:
+                        os.fchmod(child_descriptor, 0o700)
+                        opened = self._require_private_directory_descriptor(
+                            child_descriptor,
+                            child_path,
+                        )
+                        bound = os.stat(
+                            part,
+                            dir_fd=descriptor,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            not stat.S_ISDIR(bound.st_mode)
+                            or (opened.st_dev, opened.st_ino)
+                            != (bound.st_dev, bound.st_ino)
+                        ):
+                            raise StatePathError(
+                                f"state directory changed while opening: {child_path}"
+                            )
+                    except BaseException:
+                        os.close(child_descriptor)
+                        raise
+                    os.close(descriptor)
+                    descriptor = child_descriptor
+                    current = child_path
+                return destination
+            finally:
+                os.close(descriptor)
 
     def _ensure_parent(self, path: Path) -> None:
         relative = path.parent.relative_to(self.root)
@@ -380,17 +708,296 @@ class DurableStateRoot:
                 ) from exc
             for name in names:
                 child_path = destination / name
+                child = self._open_directory_at(
+                    descriptor,
+                    name,
+                    child_path,
+                    allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                )
+                if child is None:  # pragma: no cover - allow_missing is false
+                    raise StatePathError(f"state directory is missing: {child_path}")
+                os.close(child)
+            return tuple(names)
+
+    def private_directory_exists(self, relative: str | Path) -> bool:
+        """Probe one private directory without following any path component."""
+
+        destination = self.path(relative)
+        parent_relative = destination.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return False
+            descriptor = self._open_directory_at(
+                parent_descriptor,
+                destination.name,
+                destination,
+                allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                allow_missing=True,
+            )
+            if descriptor is None:
+                return False
+            os.close(descriptor)
+            return True
+
+    def _tree_bytes_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+    ) -> int:
+        before = os.fstat(descriptor)
+        try:
+            names = sorted(entry.name for entry in os.scandir(descriptor))
+        except OSError as exc:
+            raise StatePathError(f"state tree cannot be enumerated safely: {path}: {exc}") from exc
+        total = 0
+        for name in names:
+            candidate = path / name
+            try:
+                details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {candidate}: {exc}"
+                ) from exc
+            if stat.S_ISDIR(details.st_mode):
+                child = self._open_directory_at(
+                    descriptor,
+                    name,
+                    candidate,
+                    allowed_modes=allowed_directory_modes,
+                )
+                if child is None:  # pragma: no cover - allow_missing is false
+                    raise StatePathError(f"state tree directory is missing: {candidate}")
                 try:
-                    child = os.open(name, self._directory_open_flags(), dir_fd=descriptor)
-                except OSError as exc:
-                    raise StatePathError(
-                        f"state directory entry is linked or not a directory: {child_path}"
-                    ) from exc
-                try:
-                    self._require_private_directory_descriptor(child, child_path)
+                    opened_directory = os.fstat(child)
+                    if (opened_directory.st_dev, opened_directory.st_ino) != (
+                        details.st_dev,
+                        details.st_ino,
+                    ):
+                        raise StatePathError(
+                            f"state tree directory changed while opening: {candidate}"
+                        )
+                    total += self._tree_bytes_descriptor(
+                        child,
+                        candidate,
+                        allowed_directory_modes=allowed_directory_modes,
+                        allowed_file_modes=allowed_file_modes,
+                    )
                 finally:
                     os.close(child)
-            return tuple(names)
+                continue
+            self._require_regular_details(
+                details,
+                candidate,
+                allowed_modes=allowed_file_modes,
+            )
+            try:
+                file_descriptor = os.open(
+                    name,
+                    self._regular_open_flags(),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise StatePathError(f"state tree file cannot be opened safely: {candidate}") from exc
+            try:
+                opened = self._require_regular_descriptor(
+                    file_descriptor,
+                    candidate,
+                    allowed_modes=allowed_file_modes,
+                )
+                current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                expected_identity = self._stat_identity(details)
+                if (
+                    self._stat_identity(opened) != expected_identity
+                    or self._stat_identity(current) != expected_identity
+                ):
+                    raise StatePathError(f"state tree file changed while opening: {candidate}")
+                total += opened.st_size
+            finally:
+                os.close(file_descriptor)
+        after_names = sorted(entry.name for entry in os.scandir(descriptor))
+        after = os.fstat(descriptor)
+        if names != after_names or self._stat_identity(before) != self._stat_identity(after):
+            raise StatePathError(f"state tree changed while scanning: {path}")
+        return total
+
+    def tree_bytes(
+        self,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+    ) -> int:
+        """Measure a private tree through a held no-follow root descriptor."""
+
+        path = self.path(relative)
+        with self._existing_private_directory(
+            relative,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                raise FileNotFoundError(path)
+            return self._tree_bytes_descriptor(
+                descriptor,
+                path,
+                allowed_directory_modes=allowed_directory_modes,
+                allowed_file_modes=allowed_file_modes,
+            )
+
+    def _remove_tree_contents_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+    ) -> None:
+        names = sorted(entry.name for entry in os.scandir(descriptor))
+        for name in names:
+            candidate = path / name
+            details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(details.st_mode):
+                child = self._open_directory_at(
+                    descriptor,
+                    name,
+                    candidate,
+                    allowed_modes=allowed_directory_modes,
+                )
+                if child is None:  # pragma: no cover - allow_missing is false
+                    raise StatePathError(f"state tree directory is missing: {candidate}")
+                try:
+                    self._remove_tree_contents_descriptor(
+                        child,
+                        candidate,
+                        allowed_directory_modes=allowed_directory_modes,
+                        allowed_file_modes=allowed_file_modes,
+                    )
+                finally:
+                    os.close(child)
+                self.syscalls.rmdir_at(name, dir_fd=descriptor)
+                continue
+            self._require_regular_details(
+                details,
+                candidate,
+                allowed_modes=allowed_file_modes,
+            )
+            self.syscalls.unlink_at(name, dir_fd=descriptor)
+
+    def remove_private_tree(
+        self,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+    ) -> bool:
+        """Validate and remove one private tree through held no-follow descriptors."""
+
+        path = self.path(relative)
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return False
+            descriptor = self._open_directory_at(
+                parent_descriptor,
+                path.name,
+                path,
+                allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                allow_missing=True,
+            )
+            if descriptor is None:
+                return False
+            try:
+                self._tree_bytes_descriptor(
+                    descriptor,
+                    path,
+                    allowed_directory_modes=allowed_directory_modes,
+                    allowed_file_modes=allowed_file_modes,
+                )
+                self._remove_tree_contents_descriptor(
+                    descriptor,
+                    path,
+                    allowed_directory_modes=allowed_directory_modes,
+                    allowed_file_modes=allowed_file_modes,
+                )
+            finally:
+                os.close(descriptor)
+            self.syscalls.rmdir_at(path.name, dir_fd=parent_descriptor)
+            self.syscalls.fsync(parent_descriptor)
+        return True
+
+    def fsync_contained_regular_file(
+        self,
+        anchor: str | Path,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+    ) -> None:
+        """Sync one file beneath a held private anchor without path re-resolution."""
+
+        parts = self._contained_parts(relative)
+        if not parts:
+            raise StatePathError("contained regular-file path must not be empty")
+        anchor_path = self.path(anchor)
+        relative_path = Path(*parts)
+        with self.existing_private_directory(anchor) as anchor_descriptor:
+            with self._existing_directory_beneath(
+                anchor_descriptor,
+                anchor_path,
+                relative_path.parent,
+                allowed_modes=allowed_directory_modes,
+            ) as parent_descriptor:
+                path = anchor_path / relative_path
+                try:
+                    descriptor = os.open(
+                        relative_path.name,
+                        self._regular_open_flags(),
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state file cannot be opened safely: {path}: {exc}"
+                    ) from exc
+                try:
+                    self._require_regular_descriptor(
+                        descriptor,
+                        path,
+                        allowed_modes=allowed_file_modes,
+                    )
+                    self.syscalls.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+    def fsync_contained_directory(
+        self,
+        anchor: str | Path,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+    ) -> None:
+        """Sync one directory beneath a held private anchor without following links."""
+
+        anchor_path = self.path(anchor)
+        with self.existing_private_directory(anchor) as anchor_descriptor:
+            with self._existing_directory_beneath(
+                anchor_descriptor,
+                anchor_path,
+                relative,
+                allowed_modes=allowed_directory_modes,
+            ) as descriptor:
+                self.syscalls.fsync(descriptor)
 
     @contextmanager
     def lock(
@@ -411,41 +1018,86 @@ class DurableStateRoot:
             )
         path = self.path(relative)
         self._ensure_parent(path)
-        flags = os.O_RDWR | os.O_CREAT
-        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags, 0o600)
-        details = os.fstat(descriptor)
-        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
-            os.close(descriptor)
-            raise StatePathError(f"state lock is not a regular file: {path}")
-        self._require_owner(details, path)
-        os.fchmod(descriptor, 0o600)
-        try:
+        flags = os.O_RDWR
+        flags |= (
+            getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        parent_relative = path.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            descriptor: int | None = None
             try:
-                import fcntl
-            except ImportError as exc:  # pragma: no cover - rejected by capability gate
-                raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
-            while True:
-                try:
-                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                for _attempt in range(5):
+                    try:
+                        descriptor = os.open(
+                            path.name,
+                            flags | os.O_CREAT | os.O_EXCL,
+                            0o600,
+                            dir_fd=parent_descriptor,
+                        )
+                    except FileExistsError:
+                        try:
+                            descriptor = os.open(
+                                path.name,
+                                flags,
+                                dir_fd=parent_descriptor,
+                            )
+                        except FileNotFoundError:
+                            continue
                     break
-                except InterruptedError:
-                    continue
-            token = _LOCK_STACK.set((*stack, (rank, name)))
-            self.fault_hook(f"lock:{name}:acquired")
+            except OSError as exc:
+                raise StatePathError(
+                    f"state lock cannot be opened safely: {path}: {exc}"
+                ) from exc
+            if descriptor is None:
+                raise StatePathError(f"state lock binding did not stabilize: {path}")
             try:
-                yield
-            finally:
-                _LOCK_STACK.reset(token)
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                    raise StatePathError(f"state lock is not a regular file: {path}")
+                self._require_owner(details, path)
+                os.fchmod(descriptor, 0o600)
+                try:
+                    bound = os.stat(
+                        path.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state lock binding cannot be inspected safely: {path}"
+                    ) from exc
+                if (
+                    not stat.S_ISREG(bound.st_mode)
+                    or (details.st_dev, details.st_ino) != (bound.st_dev, bound.st_ino)
+                ):
+                    raise StatePathError(f"state lock changed while opening: {path}")
+                try:
+                    import fcntl
+                except ImportError as exc:  # pragma: no cover - rejected by capability gate
+                    raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
                 while True:
                     try:
-                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        fcntl.flock(descriptor, fcntl.LOCK_EX)
                         break
                     except InterruptedError:
                         continue
-                self.fault_hook(f"lock:{name}:released")
-        finally:
-            os.close(descriptor)
+                token = _LOCK_STACK.set((*stack, (rank, name)))
+                self.fault_hook(f"lock:{name}:acquired")
+                try:
+                    yield
+                finally:
+                    _LOCK_STACK.reset(token)
+                    while True:
+                        try:
+                            fcntl.flock(descriptor, fcntl.LOCK_UN)
+                            break
+                        except InterruptedError:
+                            continue
+                    self.fault_hook(f"lock:{name}:released")
+            finally:
+                os.close(descriptor)
 
     @contextmanager
     def existing_lock(
@@ -603,66 +1255,72 @@ class DurableStateRoot:
         *,
         label: str,
     ) -> Path:
-        """Atomically move one contained file/directory and sync both parents."""
+        """Atomically move one private directory and sync both held parents."""
 
         self._ensure_root()
         source_path = self.path(source)
         destination_path = self.path(destination)
         self._ensure_parent(destination_path)
-        if not source_path.exists() or source_path.is_symlink():
-            raise StatePathError(f"rename source is missing or linked: {source_path}")
-        if destination_path.exists() or destination_path.is_symlink():
-            raise StatePathError(f"rename destination already exists: {destination_path}")
-        source_details = source_path.lstat()
-        self._require_owner(source_details, source_path)
+        source_parent_relative = source_path.parent.relative_to(self.root)
+        destination_parent_relative = destination_path.parent.relative_to(self.root)
         visible = False
-        self.fault_hook(f"{label}:before_rename")
-        try:
-            self.syscalls.replace(source_path, destination_path)
-            visible = True
-            self.fault_hook(f"{label}:renamed")
-            self._fsync_directory(source_path.parent)
-            self.fault_hook(f"{label}:source_parent_durable")
-            if destination_path.parent != source_path.parent:
-                self._fsync_directory(destination_path.parent)
-            self.fault_hook(f"{label}:destination_parent_durable")
-        except BaseException as exc:
-            if visible:
-                raise CommitUnknown(
-                    f"{label} rename became visible before both directories were durable"
-                ) from exc
-            raise
+        with self.existing_private_directory(source_parent_relative) as source_parent:
+            with self.existing_private_directory(
+                destination_parent_relative
+            ) as destination_parent:
+                source_descriptor = self._open_directory_at(
+                    source_parent,
+                    source_path.name,
+                    source_path,
+                    allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                    allow_missing=True,
+                )
+                if source_descriptor is None:
+                    raise StatePathError(f"rename source is missing: {source_path}")
+                try:
+                    try:
+                        os.stat(
+                            destination_path.name,
+                            dir_fd=destination_parent,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise StatePathError(
+                            f"rename destination already exists: {destination_path}"
+                        )
+                    self.fault_hook(f"{label}:before_rename")
+                    try:
+                        self.syscalls.replace_at(
+                            source_path.name,
+                            destination_path.name,
+                            source_dir_fd=source_parent,
+                            destination_dir_fd=destination_parent,
+                        )
+                        visible = True
+                        self.fault_hook(f"{label}:renamed")
+                        self.syscalls.fsync(source_parent)
+                        self.fault_hook(f"{label}:source_parent_durable")
+                        if destination_parent_relative != source_parent_relative:
+                            self.syscalls.fsync(destination_parent)
+                        self.fault_hook(f"{label}:destination_parent_durable")
+                    except BaseException as exc:
+                        if visible:
+                            raise CommitUnknown(
+                                f"{label} rename became visible before both directories were durable"
+                            ) from exc
+                        raise
+                finally:
+                    os.close(source_descriptor)
         return destination_path
 
     def unlink_and_sync(self, relative: str | Path, *, label: str) -> None:
-        path = self.path(relative)
-        self.fault_hook(f"{label}:before_unlink")
-        try:
-            details = path.lstat()
-        except FileNotFoundError:
-            return
-        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1 or path.is_symlink():
-            raise StatePathError(f"state cleanup target is not a regular file: {path}")
-        self._require_owner(details, path)
-        if stat.S_IMODE(details.st_mode) != 0o600:
-            raise StatePathError(f"state cleanup target mode is not 0600: {path}")
-        visible = False
-        try:
-            self.syscalls.unlink(path)
-            visible = True
-            self.fault_hook(f"{label}:unlinked")
-            self._fsync_directory(path.parent)
-            self.fault_hook(f"{label}:parent_durable")
-        except BaseException as exc:
-            if visible:
-                raise CommitUnknown(
-                    f"{label} cleanup became visible before durability acknowledgement"
-                ) from exc
-            raise
+        self._unlink_and_sync(self.path(relative), label=label)
 
     def fsync_directory(self, relative: str | Path) -> None:
-        path = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
-        self._fsync_directory(path)
+        with self.existing_private_directory(relative) as descriptor:
+            self.syscalls.fsync(descriptor)
 
     def fsync_regular_file(
         self,
@@ -671,15 +1329,18 @@ class DurableStateRoot:
         allowed_modes: frozenset[int] = frozenset({0o600}),
     ) -> None:
         path = self.path(relative)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
         try:
-            details = os.fstat(descriptor)
-            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
-                raise StatePathError(f"state file is not a singular regular file: {path}")
-            self._require_owner(details, path)
-            if stat.S_IMODE(details.st_mode) not in allowed_modes:
-                raise StatePathError(f"state file mode is not allowed: {path}")
+            descriptor = self._open_existing_file(path)
+        except OSError as exc:
+            raise StatePathError(f"state file cannot be opened safely: {path}: {exc}") from exc
+        if descriptor is None:  # pragma: no cover - allow_missing_parent is false
+            raise StatePathError(f"state file parent is missing: {path.parent}")
+        try:
+            self._require_regular_descriptor(
+                descriptor,
+                path,
+                allowed_modes=allowed_modes,
+            )
             self.syscalls.fsync(descriptor)
         finally:
             os.close(descriptor)
@@ -697,40 +1358,49 @@ class DurableStateRoot:
         remain visible to the caller's ordinary directory validation.
         """
 
-        try:
-            self._require_owned_directory(self.root)
-        except FileNotFoundError:
-            return ()
         directory = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
-        try:
-            details = directory.lstat()
-        except FileNotFoundError:
-            return ()
-        if not stat.S_ISDIR(details.st_mode) or directory.is_symlink():
-            raise StatePathError(f"atomic-temp parent is not a real directory: {directory}")
-        self._require_owner(details, directory)
+        relative_directory = (
+            Path(".") if directory == self.root else directory.relative_to(self.root)
+        )
         removed: list[Path] = []
-        for entry in directory.iterdir():
-            match = _ATOMIC_TEMP_RE.fullmatch(entry.name)
-            if match is None or (
-                destination_name is not None
-                and match.group("destination") != destination_name
-            ):
-                continue
-            entry_details = entry.lstat()
-            if (
-                not stat.S_ISREG(entry_details.st_mode)
-                or entry_details.st_nlink != 1
-                or entry.is_symlink()
-            ):
-                raise StatePathError(f"atomic-temp orphan is unsafe: {entry}")
-            self._require_owner(entry_details, entry)
-            if stat.S_IMODE(entry_details.st_mode) != 0o600:
-                raise StatePathError(f"atomic-temp orphan mode is not 0600: {entry}")
-            self.syscalls.unlink(entry)
-            removed.append(entry)
-        if removed:
-            self._fsync_directory(directory)
+        with self._existing_private_directory(
+            relative_directory,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                return ()
+            try:
+                names = sorted(entry.name for entry in os.scandir(descriptor))
+            except OSError as exc:
+                raise StatePathError(
+                    f"atomic-temp parent cannot be enumerated safely: {directory}: {exc}"
+                ) from exc
+            for name in names:
+                match = _ATOMIC_TEMP_RE.fullmatch(name)
+                if match is None or (
+                    destination_name is not None
+                    and match.group("destination") != destination_name
+                ):
+                    continue
+                entry = directory / name
+                try:
+                    entry_details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                except OSError as exc:
+                    raise StatePathError(
+                        f"atomic-temp orphan cannot be inspected safely: {entry}"
+                    ) from exc
+                try:
+                    self._require_regular_details(
+                        entry_details,
+                        entry,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                except StatePathError as exc:
+                    raise StatePathError(f"atomic-temp orphan is unsafe: {entry}") from exc
+                self.syscalls.unlink_at(name, dir_fd=descriptor)
+                removed.append(entry)
+            if removed:
+                self.syscalls.fsync(descriptor)
         return tuple(removed)
 
     @contextmanager
@@ -813,13 +1483,13 @@ class DurableStateRoot:
         allow_missing: bool = False,
         label: str,
     ) -> RecordT | None:
-        path = self.path(relative)
-        if not path.exists():
+        data = self.read_optional_existing_bytes(relative)
+        if data is None:
             if allow_missing:
                 return None
             raise StateCorrupt(f"{label} current record is missing")
         try:
-            return decoder(self._read_regular(path))
+            return decoder(data)
         except Exception as exc:
             if isinstance(exc, StateCorrupt):
                 raise
@@ -911,10 +1581,14 @@ class DurableStateRoot:
         candidates: dict[str, tuple[bytes, RecordT, int]] = {}
         invalid: dict[str, Exception] = {}
         for name, path in paths.items():
-            if not path.exists():
+            try:
+                data = self.read_optional_existing_bytes(path.relative_to(self.root))
+            except Exception as exc:
+                invalid[name] = exc
+                continue
+            if data is None:
                 continue
             try:
-                data = self._read_regular(path)
                 record = decoder(data)
                 candidates[name] = (data, record, revision(record))
             except Exception as exc:
@@ -950,8 +1624,7 @@ class DurableStateRoot:
                 self._atomic_replace(paths["previous"], current_candidate[0])
             self._atomic_replace(paths["current"], selected[0])
             self.fault_hook(f"{label}:recovered")
-        if paths["pending"].exists():
-            self._unlink_and_sync(paths["pending"])
+        self._unlink_and_sync(paths["pending"])
         return selected[1]
 
     def commit_record(
@@ -986,8 +1659,8 @@ class DurableStateRoot:
             self._atomic_replace(pending_path, payload, after_replace=pending_replaced)
             self.fault_hook(f"{label}:pending_durable")
 
-            if current_path.exists():
-                current_bytes = self._read_regular(current_path)
+            current_bytes = self.read_optional_existing_bytes(current)
+            if current_bytes is not None:
                 decoder(current_bytes)
                 self._atomic_replace(previous_path, current_bytes)
                 self.fault_hook(f"{label}:previous_durable")
@@ -1046,46 +1719,67 @@ class DurableStateRoot:
             destination.parent.relative_to(self.root),
             destination_name=destination.name,
         )
-        try:
-            details = destination.lstat()
-        except FileNotFoundError:
-            pass
-        else:
-            if (
-                not stat.S_ISREG(details.st_mode)
-                or details.st_nlink != 1
-                or destination.is_symlink()
-            ):
-                raise StatePathError(
-                    f"state replacement target is not a regular file: {destination}"
+        parent_relative = destination.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            try:
+                details = os.stat(
+                    destination.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
                 )
-            self._require_owner(details, destination)
-            if stat.S_IMODE(details.st_mode) != 0o600:
-                raise StatePathError(f"state replacement target mode is not 0600: {destination}")
-        temporary = destination.parent / f".{destination.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(temporary, flags, 0o600)
-        replaced = False
-        try:
-            os.fchmod(descriptor, 0o600)
-            self._write_all(descriptor, data)
-            self.syscalls.fsync(descriptor)
-        except BaseException:
-            os.close(descriptor)
-            temporary.unlink(missing_ok=True)
-            raise
-        else:
-            os.close(descriptor)
-        try:
-            self.syscalls.replace(temporary, destination)
-            replaced = True
-            if after_replace is not None:
-                after_replace()
-            self._fsync_directory(destination.parent)
-        finally:
-            if not replaced:
-                temporary.unlink(missing_ok=True)
+            except FileNotFoundError:
+                pass
+            else:
+                self._require_regular_details(
+                    details,
+                    destination,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+            temporary_name = f".{destination.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            replaced = False
+            try:
+                try:
+                    os.fchmod(descriptor, 0o600)
+                    self._write_all(descriptor, data)
+                    self.syscalls.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                self.syscalls.replace_at(
+                    temporary_name,
+                    destination.name,
+                    source_dir_fd=parent_descriptor,
+                    destination_dir_fd=parent_descriptor,
+                )
+                replaced = True
+                if after_replace is not None:
+                    after_replace()
+                self.syscalls.fsync(parent_descriptor)
+                try:
+                    installed_descriptor = os.open(
+                        destination.name,
+                        self._regular_open_flags(),
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as exc:
+                    raise StateCorrupt(
+                        f"installed state cannot be opened safely: {destination}: {exc}"
+                    ) from exc
+                if self._read_regular_descriptor(installed_descriptor, destination) != data:
+                    raise StateCorrupt(f"installed state verification failed at {destination}")
+            finally:
+                if not replaced:
+                    try:
+                        self.syscalls.unlink_at(temporary_name, dir_fd=parent_descriptor)
+                    except FileNotFoundError:
+                        pass
 
     def _write_all(self, descriptor: int, data: bytes) -> None:
         view = memoryview(data)
@@ -1103,32 +1797,48 @@ class DurableStateRoot:
                 raise OSError(errno.EIO, "write returned no progress")
             offset += written
 
-    def _unlink_and_sync(self, path: Path) -> None:
-        try:
-            details = path.lstat()
-        except FileNotFoundError:
-            return
-        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1 or path.is_symlink():
-            raise StatePathError(f"state cleanup target is not a regular file: {path}")
-        self._require_owner(details, path)
-        if stat.S_IMODE(details.st_mode) != 0o600:
-            raise StatePathError(f"state cleanup target mode is not 0600: {path}")
-        self.syscalls.unlink(path)
-        self._fsync_directory(path.parent)
-
-    def _fsync_directory(self, path: Path) -> None:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
-        try:
-            details = os.fstat(descriptor)
-            if not stat.S_ISDIR(details.st_mode):
-                raise StatePathError(f"state directory cannot be synced safely: {path}")
-            self._require_owner(details, path)
-            self.syscalls.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-
+    def _unlink_and_sync(self, path: Path, *, label: str | None = None) -> None:
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return
+            try:
+                details = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise StatePathError(
+                    f"state cleanup target cannot be inspected safely: {path}"
+                ) from exc
+            self._require_regular_details(
+                details,
+                path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            if label is not None:
+                self.fault_hook(f"{label}:before_unlink")
+            visible = False
+            try:
+                self.syscalls.unlink_at(path.name, dir_fd=parent_descriptor)
+                visible = True
+                if label is not None:
+                    self.fault_hook(f"{label}:unlinked")
+                self.syscalls.fsync(parent_descriptor)
+                if label is not None:
+                    self.fault_hook(f"{label}:parent_durable")
+            except BaseException as exc:
+                if label is not None and visible:
+                    raise CommitUnknown(
+                        f"{label} cleanup became visible before durability acknowledgement"
+                    ) from exc
+                raise
 
 __all__ = [
     "CommitUnknown",

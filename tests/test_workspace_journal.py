@@ -40,6 +40,22 @@ class _FailOnceSyscalls(PosixSyscalls):
         self._fail("replace")
         super().replace(source, destination)
 
+    def replace_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        self._fail("replace")
+        super().replace_at(
+            source,
+            destination,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
+
 
 class _ShortWriteEintrSyscalls(PosixSyscalls):
     def __init__(self) -> None:

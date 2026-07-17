@@ -230,61 +230,48 @@ class GenerationStore:
             decoder=CapacityReservationState.from_json,
         )
 
-    @staticmethod
-    def _tree_bytes(path: Path) -> int:
-        total = 0
-        for root, directories, files in os.walk(path, topdown=True, followlinks=False):
-            root_path = Path(root)
-            safe_directories: list[str] = []
-            for name in directories:
-                candidate = root_path / name
-                details = candidate.lstat()
-                if not stat.S_ISDIR(details.st_mode) or candidate.is_symlink():
-                    raise CapacityExceeded(f"unsafe directory in capacity scan: {candidate}")
-                safe_directories.append(name)
-            directories[:] = safe_directories
-            for name in files:
-                candidate = root_path / name
-                details = candidate.lstat()
-                if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
-                    raise CapacityExceeded(f"unsafe file in capacity scan: {candidate}")
-                total += details.st_size
-        return total
-
     def _scan_usage_once(self) -> dict[tuple[str, str], int]:
         usage: dict[tuple[str, str], int] = {}
-        workspaces = self.state.root / "workspaces"
-        if workspaces.exists():
-            for workspace in workspaces.iterdir():
-                details = workspace.lstat()
-                if not stat.S_ISDIR(details.st_mode) or workspace.is_symlink():
-                    raise CapacityExceeded(f"unsafe workspace in capacity scan: {workspace}")
-                repo_uuid = workspace.name
-                candidates: list[tuple[Path, str]] = []
-                for relative in (Path("generations"), Path("staging")):
-                    parent = workspace / relative
-                    if parent.exists():
-                        candidates.extend((candidate, candidate.name) for candidate in parent.iterdir())
-                for quarantine_kind in ("gc", "corrupt"):
-                    quarantine = workspace / "quarantine" / quarantine_kind
-                    if quarantine.exists():
-                        candidates.extend(
-                            (candidate, candidate.name.rsplit(".", 1)[0])
-                            for candidate in quarantine.iterdir()
+        try:
+            workspaces = Path("workspaces")
+            for repo_uuid in self.state.list_existing_private_directories(
+                workspaces,
+                allow_missing=True,
+            ):
+                workspace = workspaces / repo_uuid
+                containers: list[tuple[Path, bool]] = [
+                    (workspace / "generations", False),
+                    (workspace / "staging", False),
+                ]
+                quarantine_root = workspace / "quarantine"
+                quarantine_kinds = self.state.list_existing_private_directories(
+                    quarantine_root,
+                    allow_missing=True,
+                )
+                containers.extend(
+                    (quarantine_root / quarantine_kind, True)
+                    for quarantine_kind in ("gc", "corrupt")
+                    if quarantine_kind in quarantine_kinds
+                )
+                for container, strips_epoch in containers:
+                    for name in self.state.list_existing_private_directories(
+                        container,
+                        allow_missing=True,
+                    ):
+                        generation_id = name.rsplit(".", 1)[0] if strips_epoch else name
+                        key = (repo_uuid, generation_id)
+                        if key in usage:
+                            raise _CapacityScanChanged(
+                                "generation occupies multiple active/staging/quarantine locations: "
+                                f"{repo_uuid}/{generation_id}"
+                            )
+                        usage[key] = self.state.tree_bytes(
+                            container / name,
+                            allowed_directory_modes=_ALLOWED_DIRECTORY_MODES,
+                            allowed_file_modes=_ALLOWED_FILE_MODES,
                         )
-                for candidate, generation_id in candidates:
-                    candidate_details = candidate.lstat()
-                    if not stat.S_ISDIR(candidate_details.st_mode) or candidate.is_symlink():
-                        raise CapacityExceeded(
-                            f"unsafe generation in capacity scan: {candidate}"
-                        )
-                    key = (repo_uuid, generation_id)
-                    if key in usage:
-                        raise _CapacityScanChanged(
-                            "generation occupies multiple active/staging/quarantine locations: "
-                            f"{repo_uuid}/{generation_id}"
-                        )
-                    usage[key] = self._tree_bytes(candidate)
+        except StatePathError as exc:
+            raise CapacityExceeded(f"unsafe state path in capacity scan: {exc}") from exc
         return usage
 
     def _usage(self, reservations: Sequence[CapacityReservation]) -> _Usage:
@@ -498,8 +485,9 @@ class GenerationStore:
             allowed_operations=frozenset({"BUILD", "MIGRATE"}),
             registry_required=True,
         ) as capacity_operation:
-            final_path = self.state.path(
-                self._generation(capacity_operation.repo_uuid, generation_id)
+            final_relative = self._generation(
+                capacity_operation.repo_uuid,
+                generation_id,
             )
             capacity_state = self._load_capacity_locked()
             existing = (
@@ -515,7 +503,11 @@ class GenerationStore:
                     None,
                 )
             )
-            if final_path.exists() and existing is None:
+            try:
+                final_exists = self.state.private_directory_exists(final_relative)
+            except StatePathError as exc:
+                raise CapacityExceeded(f"unsafe state path in capacity scan: {exc}") from exc
+            if final_exists and existing is None:
                 raise GenerationConflict("generation is already certified")
             reservation = self._reserve_locked(
                 capacity_operation,
@@ -530,12 +522,14 @@ class GenerationStore:
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"BUILD", "MIGRATE"}),
         ) as operation:
-            final_path = self.state.path(self._generation(operation.repo_uuid, generation_id))
+            final_relative = self._generation(operation.repo_uuid, generation_id)
             staging_relative = self._staging(operation.repo_uuid, generation_id)
             staging_path = self.state.path(staging_relative)
-            if final_path.exists() and staging_path.exists():
+            final_exists = self.state.private_directory_exists(final_relative)
+            staging_exists = self.state.private_directory_exists(staging_relative)
+            if final_exists and staging_exists:
                 raise GenerationConflict("generation exists in both staging and final locations")
-            if final_path.exists():
+            if final_exists:
                 self.verify_generation(operation.repo_uuid, generation_id)
             else:
                 staging_path = self.state.ensure_directory(staging_relative)
@@ -552,7 +546,7 @@ class GenerationStore:
             events = snapshot.for_generation(generation_id)
             latest = None if not events else str(events[-1].to_dict()["transition"])
             if latest is None:
-                if final_path.exists():
+                if self.state.private_directory_exists(final_relative):
                     raise GenerationConflict("installed generation has no lifecycle journal")
                 self.journal.append_generation_locked(
                     operation,
@@ -632,7 +626,8 @@ class GenerationStore:
             mode = stat.S_IMODE(details.st_mode)
             if mode not in _ALLOWED_FILE_MODES:
                 raise GenerationError(f"payload file mode is not allowed: {relative}")
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
             file_descriptor = os.open(name, flags, dir_fd=descriptor)
             try:
                 opened_before = os.fstat(file_descriptor)
@@ -763,10 +758,11 @@ class GenerationStore:
             )
         )
         if reservation is None:
-            final_path = self.state.path(
-                self._generation(operation.repo_uuid, allocation.generation_id)
+            final_relative = self._generation(
+                operation.repo_uuid,
+                allocation.generation_id,
             )
-            if final_path.exists():
+            if self.state.private_directory_exists(final_relative):
                 return
             raise GenerationConflict("allocation has no durable capacity reservation")
         expected_fence = (
@@ -843,14 +839,22 @@ class GenerationStore:
     ) -> None:
         staging = self._staging(repo_uuid, generation_id)
         for entry in inventory.entries:
-            relative = staging / str(entry["path"])
-            self.state.fsync_regular_file(relative, allowed_modes=_ALLOWED_FILE_MODES)
+            self.state.fsync_contained_regular_file(
+                staging,
+                str(entry["path"]),
+                allowed_directory_modes=_ALLOWED_DIRECTORY_MODES,
+                allowed_file_modes=_ALLOWED_FILE_MODES,
+            )
             self.fault_hook(f"generation:{generation_id}:payload_file_durable:{entry['path']}")
         for directory in sorted(
             inventory.directories,
             key=lambda value: (-len(Path(value).parts), value),
         ):
-            self.state.fsync_directory(staging / directory)
+            self.state.fsync_contained_directory(
+                staging,
+                directory,
+                allowed_directory_modes=_ALLOWED_DIRECTORY_MODES,
+            )
         self.state.fsync_directory(staging)
         self.fault_hook(f"generation:{generation_id}:payload_durable")
 
@@ -936,14 +940,13 @@ class GenerationStore:
         occurred_at: datetime,
     ) -> GenerationReceipt:
         final_relative = self._generation(operation.repo_uuid, allocation.generation_id)
-        final_path = self.state.path(final_relative)
         snapshot = self.journal.recover_locked(operation)
         events = snapshot.for_generation(allocation.generation_id)
         latest = None if not events else str(events[-1].to_dict()["transition"])
         validating_events = tuple(
             event for event in events if event.to_dict()["transition"] == "VALIDATING"
         )
-        if final_path.exists():
+        if self.state.private_directory_exists(final_relative):
             receipt = self.verify_generation(operation.repo_uuid, allocation.generation_id)
             self._validate_recovery_receipt(
                 operation,
@@ -992,7 +995,8 @@ class GenerationStore:
         staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
         self.state.cleanup_atomic_temps(staging_relative)
         receipt_relative = staging_relative / "receipt.json"
-        receipt_present = self.state.path(receipt_relative).exists()
+        receipt_bytes = self.state.read_optional_existing_bytes(receipt_relative)
+        receipt_present = receipt_bytes is not None
         latest_event = None if not events else events[-1]
         validating_requires_successor_recheck = (
             latest == "VALIDATING"
@@ -1030,11 +1034,11 @@ class GenerationStore:
                 else frozenset({"graphify-out"})
             ),
         )
-        if receipt_present:
+        if receipt_bytes is not None:
             try:
                 receipt = cast(
                     GenerationReceipt,
-                    GenerationReceipt.from_json(self.state.read_existing_bytes(receipt_relative)),
+                    GenerationReceipt.from_json(receipt_bytes),
                 )
             except Exception as exc:
                 raise GenerationConflict(f"durable staged receipt is invalid: {exc}") from exc
@@ -1084,7 +1088,7 @@ class GenerationStore:
                 label=f"generation:{allocation.generation_id}:install",
             )
         except StatePathError:
-            if not final_path.exists():
+            if not self.state.private_directory_exists(final_relative):
                 raise
         self.fault_hook(f"generation:{allocation.generation_id}:installed")
         verified = self.verify_generation(operation.repo_uuid, allocation.generation_id)

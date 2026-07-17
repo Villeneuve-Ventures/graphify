@@ -108,6 +108,54 @@ def test_capacity_preflight_fails_before_allocation_mutates_workspace_state(
     assert tree_snapshot(harness.state_root / "workspaces" / REPO_UUID) == before
 
 
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode"])
+def test_capacity_scan_rejects_unsafe_generation_parent_before_mutation(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    generations = harness.state_root / "workspaces" / REPO_UUID / "generations"
+    external: Path | None = None
+    if unsafe_kind == "symlink":
+        external = tmp_path / "outside-generations"
+        candidate = external / "gen-external"
+        candidate.mkdir(parents=True, mode=0o700)
+        candidate.chmod(0o700)
+        (candidate / "graph.json").write_text("external\n", encoding="utf-8")
+        generations.symlink_to(external, target_is_directory=True)
+    else:
+        generations.mkdir(mode=0o700)
+        generations.chmod(0o755)
+    before = tree_snapshot(harness.state_root)
+    before_external = tree_snapshot(external) if external is not None else None
+    before_external_metadata = metadata_snapshot(external) if external is not None else None
+
+    with pytest.raises(CapacityExceeded, match="unsafe state path in capacity scan"):
+        store.allocate(
+            grant,
+            expected_payload_bytes=1,
+            capacity_policy=POLICY,
+            generation_id="gen-rejected-unsafe-parent",
+            occurred_at=START,
+            monotonic_ns=10_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+    if external is not None:
+        assert tree_snapshot(external) == before_external
+        assert metadata_snapshot(external) == before_external_metadata
+
+
 def test_allocate_revalidates_capacity_policy_before_any_state_mutation(
     tmp_path: Path,
 ) -> None:
@@ -569,6 +617,268 @@ def test_certification_rejects_links_special_files_and_root_extras(
 
     with pytest.raises(GenerationError):
         store.inspect_staged_payload(allocation)
+
+
+def test_certification_cleanup_rejects_linked_staging_parent_without_external_deletion(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-cleanup-link",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("{}\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    staging = allocation.staging_path.parent
+    external = tmp_path / "outside-staging"
+    staging.rename(external)
+    staging.symlink_to(external, target_is_directory=True)
+    orphan = external / allocation.generation_id / f".receipt.json.tmp-123-{'a' * 32}"
+    orphan.write_bytes(b"external orphan")
+    orphan.chmod(0o600)
+    before_external = tree_snapshot(external)
+    before_external_metadata = metadata_snapshot(external)
+
+    with pytest.raises(StatePathError):
+        store.certify(
+            grant,
+            allocation,
+            _request("a" * 40),
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_002,
+        )
+
+    assert orphan.read_bytes() == b"external orphan"
+    assert tree_snapshot(external) == before_external
+    assert metadata_snapshot(external) == before_external_metadata
+    assert not store.state.path(store._generation(REPO_UUID, allocation.generation_id)).exists()
+
+
+def test_receipt_install_rejects_parent_swap_after_temp_cleanup_without_external_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-receipt-link",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("{}\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    staging_relative = store._staging(REPO_UUID, allocation.generation_id)
+    parked = tmp_path / "parked-receipt-staging"
+    external = tmp_path / "outside-receipt-staging"
+    external.mkdir(mode=0o755)
+    before_external = tree_snapshot(external)
+    before_external_metadata = metadata_snapshot(external)
+    original_cleanup = store.state.cleanup_atomic_temps
+    matching_calls = 0
+    swapped = False
+
+    def swap_after_cleanup(
+        relative: str | Path,
+        *,
+        destination_name: str | None = None,
+    ) -> tuple[Path, ...]:
+        nonlocal matching_calls, swapped
+        removed = original_cleanup(relative, destination_name=destination_name)
+        if Path(relative) == staging_relative:
+            matching_calls += 1
+            if matching_calls == 2:
+                allocation.staging_path.rename(parked)
+                allocation.staging_path.symlink_to(external, target_is_directory=True)
+                swapped = True
+        return removed
+
+    monkeypatch.setattr(store.state, "cleanup_atomic_temps", swap_after_cleanup)
+
+    try:
+        with pytest.raises(StatePathError):
+            store.certify(
+                grant,
+                allocation,
+                _request("d" * 40),
+                declared_entries=declared,
+                occurred_at=START,
+                monotonic_ns=10_002,
+            )
+        assert swapped
+        assert not (external / "receipt.json").exists()
+        assert tree_snapshot(external) == before_external
+        assert metadata_snapshot(external) == before_external_metadata
+    finally:
+        if allocation.staging_path.is_symlink():
+            allocation.staging_path.unlink()
+            parked.rename(allocation.staging_path)
+
+    assert allocation.staging_path.is_dir()
+    assert not store.state.path(store._generation(REPO_UUID, allocation.generation_id)).exists()
+
+
+def test_certification_fsync_rejects_transient_payload_parent_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-fsync-link",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("same bytes\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    parked = tmp_path / "parked-payload"
+    external = tmp_path / "outside-payload"
+    external.mkdir()
+    (external / "graph.json").write_text("same bytes\n", encoding="utf-8")
+    before_external = metadata_snapshot(external)
+    original = store.state.fsync_contained_regular_file
+    swapped = False
+
+    def redirect_once(*args: Any, **kwargs: Any) -> None:
+        nonlocal swapped
+        if swapped:
+            original(*args, **kwargs)
+            return
+        swapped = True
+        payload.rename(parked)
+        payload.symlink_to(external, target_is_directory=True)
+        try:
+            original(*args, **kwargs)
+        finally:
+            payload.unlink()
+            parked.rename(payload)
+
+    monkeypatch.setattr(store.state, "fsync_contained_regular_file", redirect_once)
+
+    with pytest.raises(StatePathError):
+        store.certify(
+            grant,
+            allocation,
+            _request("b" * 40),
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_002,
+        )
+
+    assert swapped
+    assert metadata_snapshot(external) == before_external
+    assert allocation.staging_path.is_dir()
+    assert not store.state.path(store._generation(REPO_UUID, allocation.generation_id)).exists()
+
+
+def test_certification_rename_rejects_transient_staging_parent_link(tmp_path: Path) -> None:
+    staging_parent: Path | None = None
+    parked = tmp_path / "outside-staging-race"
+    swapped = False
+
+    def race(event: str) -> None:
+        nonlocal swapped
+        if event == "generation:gen-rename-link:receipt_durable":
+            assert staging_parent is not None
+            staging_parent.rename(parked)
+            staging_parent.symlink_to(parked, target_is_directory=True)
+            swapped = True
+        elif event == "generation:gen-rename-link:install:renamed":
+            assert staging_parent is not None
+            staging_parent.unlink()
+            parked.rename(staging_parent)
+
+    harness = create_harness(tmp_path, fault_hook=race)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=race,
+    )
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=race,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-rename-link",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    staging_parent = allocation.staging_path.parent
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("{}\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+
+    try:
+        with pytest.raises(StatePathError):
+            store.certify(
+                grant,
+                allocation,
+                _request("c" * 40),
+                declared_entries=declared,
+                occurred_at=START,
+                monotonic_ns=10_002,
+            )
+    finally:
+        if staging_parent.is_symlink():
+            staging_parent.unlink()
+            parked.rename(staging_parent)
+
+    assert swapped
+    assert allocation.staging_path.is_dir()
+    assert not store.state.path(store._generation(REPO_UUID, allocation.generation_id)).exists()
 
 
 def test_certification_reloads_the_durable_reservation_and_stable_lock_error(
@@ -1109,20 +1419,45 @@ def test_capacity_scan_retries_a_transient_cross_workspace_rename(
         journal,
         capabilities=harness.leases.state.capabilities,
     )
-    original = store._scan_usage_once
-    calls = 0
+    source_relative = store._generation(REPO_UUID, "gen-race")
+    source = store.state.ensure_directory(source_relative)
+    content = b"generation moved during capacity scan\n"
+    (source / "graph.json").write_bytes(content)
+    destination_relative = (
+        store._workspace(REPO_UUID) / "quarantine" / "gc" / "gen-race.7"
+    )
+    original = store.state.tree_bytes
+    moved = False
 
-    def transient_scan() -> dict[tuple[str, str], int]:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise FileNotFoundError("generation moved during capacity scan")
-        return original()
+    def move_between_list_and_measure(
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+    ) -> int:
+        nonlocal moved
+        if not moved and Path(relative) == source_relative:
+            store.state.rename_contained(
+                source_relative,
+                destination_relative,
+                label="test:capacity-list-rename",
+            )
+            moved = True
+        return original(
+            relative,
+            allowed_directory_modes=allowed_directory_modes,
+            allowed_file_modes=allowed_file_modes,
+        )
 
-    monkeypatch.setattr(store, "_scan_usage_once", transient_scan)
+    monkeypatch.setattr(store.state, "tree_bytes", move_between_list_and_measure)
 
-    assert store._usage(()).global_bytes == 0
-    assert calls == 3
+    usage = store._usage(())
+
+    assert moved
+    assert usage.global_generations == 1
+    assert usage.global_bytes == len(content)
+    assert usage.workspace_generations(REPO_UUID) == 1
+    assert store.state.path(destination_relative).is_dir()
 
 
 @pytest.mark.parametrize(

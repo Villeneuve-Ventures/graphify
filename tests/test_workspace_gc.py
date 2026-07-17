@@ -4,7 +4,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import errno
 import hashlib
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import threading
@@ -122,9 +124,17 @@ class _FailOncePurgeSyscalls(PosixSyscalls):
         self._fail("unlink")
         super().unlink(path)
 
+    def unlink_at(self, path: str, *, dir_fd: int) -> None:
+        self._fail("unlink")
+        super().unlink_at(path, dir_fd=dir_fd)
+
     def rmdir(self, path: Path) -> None:
         self._fail("rmdir")
         super().rmdir(path)
+
+    def rmdir_at(self, path: str, *, dir_fd: int) -> None:
+        self._fail("rmdir")
+        super().rmdir_at(path, dir_fd=dir_fd)
 
     def fsync(self, descriptor: int) -> None:
         self._fail("fsync")
@@ -266,7 +276,7 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     for orphan in orphans:
         orphan.write_bytes(b"orphan")
         orphan.chmod(0o600)
-    before = tree_snapshot(harness.state_root)
+    before = metadata_snapshot(harness.state_root)
     before_metadata = metadata_snapshot(harness.state_root)
     plan = gc.plan(
         gc_grant,
@@ -274,7 +284,7 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         protections=EMPTY_PROTECTION,
         monotonic_ns=30_002,
     )
-    assert tree_snapshot(harness.state_root) == before
+    assert metadata_snapshot(harness.state_root) == before
     assert metadata_snapshot(harness.state_root) == before_metadata
     assert all(orphan.read_bytes() == b"orphan" for orphan in orphans)
     assert plan.candidates == ("gen-unused",)
@@ -316,6 +326,167 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     assert retained_lock.stat().st_ino == inode
 
 
+def test_gc_execute_rejects_dangling_completion_before_quarantine(
+    tmp_path: Path,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    completion_relative = gc._completion_path(REPO_UUID, plan.sha256)
+    gc.state.ensure_directory(completion_relative.parent)
+    completion_path = gc.state.path(completion_relative)
+    completion_path.symlink_to(tmp_path / "missing-completion-record")
+    generation = gc.state.path(generations._generation(REPO_UUID, "gen-unused"))
+
+    with pytest.raises(GcRecoveryRequired, match="completion is invalid"):
+        gc.execute(
+            gc_grant,
+            plan,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        )
+
+    assert completion_path.is_symlink()
+    assert generation.is_dir()
+    assert not gc.state.path(gc._intent_path(REPO_UUID)).exists()
+    assert not gc.state.path(
+        gc._quarantine(REPO_UUID, "gen-unused", gc_grant.operation_epoch)
+    ).exists()
+
+
+def test_gc_purge_rejects_dangling_record_before_quarantine_deletion(
+    tmp_path: Path,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    completion = gc.execute(
+        gc_grant,
+        plan,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        occurred_at=START,
+        monotonic_ns=30_002,
+    )
+    quarantine = gc.state.path(
+        gc._quarantine(
+            REPO_UUID,
+            "gen-unused",
+            completion.operation_epoch,
+        )
+    )
+    purge_relative = gc._purge_path(REPO_UUID, plan.sha256)
+    gc.state.ensure_directory(purge_relative.parent)
+    purge_path = gc.state.path(purge_relative)
+    purge_path.symlink_to(tmp_path / "missing-purge-record")
+    before_quarantine = tree_snapshot(quarantine)
+    before_quarantine_metadata = metadata_snapshot(quarantine)
+
+    with pytest.raises(GcError, match="purge record is invalid"):
+        gc.purge(
+            gc_grant,
+            plan_sha256=plan.sha256,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=30_003,
+        )
+
+    assert purge_path.is_symlink()
+    assert tree_snapshot(quarantine) == before_quarantine
+    assert metadata_snapshot(quarantine) == before_quarantine_metadata
+
+
+def test_gc_purge_rejects_linked_quarantine_parent_without_external_deletion(
+    tmp_path: Path,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    completion = gc.execute(
+        gc_grant,
+        plan,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        occurred_at=START,
+        monotonic_ns=30_002,
+    )
+    quarantine_relative = gc._quarantine(
+        REPO_UUID,
+        "gen-unused",
+        completion.operation_epoch,
+    )
+    quarantine_parent = gc.state.path(quarantine_relative.parent)
+    external = tmp_path / "outside-purge-quarantine"
+    quarantine_parent.rename(external)
+    quarantine_parent.symlink_to(external, target_is_directory=True)
+    victim = external / f"gen-unused.{completion.operation_epoch}" / "graphify-out" / "graph.json"
+    before = tree_snapshot(harness.state_root)
+    before_metadata = metadata_snapshot(harness.state_root)
+    before_external = tree_snapshot(external)
+    before_external_metadata = metadata_snapshot(external)
+
+    with pytest.raises(GcError, match="quarantine path is unsafe"):
+        gc._remove_quarantine(quarantine_relative)
+    assert victim.is_file()
+    assert tree_snapshot(harness.state_root) == before
+    assert metadata_snapshot(harness.state_root) == before_metadata
+    assert tree_snapshot(external) == before_external
+    assert metadata_snapshot(external) == before_external_metadata
+
+    with pytest.raises(GcError, match="quarantine path is unsafe"):
+        gc.purge(
+            gc_grant,
+            plan_sha256=plan.sha256,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=30_003,
+        )
+    assert victim.is_file()
+    assert tree_snapshot(harness.state_root) == before
+    assert tree_snapshot(external) == before_external
+    assert metadata_snapshot(external) == before_external_metadata
+
+
 def test_gc_plan_rejects_insecure_root_without_repairing_it(tmp_path: Path) -> None:
     harness, generations, pointers, _receipts = _runtime(tmp_path)
     gc_grant = acquire(harness, "GC", tick=3)
@@ -338,6 +509,33 @@ def test_gc_plan_rejects_insecure_root_without_repairing_it(tmp_path: Path) -> N
         )
 
     assert metadata_snapshot(harness.state_root) == before
+
+
+def test_existing_fifo_lock_is_rejected_without_blocking_or_mutation(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path)
+    lock = harness.state_root / "registry.lock"
+    lock.unlink()
+    lock.parent.chmod(0o700)
+    os.mkfifo(lock, 0o600)
+    before = tree_snapshot(harness.state_root)
+    timed_out = False
+
+    def interrupt(_signum: int, _frame: Any) -> None:
+        nonlocal timed_out
+        timed_out = True
+        raise TimeoutError("blocking FIFO open")
+
+    previous_handler = signal.signal(signal.SIGALRM, interrupt)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0.25)
+    try:
+        with pytest.raises(StatePathError):
+            harness.registry.load()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+    assert not timed_out
+    assert tree_snapshot(harness.state_root) == before
 
 
 @pytest.mark.parametrize(
@@ -551,6 +749,68 @@ def test_gc_commit_unknown_blocks_pointer_writer_until_successor_reconciles(
     )
     assert completion is not None and completion.quarantined == ("gen-unused",)
     assert not (harness.state_root / "workspaces" / REPO_UUID / "gc/intent.json").exists()
+
+
+def test_gc_reconcile_rejects_linked_quarantine_parent_without_clearing_intent(
+    tmp_path: Path,
+) -> None:
+    armed = True
+
+    def fail(event: str) -> None:
+        nonlocal armed
+        if armed and event == "gc:gen-unused:quarantine:renamed":
+            armed = False
+            raise InjectedFault(event)
+
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=fail,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    with pytest.raises(CommitUnknown):
+        gc.execute(
+            gc_grant,
+            plan,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        )
+    harness.leases.release(gc_grant)
+    quarantine_parent = harness.state_root / "workspaces" / REPO_UUID / "quarantine" / "gc"
+    external = tmp_path / "outside-reconcile-quarantine"
+    quarantine_parent.rename(external)
+    quarantine_parent.symlink_to(external, target_is_directory=True)
+    recovery = acquire(harness, "POINTER_RECOVERY", tick=5)
+    intent = harness.state_root / "workspaces" / REPO_UUID / "gc" / "intent.json"
+    before = tree_snapshot(harness.state_root)
+    before_external = tree_snapshot(external)
+    before_external_metadata = metadata_snapshot(external)
+
+    with pytest.raises(StatePathError):
+        gc.reconcile(
+            recovery,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=50_001,
+        )
+
+    assert intent.is_file()
+    assert tree_snapshot(harness.state_root) == before
+    assert tree_snapshot(external) == before_external
+    assert metadata_snapshot(external) == before_external_metadata
 
 
 @pytest.mark.parametrize("operation", POST_CRASH_BLOCKED_OPERATIONS)

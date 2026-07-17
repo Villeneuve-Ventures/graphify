@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import os
 from pathlib import Path
-import stat
 from typing import Any, cast
 
 from graphify.workspace.contracts import (
@@ -29,6 +27,10 @@ from graphify.workspace.persistence import (
     Syscalls,
 )
 from graphify.workspace.pointers import PointerStore
+
+
+_PURGE_ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
+_PURGE_ALLOWED_FILE_MODES = frozenset({0o600, 0o644, 0o755})
 
 
 class GcError(RuntimeError):
@@ -351,8 +353,8 @@ class GcStore:
                 generation_id,
                 intent.operation_epoch,
             )
-            source_exists = self.state.path(source).exists()
-            destination_exists = self.state.path(destination).exists()
+            source_exists = self.state.private_directory_exists(source)
+            destination_exists = self.state.private_directory_exists(destination)
             if source_exists == destination_exists:
                 raise GcRecoveryRequired(
                     f"GC location is ambiguous for {generation_id}: "
@@ -381,11 +383,11 @@ class GcStore:
     def _read_completion(self, intent: GcIntentState) -> GcCompletionState | None:
         relative = self._completion_path(intent.repo_uuid, intent.plan_sha256)
         self.state.cleanup_atomic_temps(relative.parent)
-        path = self.state.path(relative)
-        if not path.exists():
-            return None
         try:
-            completion = GcCompletionState.from_json(self.state.read_existing_bytes(relative))
+            data = self.state.read_optional_existing_bytes(relative)
+            if data is None:
+                return None
+            completion = GcCompletionState.from_json(data)
         except Exception as exc:
             raise GcRecoveryRequired(f"GC completion is invalid: {exc}") from exc
         if (
@@ -426,6 +428,7 @@ class GcStore:
             if refreshed.canonical != plan.canonical:
                 raise GcPlanStale("GC dry-run plan no longer matches reachability")
             intent = self._intent(operation, plan, occurred_at=occurred_at)
+            completion = self._read_completion(intent)
             self.state.install_once_bytes(
                 self._intent_path(operation.repo_uuid),
                 intent.canonical,
@@ -451,7 +454,6 @@ class GcStore:
                     raise GcRecoveryRequired("GC reachability changed after durable intent")
                 self.fault_hook("gc:reachability_rechecked")
                 self._rename_candidates(intent)
-            completion = self._read_completion(intent)
             if completion is None:
                 completion = self._completion(intent, completed_at=occurred_at)
                 self._write_completion(intent, completion)
@@ -492,6 +494,7 @@ class GcStore:
             protected = {generation_id for generation_id, _reasons in refreshed.protected}
             if any(generation_id in protected for generation_id in intent.candidates):
                 raise GcRecoveryRequired("a durable GC candidate became reachable")
+            completion = self._read_completion(intent)
             locks = [
                 (
                     generation_id,
@@ -501,7 +504,6 @@ class GcStore:
             ]
             with self.state.existing_generation_locks(locks, exclusive=True):
                 self._rename_candidates(intent)
-            completion = self._read_completion(intent)
             if completion is None:
                 completion = self._completion(intent, completed_at=completed_at)
                 self._write_completion(intent, completion)
@@ -512,28 +514,15 @@ class GcStore:
             self.fault_hook("gc:reconciled")
             return completion
 
-    def _remove_quarantine(self, path: Path) -> None:
-        if path.is_symlink() or not path.is_dir():
-            raise GcError(f"quarantine path is unsafe: {path}")
-        self.state._require_owner(path.lstat(), path)
-        for root, directories, files in os.walk(path, topdown=False, followlinks=False):
-            root_path = Path(root)
-            for name in files:
-                candidate = root_path / name
-                details = candidate.lstat()
-                if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
-                    raise GcError(f"unsafe file in quarantine: {candidate}")
-                self.state._require_owner(details, candidate)
-                self.state.syscalls.unlink(candidate)
-            for name in directories:
-                candidate = root_path / name
-                details = candidate.lstat()
-                if not stat.S_ISDIR(details.st_mode) or candidate.is_symlink():
-                    raise GcError(f"unsafe directory in quarantine: {candidate}")
-                self.state._require_owner(details, candidate)
-                self.state.syscalls.rmdir(candidate)
-        self.state.syscalls.rmdir(path)
-        self.state.fsync_directory(path.parent.relative_to(self.state.root))
+    def _remove_quarantine(self, relative: Path) -> bool:
+        try:
+            return self.state.remove_private_tree(
+                relative,
+                allowed_directory_modes=_PURGE_ALLOWED_DIRECTORY_MODES,
+                allowed_file_modes=_PURGE_ALLOWED_FILE_MODES,
+            )
+        except StatePathError as exc:
+            raise GcError(f"quarantine path is unsafe: {exc}") from exc
 
     def purge(
         self,
@@ -555,13 +544,16 @@ class GcStore:
             if self._read_intent(operation.repo_uuid) is not None:
                 raise GcRecoveryRequired("GC intent must be reconciled before purge")
             purge_relative = self._purge_path(operation.repo_uuid, plan_sha256)
-            if self.state.path(purge_relative).exists():
-                try:
-                    purge = GcPurgeState.from_json(
-                        self.state.read_existing_bytes(purge_relative)
-                    )
-                except Exception as exc:
-                    raise GcError(f"GC purge record is invalid: {exc}") from exc
+            try:
+                purge_data = self.state.read_optional_existing_bytes(purge_relative)
+                purge = (
+                    None
+                    if purge_data is None
+                    else GcPurgeState.from_json(purge_data)
+                )
+            except Exception as exc:
+                raise GcError(f"GC purge record is invalid: {exc}") from exc
+            if purge is not None:
                 if purge.repo_uuid != operation.repo_uuid or purge.plan_sha256 != plan_sha256:
                     raise GcError("GC purge record belongs to another workspace or plan")
                 return purge
@@ -596,20 +588,15 @@ class GcStore:
             ]
             with self.state.existing_generation_locks(locks, exclusive=True):
                 for generation_id in completion.quarantined:
-                    quarantine = self.state.path(
-                        self._quarantine(
-                            operation.repo_uuid,
-                            generation_id,
-                            completion.operation_epoch,
-                        )
+                    quarantine = self._quarantine(
+                        operation.repo_uuid,
+                        generation_id,
+                        completion.operation_epoch,
                     )
-                    if quarantine.exists():
-                        self._remove_quarantine(quarantine)
+                    if self._remove_quarantine(quarantine):
                         self.fault_hook(f"gc:{generation_id}:purged")
                     else:
-                        self.state.fsync_directory(
-                            quarantine.parent.relative_to(self.state.root)
-                        )
+                        self.state.fsync_directory(quarantine.parent)
             purge = GcPurgeState.from_mapping(
                 {
                     "contract": "graphify.workspace.gc_purge.internal",

@@ -45,6 +45,7 @@ from graphify.workspace.persistence import (
     InjectedFault,
     LockOrderError,
     PosixSyscalls,
+    REGISTRY_LOCK_RANK,
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
@@ -221,6 +222,22 @@ class FailOnceSyscalls(PosixSyscalls):
     def replace(self, source: Path, destination: Path) -> None:
         self._fail("replace")
         super().replace(source, destination)
+
+    def replace_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        self._fail("replace")
+        super().replace_at(
+            source,
+            destination,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
 
 
 class FailFsyncCallSyscalls(PosixSyscalls):
@@ -419,6 +436,217 @@ def test_state_root_rejects_links_overlap_and_split_registry_roots(tmp_path: Pat
     registry = RegistryStore(tmp_path / "registry-state", capabilities=SUPPORTED)
     with pytest.raises(LeaseError, match="share one external state root"):
         LeaseStore(tmp_path / "other-state", registry, capabilities=SUPPORTED)
+
+
+def test_ensure_directory_holds_descriptor_across_binding_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    target = state.ensure_directory("workspaces")
+    target.chmod(0o755)
+    parked = tmp_path / "parked-workspaces"
+    external = tmp_path / "external-workspaces"
+    external.mkdir(mode=0o755)
+    before_external = _tree_snapshot(external)
+    original_fchmod = os.fchmod
+    target_identity = target.stat()
+    swapped = False
+
+    def swap_binding(descriptor: int, mode: int) -> None:
+        nonlocal swapped
+        opened = os.fstat(descriptor)
+        if not swapped and (opened.st_dev, opened.st_ino) == (
+            target_identity.st_dev,
+            target_identity.st_ino,
+        ):
+            target.rename(parked)
+            target.symlink_to(external, target_is_directory=True)
+            swapped = True
+        original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(os, "fchmod", swap_binding)
+
+    try:
+        with pytest.raises(StatePathError, match="changed while opening"):
+            state.ensure_directory("workspaces")
+        assert swapped
+        assert stat.S_IMODE(external.stat().st_mode) == 0o755
+        assert _tree_snapshot(external) == before_external
+    finally:
+        if target.is_symlink():
+            target.unlink()
+            parked.rename(target)
+
+
+def test_state_root_repair_holds_descriptor_across_binding_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    state.ensure_directory(".")
+    parked = tmp_path / "parked-state"
+    external = tmp_path / "external-state"
+    external.mkdir(mode=0o755)
+    before_external = _tree_snapshot(external)
+    original_fchmod = os.fchmod
+    root_identity = state.root.stat()
+    swapped = False
+
+    def swap_binding(descriptor: int, mode: int) -> None:
+        nonlocal swapped
+        opened = os.fstat(descriptor)
+        if not swapped and (opened.st_dev, opened.st_ino) == (
+            root_identity.st_dev,
+            root_identity.st_ino,
+        ):
+            state.root.rename(parked)
+            state.root.symlink_to(external, target_is_directory=True)
+            swapped = True
+        original_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(os, "fchmod", swap_binding)
+
+    try:
+        with pytest.raises(StatePathError, match="state root changed while opening"):
+            state.ensure_directory(".")
+        assert swapped
+        assert stat.S_IMODE(external.stat().st_mode) == 0o755
+        assert _tree_snapshot(external) == before_external
+    finally:
+        if state.root.is_symlink():
+            state.root.unlink()
+            parked.rename(state.root)
+
+
+def test_root_descriptor_handoff_survives_parent_binding_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "root-parent"
+    parent.mkdir()
+    state = DurableStateRoot(parent / "state", capabilities=SUPPORTED)
+    state.ensure_directory(".")
+    parked_parent = tmp_path / "parked-root-parent"
+    external_parent = tmp_path / "external-root-parent"
+    external_state = external_parent / "state"
+    external_state.mkdir(parents=True, mode=0o700)
+    external_state.chmod(0o700)
+    before_external = _tree_snapshot(external_parent)
+    root_identity = state.root.stat()
+    original_dup = os.dup
+    swapped = False
+
+    def swap_after_root_is_held(descriptor: int) -> int:
+        nonlocal swapped
+        duplicate = original_dup(descriptor)
+        opened = os.fstat(descriptor)
+        if not swapped and (opened.st_dev, opened.st_ino) == (
+            root_identity.st_dev,
+            root_identity.st_ino,
+        ):
+            parent.rename(parked_parent)
+            parent.symlink_to(external_parent, target_is_directory=True)
+            swapped = True
+        return duplicate
+
+    monkeypatch.setattr(os, "dup", swap_after_root_is_held)
+
+    try:
+        state.ensure_directory("workspaces")
+        assert swapped
+        assert (parked_parent / "state" / "workspaces").is_dir()
+        assert not (external_state / "workspaces").exists()
+        assert _tree_snapshot(external_parent) == before_external
+    finally:
+        if parent.is_symlink():
+            parent.unlink()
+            parked_parent.rename(parent)
+
+
+def test_writer_lock_rejects_parent_swap_without_external_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    lock_relative = Path("workspaces") / REPO_UUID / "locks" / "workspace.lock"
+    parent = state.ensure_directory(lock_relative.parent)
+    parked = tmp_path / "parked-locks"
+    external = tmp_path / "external-locks"
+    external.mkdir(mode=0o700)
+    external_lock = external / "workspace.lock"
+    external_lock.write_bytes(b"external lock\n")
+    external_lock.chmod(0o644)
+    before_external = _tree_snapshot(external)
+    original_ensure_parent = state._ensure_parent
+    swapped = False
+
+    def swap_after_ensure(path: Path) -> None:
+        nonlocal swapped
+        original_ensure_parent(path)
+        parent.rename(parked)
+        parent.symlink_to(external, target_is_directory=True)
+        swapped = True
+
+    monkeypatch.setattr(state, "_ensure_parent", swap_after_ensure)
+
+    try:
+        with pytest.raises(StatePathError):
+            with state.lock(lock_relative, rank=REGISTRY_LOCK_RANK, name="registry"):
+                pytest.fail("unsafe writer lock unexpectedly acquired")
+        assert swapped
+        assert stat.S_IMODE(external_lock.stat().st_mode) == 0o644
+        assert _tree_snapshot(external) == before_external
+    finally:
+        if parent.is_symlink():
+            parent.unlink()
+            parked.rename(parent)
+
+
+def test_unlink_and_sync_holds_parent_descriptor_across_binding_swap(
+    tmp_path: Path,
+) -> None:
+    parent: Path | None = None
+    parked = tmp_path / "parked-cleanup"
+    external = tmp_path / "external-cleanup"
+    events: list[str] = []
+
+    def swap_before_unlink(event: str) -> None:
+        events.append(event)
+        if event == "test:cleanup:before_unlink":
+            assert parent is not None
+            parent.rename(parked)
+            parent.symlink_to(external, target_is_directory=True)
+
+    state = DurableStateRoot(
+        tmp_path / "state",
+        capabilities=SUPPORTED,
+        fault_hook=swap_before_unlink,
+    )
+    relative = Path("workspaces") / REPO_UUID / "gc" / "intent.json"
+    parent = state.ensure_directory(relative.parent)
+    internal = state.path(relative)
+    internal.write_bytes(b"internal intent\n")
+    internal.chmod(0o600)
+    external.mkdir(mode=0o700)
+    external_intent = external / "intent.json"
+    external_intent.write_bytes(b"external intent\n")
+    external_intent.chmod(0o600)
+    before_external = _tree_snapshot(external)
+
+    try:
+        state.unlink_and_sync(relative, label="test:cleanup")
+        assert events[-3:] == [
+            "test:cleanup:before_unlink",
+            "test:cleanup:unlinked",
+            "test:cleanup:parent_durable",
+        ]
+        assert not (parked / "intent.json").exists()
+        assert _tree_snapshot(external) == before_external
+    finally:
+        if parent.is_symlink():
+            parent.unlink()
+            parked.rename(parent)
 
 
 def test_source_identity_rejects_linked_or_hardlinked_workspace_config(tmp_path: Path) -> None:
@@ -951,6 +1179,27 @@ def test_failed_directory_sync_reports_commit_unknown_and_recovers_monotonically
         revision=lambda value: int(value["revision"]),
     )
     assert recovered == {"revision": 2}
+
+
+def test_record_recovery_rejects_dangling_pending_authority(tmp_path: Path) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    current = canonical_json_bytes({"revision": 1})
+    state.atomic_replace_bytes("counter.json", current, label="counter:current")
+    pending = state.path("counter.pending.json")
+    pending.symlink_to(tmp_path / "missing-pending-record")
+
+    with pytest.raises(StateCorrupt, match="pending commit is corrupt"):
+        state.recover_record(
+            label="counter",
+            current="counter.json",
+            previous="counter.previous.json",
+            pending="counter.pending.json",
+            decoder=json.loads,
+            revision=lambda value: int(value["revision"]),
+        )
+
+    assert pending.is_symlink()
+    assert state.read_existing_bytes("counter.json") == current
 
 
 def test_registry_mutations_serialize_across_processes(tmp_path: Path) -> None:
