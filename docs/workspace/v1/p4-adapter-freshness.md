@@ -23,10 +23,11 @@ has no executable adapter and cannot stage or promote state.
 
 The retained reader accepts only declared source version `0.9.12`. It hashes
 and validates the legacy manifest, AST/semantic cache entries, and graph/report
-artifacts without changing their bytes or metadata. The returned manifest
-entries preserve AST and semantic hash attribution. Live legacy-writer
-quiescence, copying into a generation, and repository migration remain later
-work.
+artifacts without application-issued writes or changes to their bytes and
+write-sensitive metadata. Filesystem access-time behavior remains
+filesystem-owned. The returned manifest entries preserve AST and semantic hash
+attribution. Live legacy-writer quiescence, copying into a generation, and
+repository migration remain later work.
 
 ## No-write detection seam
 

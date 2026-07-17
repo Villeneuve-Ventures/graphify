@@ -260,9 +260,18 @@ class PointerStore:
             "receipt_sha256": receipt.sha256,
         }
 
+    def _require_compatible(self, receipt: GenerationReceipt) -> GenerationReceipt:
+        if receipt.to_dict()["compatibility_sha256"] != self.compatibility_sha256:
+            raise UnsupportedCompatibility(
+                "pointer receipt does not match the selected compatibility manifest"
+            )
+        return receipt
+
     def _verify_ref(self, repo_uuid: str, reference: dict[str, Any]) -> GenerationReceipt:
         generation_id = str(reference["generation_id"])
-        receipt = self.generations.verify_generation(repo_uuid, generation_id)
+        receipt = self._require_compatible(
+            self.generations.verify_generation(repo_uuid, generation_id)
+        )
         if receipt.sha256 != reference["receipt_sha256"]:
             raise PointerCorrupt(f"pointer receipt hash is stale for {generation_id}")
         return receipt
@@ -316,6 +325,7 @@ class PointerStore:
             except GenerationError:
                 corrupt_generations.add(generation_id)
                 continue
+            self._require_compatible(receipt)
             if receipt.sha256 == ref["receipt_sha256"]:
                 receipts[name] = receipt
         if "current" in receipts:
@@ -575,7 +585,6 @@ class PointerStore:
         *,
         transition: str,
         allowed_operation: str,
-        expected_compatibility_sha256: str | None,
         occurred_at: datetime,
         monotonic_ns: int,
     ) -> PointerSet:
@@ -593,18 +602,12 @@ class PointerStore:
             )
             with self.state.existing_generation_locks(locks, exclusive=True):
                 current = self._preliminary_pointer(operation.repo_uuid)
-                candidate = self.generations.verify_generation(
-                    operation.repo_uuid,
-                    cas.candidate_generation_id,
-                )
-                if (
-                    expected_compatibility_sha256 is not None
-                    and candidate.to_dict()["compatibility_sha256"]
-                    != expected_compatibility_sha256
-                ):
-                    raise UnsupportedCompatibility(
-                        "candidate receipt does not match the selected compatibility manifest"
+                candidate = self._require_compatible(
+                    self.generations.verify_generation(
+                        operation.repo_uuid,
+                        cas.candidate_generation_id,
                     )
+                )
                 self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
                 snapshot = self.journal.recover_locked(operation)
                 if not self._journal_certifies(
@@ -689,7 +692,6 @@ class PointerStore:
             cas,
             transition="PROMOTED",
             allowed_operation="PROMOTE",
-            expected_compatibility_sha256=self.compatibility_sha256,
             occurred_at=occurred_at,
             monotonic_ns=monotonic_ns,
         )
@@ -707,7 +709,6 @@ class PointerStore:
             cas,
             transition="ROLLED_BACK",
             allowed_operation="ROLLBACK",
-            expected_compatibility_sha256=None,
             occurred_at=occurred_at,
             monotonic_ns=monotonic_ns,
         )
@@ -735,7 +736,6 @@ class PointerStore:
             allowed_operations=frozenset({"POINTER_RECOVERY", "REPAIR"}),
         ) as operation:
             self._assert_no_gc_intent(operation.repo_uuid)
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
             try:
                 current = self._read_pointer(
                     self._current(operation.repo_uuid),
@@ -756,6 +756,10 @@ class PointerStore:
                 else cast(PointerSet, PointerSet.from_mapping(prior.to_dict()["pointer_set"]))
             )
             self._validate_pending_relationship(current, pending, prior)
+            for pointer in (current, pending, prior_pointer):
+                if pointer is not None:
+                    self._verify_repair_refs(operation.repo_uuid, pointer)
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
             if pending is None and current is not None:
                 try:
                     current_receipts = self.verify_pointer(
@@ -1047,7 +1051,9 @@ class PointerStore:
                 )
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
-                receipt = self.generations.verify_generation(repo_uuid, generation_id)
+                receipt = self._require_compatible(
+                    self.generations.verify_generation(repo_uuid, generation_id)
+                )
                 if receipt.sha256 != current["receipt_sha256"]:
                     raise PointerCorrupt("current pointer receipt hash does not match generation")
                 yield GenerationRead(

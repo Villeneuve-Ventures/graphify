@@ -66,6 +66,18 @@ POLICY = CapacityPolicy.from_mapping(
 )
 
 
+def _alternate_manifest() -> CompatibilityManifest:
+    return cast(
+        CompatibilityManifest,
+        CompatibilityManifest.from_mapping(
+            {
+                **COMPATIBILITY_MANIFEST.to_dict(),
+                "distribution_build": "alternate-published-build",
+            }
+        ),
+    )
+
+
 def _request(commit: str) -> CertificationRequest:
     return CertificationRequest(
         source_commit=commit,
@@ -86,6 +98,7 @@ def _certify(
     content: str,
     *,
     monotonic_ns: int,
+    compatibility_sha256: str = COMPATIBILITY_SHA256,
 ):
     allocation = store.allocate(
         grant,
@@ -102,7 +115,10 @@ def _certify(
     return store.certify(
         grant,
         allocation,
-        _request(hashlib.sha1(generation_id.encode()).hexdigest()),
+        replace(
+            _request(hashlib.sha1(generation_id.encode()).hexdigest()),
+            compatibility_sha256=compatibility_sha256,
+        ),
         declared_entries=entries,
         occurred_at=START,
         monotonic_ns=monotonic_ns + 1,
@@ -239,13 +255,7 @@ def test_raw_journal_caller_cannot_append_pointer_owned_transition(
 def test_promotion_rejects_different_manifest_generation_without_state_mutation(
     tmp_path: Path,
 ) -> None:
-    manifest_value = COMPATIBILITY_MANIFEST.to_dict()
-    alternate_manifest = cast(
-        CompatibilityManifest,
-        CompatibilityManifest.from_mapping(
-            {**manifest_value, "distribution_build": "alternate-published-build"}
-        ),
-    )
+    alternate_manifest = _alternate_manifest()
     assert alternate_manifest.sha256 != COMPATIBILITY_SHA256
     harness = create_harness(tmp_path)
     build = acquire(harness, "BUILD", tick=1)
@@ -261,28 +271,13 @@ def test_promotion_rejects_different_manifest_generation_without_state_mutation(
         compatibility_manifest=alternate_manifest,
         capabilities=harness.leases.state.capabilities,
     )
-    allocation = alternate_generations.allocate(
+    receipt = _certify(
+        alternate_generations,
         build,
-        expected_payload_bytes=4096,
-        capacity_policy=POLICY,
-        generation_id="gen-alternate-manifest",
-        occurred_at=START,
-        monotonic_ns=10_001,
-    )
-    payload = allocation.staging_path / "graphify-out"
-    payload.mkdir()
-    (payload / "graph.json").write_text("alternate\n", encoding="utf-8")
-    declared = alternate_generations.inspect_staged_payload(allocation)
-    receipt = alternate_generations.certify(
-        build,
-        allocation,
-        replace(
-            _request(hashlib.sha1(b"gen-alternate-manifest").hexdigest()),
-            compatibility_sha256=alternate_manifest.sha256,
-        ),
-        declared_entries=declared,
-        occurred_at=START,
+        "gen-alternate-manifest",
+        "alternate\n",
         monotonic_ns=10_002,
+        compatibility_sha256=alternate_manifest.sha256,
     )
     harness.leases.release(build)
     promote = acquire(harness, "PROMOTE", tick=2)
@@ -305,7 +300,7 @@ def test_promotion_rejects_different_manifest_generation_without_state_mutation(
 
     with pytest.raises(
         UnsupportedCompatibility,
-        match="candidate receipt does not match",
+        match="pointer receipt does not match",
     ):
         pointers.promote(
             promote,
@@ -315,6 +310,164 @@ def test_promotion_rejects_different_manifest_generation_without_state_mutation(
         )
 
     assert tree_snapshot(harness.state_root) == before
+
+
+def test_rollback_rejects_different_manifest_generation_without_state_mutation(
+    tmp_path: Path,
+) -> None:
+    alternate_manifest = _alternate_manifest()
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    current_generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    current = _certify(
+        current_generations,
+        build,
+        "gen-current-manifest",
+        "current\n",
+        monotonic_ns=10_001,
+    )
+    alternate_generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=alternate_manifest,
+        capabilities=harness.leases.state.capabilities,
+    )
+    alternate = _certify(
+        alternate_generations,
+        build,
+        "gen-rollback-alternate",
+        "alternate\n",
+        monotonic_ns=10_003,
+        compatibility_sha256=alternate_manifest.sha256,
+    )
+    harness.leases.release(build)
+    promote = acquire(harness, "PROMOTE", tick=2)
+    pointers = PointerStore(
+        harness.state_root,
+        harness.leases,
+        current_generations,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    pointers.promote(
+        promote,
+        _cas(promote, current, revision=0, current_sha256=None),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=20_001,
+    )
+    harness.leases.release(promote)
+    rollback = acquire(harness, "ROLLBACK", tick=3)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        UnsupportedCompatibility,
+        match="pointer receipt does not match",
+    ):
+        pointers.rollback(
+            rollback,
+            _cas(rollback, alternate, revision=1, current_sha256=current.sha256),
+            occurred_at=START + timedelta(seconds=2),
+            monotonic_ns=30_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_recovery_rejects_incompatible_pending_pointer_without_state_mutation(
+    tmp_path: Path,
+) -> None:
+    alternate_manifest = _alternate_manifest()
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    alternate_generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=alternate_manifest,
+        capabilities=harness.leases.state.capabilities,
+    )
+    alternate = _certify(
+        alternate_generations,
+        build,
+        "gen-pending-alternate",
+        "alternate\n",
+        monotonic_ns=10_001,
+        compatibility_sha256=alternate_manifest.sha256,
+    )
+    harness.leases.release(build)
+    promote = acquire(harness, "PROMOTE", tick=2)
+
+    def interrupt_pending(event: str) -> None:
+        if event == "pointer:promoted:pending_durable":
+            raise InjectedFault(event)
+
+    alternate_pointers = PointerStore(
+        harness.state_root,
+        harness.leases,
+        alternate_generations,
+        journal,
+        compatibility_manifest=alternate_manifest,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=interrupt_pending,
+    )
+    with pytest.raises(InjectedFault, match="pending_durable"):
+        alternate_pointers.promote(
+            promote,
+            _cas(promote, alternate, revision=0, current_sha256=None),
+            occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=20_001,
+        )
+    harness.leases.release(promote)
+    recovery = acquire(harness, "POINTER_RECOVERY", tick=3)
+    current_generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    current_pointers = PointerStore(
+        harness.state_root,
+        harness.leases,
+        current_generations,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    pending_path = current_pointers.state.path(current_pointers._pending(REPO_UUID))
+    assert pending_path.is_file()
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        UnsupportedCompatibility,
+        match="pointer receipt does not match",
+    ):
+        current_pointers.recover(
+            recovery,
+            occurred_at=START + timedelta(seconds=2),
+            monotonic_ns=30_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+    assert pending_path.is_file()
 
 
 def test_two_certified_candidates_race_promotion_and_only_one_wins(tmp_path: Path) -> None:

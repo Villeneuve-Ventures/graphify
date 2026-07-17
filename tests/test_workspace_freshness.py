@@ -467,7 +467,7 @@ def test_unavailable_active_source_fails_closed_without_query(tmp_path: Path) ->
     assert called is False
 
 
-def test_freshness_and_query_leave_source_and_workspace_bytes_metadata_and_xattrs_unchanged(
+def test_freshness_leaves_bytes_write_sensitive_metadata_and_xattrs_unchanged(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime(tmp_path)

@@ -149,9 +149,9 @@ output remains ignored and must not widen the P1 product diff.
 - deterministic schedules cover edit, create, delete, rename, replacement,
   policy change, post-pass identity change, persistent churn, pointer change,
   wholly inter-observation ABA, and post-boundary mutation;
-- native query bypasses optional query logging, and recursive bytes, metadata,
-  xattrs, read-only source modes, and filesystem-event observation prove no
-  source or workspace write; and
+- native query bypasses optional query logging, and recursive bytes,
+  write-sensitive metadata, xattrs, read-only source modes, and filesystem-event
+  observation prove no source or workspace write; and
 - focused adapter/freshness/compatibility tests run before the full repository,
   security, packaging, graph-refresh, exact-head CI, and independent-review
   gates.
