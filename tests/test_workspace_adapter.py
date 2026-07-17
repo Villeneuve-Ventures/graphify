@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 
@@ -15,6 +16,7 @@ from graphify.workspace.adapters import (
     AdapterIntent,
     CompatibilityLane,
     CompatibilityTuple,
+    RetainedStateInvalid,
     SUPPORTED_COMPATIBILITY,
     UnsupportedCompatibility,
     select_adapter,
@@ -109,6 +111,9 @@ def test_retained_0912_manifest_cache_and_artifacts_import_without_mutation() ->
     imported = adapter.read_retained_state(retained, source_version="0.9.12")
 
     assert imported.source_version == "0.9.12"
+    graph = json.loads((retained / "graphify-out/graph.json").read_bytes())
+    assert "links" in graph
+    assert "edges" not in graph
     assert imported.manifest_entries[0].path == "/legacy/repo/README.md"
     assert imported.manifest_entries[0].ast_hash == "22222222222222222222222222222222"
     assert imported.manifest_entries[1].path == "/legacy/repo/app.py"
@@ -123,6 +128,38 @@ def test_retained_0912_manifest_cache_and_artifacts_import_without_mutation() ->
     )
     assert "graphify-out/graph.json" in imported.artifact_entries
     assert _tree_bytes(retained) == before
+
+
+def test_retained_0912_rejects_nonexport_graph_shape(tmp_path: Path) -> None:
+    retained = tmp_path / "graphify-0.9.12"
+    shutil.copytree(FIXTURES / "legacy" / "graphify-0.9.12", retained)
+    graph_path = retained / "graphify-out/graph.json"
+    graph = json.loads(graph_path.read_bytes())
+    graph["edges"] = graph.pop("links")
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.IMPORT,
+    ).require_adapter()
+
+    with pytest.raises(RetainedStateInvalid, match="unsupported shape"):
+        adapter.read_retained_state(retained, source_version="0.9.12")
+
+
+def test_retained_0912_requires_published_report_shape(tmp_path: Path) -> None:
+    retained = tmp_path / "graphify-0.9.12"
+    shutil.copytree(FIXTURES / "legacy" / "graphify-0.9.12", retained)
+    (retained / "graphify-out/GRAPH_REPORT.md").write_text(
+        "# synthetic report\n",
+        encoding="utf-8",
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.IMPORT,
+    ).require_adapter()
+
+    with pytest.raises(RetainedStateInvalid, match="report has an unsupported shape"):
+        adapter.read_retained_state(retained, source_version="0.9.12")
 
 
 def test_retained_import_rejects_other_versions_without_touching_fixture() -> None:

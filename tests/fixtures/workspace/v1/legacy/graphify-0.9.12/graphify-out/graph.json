@@ -1,13 +1,17 @@
 {
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
   "nodes": [
     {
       "id": "legacy_app",
       "label": "legacy_app",
-      "type": "function"
+      "type": "function",
+      "community": 0,
+      "norm_label": "legacy_app"
     }
   ],
-  "edges": [],
-  "metadata": {
-    "graphify_version": "0.9.12"
-  }
+  "links": [],
+  "hyperedges": [],
+  "built_at_commit": "1111111111111111111111111111111111111111"
 }

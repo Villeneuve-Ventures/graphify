@@ -494,9 +494,20 @@ class Graphify0916Adapter:
         except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RetainedStateInvalid("legacy graph artifact is missing or invalid") from exc
         if not isinstance(graph, dict) or not isinstance(graph.get("nodes"), list) or not isinstance(
-            graph.get("edges"), list
+            graph.get("links"), list
+        ) or any(
+            not isinstance(item, Mapping)
+            for item in (*graph["nodes"], *graph["links"])
         ):
             raise RetainedStateInvalid("legacy graph artifact has an unsupported shape")
+
+        report_path = "graphify-out/GRAPH_REPORT.md"
+        try:
+            report = payloads[report_path].decode("utf-8")
+        except (KeyError, UnicodeDecodeError) as exc:
+            raise RetainedStateInvalid("legacy graph report is missing or invalid") from exc
+        if not report.startswith("# Graph Report - ") or "\n## Corpus Check\n" not in report:
+            raise RetainedStateInvalid("legacy graph report has an unsupported shape")
         artifact_entries = tuple(
             relative
             for relative in sorted(payloads)
