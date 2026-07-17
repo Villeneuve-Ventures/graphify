@@ -41,8 +41,10 @@ without export or network effects.
 Ordinary detection given an explicit `cache_root` redirects conversion
 sidecars beneath that output root. The P4 structural build uses read-only
 detection, runs the `0.9.16` extractor/build implementation, writes only to its
-explicit external output root, and reports non-code dispatched inputs that it
-did not structurally extract.
+explicit external output root, persists the queryable `graphify-out/graph.json`
+artifact there, and reports non-code dispatched inputs that it did not
+structurally extract. Its source root remains the extraction and XAML resolution
+anchor even when caches and durable artifacts are redirected externally.
 
 ## `current_only` release protocol
 

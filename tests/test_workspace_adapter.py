@@ -16,6 +16,8 @@ from graphify.workspace.adapters import (
     AdapterIntent,
     CompatibilityLane,
     CompatibilityTuple,
+    ObservationUnavailable,
+    ObservationUnstable,
     QueryRejected,
     QueryRequest,
     RetainedStateInvalid,
@@ -199,8 +201,113 @@ def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path:
     assert result.detected_code_files == ("app.py",)
     assert result.omitted_dispatched_files == ("book.xlsx", "notes.md")
     assert (output / "graphify-out" / "cache").is_dir()
+    graph_path = output / "graphify-out" / "graph.json"
+    graph = json.loads(graph_path.read_bytes())
+    assert len(graph["nodes"]) == result.node_count
+    assert len(graph["links"]) == result.edge_count
+    assert adapter.query_structural(
+        output / "graphify-out",
+        QueryRequest(question="answer"),
+    )
     assert not (source / "graphify-out").exists()
     assert _tree_bytes(source) == before
+
+
+def test_0916_structural_build_keeps_xaml_resolution_anchored_to_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    shutil.copytree(FIXTURES.parents[1] / "xaml_viewmodel", source)
+    before = _tree_bytes(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    adapter.build_structural(source, output_root=output)
+
+    graph = json.loads((output / "graphify-out" / "graph.json").read_bytes())
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    view_model_edges = [
+        edge
+        for edge in graph["links"]
+        if edge["relation"] == "references" and edge.get("context") == "view_model"
+    ]
+    assert any(
+        nodes[edge["target"]]["label"] == "MainViewModel"
+        and nodes[edge["target"]]["source_file"].endswith("MainViewModel.cs")
+        for edge in view_model_edges
+    )
+    assert not (source / "graphify-out").exists()
+    assert _tree_bytes(source) == before
+
+
+def test_0916_structural_build_rejects_incomplete_detection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+
+    def incomplete_detection(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "files": {
+                "code": [str(source / "app.py")],
+                "document": [],
+                "paper": [],
+                "image": [],
+                "video": [],
+            },
+            "walk_errors": ["source/private: permission denied"],
+        }
+
+    def forbidden_extract(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("incomplete detection reached extraction")
+
+    monkeypatch.setattr(
+        "graphify.workspace.adapters.v0_9_16.detect",
+        incomplete_detection,
+    )
+    monkeypatch.setattr(
+        "graphify.workspace.adapters.v0_9_16.extract",
+        forbidden_extract,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnavailable, match="enumeration was incomplete"):
+        adapter.build_structural(source, output_root=output)
+
+    assert not (output / "graphify-out" / "graph.json").exists()
+
+
+def test_observer_rejects_in_place_change_after_hashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source.py"
+    source.write_bytes(b"before\n")
+    original_lstat = Path.lstat
+    raced = False
+
+    def racing_lstat(path: Path) -> os.stat_result:
+        nonlocal raced
+        if path == source and not raced:
+            raced = True
+            source.write_bytes(b"changed after descriptor hashing\n")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", racing_lstat)
+
+    with pytest.raises(ObservationUnstable, match="after hashing"):
+        adapter_module._read_regular_once(source)
 
 
 def test_0916_structural_query_rejects_malformed_graph(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ from networkx.readwrite import json_graph
 # Engine-private imports are deliberately confined to this versioned adapter.
 from graphify.build import build_from_json
 from graphify.detect import _is_noise_dir, detect
+from graphify.export import to_json
 from graphify.extract import extract
 from graphify.security import check_graph_file_size_cap
 from graphify.workspace.contracts import CANDIDATE_DISTRIBUTION_VERSION, canonical_json_bytes
@@ -117,12 +118,10 @@ def _read_regular_once(
         installed = path.lstat()
     except FileNotFoundError as exc:
         raise ObservationUnstable(f"source file disappeared after hashing: {path}") from exc
-    if (
-        not stat.S_ISREG(installed.st_mode)
-        or installed.st_nlink != 1
-        or (installed.st_dev, installed.st_ino) != (after.st_dev, after.st_ino)
+    if not stat.S_ISREG(installed.st_mode) or any(
+        getattr(installed, field) != getattr(after, field) for field in stable_fields
     ):
-        raise ObservationUnstable(f"source file was replaced while hashing: {path}")
+        raise ObservationUnstable(f"source file changed after hashing: {path}")
     payload = None if chunks is None else b"".join(chunks)
     return digest.hexdigest(), after, payload
 
@@ -212,6 +211,8 @@ class Graphify0916Adapter:
             raise ObservationUnsupported("engine output root must be external to source")
         output.mkdir(parents=True, exist_ok=True)
         detection = detect(root, cache_root=output, read_only=True)
+        if detection.get("walk_errors"):
+            raise ObservationUnavailable("source directory enumeration was incomplete")
         code_files = tuple(str(path) for path in detection["files"].get("code", []))
         omitted = tuple(
             sorted(
@@ -221,8 +222,21 @@ class Graphify0916Adapter:
                 for path in paths
             )
         )
-        extraction = extract([Path(path) for path in code_files], cache_root=output)
+        extraction = extract(
+            [Path(path) for path in code_files],
+            cache_root=output,
+            source_root=root,
+        )
         graph = build_from_json(extraction, root=root)
+        payload_root = output / "graphify-out"
+        payload_root.mkdir(parents=True, exist_ok=True)
+        if not to_json(
+            graph,
+            {},
+            str(payload_root / "graph.json"),
+            built_at_commit="",
+        ):
+            raise ObservationUnavailable("structural graph artifact could not be persisted")
         return StructuralBuild(
             engine_baseline=self.engine_baseline,
             node_count=graph.number_of_nodes(),

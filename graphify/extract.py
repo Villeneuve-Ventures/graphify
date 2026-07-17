@@ -4290,6 +4290,7 @@ def extract(
     paths: list[Path],
     cache_root: Path | None = None,
     *,
+    source_root: Path | None = None,
     parallel: bool = True,
     max_workers: int | None = None,
 ) -> dict:
@@ -4305,6 +4306,8 @@ def extract(
         cache_root: explicit root for graphify-out/cache/ (overrides the
             inferred common path prefix). Pass Path('.') when running on a
             subdirectory so the cache stays at ./graphify-out/cache/.
+        source_root: optional corpus anchor for cache keys, node ids, symbol
+            resolution, and XAML project scans when ``cache_root`` is external.
         parallel: if True and there are >= _PARALLEL_THRESHOLD uncached files,
             use ProcessPoolExecutor for multi-core extraction.
         max_workers: max subprocess count. Defaults to cpu_count (or the
@@ -4334,7 +4337,9 @@ def extract(
             root = Path(*paths[0].parts[:common_len]) if common_len else Path(".")
     except Exception:
         root = Path(".")
-    if cache_root is not None:
+    if source_root is not None:
+        root = source_root
+    elif cache_root is not None:
         root = cache_root
     root = root.resolve()
 

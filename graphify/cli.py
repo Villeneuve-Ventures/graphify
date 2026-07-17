@@ -2102,6 +2102,7 @@ def dispatch_command(cmd: str) -> None:
                 manifest_path=str(manifest_path),
                 google_workspace=google_workspace or None,
                 extra_excludes=cli_excludes or None,
+                cache_root=out_root,
             )
             files_by_type = detection.get("files", {})
             new_by_type = detection.get("new_files", {})
