@@ -2054,7 +2054,10 @@ def test_separator_collision_paths_get_distinct_ids(tmp_path):
     # distinct nodes (no silent separator-collision merge)
     file_nodes = [n for n in result["nodes"] if str(n.get("label", "")).endswith(".py")]
     assert len(file_nodes) == 2
-    assert len({n["id"] for n in file_nodes}) == 2, [n["id"] for n in file_nodes]
+    assert sorted(n["id"] for n in file_nodes) == [
+        "foo_bar_baz_py_foo_bar_baz_50ab1c",
+        "foo_bar_baz_py_foo_bar_baz_70fe68",
+    ]
 
 
 def test_non_colliding_path_id_is_not_salted(tmp_path):

@@ -343,7 +343,7 @@ def test_runtime_export_scrubs_untrusted_package_sources(
         commands.append(list(command))
         calls.append(dict(env or {}))
         if "requirements.txt" in command:
-            stdout = "networkx==3.6.1\n"
+            stdout = "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n"
         else:
             stdout = json.dumps(
                 {
@@ -376,6 +376,575 @@ def test_runtime_export_scrubs_untrusted_package_sources(
             "PIP_INDEX_URL",
         }:
             assert name not in env
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        ("networkx==3.6.1\n", "lack valid SHA-256 hashes"),
+        ("networkx==3.6.1 --hash=sha256:bad\n", "lack valid SHA-256 hashes"),
+        ("networkx==3.6.1 --hash=sha512:" + "0" * 128 + "\n", "lack valid SHA-256 hashes"),
+        ("--hash=sha256:" + "0" * 64 + "\n", "lack a requirement specifier"),
+        ("networkx==3.6.1 \\\n", "unterminated continuation"),
+        ("# empty export\n", "contain no locked entries"),
+    ],
+)
+def test_hashed_requirements_validation_fails_closed(
+    tmp_path: Path,
+    contents: str,
+    message: str,
+) -> None:
+    requirements = _write(tmp_path / "requirements.txt", contents)
+
+    with pytest.raises(ArtifactError, match=message):
+        candidate_artifacts._assert_hashed_requirements(requirements, label="fixture")
+
+
+def test_hashed_requirements_validation_accepts_uv_multiline_entries(tmp_path: Path) -> None:
+    requirements = _write(
+        tmp_path / "requirements.txt",
+        "networkx==3.6.1 ; python_full_version >= '3.11' \\\n"
+        "    --hash=sha256:" + "0" * 64 + " \\\n"
+        "    --hash=sha256:" + "1" * 64 + "\n"
+        "numpy==2.4.6 --hash=sha256:" + "2" * 64 + "\n",
+    )
+
+    candidate_artifacts._assert_hashed_requirements(requirements, label="fixture")
+
+
+def test_runtime_export_rejects_unhashed_requirements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="networkx==3.6.1\n",
+            stderr="",
+        ),
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+    with pytest.raises(ArtifactError, match="candidate runtime requirements lack valid"):
+        candidate_artifacts._export_runtime(
+            tmp_path,
+            tmp_path / "runtime-requirements.txt",
+            tmp_path / "sbom.cdx.json",
+        )
+
+
+def test_audit_scope_export_rejects_unhashed_requirements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="networkx==3.6.1\n",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(ArtifactError, match="all-extras-requirements requirements lack valid"):
+        candidate_artifacts._export_audit_scope(
+            tmp_path,
+            tmp_path / "all-extras-requirements.txt",
+            arguments=("--all-extras", "--no-dev"),
+        )
+
+
+def test_hashed_requirements_audit_never_scans_the_editable_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command, *, cwd, env=None, umask=None):
+        del cwd, env, umask
+        commands.append(list(command))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {"dependencies": [{"name": "networkx", "version": "3.6.1", "vulns": []}]}
+            ),
+            stderr="No known vulnerabilities found\n",
+        )
+
+    monkeypatch.setattr(candidate_artifacts, "_run", fake_run)
+
+    result = candidate_artifacts._audit_requirements(
+        requirements,
+        cwd=tmp_path,
+        label="candidate runtime",
+        expected_dependency_count=1,
+    )
+
+    assert result == {"dependency_count": 1, "vulnerability_count": 0}
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[:3] == [sys.executable, "-m", "pip_audit"]
+    assert "--strict" in command
+    assert "--require-hashes" in command
+    assert "--no-deps" in command
+    assert "--disable-pip" in command
+    assert command[command.index("--requirement") + 1] == str(requirements)
+    assert "--skip-editable" not in command
+
+
+def test_hashed_requirements_audit_rejects_unresolved_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "fixture==1.0 --hash=sha256:" + "0" * 64 + "\n",
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {"dependencies": [{"name": "fixture", "skip_reason": "unresolved"}]}
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(ArtifactError, match="unresolved dependency"):
+        candidate_artifacts._audit_requirements(
+            requirements,
+            cwd=tmp_path,
+            label="candidate runtime",
+            expected_dependency_count=1,
+        )
+
+
+def test_hashed_requirements_audit_rejects_incomplete_record_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "fixture==1.0 --hash=sha256:" + "0" * 64 + "\n",
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {"dependencies": [{"name": "fixture", "version": "1.0", "vulns": []}]}
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(ArtifactError, match="audited 1 of 2 locked records"):
+        candidate_artifacts._audit_requirements(
+            requirements,
+            cwd=tmp_path,
+            label="complete lock",
+            expected_dependency_count=2,
+        )
+
+
+def test_complete_lock_audit_inputs_include_marker_inapplicable_versions(
+    tmp_path: Path,
+) -> None:
+    lock = f"""
+version = 1
+
+[[package]]
+name = "graphifyy"
+version = "0.9.16+workspace.1"
+source = {{ editable = "." }}
+
+[[package]]
+name = "networkx"
+version = "3.4.2"
+source = {{ registry = "{CONTROLLED_UPSTREAM_INDEX}" }}
+resolution-markers = ["python_full_version < '3.11'"]
+sdist = {{ hash = "sha256:{'0' * 64}" }}
+
+[[package]]
+name = "networkx"
+version = "3.6.1"
+source = {{ registry = "{CONTROLLED_UPSTREAM_INDEX}" }}
+resolution-markers = ["python_full_version >= '3.11'"]
+wheels = [{{ hash = "sha256:{'1' * 64}" }}]
+
+[[package]]
+name = "colorama"
+version = "0.4.6"
+source = {{ registry = "{CONTROLLED_UPSTREAM_INDEX}" }}
+resolution-markers = ["sys_platform == 'win32'"]
+wheels = [{{ hash = "sha256:{'2' * 64}" }}]
+"""
+    _write(tmp_path / "uv.lock", lock)
+
+    cohorts = candidate_artifacts._locked_registry_requirement_files(
+        tmp_path,
+        tmp_path / "audit-inputs",
+    )
+
+    assert [count for _, count in cohorts] == [2, 1]
+    contents = [path.read_text(encoding="utf-8") for path, _ in cohorts]
+    assert "colorama==0.4.6" in contents[0]
+    assert "networkx==3.4.2" in contents[0]
+    assert "networkx==3.6.1" in contents[1]
+    assert all(";" not in content for content in contents)
+
+
+@pytest.mark.parametrize(
+    ("source", "artifacts", "message"),
+    [
+        ('{ git = "https://example.invalid/fixture.git" }', 'sdist = { hash = "sha256:' + "0" * 64 + '" }', "not registry-auditable"),
+        ('{ registry = "https://example.invalid/simple" }', 'sdist = { hash = "sha256:' + "0" * 64 + '" }', "untrusted registry"),
+        ('{ registry = "https://pypi.org/simple" }', "", "lacks valid SHA-256"),
+    ],
+)
+def test_complete_lock_audit_inputs_reject_unauditable_records(
+    tmp_path: Path,
+    source: str,
+    artifacts: str,
+    message: str,
+) -> None:
+    lock = f"""
+version = 1
+
+[[package]]
+name = "graphifyy"
+version = "0.9.16+workspace.1"
+source = {{ editable = "." }}
+
+[[package]]
+name = "fixture"
+version = "1.0"
+source = {source}
+{artifacts}
+"""
+    _write(tmp_path / "uv.lock", lock)
+
+    with pytest.raises(ArtifactError, match=message):
+        candidate_artifacts._locked_registry_requirement_files(
+            tmp_path,
+            tmp_path / "audit-inputs",
+        )
+
+
+def test_candidate_audit_covers_runtime_all_extras_and_dev_scopes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    artifact_root = tmp_path / "candidate"
+    _write(repo / "uv.lock", "version = 1\n")
+    _write(artifact_root / "trusted-manifest.json", "{}\n")
+    _write(artifact_root / "compatibility.json", "{}\n")
+    _write(
+        artifact_root / "provenance.json",
+        json.dumps({"fork_commit": "head", "fork_tree": "tree"}),
+    )
+    for name in (WHEEL_NAME, "runtime-requirements.txt", "sbom.cdx.json"):
+        _write(artifact_root / name, b"fixture")
+
+    class FakeCompatibility:
+        @classmethod
+        def from_mapping(cls, _data):
+            return cls()
+
+        def to_dict(self):
+            return {"fork_commit": "head", "runtime_lock_sha256": "lock-sha256"}
+
+    monkeypatch.setattr(candidate_artifacts, "CompatibilityManifest", FakeCompatibility)
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_assert_candidate_source",
+        lambda _repo: ("head", "tree"),
+    )
+    monkeypatch.setattr(candidate_artifacts, "verify_trusted_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "sha256_file",
+        lambda path: "lock-sha256" if path.name == "uv.lock" else f"sha256:{path.name}",
+    )
+    exports: list[tuple[str, ...]] = []
+
+    def fake_export(_repo, destination, *, arguments):
+        exports.append(arguments)
+        _write(destination, "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n")
+
+    def fake_locked_registry(_repo, destination):
+        first = _write(destination / "locked-registry-1.txt", "attrs==26.1.0\n")
+        second = _write(destination / "locked-registry-2.txt", "networkx==3.4.2\n")
+        return [(first, 1), (second, 1)]
+
+    install_inputs: list[tuple[Path, Path]] = []
+
+    def fake_install(*, wheel, requirements, work_root):
+        del work_root
+        install_inputs.append((wheel, requirements))
+        return {"distribution": "graphifyy", "version": "0.9.16+workspace.1"}
+
+    audited: list[tuple[str, str, int | None]] = []
+
+    def fake_audit(requirements, *, cwd, label, expected_dependency_count=None):
+        del cwd
+        audited.append((requirements.name, label, expected_dependency_count))
+        return {"dependency_count": 1, "vulnerability_count": 0}
+
+    monkeypatch.setattr(candidate_artifacts, "_export_audit_scope", fake_export)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_locked_registry_requirement_files",
+        fake_locked_registry,
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_verify_noneditable_candidate_install",
+        fake_install,
+    )
+    monkeypatch.setattr(candidate_artifacts, "_audit_requirements", fake_audit)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="pip-audit 2.10.0\n" if "pip_audit" in command else "uv 0.11.29\n",
+            stderr="",
+        ),
+    )
+
+    result = candidate_artifacts.audit_candidate(repo_root=repo, artifact_root=artifact_root)
+
+    assert exports == [("--no-dev", "--all-extras"), ("--only-dev",)]
+    assert install_inputs == [
+        (artifact_root / WHEEL_NAME, artifact_root / "runtime-requirements.txt")
+    ]
+    assert audited == [
+        ("runtime-requirements.txt", "candidate runtime", None),
+        ("all-extras-requirements.txt", "locked runtime plus all extras", None),
+        ("dev-requirements.txt", "locked development dependencies", None),
+        ("locked-registry-1.txt", "complete locked registry cohort 1", 1),
+        ("locked-registry-2.txt", "complete locked registry cohort 2", 1),
+    ]
+    audits = result["audits"]
+    assert isinstance(audits, dict)
+    assert set(audits) == {"runtime", "all_extras", "dev", "all_locked_registry_records"}
+    assert audits["all_locked_registry_records"] == {
+        "cohort_count": 2,
+        "dependency_count": 2,
+        "vulnerability_count": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("compatibility", "provenance", "message"),
+    [
+        (
+            {"fork_commit": "different-head", "runtime_lock_sha256": "lock-sha256"},
+            {"fork_commit": "head", "fork_tree": "tree"},
+            "compatibility does not match",
+        ),
+        (
+            {"fork_commit": "head", "runtime_lock_sha256": "different-lock"},
+            {"fork_commit": "head", "fork_tree": "tree"},
+            "compatibility does not match",
+        ),
+        (
+            {"fork_commit": "head", "runtime_lock_sha256": "lock-sha256"},
+            {"fork_commit": "different-head", "fork_tree": "tree"},
+            "provenance does not match",
+        ),
+        (
+            {"fork_commit": "head", "runtime_lock_sha256": "lock-sha256"},
+            {"fork_commit": "head", "fork_tree": "different-tree"},
+            "provenance does not match",
+        ),
+    ],
+)
+def test_candidate_audit_rejects_resigned_checkout_or_lock_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    compatibility: dict[str, str],
+    provenance: dict[str, str],
+    message: str,
+) -> None:
+    repo = tmp_path / "repo"
+    artifact_root = tmp_path / "candidate"
+    _write(repo / "uv.lock", "version = 1\n")
+    _write(artifact_root / "trusted-manifest.json", "{}\n")
+    _write(artifact_root / "compatibility.json", "{}\n")
+    _write(artifact_root / "provenance.json", json.dumps(provenance))
+
+    class FakeCompatibility:
+        @classmethod
+        def from_mapping(cls, _data):
+            return cls()
+
+        def to_dict(self):
+            return compatibility
+
+    monkeypatch.setattr(candidate_artifacts, "CompatibilityManifest", FakeCompatibility)
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_assert_candidate_source",
+        lambda _repo: ("head", "tree"),
+    )
+    monkeypatch.setattr(candidate_artifacts, "verify_trusted_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "sha256_file",
+        lambda path: "lock-sha256" if path.name == "uv.lock" else f"sha256:{path.name}",
+    )
+
+    with pytest.raises(ArtifactError, match=message):
+        candidate_artifacts.audit_candidate(repo_root=repo, artifact_root=artifact_root)
+
+
+def test_candidate_install_rejects_editable_directory_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = _write(tmp_path / WHEEL_NAME, b"fixture")
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n",
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_wheel_metadata",
+        lambda _wheel: {"distribution": "graphifyy", "version": "0.9.16+workspace.1"},
+    )
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+
+    def fake_run(command, **_kwargs):
+        stdout = ""
+        if Path(command[0]).name in {"graphify", "graphify.exe"} and "--version" in command:
+            stdout = "graphify 0.9.16+workspace.1\n"
+        if "-c" in command:
+            stdout = json.dumps(
+                {
+                    "version": "0.9.16+workspace.1",
+                    "module_file": str(
+                        tmp_path / "candidate-venv/lib/python/site-packages/graphify/__init__.py"
+                    ),
+                    "direct_url": {
+                        "url": tmp_path.as_uri(),
+                        "dir_info": {"editable": True},
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(candidate_artifacts, "_run", fake_run)
+
+    with pytest.raises(ArtifactError, match="not bound to the non-editable wheel archive"):
+        candidate_artifacts._verify_noneditable_candidate_install(
+            wheel=wheel,
+            requirements=requirements,
+            work_root=tmp_path,
+        )
+
+
+def test_candidate_install_rejects_broken_wheel_console(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = _write(tmp_path / WHEEL_NAME, b"fixture")
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n",
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_wheel_metadata",
+        lambda _wheel: {"distribution": "graphifyy", "version": "0.9.16+workspace.1"},
+    )
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+
+    def fake_run(command, **_kwargs):
+        if Path(command[0]).name in {"graphify", "graphify.exe"}:
+            raise ArtifactError("broken wheel console")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(candidate_artifacts, "_run", fake_run)
+
+    with pytest.raises(ArtifactError, match="broken wheel console"):
+        candidate_artifacts._verify_noneditable_candidate_install(
+            wheel=wheel,
+            requirements=requirements,
+            work_root=tmp_path,
+        )
+
+
+def test_candidate_install_accepts_module_under_resolved_symlinked_venv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wheel = _write(tmp_path / WHEEL_NAME, b"fixture")
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n",
+    )
+    real_root = tmp_path / "real-root"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    module_file = real_root / "candidate-venv/lib/python/site-packages/graphify/__init__.py"
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_wheel_metadata",
+        lambda _wheel: {"distribution": "graphifyy", "version": "0.9.16+workspace.1"},
+    )
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+
+    def fake_run(command, **_kwargs):
+        stdout = ""
+        if Path(command[0]).name in {"graphify", "graphify.exe"} and "--version" in command:
+            stdout = "graphify 0.9.16+workspace.1\n"
+        if "-c" in command:
+            stdout = json.dumps(
+                {
+                    "version": "0.9.16+workspace.1",
+                    "module_file": str(module_file),
+                    "direct_url": {
+                        "url": wheel.as_uri().replace("%2B", "+"),
+                        "archive_info": {},
+                    },
+                }
+            )
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(candidate_artifacts, "_run", fake_run)
+
+    result = candidate_artifacts._verify_noneditable_candidate_install(
+        wheel=wheel,
+        requirements=requirements,
+        work_root=linked_root,
+    )
+
+    assert result["editable"] is False
+    assert result["module_file"] == str(module_file)
 
 
 def test_trusted_manifest_rejects_empty_artifact_set(tmp_path: Path) -> None:
@@ -606,7 +1175,7 @@ def test_installed_skill_tree_digest_is_bound_to_skill_bundle(tmp_path: Path) ->
         skill_bundle_tree_sha256(skill_bundle, installed_root=installed)
 
 
-def test_candidate_module_exposes_explicit_two_root_build_flags() -> None:
+def test_candidate_module_exposes_explicit_build_and_audit_flags() -> None:
     result = subprocess.run(
         [sys.executable, "-m", "tools.workspace_artifacts", "build", "--help"],
         cwd=Path(__file__).resolve().parents[1],
@@ -618,6 +1187,16 @@ def test_candidate_module_exposes_explicit_two_root_build_flags() -> None:
     assert "--repo-root" in result.stdout
     assert "--output-root" in result.stdout
     assert "--comparison-output-root" in result.stdout
+
+    audit = subprocess.run(
+        [sys.executable, "-m", "tools.workspace_artifacts", "audit", "--help"],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--repo-root" in audit.stdout
+    assert "--artifact-root" in audit.stdout
 
 
 def test_verify_cli_reports_missing_manifest_without_traceback(tmp_path: Path) -> None:

@@ -49,7 +49,7 @@ def _expected_artifacts() -> list[Path]:
 
 
 @pytest.fixture(scope="module")
-def wheel_namelist(tmp_path_factory) -> set[str]:
+def wheel_build(tmp_path_factory) -> tuple[set[str], str, str]:
     if not _has_build():
         pytest.skip("`python -m build` unavailable (dev extra not installed)")
     out = tmp_path_factory.mktemp("wheel")
@@ -62,7 +62,26 @@ def wheel_namelist(tmp_path_factory) -> set[str]:
     wheels = list(out.glob("graphifyy-*.whl"))
     assert wheels, "no wheel produced"
     with zipfile.ZipFile(max(wheels, key=lambda p: p.stat().st_mtime)) as z:
-        return set(z.namelist())
+        names = set(z.namelist())
+        metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
+        assert len(metadata_names) == 1
+        metadata = z.read(metadata_names[0]).decode("utf-8")
+    return names, proc.stdout + proc.stderr, metadata
+
+
+@pytest.fixture(scope="module")
+def wheel_namelist(wheel_build: tuple[set[str], str, str]) -> set[str]:
+    return wheel_build[0]
+
+
+def test_wheel_build_uses_current_packaging_metadata_without_tool_warnings(
+    wheel_build: tuple[set[str], str, str],
+) -> None:
+    _, output, metadata = wheel_build
+    assert "`project.license` as a TOML table is deprecated" not in output
+    assert "The 'wheel' package is no longer the canonical location" not in output
+    assert "License-Expression: MIT\n" in metadata
+    assert "License-File: LICENSE\n" in metadata
 
 
 @pytest.mark.parametrize(
