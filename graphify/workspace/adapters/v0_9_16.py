@@ -80,6 +80,22 @@ class _PinnedRegularPath:
     details: os.stat_result
 
 
+@dataclass(frozen=True)
+class _PinnedAbsentPath:
+    relative: Path
+    ancestor_identities: tuple[tuple[int, int], ...]
+    container_details: os.stat_result
+
+
+@dataclass(frozen=True)
+class _PinnedUnsafePath:
+    relative: Path
+    details: os.stat_result
+
+
+_PinnedOptionalPath = _PinnedRegularPath | _PinnedAbsentPath | _PinnedUnsafePath
+
+
 def _emit(
     hook: ObservationHook | None,
     event: str,
@@ -168,6 +184,7 @@ def _read_descriptor_once(
     max_bytes: int | None,
     size_cap: int | None,
     chunk_consumer: Callable[[bytes], object] | None,
+    deadline_ns: int | None = None,
 ) -> tuple[str, os.stat_result, bytes | None]:
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise ObservationUnsupported(f"source entry is not a singular regular file: {path}")
@@ -180,6 +197,7 @@ def _read_descriptor_once(
     remaining = max_bytes
     total = 0
     while remaining is None or remaining > 0:
+        _deadline(deadline_ns)
         try:
             read_size = 1024 * 1024 if remaining is None else min(1024 * 1024, remaining)
             if size_cap is not None:
@@ -191,6 +209,7 @@ def _read_descriptor_once(
             raise ObservationUnavailable(
                 f"source file cannot be read safely: {path}: {exc}"
             ) from exc
+        _deadline(deadline_ns)
         if not chunk:
             break
         total += len(chunk)
@@ -203,6 +222,7 @@ def _read_descriptor_once(
             chunks.append(chunk)
         if chunk_consumer is not None:
             chunk_consumer(chunk)
+        _deadline(deadline_ns)
         if remaining is not None:
             remaining -= len(chunk)
     after = _source_file_fstat(descriptor, path, phase="after hashing")
@@ -219,6 +239,7 @@ def _read_regular_once(
     max_bytes: int | None = None,
     size_cap: int | None = None,
     chunk_consumer: Callable[[bytes], object] | None = None,
+    deadline_ns: int | None = None,
 ) -> tuple[str, os.stat_result, bytes | None]:
     _validate_read_options(
         collect=collect,
@@ -226,6 +247,7 @@ def _read_regular_once(
         size_cap=size_cap,
         chunk_consumer=chunk_consumer,
     )
+    _deadline(deadline_ns)
     try:
         installed_before = path.lstat()
     except FileNotFoundError as exc:
@@ -273,6 +295,7 @@ def _read_regular_once(
             max_bytes=max_bytes,
             size_cap=size_cap,
             chunk_consumer=chunk_consumer,
+            deadline_ns=deadline_ns,
         )
     finally:
         os.close(descriptor)
@@ -442,6 +465,7 @@ def _read_relative_regular_once(
     size_cap: int | None = None,
     chunk_consumer: Callable[[bytes], object] | None = None,
     expected_path: _PinnedRegularPath | None = None,
+    deadline_ns: int | None = None,
 ) -> tuple[str, os.stat_result, bytes | None]:
     _validate_read_options(
         collect=collect,
@@ -449,6 +473,7 @@ def _read_relative_regular_once(
         size_cap=size_cap,
         chunk_consumer=chunk_consumer,
     )
+    _deadline(deadline_ns)
     parts = relative.parts
     if relative.is_absolute() or not parts or any(part in {"", ".", ".."} for part in parts):
         raise ObservationUnsupported(f"detected source has an unsafe relative path: {path}")
@@ -518,6 +543,7 @@ def _read_relative_regular_once(
                 max_bytes=max_bytes,
                 size_cap=size_cap,
                 chunk_consumer=chunk_consumer,
+                deadline_ns=deadline_ns,
             )
         finally:
             os.close(descriptor)
@@ -557,9 +583,16 @@ class _PinnedSourceReader:
     anchor: Path
     descriptor: int
     opened: os.stat_result
+    deadline_ns: int | None = None
 
     @classmethod
-    def open(cls, anchor: Path) -> _PinnedSourceReader:
+    def open(
+        cls,
+        anchor: Path,
+        *,
+        deadline_ns: int | None = None,
+    ) -> _PinnedSourceReader:
+        _deadline(deadline_ns)
         descriptor = _open_absolute_source_directory(anchor)
         try:
             opened = _source_directory_fstat(
@@ -583,7 +616,13 @@ class _PinnedSourceReader:
                 raise ObservationUnstable(
                     f"source root changed while opening: {anchor}"
                 )
-            return cls(anchor=anchor, descriptor=descriptor, opened=opened)
+            _deadline(deadline_ns)
+            return cls(
+                anchor=anchor,
+                descriptor=descriptor,
+                opened=opened,
+                deadline_ns=deadline_ns,
+            )
         except BaseException:
             os.close(descriptor)
             raise
@@ -623,6 +662,7 @@ class _PinnedSourceReader:
             size_cap=size_cap,
             chunk_consumer=chunk_consumer,
             expected_path=expected_path,
+            deadline_ns=self.deadline_ns,
         )
 
     def pin_regular(self, path: Path) -> _PinnedRegularPath:
@@ -654,6 +694,130 @@ class _PinnedSourceReader:
             ),
             details=details,
         )
+
+    def pin_optional_regular(self, path: Path) -> _PinnedOptionalPath:
+        relative = self._relative(path)
+        captured: list[os.stat_result] = []
+        try:
+            parent_descriptor = _open_relative_parent(
+                self.descriptor,
+                relative.parts,
+                path,
+                captured_details=captured,
+            )
+        except _RelativePathMissing:
+            container_details = (
+                captured[-1]
+                if captured
+                else _source_directory_fstat(
+                    self.descriptor,
+                    self.anchor,
+                    phase="while pinning an absent path",
+                )
+            )
+            return _PinnedAbsentPath(
+                relative=relative,
+                ancestor_identities=tuple(
+                    (item.st_dev, item.st_ino) for item in captured
+                ),
+                container_details=container_details,
+            )
+        try:
+            container_before = _source_directory_fstat(
+                parent_descriptor,
+                path.parent,
+                phase="before pinning an optional path",
+            )
+            try:
+                details = os.stat(
+                    relative.parts[-1],
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                details = None
+            except OSError as exc:
+                raise ObservationUnavailable(
+                    f"source entry cannot be inspected while pinning: {path}: {exc}"
+                ) from exc
+            container_after = _source_directory_fstat(
+                parent_descriptor,
+                path.parent,
+                phase="after pinning an optional path",
+            )
+            if _stat_changed(container_before, container_after):
+                raise ObservationUnstable(
+                    f"source directory changed while pinning optional path: {path}"
+                )
+        finally:
+            os.close(parent_descriptor)
+        ancestor_identities = tuple(
+            (item.st_dev, item.st_ino) for item in captured
+        )
+        if details is None:
+            return _PinnedAbsentPath(
+                relative=relative,
+                ancestor_identities=ancestor_identities,
+                container_details=container_after,
+            )
+        if stat.S_ISREG(details.st_mode) and details.st_nlink == 1:
+            return _PinnedRegularPath(
+                relative=relative,
+                ancestor_identities=ancestor_identities,
+                details=details,
+            )
+        return _PinnedUnsafePath(relative=relative, details=details)
+
+    def require_absent(self, path: Path, pinned: _PinnedAbsentPath) -> None:
+        relative = self._relative(path)
+        if relative != pinned.relative:
+            raise ObservationUnstable(f"comparison input changed after absent pin: {path}")
+        existing_count = len(pinned.ancestor_identities)
+        if existing_count >= len(relative.parts):
+            raise ObservationUnstable(f"comparison absence pin is invalid: {path}")
+        container_descriptor = _open_relative_directories(
+            self.descriptor,
+            relative.parts[:existing_count],
+            path,
+            expected_identities=pinned.ancestor_identities,
+        )
+        try:
+            container_before = _source_directory_fstat(
+                container_descriptor,
+                path,
+                phase="before revalidating an absent path",
+            )
+            if _stat_changed(pinned.container_details, container_before):
+                raise ObservationUnstable(
+                    f"comparison input changed after absent pin: {path}"
+                )
+            try:
+                os.stat(
+                    relative.parts[existing_count],
+                    dir_fd=container_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise ObservationUnavailable(
+                    f"comparison absence cannot be revalidated safely: {path}: {exc}"
+                ) from exc
+            else:
+                raise ObservationUnstable(
+                    f"comparison input appeared after absent pin: {path}"
+                )
+            container_after = _source_directory_fstat(
+                container_descriptor,
+                path,
+                phase="after revalidating an absent path",
+            )
+            if _stat_changed(container_before, container_after):
+                raise ObservationUnstable(
+                    f"comparison input changed while revalidating absence: {path}"
+                )
+        finally:
+            os.close(container_descriptor)
 
     def entry_details(
         self,
@@ -854,8 +1018,13 @@ class _PinnedReadAuthority:
         return Path(os.path.abspath(os.fspath(path)))
 
     @classmethod
-    def open(cls, source_anchor: Path) -> _PinnedReadAuthority:
-        source = _PinnedSourceReader.open(source_anchor)
+    def open(
+        cls,
+        source_anchor: Path,
+        *,
+        deadline_ns: int | None = None,
+    ) -> _PinnedReadAuthority:
+        source = _PinnedSourceReader.open(source_anchor, deadline_ns=deadline_ns)
         git_dir: _PinnedSourceReader | None = None
         common_dir: _PinnedSourceReader | None = None
         git_file: Path | None = None
@@ -867,7 +1036,7 @@ class _PinnedReadAuthority:
             if dot_git_details is None:
                 return cls(source, None, None, None, None)
             if stat.S_ISDIR(dot_git_details.st_mode):
-                git_dir = _PinnedSourceReader.open(dot_git)
+                git_dir = _PinnedSourceReader.open(dot_git, deadline_ns=deadline_ns)
                 if hasattr(os, "geteuid") and git_dir.opened.st_uid != os.geteuid():
                     raise ObservationUnsupported(
                         "Git metadata directory is not owned by the current user"
@@ -898,7 +1067,10 @@ class _PinnedReadAuthority:
                 base=source_anchor,
                 label="Git metadata pointer",
             )
-            git_dir = _PinnedSourceReader.open(git_dir_path)
+            git_dir = _PinnedSourceReader.open(
+                git_dir_path,
+                deadline_ns=deadline_ns,
+            )
             if hasattr(os, "geteuid") and git_dir.opened.st_uid != os.geteuid():
                 raise ObservationUnsupported(
                     "Git worktree metadata directory is not owned by the current user"
@@ -927,7 +1099,10 @@ class _PinnedReadAuthority:
                 common_dir = (
                     git_dir
                     if common_dir_path == git_dir_path
-                    else _PinnedSourceReader.open(common_dir_path)
+                    else _PinnedSourceReader.open(
+                        common_dir_path,
+                        deadline_ns=deadline_ns,
+                    )
                 )
                 if (
                     hasattr(os, "geteuid")
@@ -1190,6 +1365,21 @@ class _PinnedReadAuthority:
         self._require_comparison_directory_bindings(key.parent)
         self.comparison_paths[key] = pinned
 
+    def pin_optional_comparison(self, path: Path) -> _PinnedOptionalPath:
+        key = self._comparison_key(path)
+        if key in self.comparison_paths:
+            raise ObservationUnstable(
+                f"optional comparison input was pinned more than once: {path}"
+            )
+        reader = self._reader_for(key)
+        self._require_comparison_directory_bindings(key.parent)
+        pinned = reader.pin_optional_regular(key)
+        self._require_comparison_directory_bindings(key.parent)
+        self.comparison_paths[key] = (
+            pinned if isinstance(pinned, _PinnedRegularPath) else None
+        )
+        return pinned
+
     def require_comparison_path(self, path: Path) -> _PinnedRegularPath:
         key = self._comparison_key(path)
         if key not in self.comparison_paths:
@@ -1202,6 +1392,20 @@ class _PinnedReadAuthority:
                 f"comparison input is not a singular regular file: {path}"
             )
         return pinned
+
+    def require_optional_comparison_path(
+        self,
+        path: Path,
+        pinned: _PinnedOptionalPath,
+    ) -> _PinnedRegularPath | None:
+        if isinstance(pinned, _PinnedRegularPath):
+            return self.require_comparison_path(path)
+        if isinstance(pinned, _PinnedUnsafePath):
+            raise ObservationUnsupported(
+                f"comparison input is not a singular regular file: {path}"
+            )
+        self._reader_for(path).require_absent(path, pinned)
+        return None
 
     def observe(
         self,
@@ -1714,6 +1918,7 @@ def _policy_paths(
     root: Path,
     authority: _PinnedReadAuthority,
     detection: Mapping[str, object],
+    workspace_policy: _PinnedOptionalPath,
 ) -> tuple[Path, ...]:
     raw_paths = detection.get("comparison_policy_paths")
     if not isinstance(raw_paths, list) or not all(
@@ -1723,7 +1928,7 @@ def _policy_paths(
     paths = {Path(value) for value in raw_paths}
     paths.update(authority.routing_policy_paths)
     workspace = root / ".graphify" / "workspace.toml"
-    if workspace.exists() or workspace.is_symlink():
+    if authority.require_optional_comparison_path(workspace, workspace_policy) is not None:
         paths.add(workspace)
     return tuple(
         sorted(paths, key=lambda path: authority.policy_label(path, root))
@@ -1931,12 +2136,17 @@ class Graphify0916Adapter:
     ) -> _InventoryPass:
         _deadline(deadline_ns)
         policy_root = _policy_root_for(root)
-        authority = _PinnedReadAuthority.open(policy_root)
+        authority = _PinnedReadAuthority.open(
+            policy_root,
+            deadline_ns=deadline_ns,
+        )
         try:
             source_details = authority.source.directory_details(root)
             authority.bind_comparison_directory(root, source_details)
             commit_before = authority.git_head()
-            authority.pin_comparison(root / ".graphify" / "workspace.toml")
+            workspace_policy = authority.pin_optional_comparison(
+                root / ".graphify" / "workspace.toml"
+            )
             detection = detect(
                 root,
                 read_only=True,
@@ -1964,7 +2174,12 @@ class Graphify0916Adapter:
                 path: authority.require_comparison_path(path)
                 for _file_type, path in detected_paths
             }
-            policy_paths = _policy_paths(root, authority, detection)
+            policy_paths = _policy_paths(
+                root,
+                authority,
+                detection,
+                workspace_policy,
+            )
             pinned_policies = {
                 path: authority.require_comparison_path(path) for path in policy_paths
             }

@@ -19,6 +19,7 @@ from graphify.workspace.adapters import (
     AdapterIntent,
     CompatibilityLane,
     CompatibilityTuple,
+    ObservationTimeout,
     ObservationUnavailable,
     ObservationUnstable,
     ObservationUnsupported,
@@ -184,6 +185,15 @@ def test_query_request_rejects_work_beyond_the_workspace_bound(
             token_budget=token_budget,
             context_filters=context_filters,
         )
+
+
+def test_query_request_copies_context_filters_before_validation() -> None:
+    filters: Any = ["call"]
+
+    request = QueryRequest(question="bounded", context_filters=filters)
+    filters.extend(["x" * 129] * 20)
+
+    assert request.context_filters == ("call",)
 
 
 def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path: Path) -> None:
@@ -668,6 +678,7 @@ def test_0916_structural_build_rejects_ancestor_symlink_swap_without_external_re
         size_cap: int | None = None,
         chunk_consumer: Callable[[bytes], object] | None = None,
         expected_path: adapter_module._PinnedRegularPath | None = None,
+        deadline_ns: int | None = None,
     ) -> tuple[str, os.stat_result, bytes | None]:
         nonlocal swapped
         if not swapped:
@@ -683,6 +694,7 @@ def test_0916_structural_build_rejects_ancestor_symlink_swap_without_external_re
             size_cap=size_cap,
             chunk_consumer=chunk_consumer,
             expected_path=expected_path,
+            deadline_ns=deadline_ns,
         )
 
     monkeypatch.setattr(adapter_module.os, "read", tracked_read)
@@ -842,6 +854,50 @@ def test_observer_rejects_in_place_change_after_hashing(
 
     with pytest.raises(ObservationUnstable, match="after hashing"):
         adapter_module._read_regular_once(source)
+
+
+def test_observer_checks_deadline_between_file_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    large_file = source / "large.py"
+    large_file.write_bytes(b"x" * (2 * 1024 * 1024))
+    _init_git_repo(source, "large.py")
+    large_identity = large_file.stat()
+    original_read = adapter_module.os.read
+    now = 0
+    source_reads = 0
+
+    def monotonic_ns() -> int:
+        return now
+
+    def advance_after_read(descriptor: int, size: int) -> bytes:
+        nonlocal now, source_reads
+        chunk = original_read(descriptor, size)
+        details = os.fstat(descriptor)
+        if chunk and (details.st_dev, details.st_ino) == (
+            large_identity.st_dev,
+            large_identity.st_ino,
+        ):
+            source_reads += 1
+            now = 2
+        return chunk
+
+    monkeypatch.setattr(adapter_module.time, "monotonic_ns", monotonic_ns)
+    monkeypatch.setattr(adapter_module.os, "read", advance_after_read)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationTimeout, match="exceeded its deadline"):
+        adapter.observe(source, deadline_ns=1)
+
+    assert source_reads == 1
 
 
 def test_observer_normalizes_source_read_io_failure(
@@ -1978,6 +2034,92 @@ def test_observer_hashes_every_effective_policy_input(
     assert after.entries == before.entries
     assert after.inventory_sha256 == before.inventory_sha256
     assert after.policy_sha256 != before.policy_sha256
+
+
+def test_observer_revalidates_workspace_policy_pinned_before_detection(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    workspace_config = source / ".graphify" / "workspace.toml"
+    workspace_config.parent.mkdir(parents=True)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    workspace_config.write_text("schema_version = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py", ".graphify/workspace.toml")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    def delete_after_detection(event: str, _details: object) -> None:
+        if event == "inventory_detected":
+            workspace_config.unlink(missing_ok=True)
+
+    with pytest.raises(ObservationUnstable, match="workspace.toml"):
+        adapter.observe(
+            source,
+            max_inventory_passes=2,
+            hook=delete_after_detection,
+        )
+
+    assert not workspace_config.exists()
+
+
+@pytest.mark.parametrize("policy_kind", ["symlink", "directory", "hardlink"])
+def test_observer_rejects_unsafe_workspace_policy_at_initial_pin(
+    tmp_path: Path,
+    policy_kind: str,
+) -> None:
+    source = tmp_path / "source"
+    workspace_config = source / ".graphify" / "workspace.toml"
+    workspace_config.parent.mkdir(parents=True)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    external = tmp_path / "external.toml"
+    external.write_text("schema_version = 1\n", encoding="utf-8")
+    if policy_kind == "symlink":
+        workspace_config.symlink_to(external)
+    elif policy_kind == "directory":
+        workspace_config.mkdir()
+    else:
+        os.link(external, workspace_config)
+    _init_git_repo(source, "app.py")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="workspace.toml"):
+        adapter.observe(source)
+
+
+@pytest.mark.parametrize("remove_before_revalidation", [False, True])
+def test_observer_rejects_workspace_policy_appearing_after_absent_pin(
+    tmp_path: Path,
+    remove_before_revalidation: bool,
+) -> None:
+    source = tmp_path / "source"
+    workspace_config = source / ".graphify" / "workspace.toml"
+    workspace_config.parent.mkdir(parents=True)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    def appear_during_each_pass(event: str, _details: object) -> None:
+        if event == "inventory_detected":
+            workspace_config.write_text("schema_version = 1\n", encoding="utf-8")
+            if remove_before_revalidation:
+                workspace_config.unlink()
+        elif event == "inventory_complete":
+            workspace_config.unlink(missing_ok=True)
+
+    with pytest.raises(ObservationUnstable, match="workspace.toml"):
+        adapter.observe(
+            source,
+            max_inventory_passes=2,
+            hook=appear_during_each_pass,
+        )
 
 
 def test_0916_structural_query_rejects_malformed_graph(tmp_path: Path) -> None:

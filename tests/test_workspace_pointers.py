@@ -638,6 +638,63 @@ def test_reader_during_each_promotion_boundary_observes_one_complete_pointer(
     harness.leases.release(promote)
 
 
+@pytest.mark.parametrize(
+    ("boundary", "readable"),
+    [
+        ("pointer:promoted:visible", False),
+        ("pointer:promoted:journal_durable", True),
+    ],
+)
+def test_reader_ignores_pending_only_after_visible_pointer_is_journal_durable(
+    tmp_path: Path,
+    boundary: str,
+    readable: bool,
+) -> None:
+    armed = False
+
+    def fail_after_journal(event: str) -> None:
+        nonlocal armed
+        if armed and event == boundary:
+            armed = False
+            raise InjectedFault(event)
+
+    harness, _journal, _generations, pointers, promote, receipts = _promotion_runtime(
+        tmp_path,
+        fault_hook=fail_after_journal,
+    )
+    old = receipts["gen-old"]
+    new = receipts["gen-new"]
+    pointers.promote(
+        promote,
+        _cas(promote, old, revision=0, current_sha256=None),
+        occurred_at=START,
+        monotonic_ns=20_001,
+    )
+    armed = True
+    with pytest.raises(InjectedFault, match=boundary):
+        pointers.promote(
+            promote,
+            _cas(promote, new, revision=1, current_sha256=old.sha256),
+            occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=20_002,
+        )
+    harness.leases.release(promote)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(PointerRecoveryRequired):
+        pointers.load(REPO_UUID)
+    if readable:
+        with pointers.read_current(REPO_UUID) as reading:
+            assert reading.pointer.to_dict()["current"]["generation_id"] == "gen-new"
+            pointers.revalidate_read(REPO_UUID, reading)
+    else:
+        with pytest.raises(PointerCorrupt, match="no matching durable journal"):
+            with pointers.read_current(REPO_UUID):
+                pytest.fail("an incomplete visible pointer must not be readable")
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_reader_that_locks_first_delays_promotion_without_a_durable_pin(tmp_path: Path) -> None:
     harness, _journal, _generations, pointers, promote, receipts = _promotion_runtime(tmp_path)
     old = receipts["gen-old"]

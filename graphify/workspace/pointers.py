@@ -1077,7 +1077,11 @@ class PointerStore:
                 generation_id=generation_id,
                 exclusive=False,
             ):
-                reloaded = self.load(repo_uuid)
+                reloaded = self._read_pointer(
+                    self._current(repo_uuid),
+                    allow_missing=False,
+                    expected_repo_uuid=repo_uuid,
+                )
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
                 receipt = self._require_compatible(
@@ -1103,7 +1107,11 @@ class PointerStore:
         is a conflict and the caller must discard its output.
         """
 
-        pointer = self.load(repo_uuid)
+        pointer = self._read_pointer(
+            self._current(repo_uuid),
+            allow_missing=False,
+            expected_repo_uuid=repo_uuid,
+        )
         if pointer is None or pointer.canonical != reading.pointer.canonical:
             raise PointerConflict("current pointer changed during protected read")
         receipts = self.verify_pointer(pointer, expected_repo_uuid=repo_uuid)

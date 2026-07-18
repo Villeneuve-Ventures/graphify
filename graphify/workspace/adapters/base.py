@@ -146,6 +146,7 @@ class QueryRequest:
     context_filters: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "context_filters", tuple(self.context_filters))
         if not self.question or self.question.strip() != self.question:
             raise QueryRejected("question must be non-empty and trimmed")
         if len(self.question.encode("utf-8")) > _MAX_QUERY_QUESTION_BYTES:

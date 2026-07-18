@@ -1261,18 +1261,16 @@ def _comparison_walk(
 ) -> Iterator[tuple[str, list[str], list[str]]]:
     """Walk top-down from listings bound to caller-held directory authority."""
 
-    def visit(directory: Path) -> Iterator[tuple[str, list[str], list[str]]]:
+    pending = [root]
+    while pending:
+        directory = pending.pop()
         try:
             dirnames, filenames = directory_lister(directory)
         except OSError as exc:
             onerror(exc)
-            return
+            continue
         yield str(directory), dirnames, filenames
-        for name in dirnames:
-            child = directory / name
-            yield from visit(child)
-
-    yield from visit(root)
+        pending.extend(directory / name for name in reversed(dirnames))
 
 
 def detect(
