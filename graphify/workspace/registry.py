@@ -135,7 +135,11 @@ class RegistryStore:
             yield document
 
     @contextmanager
-    def read_only_snapshot(self) -> Iterator[Registry]:
+    def read_only_snapshot(
+        self,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[Registry]:
         """Hold an existing registry lock without repair, creation, or chmod."""
 
         with self.state.existing_lock(
@@ -143,6 +147,7 @@ class RegistryStore:
             rank=REGISTRY_LOCK_RANK,
             name="registry",
             exclusive=False,
+            deadline_ns=deadline_ns,
         ):
             document = self._load_locked(recover=False)
             if document is None:  # pragma: no cover - narrowed by allow_missing=False

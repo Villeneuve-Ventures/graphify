@@ -213,6 +213,30 @@ def test_query_request_rejects_non_string_question(question: Any) -> None:
         QueryRequest(question=question)
 
 
+@pytest.mark.parametrize("mode", [None, [], 1, b"bfs"])
+def test_query_request_rejects_non_string_mode(mode: Any) -> None:
+    with pytest.raises(QueryRejected, match="mode must be a string"):
+        QueryRequest(question="bounded", mode=mode)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("depth", None),
+        ("depth", "2"),
+        ("depth", 2.0),
+        ("depth", True),
+        ("token_budget", None),
+        ("token_budget", "2000"),
+        ("token_budget", 2000.0),
+        ("token_budget", True),
+    ],
+)
+def test_query_request_rejects_non_integer_bounds(field: str, value: Any) -> None:
+    with pytest.raises(QueryRejected, match=rf"{field} must be an integer"):
+        QueryRequest(question="bounded", **{field: value})
+
+
 def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path: Path) -> None:
     source = tmp_path / "source"
     output = tmp_path / "staging"

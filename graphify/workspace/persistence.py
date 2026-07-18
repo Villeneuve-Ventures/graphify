@@ -12,6 +12,7 @@ import platform
 import re
 import stat
 import subprocess
+import time
 from typing import Callable, Iterator, Protocol, Sequence, TypeVar
 import uuid
 
@@ -59,6 +60,10 @@ class CommitUnknown(WorkspaceRuntimeError):
 
 class LockOrderError(WorkspaceRuntimeError):
     code = "lock_order"
+
+
+class LockTimeout(WorkspaceRuntimeError):
+    code = "lock_timeout"
 
 
 class InjectedFault(RuntimeError):
@@ -1130,9 +1135,10 @@ class DurableStateRoot:
         name: str,
         exclusive: bool = True,
         blocking: bool = True,
+        deadline_ns: int | None = None,
         kind: str = "state",
     ) -> Iterator[None]:
-        """Lock an existing coordination file without any mutating syscall."""
+        """Lock existing coordination state without mutation, bounded if requested."""
 
         stack = _LOCK_STACK.get()
         if stack and (
@@ -1163,14 +1169,28 @@ class DurableStateRoot:
             except ImportError as exc:  # pragma: no cover - rejected by capability gate
                 raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
             operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-            if not blocking:
+            if not blocking or deadline_ns is not None:
                 operation |= fcntl.LOCK_NB
             while True:
+                if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                    raise LockTimeout(f"{kind} lock acquisition timed out: {path}")
                 try:
                     fcntl.flock(descriptor, operation)
-                    break
                 except InterruptedError:
                     continue
+                except BlockingIOError:
+                    if deadline_ns is None:
+                        raise
+                    remaining_ns = deadline_ns - time.monotonic_ns()
+                    if remaining_ns <= 0:
+                        raise LockTimeout(
+                            f"{kind} lock acquisition timed out: {path}"
+                        ) from None
+                    time.sleep(min(0.001, remaining_ns / 1_000_000_000))
+                    continue
+                if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                    raise LockTimeout(f"{kind} lock acquisition timed out: {path}")
+                break
             token = _LOCK_STACK.set((*stack, (rank, name)))
             self.fault_hook(f"lock:{name}:acquired")
             try:
@@ -1433,6 +1453,7 @@ class DurableStateRoot:
         generation_id: str,
         exclusive: bool,
         blocking: bool = True,
+        deadline_ns: int | None = None,
     ) -> Iterator[None]:
         """Lock a retained coordination object without any mutating syscall."""
 
@@ -1443,6 +1464,7 @@ class DurableStateRoot:
             name=name,
             exclusive=exclusive,
             blocking=blocking,
+            deadline_ns=deadline_ns,
             kind="generation",
         ):
             yield

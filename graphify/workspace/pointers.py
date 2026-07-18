@@ -1060,7 +1060,12 @@ class PointerStore:
                 return result
 
     @contextmanager
-    def read_current(self, repo_uuid: str) -> Iterator[GenerationRead]:
+    def read_current(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[GenerationRead]:
         while True:
             pointer = self._read_pointer(
                 self._current(repo_uuid),
@@ -1076,6 +1081,7 @@ class PointerStore:
                 lock,
                 generation_id=generation_id,
                 exclusive=False,
+                deadline_ns=deadline_ns,
             ):
                 reloaded = self._read_pointer(
                     self._current(repo_uuid),

@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from typing import Any, Callable, Mapping, cast
 
@@ -376,6 +377,70 @@ def test_expired_freshness_deadline_fails_before_query(tmp_path: Path) -> None:
     assert result.reason == "timeout"
     assert result.query_executed is False
     assert result.output is None
+
+
+@pytest.mark.parametrize("lock_kind", ["registry", "generation"])
+def test_freshness_deadline_bounds_shared_lock_acquisition(
+    tmp_path: Path,
+    lock_kind: str,
+) -> None:
+    runtime = _runtime(tmp_path)
+    before = {
+        "source_tree": tree_snapshot(runtime.repo),
+        "source_metadata": metadata_snapshot(runtime.repo),
+        "source_xattrs": _xattr_snapshot(runtime.repo),
+        "workspace_tree": tree_snapshot(runtime.state_root),
+        "workspace_metadata": metadata_snapshot(runtime.state_root),
+        "workspace_xattrs": _xattr_snapshot(runtime.state_root),
+    }
+    if lock_kind == "registry":
+        lock = runtime.registry.state.path(runtime.registry.LOCK)
+    else:
+        lock = runtime.pointers.state.path(
+            runtime.pointers.generations._lock(REPO_UUID, "gen-current")
+        )
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys, time; "
+                "fd=os.open(sys.argv[1], os.O_RDONLY); "
+                "fcntl.flock(fd, fcntl.LOCK_EX); "
+                "print('READY', flush=True); time.sleep(60)"
+            ),
+            str(lock),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "READY"
+        started = time.monotonic()
+
+        result = runtime.authority.query(
+            REPO_UUID,
+            QUERY,
+            timeout_ns=10_000_000,
+        )
+
+        assert time.monotonic() - started < 1.0
+        assert result.decision == "withhold"
+        assert result.reason == "timeout"
+        assert result.query_executed is False
+        assert result.output is None
+        assert {
+            "source_tree": tree_snapshot(runtime.repo),
+            "source_metadata": metadata_snapshot(runtime.repo),
+            "source_xattrs": _xattr_snapshot(runtime.repo),
+            "workspace_tree": tree_snapshot(runtime.state_root),
+            "workspace_metadata": metadata_snapshot(runtime.state_root),
+            "workspace_xattrs": _xattr_snapshot(runtime.state_root),
+        } == before
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
 
 
 def test_deadline_expiring_after_pre_observation_skips_query(

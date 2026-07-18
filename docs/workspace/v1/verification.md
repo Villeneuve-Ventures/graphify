@@ -156,8 +156,11 @@ output remains ignored and must not widen the P1 product diff.
   source/output bindings and exact destination contents around the copy,
   normalizes staged payload modes independently of caller umask, and deterministic
   contract bundles exclude generated adapter cache trees;
-- query text, term work, context filters, depth, and token budgets reject above
-  their workspace bounds before freshness locks are acquired;
+- query mode, depth, and token-budget types reject before comparison; query text,
+  term work, context filters, depth, and token budgets reject above their
+  workspace bounds before freshness locks are acquired; registry and generation
+  lock contention is bounded by the same deadline and performs zero source or
+  workspace writes;
 - deterministic schedules cover edit, create, delete, rename, replacement,
   source, classifier, policy, query-payload, and output ancestor-to-symlink
   replacement, plus a real-directory detection/snapshot replacement, with zero

@@ -82,7 +82,9 @@ that boundary or before publication fails without reading the replacement inode.
    reading registry, pointer, generation, or source state.
 2. Hold the existing registry lock shared, resolve its singular active source,
    then open the current generation through its pre-created shared coordination
-   lock. This preserves registry-before-generation lock ordering.
+   lock. This preserves registry-before-generation lock ordering. A caller
+   deadline bounds both acquisitions through nonmutating nonblocking polling;
+   expiry withholds as `timeout` before source observation or query execution.
 3. Discover source identity and collect a complete no-write pre-query
    observation. Detection and hashing share one pinned read authority spanning
    the checkout plus the bounded per-worktree and common Git metadata roots.
@@ -96,10 +98,11 @@ that boundary or before publication fails without reading the replacement inode.
    receipt, payload manifest, and compatibility digest to the sealed generation.
 5. Recheck the deadline, then run the adapter's native directed `0.9.16`
    traversal against the immutable payload through the same rooted no-follow
-   reader. Requests reject before lock acquisition when depth exceeds `8`, token
-   budget exceeds `32768`, question text or term work exceeds its bound, or
-   context filters exceed their count, item, or aggregate bounds. This library
-   path deliberately bypasses optional query logging.
+   reader. Requests reject malformed field types before comparison or lock
+   acquisition, and reject when depth exceeds `8`, token budget exceeds `32768`,
+   question text or term work exceeds its bound, or context filters exceed their
+   count, item, or aggregate bounds. This library path deliberately bypasses
+   optional query logging.
 6. Repeat source identity and the complete observation, revalidate source
    identity once more, and revalidate the pointer/receipt while both shared
    locks remain held.

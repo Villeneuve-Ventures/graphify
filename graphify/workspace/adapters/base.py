@@ -174,12 +174,18 @@ class QueryRequest:
             raise QueryRejected(
                 f"question must not exceed {_MAX_QUERY_TERM_UNITS} non-space term units"
             )
+        if not isinstance(self.mode, str):
+            raise QueryRejected("mode must be a string")
         if self.mode not in {"bfs", "dfs"}:
             raise QueryRejected("mode must be bfs or dfs")
+        if type(self.depth) is not int:
+            raise QueryRejected("depth must be an integer")
         if self.depth < 0:
             raise QueryRejected("depth must be non-negative")
         if self.depth > _MAX_QUERY_DEPTH:
             raise QueryRejected(f"depth must not exceed {_MAX_QUERY_DEPTH}")
+        if type(self.token_budget) is not int:
+            raise QueryRejected("token_budget must be an integer")
         if self.token_budget <= 0:
             raise QueryRejected("token_budget must be positive")
         if self.token_budget > _MAX_QUERY_TOKEN_BUDGET:

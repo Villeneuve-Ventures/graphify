@@ -34,7 +34,7 @@ from graphify.workspace.identity import (
     discover_source,
 )
 from graphify.workspace.generations import GenerationError
-from graphify.workspace.persistence import StateCorrupt, StatePathError
+from graphify.workspace.persistence import LockTimeout, StateCorrupt, StatePathError
 from graphify.workspace.pointers import (
     GenerationRead,
     PointerConflict,
@@ -246,9 +246,12 @@ class FreshnessAuthority:
             # Registry rank precedes generation rank. Keeping this existing
             # shared lock open makes active-source selection stable for the
             # complete two-sided observation and query window.
-            with self.registry.read_only_snapshot() as document:
+            with self.registry.read_only_snapshot(deadline_ns=deadline_ns) as document:
                 authority_pre = self._authority_snapshot(document, repo_uuid)
-                with self.pointers.read_current(repo_uuid) as reading:
+                with self.pointers.read_current(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                ) as reading:
                     pre = self._observe(
                         authority_pre.source,
                         phase="pre",
@@ -369,7 +372,7 @@ class FreshnessAuthority:
                 FreshnessResult[OutputT],
                 self._without_observation("unstable", query_executed=query_executed),
             )
-        except ObservationTimeout:
+        except (LockTimeout, ObservationTimeout):
             return cast(
                 FreshnessResult[OutputT],
                 self._without_observation("timeout", query_executed=query_executed),
