@@ -1,6 +1,6 @@
 # Graphify workspace contract v1
 
-Status: P3 control-plane persistence runtime for
+Status: P4 adapter and observed-current library runtime for
 `graphifyy 0.9.16+workspace.1`; the public v1 contract fields remain frozen.
 
 This directory defines the first version of Graphify's workspace control-plane
@@ -8,9 +8,11 @@ contracts. P2 provides a library surface for external durable registry state,
 operator-authorized UUID/source binding, explicit active-source selection, and
 fenced lease allocation. P3 adds caller-supplied generation staging and
 certification, a framed segmented journal, atomic pointer movement and repair,
-retained coordination locks, explicit capacity preflight, and offline GC. It
-does not provide a `graphify workspace` command. P4 and P5 still own engine
-adaptation, freshness observation, semantic queues, services, and commands.
+retained coordination locks, explicit capacity preflight, and offline GC. P4
+adds the sole `0.9.16` engine adapter, the no-write comparison seam, and
+two-sided observed-current release. It does not provide a retained-state import
+path or a `graphify workspace` command. Semantic queues, services, and commands
+remain P5 work.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build
@@ -30,7 +32,8 @@ or fork engine logic inside the package.
   revision binding, or exact compensation coverage.
 - `graphify.workspace.persistence`, `.identity`, `.registry`, `.leases`,
   `.generations`, `.journal`, `.pointers`, and `.gc` implement the P2/P3
-  runtime boundary. Lifecycle mutation fails closed
+  runtime boundary. `.adapters` and `.freshness` implement the bounded P4
+  read-only engine/query boundary. Lifecycle mutation fails closed
   outside non-elevated macOS on local APFS; tests use an explicit injected
   capability seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,
@@ -43,6 +46,7 @@ or fork engine logic inside the package.
 - [Architecture](architecture.md)
 - [State contracts](state-contract.md)
 - [P3 runtime](p3-runtime.md)
+- [P4 adapter and freshness](p4-adapter-freshness.md)
 - [Compatibility and artifacts](compatibility.md)
 - [Installation and rollback](installation.md)
 - [Migration boundary](migration.md)

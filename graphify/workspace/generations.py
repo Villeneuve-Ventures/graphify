@@ -11,10 +11,17 @@ import shutil
 import stat
 from typing import Any, Mapping, Sequence, cast
 
+from graphify.workspace.adapters import (
+    AdapterIntent,
+    CompatibilityTuple,
+    UnsupportedCompatibility,
+    select_adapter,
+)
 from graphify.workspace.contracts import (
     CapacityPolicy,
     CapacityReservation,
     CapacityReservationState,
+    CompatibilityManifest,
     ContractError,
     GenerationCoordinationLock,
     GenerationReceipt,
@@ -84,6 +91,7 @@ class GenerationAllocation:
     staging_path: Path
     expected_payload_bytes: int
     capacity_policy_sha256: str
+    compatibility_sha256: str
     active_source_revision: int
     operation_epoch: int
     fence_token: int
@@ -156,10 +164,14 @@ class GenerationStore:
         leases: LeaseStore,
         journal: JournalStore,
         *,
+        compatibility_manifest: CompatibilityManifest,
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
     ) -> None:
+        compatibility = CompatibilityTuple.from_manifest(compatibility_manifest)
+        select_adapter(compatibility, intent=AdapterIntent.STAGE).require_adapter()
+        self.compatibility_sha256 = compatibility_manifest.sha256
         self.leases = leases
         self.journal = journal
         self.state = DurableStateRoot(
@@ -379,6 +391,7 @@ class GenerationStore:
             if (
                 existing.reserved_bytes != expected_payload_bytes
                 or existing.policy_sha256 != policy.sha256
+                or existing.compatibility_sha256 != self.compatibility_sha256
                 or existing.active_source_revision
                 != operation.grant.active_source_revision
             ):
@@ -398,6 +411,7 @@ class GenerationStore:
                 generation_id=generation_id,
                 reserved_bytes=existing.reserved_bytes,
                 policy_sha256=existing.policy_sha256,
+                compatibility_sha256=existing.compatibility_sha256,
                 active_source_revision=existing.active_source_revision,
                 operation_epoch=operation.grant.operation_epoch,
                 fence_token=operation.fence_token,
@@ -422,6 +436,7 @@ class GenerationStore:
             generation_id=generation_id,
             reserved_bytes=expected_payload_bytes,
             policy_sha256=policy.sha256,
+            compatibility_sha256=self.compatibility_sha256,
             active_source_revision=operation.grant.active_source_revision,
             operation_epoch=operation.grant.operation_epoch,
             fence_token=operation.fence_token,
@@ -577,6 +592,7 @@ class GenerationStore:
                 staging_path=staging_path,
                 expected_payload_bytes=reservation.reserved_bytes,
                 capacity_policy_sha256=reservation.policy_sha256,
+                compatibility_sha256=reservation.compatibility_sha256,
                 active_source_revision=reservation.active_source_revision,
                 operation_epoch=reservation.operation_epoch,
                 fence_token=reservation.fence_token,
@@ -780,6 +796,7 @@ class GenerationStore:
         durable = (
             reservation.reserved_bytes,
             reservation.policy_sha256,
+            reservation.compatibility_sha256,
             reservation.active_source_revision,
             reservation.operation_epoch,
             reservation.fence_token,
@@ -787,6 +804,7 @@ class GenerationStore:
         supplied = (
             allocation.expected_payload_bytes,
             allocation.capacity_policy_sha256,
+            allocation.compatibility_sha256,
             allocation.active_source_revision,
             allocation.operation_epoch,
             allocation.fence_token,
@@ -1114,6 +1132,13 @@ class GenerationStore:
         occurred_at: datetime,
         monotonic_ns: int,
     ) -> GenerationReceipt:
+        if (
+            allocation.compatibility_sha256 != self.compatibility_sha256
+            or request.compatibility_sha256 != self.compatibility_sha256
+        ):
+            raise UnsupportedCompatibility(
+                "generation certification is not bound to the selected compatibility manifest"
+            )
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,

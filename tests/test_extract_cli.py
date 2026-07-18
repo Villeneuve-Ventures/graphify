@@ -221,6 +221,56 @@ def test_extract_out_keeps_project_root_clean(monkeypatch, tmp_path):
     )
 
 
+def test_extract_out_incremental_office_detection_stays_external(
+    monkeypatch,
+    tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    _code_only_corpus(project)
+    office = project / "book.xlsx"
+    office.write_bytes(b"synthetic office fixture")
+    external = tmp_path / "external"
+    expected_converted = (external / "graphify-out" / "converted").resolve()
+    converted_roots = []
+
+    def convert(path, converted_dir):
+        assert path == office
+        converted_roots.append(converted_dir.resolve())
+        target = converted_dir / "book.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            target.write_text("converted outside source\n", encoding="utf-8")
+        return target
+
+    _clear_backend_keys(monkeypatch)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr("graphify.detect.convert_office_file", convert)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            ".",
+            "--out",
+            str(external),
+            "--code-only",
+            "--no-cluster",
+        ],
+    )
+
+    for _run in range(2):
+        try:
+            mainmod.main()
+        except SystemExit as exc:
+            assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
+
+    assert converted_roots == [expected_converted, expected_converted]
+    assert not (project / "graphify-out").exists()
+
+
 def test_extract_without_key_still_errors_when_docs_present(
     monkeypatch, tmp_path, capsys
 ):

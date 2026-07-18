@@ -64,6 +64,103 @@ def test_extract_merges_multiple_files():
     assert result["input_tokens"] == 0
 
 
+def test_extract_surfaces_per_file_errors(tmp_path, monkeypatch):
+    from graphify import extract as extract_mod
+
+    source = tmp_path / "app.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+
+    def failed_sequential(
+        uncached_work,
+        per_file,
+        root,
+        total_files,
+        cache_location=None,
+    ):
+        del uncached_work, root, total_files, cache_location
+        per_file[0] = {
+            "nodes": [],
+            "edges": [],
+            "error": "synthetic extractor failure",
+        }
+
+    monkeypatch.setattr(extract_mod, "_extract_sequential", failed_sequential)
+
+    result = extract_mod.extract(
+        [source],
+        cache_root=tmp_path / "cache",
+        source_root=tmp_path,
+        parallel=False,
+    )
+
+    assert result["errors"] == [
+        {"path": "app.py", "error": "synthetic extractor failure"}
+    ]
+
+
+def test_extract_error_paths_preserve_identity_without_leaking_host_paths(
+    tmp_path,
+    monkeypatch,
+):
+    from graphify import extract as extract_mod
+
+    corpus = tmp_path / "corpus"
+    first = corpus / "left" / "app.py"
+    second = corpus / "right" / "app.py"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text("LEFT = 1\n", encoding="utf-8")
+    second.write_text("RIGHT = 1\n", encoding="utf-8")
+
+    def failed_sequential(
+        uncached_work,
+        per_file,
+        root,
+        total_files,
+        cache_location=None,
+    ):
+        del root, total_files, cache_location
+        for idx, _path in uncached_work:
+            per_file[idx] = {
+                "nodes": [],
+                "edges": [],
+                "error": "synthetic extractor failure",
+            }
+
+    monkeypatch.setattr(extract_mod, "_extract_sequential", failed_sequential)
+
+    result = extract_mod.extract(
+        [first, second],
+        cache_root=tmp_path / "external-cache",
+        parallel=False,
+    )
+
+    assert result["errors"] == [
+        {"path": "left/app.py", "error": "synthetic extractor failure"},
+        {"path": "right/app.py", "error": "synthetic extractor failure"},
+    ]
+
+    external_first = tmp_path / "external-left" / "app.py"
+    external_second = tmp_path / "external-right" / "app.py"
+    external_first.parent.mkdir()
+    external_second.parent.mkdir()
+    external_first.write_text("LEFT = 1\n", encoding="utf-8")
+    external_second.write_text("RIGHT = 1\n", encoding="utf-8")
+
+    external_result = extract_mod.extract(
+        [external_first, external_second],
+        cache_root=tmp_path / "external-cache",
+        source_root=corpus,
+        parallel=False,
+    )
+    error_paths = [row["path"] for row in external_result["errors"]]
+
+    assert len(set(error_paths)) == 2
+    assert all(path.startswith("@external/") for path in error_paths)
+    assert all(path.endswith("/app.py") for path in error_paths)
+    assert str(tmp_path) not in json.dumps(external_result["errors"])
+
+
 def test_extract_disambiguates_duplicate_symbol_ids_by_source_path(tmp_path):
     first = tmp_path / "apps/api/Program.cs"
     second = tmp_path / "tools/api/Program.cs"

@@ -34,6 +34,7 @@ from graphify.workspace.persistence import (
     StatePathError,
     Syscalls,
     WORKSPACE_LOCK_RANK,
+    require_before_deadline,
 )
 
 if TYPE_CHECKING:
@@ -135,15 +136,29 @@ class RegistryStore:
             yield document
 
     @contextmanager
-    def read_only_snapshot(self) -> Iterator[Registry]:
+    def read_only_snapshot(
+        self,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[Registry]:
         """Hold an existing registry lock without repair, creation, or chmod."""
 
         with self.state.existing_lock(
             self.LOCK,
             rank=REGISTRY_LOCK_RANK,
             name="registry",
+            exclusive=False,
+            deadline_ns=deadline_ns,
         ):
+            require_before_deadline(
+                deadline_ns,
+                "registry snapshot read exceeded its deadline",
+            )
             document = self._load_locked(recover=False)
+            require_before_deadline(
+                deadline_ns,
+                "registry snapshot read exceeded its deadline",
+            )
             if document is None:  # pragma: no cover - narrowed by allow_missing=False
                 raise StateCorrupt("registry current record is missing")
             yield document

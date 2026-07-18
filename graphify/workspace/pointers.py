@@ -8,14 +8,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, cast
 
+from graphify.workspace.adapters import (
+    AdapterIntent,
+    CompatibilityTuple,
+    UnsupportedCompatibility,
+    select_adapter,
+)
 from graphify.workspace.contracts import (
     STATE_SCHEMA_VERSION,
+    CompatibilityManifest,
     GenerationReceipt,
     PointerSet,
     PriorPointerRecord,
 )
 from graphify.workspace.generations import GenerationError, GenerationStore
-from graphify.workspace.journal import JournalSnapshot, JournalStore
+from graphify.workspace.journal import JournalError, JournalSnapshot, JournalStore
 from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
@@ -23,6 +30,7 @@ from graphify.workspace.persistence import (
     RuntimeCapabilities,
     StatePathError,
     Syscalls,
+    require_before_deadline,
 )
 
 
@@ -90,10 +98,18 @@ class PointerStore:
         generations: GenerationStore,
         journal: JournalStore,
         *,
+        compatibility_manifest: CompatibilityManifest,
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
     ) -> None:
+        compatibility = CompatibilityTuple.from_manifest(compatibility_manifest)
+        select_adapter(compatibility, intent=AdapterIntent.PROMOTE).require_adapter()
+        self.compatibility_sha256 = compatibility_manifest.sha256
+        if generations.compatibility_sha256 != self.compatibility_sha256:
+            raise UnsupportedCompatibility(
+                "pointer and generation stores require the same compatibility manifest"
+            )
         self.leases = leases
         self.generations = generations
         self.journal = journal
@@ -245,9 +261,18 @@ class PointerStore:
             "receipt_sha256": receipt.sha256,
         }
 
+    def _require_compatible(self, receipt: GenerationReceipt) -> GenerationReceipt:
+        if receipt.to_dict()["compatibility_sha256"] != self.compatibility_sha256:
+            raise UnsupportedCompatibility(
+                "pointer receipt does not match the selected compatibility manifest"
+            )
+        return receipt
+
     def _verify_ref(self, repo_uuid: str, reference: dict[str, Any]) -> GenerationReceipt:
         generation_id = str(reference["generation_id"])
-        receipt = self.generations.verify_generation(repo_uuid, generation_id)
+        receipt = self._require_compatible(
+            self.generations.verify_generation(repo_uuid, generation_id)
+        )
         if receipt.sha256 != reference["receipt_sha256"]:
             raise PointerCorrupt(f"pointer receipt hash is stale for {generation_id}")
         return receipt
@@ -301,6 +326,7 @@ class PointerStore:
             except GenerationError:
                 corrupt_generations.add(generation_id)
                 continue
+            self._require_compatible(receipt)
             if receipt.sha256 == ref["receipt_sha256"]:
                 receipts[name] = receipt
         if "current" in receipts:
@@ -348,6 +374,39 @@ class PointerStore:
             and event.to_dict()["fence_token"] == value["fence_token"]
             for event in snapshot.events
         )
+
+    def _verify_visible_pointer_journal(
+        self,
+        repo_uuid: str,
+        pointer: PointerSet,
+    ) -> None:
+        try:
+            snapshot = self.journal.read_stable(repo_uuid)
+        except JournalError as exc:
+            raise PointerCorrupt(
+                f"visible pointer journal authority is unavailable: {exc}"
+            ) from exc
+        pointer_revision = int(pointer.to_dict()["pointer_revision"])
+        durable_pointer_revisions = [
+            int(value["pointer_revision"])
+            for event in snapshot.events
+            if (value := event.to_dict())["pointer_revision"] is not None
+        ]
+        if durable_pointer_revisions and max(durable_pointer_revisions) > pointer_revision:
+            raise PointerCorrupt(
+                "visible pointer is stale relative to durable journal history"
+            )
+        if not any(
+            self._journal_records_pointer(
+                snapshot,
+                pointer,
+                transition=transition,
+            )
+            for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")
+        ):
+            raise PointerCorrupt(
+                "visible pointer has no matching durable journal event"
+            )
 
     def _preliminary_pointer(self, repo_uuid: str) -> PointerSet | None:
         if self._exists(self._pending(repo_uuid)):
@@ -569,7 +628,6 @@ class PointerStore:
             allowed_operations=frozenset({allowed_operation}),
         ) as operation:
             self._assert_no_gc_intent(operation.repo_uuid)
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
             preliminary = self._preliminary_pointer(operation.repo_uuid)
             locks = self._lock_set(
                 operation.repo_uuid,
@@ -578,10 +636,13 @@ class PointerStore:
             )
             with self.state.existing_generation_locks(locks, exclusive=True):
                 current = self._preliminary_pointer(operation.repo_uuid)
-                candidate = self.generations.verify_generation(
-                    operation.repo_uuid,
-                    cas.candidate_generation_id,
+                candidate = self._require_compatible(
+                    self.generations.verify_generation(
+                        operation.repo_uuid,
+                        cas.candidate_generation_id,
+                    )
                 )
+                self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
                 snapshot = self.journal.recover_locked(operation)
                 if not self._journal_certifies(
                     snapshot,
@@ -709,7 +770,6 @@ class PointerStore:
             allowed_operations=frozenset({"POINTER_RECOVERY", "REPAIR"}),
         ) as operation:
             self._assert_no_gc_intent(operation.repo_uuid)
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
             try:
                 current = self._read_pointer(
                     self._current(operation.repo_uuid),
@@ -730,6 +790,10 @@ class PointerStore:
                 else cast(PointerSet, PointerSet.from_mapping(prior.to_dict()["pointer_set"]))
             )
             self._validate_pending_relationship(current, pending, prior)
+            for pointer in (current, pending, prior_pointer):
+                if pointer is not None:
+                    self._verify_repair_refs(operation.repo_uuid, pointer)
+            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
             if pending is None and current is not None:
                 try:
                     current_receipts = self.verify_pointer(
@@ -997,12 +1061,25 @@ class PointerStore:
                 return result
 
     @contextmanager
-    def read_current(self, repo_uuid: str) -> Iterator[GenerationRead]:
+    def read_current(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[GenerationRead]:
         while True:
+            require_before_deadline(
+                deadline_ns,
+                "current pointer read exceeded its deadline",
+            )
             pointer = self._read_pointer(
                 self._current(repo_uuid),
                 allow_missing=False,
                 expected_repo_uuid=repo_uuid,
+            )
+            require_before_deadline(
+                deadline_ns,
+                "current pointer read exceeded its deadline",
             )
             assert pointer is not None
             value = pointer.to_dict()
@@ -1013,17 +1090,37 @@ class PointerStore:
                 lock,
                 generation_id=generation_id,
                 exclusive=False,
+                deadline_ns=deadline_ns,
             ):
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
+                )
                 reloaded = self._read_pointer(
                     self._current(repo_uuid),
                     allow_missing=False,
                     expected_repo_uuid=repo_uuid,
                 )
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
+                )
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
-                receipt = self.generations.verify_generation(repo_uuid, generation_id)
+                receipt = self._require_compatible(
+                    self.generations.verify_generation(repo_uuid, generation_id)
+                )
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
+                )
                 if receipt.sha256 != current["receipt_sha256"]:
                     raise PointerCorrupt("current pointer receipt hash does not match generation")
+                self._verify_visible_pointer_journal(repo_uuid, pointer)
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
+                )
                 yield GenerationRead(
                     pointer=pointer,
                     receipt=receipt,
@@ -1032,6 +1129,54 @@ class PointerStore:
                     ),
                 )
                 return
+
+    def revalidate_read(
+        self,
+        repo_uuid: str,
+        reading: GenerationRead,
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
+        """Revalidate a protected read without releasing its shared lock.
+
+        Callers use this immediately before an output-release boundary. The
+        method performs no recovery or mutation; any pointer or receipt change
+        is a conflict and the caller must discard its output.
+        """
+
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
+        pointer = self._read_pointer(
+            self._current(repo_uuid),
+            allow_missing=False,
+            expected_repo_uuid=repo_uuid,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
+        if pointer is None or pointer.canonical != reading.pointer.canonical:
+            raise PointerConflict("current pointer changed during protected read")
+        receipts = self.verify_pointer(pointer, expected_repo_uuid=repo_uuid)
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
+        self._verify_visible_pointer_journal(repo_uuid, pointer)
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
+        if receipts["current"].canonical != reading.receipt.canonical:
+            raise PointerConflict("current receipt changed during protected read")
+        current = cast(dict[str, Any], pointer.to_dict()["current"])
+        expected_path = self.state.path(
+            self.generations._generation(repo_uuid, str(current["generation_id"]))
+        )
+        if expected_path != reading.generation_path:
+            raise PointerConflict("current generation path changed during protected read")
 
 
 __all__ = [

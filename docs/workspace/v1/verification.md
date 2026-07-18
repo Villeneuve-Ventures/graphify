@@ -132,8 +132,53 @@ output remains ignored and must not widen the P1 product diff.
   generation, pointer, reader-lock, GC, clean-reboot, dead-builder adoption, and
   cross-workspace lock-scope boundaries.
 
-P3 verification does not satisfy P4/P5 adapter, freshness, queue, service,
-performance, installation, or live-cutover gates.
+## P4 adapter and freshness gates
+
+- all Graphify-private engine imports are confined to the one versioned
+  `0.9.16` adapter package;
+- exact tuple selection executes `0.9.16`, mixed tuples reject before later
+  state use, and coherent future tuples remain probe-only and non-promoting;
+- no pre-workspace retained-state reader or import intent is exposed, and only
+  the exact supported tuple can stage or promote a newly built generation;
+- read-only detection suppresses stat/word-count persistence and conversion
+  sidecars, while explicit ordinary output roots redirect sidecars outside the
+  source checkout;
+- two consecutive complete descriptor-checked inventory passes form each side
+  of the query; detector probes, source entries, policies, and query payloads
+  share rooted no-follow reads, with source identity and pointer/receipt
+  revalidated at the release boundary;
+- linked worktrees pin the checkout, per-worktree Git directory, and shared Git
+  common directory independently; only `.git`, `commondir`, and
+  `info/exclude` routing/policy reads can cross the checkout boundary;
+- structural extraction consumes only a descriptor-validated external source
+  snapshot in a private build directory, publishes through a pinned empty output
+  descriptor while retaining source authority through publication, revalidates
+  the digest of every selected source and effective policy input plus
+  source/output bindings and exact destination contents around the copy, rejects
+  per-file extractor errors, preserves reciprocal directed edges, normalizes
+  staged payload modes independently of caller umask, and deterministic contract
+  bundles exclude generated adapter cache trees;
+- query mode, depth, and token-budget types reject before comparison; query text,
+  term work, context filters, depth, and token budgets reject above their
+  workspace bounds before freshness locks are acquired; registry and generation
+  lock contention plus subsequent registry, pointer, receipt, journal, and
+  release-revalidation phases are bounded by the same deadline and perform zero
+  source or workspace writes;
+- deterministic schedules cover edit, create, delete, rename, replacement,
+  source, classifier, policy, query-payload, and output ancestor-to-symlink
+  replacement, plus a real-directory detection/snapshot replacement, with zero
+  external access, policy change,
+  post-pass identity change, persistent churn, pointer change, wholly
+  inter-observation ABA, and post-boundary mutation;
+- native query bypasses optional query logging, and recursive bytes,
+  write-sensitive metadata, xattrs, read-only source modes, and filesystem-event
+  observation prove no source or workspace write; and
+- focused adapter/freshness/compatibility tests run before the full repository,
+  security, packaging, graph-refresh, exact-head CI, and independent-review
+  gates.
+
+P4 verification does not satisfy P5 semantic queue, service, workspace CLI,
+installation, performance, or live-cutover gates.
 
 The P1 fixture bundle is deliberately limited to synthetic contract fixtures;
 it is not claimed as the representative repository corpus required by the

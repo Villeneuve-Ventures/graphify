@@ -33,10 +33,12 @@ usage.
 - Unknown engine, distribution, extractor/cache ABI, adapter, state-schema, or
   CLI tuples are rejected before later implementations may stage or move state.
 - Older code does not write newer schemas.
-- A read-only downgrade and state migration contract will be implemented later;
-  state migration must create a new generation rather than rewrite its source.
+- Pre-workspace `graphify-out` state is neither importable nor promotable.
+  Adoption must build and certify a new generation through the exact supported
+  `0.9.16` tuple without rewriting the pre-workspace state.
 - New upstream releases enter a non-promoting whole-artifact lane. A tag alone
-  never widens support.
+  never widens support. The lane has probe metadata only: no executable adapter,
+  staging, or promotion authority.
 
 ## Artifact set
 

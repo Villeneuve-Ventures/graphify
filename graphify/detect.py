@@ -8,6 +8,7 @@ import shlex
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
+from typing import Callable, Iterator
 
 from graphify.google_workspace import (
     GOOGLE_WORKSPACE_EXTENSIONS,
@@ -15,6 +16,42 @@ from graphify.google_workspace import (
     google_workspace_enabled,
 )
 from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME, out_path
+
+
+ComparisonReader = Callable[[Path, int | None], bytes]
+# True means a singular regular file is pinned, False means the path is absent,
+# and None means the callback does not report presence. Unsafe entries must raise.
+ComparisonPinner = Callable[[Path], bool | None]
+ComparisonDirectoryLister = Callable[[Path], tuple[list[str], list[str]]]
+
+
+def _read_detector_text(
+    path: Path,
+    comparison_reader: ComparisonReader | None,
+    *,
+    max_bytes: int | None = None,
+) -> str:
+    if comparison_reader is None:
+        return path.read_text(encoding="utf-8", errors="ignore")
+    return comparison_reader(path, max_bytes).decode("utf-8", errors="ignore")
+
+
+def _comparison_file_present(
+    path: Path,
+    comparison_reader: ComparisonReader | None,
+    comparison_pinner: ComparisonPinner | None,
+) -> bool:
+    if comparison_reader is None:
+        return path.exists()
+    if comparison_pinner is not None:
+        pinned_present = comparison_pinner(path)
+        if pinned_present is not None:
+            return pinned_present
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 class FileType(str, Enum):
@@ -182,7 +219,11 @@ _PAPER_SIGNALS = [
 _PAPER_SIGNAL_THRESHOLD = 3  # need at least this many signals to call it a paper
 
 
-def _is_sensitive(path: Path) -> bool:
+def _is_sensitive(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> bool:
     """Return True if this file likely contains secrets and should be skipped."""
     # Stage 1: any PARENT directory is a known secrets dir (parts[:-1] excludes
     # the filename itself so a root-level file named "credentials" is not falsely
@@ -203,20 +244,44 @@ def _is_sensitive(path: Path) -> bool:
     # id_rsa, ...) still apply to everything regardless of extension.
     if _generic_keyword_hit(name):
         ext = path.suffix.lower()
-        is_source_code = classify_file(path) == FileType.CODE and ext not in _SECRET_PRONE_DATA_EXTS
+        is_source_code = (
+            classify_file(path, comparison_reader=comparison_reader) == FileType.CODE
+            and ext not in _SECRET_PRONE_DATA_EXTS
+        )
         return not is_source_code
     return False
 
 
-def _looks_like_paper(path: Path) -> bool:
-    """Heuristic: does this text file read like an academic paper?"""
-    try:
-        # Only scan first 3000 chars for speed
-        text = path.read_text(encoding="utf-8", errors="ignore")[:3000]
-        hits = sum(1 for pattern in _PAPER_SIGNALS if pattern.search(text))
-        return hits >= _PAPER_SIGNAL_THRESHOLD
-    except Exception:
+def _is_sensitive_without_content(path: Path) -> bool:
+    """Recognize sensitive paths without opening or pinning the candidate."""
+    if any(part in _SENSITIVE_DIRS for part in path.parts[:-1]):
+        return True
+    name = path.name
+    if any(pattern.search(name) for pattern in _SENSITIVE_PATTERNS):
+        return True
+    if not _generic_keyword_hit(name):
         return False
+    extension = path.suffix.lower()
+    return extension not in CODE_EXTENSIONS or extension in _SECRET_PRONE_DATA_EXTS
+
+
+def _looks_like_paper(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> bool:
+    """Heuristic: does this text file read like an academic paper?"""
+    if comparison_reader is None:
+        try:
+            text = _read_detector_text(path, None)[:3000]
+        except Exception:
+            return False
+    else:
+        # UTF-8 uses at most four bytes per code point, so 12,000 bytes cover
+        # the same first-3,000-character heuristic without an unbounded read.
+        text = _read_detector_text(path, comparison_reader, max_bytes=12_000)[:3000]
+    hits = sum(1 for pattern in _PAPER_SIGNALS if pattern.search(text))
+    return hits >= _PAPER_SIGNAL_THRESHOLD
 
 
 _ASSET_DIR_MARKERS = {".imageset", ".xcassets", ".appiconset", ".colorset", ".launchimage"}
@@ -360,7 +425,11 @@ def _env_command_args(args: list[str], *, allow_split: bool = True) -> list[str]
     return []
 
 
-def _shebang_interpreter(path: Path) -> str | None:
+def _shebang_interpreter(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> str | None:
     """Return the interpreter name from a shebang line.
 
     Handles forms that a naive parser misses:
@@ -375,9 +444,15 @@ def _shebang_interpreter(path: Path) -> str | None:
     Returns the basename of the resolved interpreter, or None if there is
     no shebang / the file is unreadable / parsing fails.
     """
+    if comparison_reader is None:
+        try:
+            with path.open("rb") as f:
+                first = f.read(256)
+        except OSError:
+            return None
+    else:
+        first = comparison_reader(path, 256)
     try:
-        with path.open("rb") as f:
-            first = f.read(256)
         if not first.startswith(b"#!"):
             return None
         line = first.split(b"\n")[0].decode(errors="replace")[2:].strip()
@@ -391,19 +466,27 @@ def _shebang_interpreter(path: Path) -> str | None:
                 return None
             interp = Path(env_args[0]).name
         return interp
-    except (OSError, ValueError):
+    except ValueError:
         return None
 
 
-def _shebang_file_type(path: Path) -> FileType | None:
+def _shebang_file_type(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> FileType | None:
     """Peek at the first line of an extensionless file for a shebang."""
-    interp = _shebang_interpreter(path)
+    interp = _shebang_interpreter(path, comparison_reader=comparison_reader)
     if interp in _SHEBANG_CODE_INTERPRETERS:
         return FileType.CODE
     return None
 
 
-def classify_file(path: Path) -> FileType | None:
+def classify_file(
+    path: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+) -> FileType | None:
     # Package manifests (apm.yml, pyproject.toml, go.mod, pom.xml) are parsed
     # deterministically, so route them to the AST path (CODE) rather than the LLM
     # document path — otherwise apm.yml (a .yml "document") would be LLM-extracted
@@ -416,7 +499,7 @@ def classify_file(path: Path) -> FileType | None:
         return FileType.CODE
     ext = path.suffix.lower()
     if not ext:
-        return _shebang_file_type(path)
+        return _shebang_file_type(path, comparison_reader=comparison_reader)
     if ext in CODE_EXTENSIONS:
         return FileType.CODE
     if ext in PAPER_EXTENSIONS:
@@ -428,7 +511,7 @@ def classify_file(path: Path) -> FileType | None:
         return FileType.IMAGE
     if ext in DOC_EXTENSIONS:
         # Check if it's a converted paper
-        if _looks_like_paper(path):
+        if _looks_like_paper(path, comparison_reader=comparison_reader):
             return FileType.PAPER
         return FileType.DOCUMENT
     if ext in OFFICE_EXTENSIONS:
@@ -790,7 +873,12 @@ def _find_vcs_root(start: Path) -> Path | None:
         current = parent
 
 
-def _git_info_exclude(vcs_root: Path) -> Path | None:
+def _git_info_exclude(
+    vcs_root: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
+) -> Path | None:
     """Resolve ``$GIT_DIR/info/exclude`` for the repo rooted at ``vcs_root``.
 
     ``info/exclude`` is where git records local-only, uncommitted excludes — and
@@ -803,11 +891,19 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
     """
     dot_git = vcs_root / ".git"
     git_dir: Path | None = None
-    if dot_git.is_dir():
+    if comparison_reader is not None and dot_git.is_symlink():
+        if comparison_pinner is not None:
+            comparison_pinner(dot_git)
+        _read_detector_text(dot_git, comparison_reader)
+    elif dot_git.is_dir():
         git_dir = dot_git
-    elif dot_git.is_file():
+    elif dot_git.is_file() or (
+        comparison_reader is not None and dot_git.exists()
+    ):
         try:
-            content = dot_git.read_text(encoding="utf-8", errors="ignore").strip()
+            if comparison_pinner is not None:
+                comparison_pinner(dot_git)
+            content = _read_detector_text(dot_git, comparison_reader).strip()
         except OSError:
             content = ""
         if content.startswith("gitdir:"):
@@ -818,9 +914,16 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
             # A linked worktree's gitdir holds a `commondir` file pointing at the
             # shared git dir, where info/exclude actually lives.
             commondir = gd / "commondir"
-            if commondir.exists():
+            if commondir.exists() or (
+                comparison_reader is not None and commondir.is_symlink()
+            ):
                 try:
-                    cd_raw = commondir.read_text(encoding="utf-8", errors="ignore").strip()
+                    if comparison_pinner is not None:
+                        comparison_pinner(commondir)
+                    cd_raw = _read_detector_text(
+                        commondir,
+                        comparison_reader,
+                    ).strip()
                 except OSError:
                     cd_raw = ""
                 if cd_raw:
@@ -829,10 +932,26 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
     if git_dir is None:
         return None
     exclude = git_dir / "info" / "exclude"
+    if comparison_reader is not None:
+        return (
+            exclude
+            if _comparison_file_present(
+                exclude,
+                comparison_reader,
+                comparison_pinner,
+            )
+            else None
+        )
     return exclude if exclude.is_file() else None
 
 
-def _load_dir_own_ignore(d: Path) -> list[tuple[Path, str]]:
+def _load_dir_own_ignore(
+    d: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
+    policy_paths: set[Path] | None = None,
+) -> list[tuple[Path, str]]:
     """Read .gitignore/.graphifyignore directly inside *d* (not its ancestors).
 
     Merges .gitignore and .graphifyignore for this one directory (#1363):
@@ -851,15 +970,30 @@ def _load_dir_own_ignore(d: Path) -> list[tuple[Path, str]]:
     patterns: list[tuple[Path, str]] = []
     for fname in (".gitignore", ".graphifyignore"):
         ignore_file = d / fname
-        if ignore_file.exists():
-            for raw in ignore_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if _comparison_file_present(
+            ignore_file,
+            comparison_reader,
+            comparison_pinner,
+        ):
+            if policy_paths is not None:
+                policy_paths.add(ignore_file)
+            for raw in _read_detector_text(
+                ignore_file,
+                comparison_reader,
+            ).splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
                     patterns.append((d, line))
     return patterns
 
 
-def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
+def _load_graphifyignore(
+    root: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
+    policy_paths: set[Path] | None = None,
+) -> list[tuple[Path, str]]:
     """Read .graphifyignore files and return (anchor_dir, pattern) pairs.
 
     Patterns are returned outer-first so that inner (closer) rules are
@@ -892,15 +1026,33 @@ def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
     # per-directory .gitignore/.graphifyignore — so load it first (lowest priority
     # under last-match-wins) anchored at the VCS root, letting a nearer `!`
     # re-include still override it (#1810).
-    info_exclude = _git_info_exclude(ceiling)
+    info_exclude = _git_info_exclude(
+        ceiling,
+        comparison_reader=comparison_reader,
+        comparison_pinner=comparison_pinner,
+    )
     if info_exclude is not None:
-        for raw in info_exclude.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if policy_paths is not None:
+            policy_paths.add(info_exclude)
+        if comparison_pinner is not None:
+            comparison_pinner(info_exclude)
+        for raw in _read_detector_text(
+            info_exclude,
+            comparison_reader,
+        ).splitlines():
             line = _parse_gitignore_line(raw)
             if line:
                 patterns.append((ceiling, line))
 
     for d in dirs:
-        patterns.extend(_load_dir_own_ignore(d))
+        patterns.extend(
+            _load_dir_own_ignore(
+                d,
+                comparison_reader=comparison_reader,
+                comparison_pinner=comparison_pinner,
+                policy_paths=policy_paths,
+            )
+        )
     return patterns
 
 
@@ -991,7 +1143,13 @@ def _is_ignored(
     return _eval(path)
 
 
-def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
+def _load_graphifyinclude(
+    root: Path,
+    *,
+    comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
+    policy_paths: set[Path] | None = None,
+) -> list[tuple[Path, str]]:
     """Read .graphifyinclude allowlist patterns from root and ancestors.
 
     Include patterns opt matching hidden files/dirs into traversal. Sensitive
@@ -1013,8 +1171,17 @@ def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
     patterns: list[tuple[Path, str]] = []
     for d in dirs:
         include_file = d / ".graphifyinclude"
-        if include_file.exists():
-            for raw in include_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if _comparison_file_present(
+            include_file,
+            comparison_reader,
+            comparison_pinner,
+        ):
+            if policy_paths is not None:
+                policy_paths.add(include_file)
+            for raw in _read_detector_text(
+                include_file,
+                comparison_reader,
+            ).splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
                     patterns.append((d, line))
@@ -1127,8 +1294,73 @@ def _resolves_under_root(path: Path, root: Path) -> bool:
     return True
 
 
-def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None) -> dict:
-    root = root.resolve()
+def _comparison_walk(
+    root: Path,
+    *,
+    onerror: Callable[[OSError], None],
+    directory_lister: ComparisonDirectoryLister,
+) -> Iterator[tuple[str, list[str], list[str]]]:
+    """Walk top-down from listings bound to caller-held directory authority."""
+
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            dirnames, filenames = directory_lister(directory)
+        except OSError as exc:
+            onerror(exc)
+            continue
+        yield str(directory), dirnames, filenames
+        pending.extend(directory / name for name in reversed(dirnames))
+
+
+def detect(
+    root: Path,
+    *,
+    follow_symlinks: bool | None = None,
+    google_workspace: bool | None = None,
+    extra_excludes: list[str] | None = None,
+    cache_root: Path | None = None,
+    read_only: bool = False,
+    comparison_reader: ComparisonReader | None = None,
+    comparison_pinner: ComparisonPinner | None = None,
+    comparison_directory_lister: ComparisonDirectoryLister | None = None,
+) -> dict:
+    """Detect supported corpus files.
+
+    ``read_only`` is the workspace comparison seam. It requires a caller-owned
+    ``comparison_reader`` for every classifier and policy content probe.
+    ``comparison_pinner`` can bind each enumerated input before those probes
+    and can report ``True`` for a singular regular file, ``False`` for absence,
+    or ``None`` when it does not report presence; unsafe inputs must raise,
+    while ``comparison_directory_lister`` supplies descriptor-bound listings.
+    Read-only detection bypasses the persistent stat/word-count cache and never
+    materializes Office or Google Workspace conversion sidecars. Office source
+    files remain in the returned inventory; Google Workspace shortcuts are
+    reported as unsupported for certified comparison because their authoritative
+    remote content cannot be observed without export/network side effects.
+
+    When ordinary detection is given ``cache_root``, conversion sidecars follow
+    the other detector outputs into that root instead of appearing in the source
+    checkout.
+    """
+    if read_only and comparison_reader is None:
+        raise ValueError("read_only detection requires a comparison reader")
+    if comparison_reader is not None and not read_only:
+        raise ValueError("comparison_reader is only valid for read_only detection")
+    if comparison_pinner is not None and (not read_only or comparison_reader is None):
+        raise ValueError(
+            "comparison_pinner requires read_only detection and a comparison reader"
+        )
+    if comparison_directory_lister is not None and comparison_pinner is None:
+        raise ValueError("comparison_directory_lister requires a comparison pinner")
+    if comparison_directory_lister is not None and follow_symlinks:
+        raise ValueError("comparison directory listings do not follow symlinks")
+    root = (
+        Path(os.path.abspath(os.fspath(root)))
+        if read_only
+        else root.resolve()
+    )
     if follow_symlinks is None:
         follow_symlinks = False
     google_workspace = google_workspace_enabled() if google_workspace is None else google_workspace
@@ -1146,12 +1378,23 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         # PDFs/docx aren't re-parsed on every run just to size the corpus (#1656).
         # cache_root (when given, e.g. from `extract --out`) keeps this cache out
         # of the scanned corpus (#1747).
+        if read_only:
+            # Certified comparison hashes each selected file exactly once through
+            # its descriptor-safe observer. Corpus sizing is irrelevant there,
+            # and counting here would introduce an extra content read.
+            return 0
         from graphify import cache as _cache
         return _cache.cached_word_count(path, root, count_words, cache_root=cache_root)
 
     skipped_sensitive: list[str] = []
     unclassified: list[str] = []
-    ignore_patterns = _load_graphifyignore(root)
+    comparison_policy_paths: set[Path] | None = set() if read_only else None
+    ignore_patterns = _load_graphifyignore(
+        root,
+        comparison_reader=comparison_reader,
+        comparison_pinner=comparison_pinner,
+        policy_paths=comparison_policy_paths,
+    )
     ignore_cache: dict[Path, bool] = {}  # shared across all _is_ignored calls in this scan
     # CLI --exclude patterns are anchored at the scan root and appended last
     # so they win over any .graphifyignore/.gitignore rules (#947).
@@ -1160,12 +1403,20 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             line = _parse_gitignore_line(pat)
             if line:
                 ignore_patterns.append((root, line))
-    include_patterns = _load_graphifyinclude(root)
+    include_patterns = _load_graphifyinclude(
+        root,
+        comparison_reader=comparison_reader,
+        comparison_pinner=comparison_pinner,
+        policy_paths=comparison_policy_paths,
+    )
 
-    # Always include graphify-out/memory/ - query results filed back into the graph
+    # Ordinary detection includes graphify-out/memory/ so query results can be
+    # filed back into the graph. Certified read-only comparison deliberately
+    # excludes this pre-workspace generated state from source authority.
     memory_dir = root / GRAPHIFY_OUT / "memory"
+    memory_present = not read_only and memory_dir.exists()
     scan_paths = [root]
-    if memory_dir.exists():
+    if memory_present:
         scan_paths.append(memory_dir)
 
     seen: set[Path] = set()
@@ -1190,10 +1441,17 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         )
 
     for scan_root in scan_paths:
-        in_memory_tree = memory_dir.exists() and str(scan_root).startswith(str(memory_dir))
-        for dirpath, dirnames, filenames in os.walk(
-            scan_root, followlinks=follow_symlinks, onerror=_on_walk_error
-        ):
+        in_memory_tree = memory_present and str(scan_root).startswith(str(memory_dir))
+        walker = (
+            os.walk(scan_root, followlinks=follow_symlinks, onerror=_on_walk_error)
+            if comparison_directory_lister is None
+            else _comparison_walk(
+                scan_root,
+                onerror=_on_walk_error,
+                directory_lister=comparison_directory_lister,
+            )
+        )
+        for dirpath, dirnames, filenames in walker:
             dp = Path(dirpath)
             if follow_symlinks and os.path.islink(dirpath):
                 real = os.path.realpath(dirpath)
@@ -1209,7 +1467,14 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                 # Load it now, before pruning dp's children, so a nested ignore
                 # file governs its own subtree the same way git honors it (#1206).
                 if dp != root:
-                    ignore_patterns.extend(_load_dir_own_ignore(dp))
+                    ignore_patterns.extend(
+                        _load_dir_own_ignore(
+                            dp,
+                            comparison_reader=comparison_reader,
+                            comparison_pinner=comparison_pinner,
+                            policy_paths=comparison_policy_paths,
+                        )
+                    )
                 # Prune noise dirs in-place so os.walk never descends into them.
                 # Dot dirs are allowed — users often want .github/, .claude/, etc.
                 # Framework caches (.next, .nuxt, …) are caught by _is_noise_dir.
@@ -1246,24 +1511,31 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
 
     all_files.sort(key=lambda p: str(p))
 
-    converted_dir = root / GRAPHIFY_OUT / "converted"
+    output_root = root if cache_root is None else Path(cache_root).resolve()
+    converted_dir = output_root / GRAPHIFY_OUT / "converted"
+    comparison_unsupported: list[str] = []
 
     for p in all_files:
         # For memory dir files, skip hidden/noise filtering
-        in_memory = memory_dir.exists() and str(p).startswith(str(memory_dir))
+        in_memory = memory_present and str(p).startswith(str(memory_dir))
         if not in_memory:
             # Skip files inside our own converted/ dir (avoid re-processing sidecars)
             if str(p).startswith(str(converted_dir)):
                 continue
         if not in_memory and _is_ignored(p, root, ignore_patterns, _cache=ignore_cache):
             continue
-        if not _resolves_under_root(p, root):
-            skipped_sensitive.append(str(p) + " [symlink target outside scan root]")
-            continue
-        if _is_sensitive(p):
+        if comparison_pinner is not None and _is_sensitive_without_content(p):
             skipped_sensitive.append(str(p))
             continue
-        ftype = classify_file(p)
+        if comparison_pinner is not None:
+            comparison_pinner(p)
+        if comparison_pinner is None and not _resolves_under_root(p, root):
+            skipped_sensitive.append(str(p) + " [symlink target outside scan root]")
+            continue
+        if _is_sensitive(p, comparison_reader=comparison_reader):
+            skipped_sensitive.append(str(p))
+            continue
+        ftype = classify_file(p, comparison_reader=comparison_reader)
         if not ftype:
             # Considered but unclassifiable: an extension not in any supported set,
             # or an extensionless, non-shebang file (Dockerfile, Gemfile, Makefile,
@@ -1273,6 +1545,10 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             continue
         if ftype:
             if p.suffix.lower() in GOOGLE_WORKSPACE_EXTENSIONS:
+                if read_only:
+                    files[ftype].append(str(p))
+                    comparison_unsupported.append(str(p))
+                    continue
                 if not google_workspace:
                     skipped_sensitive.append(
                         str(p)
@@ -1295,6 +1571,10 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                 continue
             # Office files: convert to markdown sidecar so subagents can read them
             if p.suffix.lower() in OFFICE_EXTENSIONS:
+                if read_only:
+                    files[ftype].append(str(p))
+                    total_words += _wc(p)
+                    continue
                 md_path = convert_office_file(p, converted_dir)
                 if md_path:
                     if _is_ignored(md_path, root, ignore_patterns, _cache=ignore_cache):
@@ -1329,7 +1609,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             f"Consider running on a subfolder."
         )
 
-    return {
+    result = {
         "files": {k.value: v for k, v in files.items()},
         "total_files": total_files,
         "total_words": total_words,
@@ -1338,9 +1618,15 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         "skipped_sensitive": skipped_sensitive,
         "unclassified": sorted(unclassified),
         "walk_errors": walk_errors,
+        "comparison_unsupported": sorted(comparison_unsupported),
         "graphifyignore_patterns": len(ignore_patterns),
         "scan_root": str(root.resolve()),
     }
+    if read_only:
+        result["comparison_policy_paths"] = sorted(
+            str(path) for path in (comparison_policy_paths or ())
+        )
+    return result
 
 
 def _os_path(path: Path) -> str:
@@ -1549,6 +1835,7 @@ def detect_incremental(
     google_workspace: bool | None = None,
     kind: str = "semantic",
     extra_excludes: list[str] | None = None,
+    cache_root: Path | None = None,
 ) -> dict:
     """Like detect(), but returns only new or modified files since the last run.
 
@@ -1567,12 +1854,19 @@ def detect_incremental(
     Backwards compatible with legacy manifests storing plain float mtime values
     or {mtime, hash} dicts (treated as ast_hash only; semantic_hash = miss).
 
-    The ``follow_symlinks`` flag is forwarded to :func:`detect` so in-root
-    symlinked sub-trees are scanned consistently between full and incremental
-    runs. ``None`` (default) does not follow symlinked directories; callers must
-    opt in explicitly, and resolved targets outside the scan root are skipped.
+    ``follow_symlinks`` and ``cache_root`` are forwarded to :func:`detect` so
+    in-root symlinked sub-trees and external conversion/cache outputs remain
+    consistent between full and incremental runs. ``None`` (default) does not
+    follow symlinked directories; callers must opt in explicitly, and resolved
+    targets outside the scan root are skipped.
     """
-    full = detect(root, follow_symlinks=follow_symlinks, google_workspace=google_workspace, extra_excludes=extra_excludes)
+    full = detect(
+        root,
+        follow_symlinks=follow_symlinks,
+        google_workspace=google_workspace,
+        extra_excludes=extra_excludes,
+        cache_root=cache_root,
+    )
     # Pass ``root`` so a manifest written with relative keys (post-#777) is
     # re-anchored to the absolute form the rest of this function compares
     # against. Legacy absolute-keyed manifests pass through unchanged.

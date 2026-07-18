@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -50,6 +51,10 @@ class SourceAmbiguousError(IdentityError):
 
 class SourceDiscoveryError(IdentityError):
     code = "source_discovery_error"
+
+
+class SourceDiscoveryTimeout(SourceDiscoveryError):
+    code = "source_discovery_timeout"
 
 
 class IdentityAction(str, Enum):
@@ -131,17 +136,40 @@ class SourceIdentity:
         }
 
 
-def _git(root: Path, *arguments: str) -> str:
+def _remaining_timeout_seconds(deadline_ns: int | None) -> float | None:
+    if deadline_ns is None:
+        return None
+    remaining_ns = deadline_ns - time.monotonic_ns()
+    if remaining_ns <= 0:
+        raise SourceDiscoveryTimeout("source discovery deadline expired")
+    return remaining_ns / 1_000_000_000
+
+
+def _check_deadline(deadline_ns: int | None) -> None:
+    _remaining_timeout_seconds(deadline_ns)
+
+
+def _git(
+    root: Path,
+    *arguments: str,
+    deadline_ns: int | None = None,
+) -> str:
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
-    result = subprocess.run(
-        ["git", *arguments],
-        cwd=root,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    command = ["git", *arguments]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_remaining_timeout_seconds(deadline_ns),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SourceDiscoveryTimeout("source discovery deadline expired") from exc
+    _check_deadline(deadline_ns)
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "git command failed"
         raise SourceDiscoveryError(detail)
@@ -178,15 +206,33 @@ def _normalize_remote(raw: str) -> str:
     return urlunsplit((parsed.scheme.lower(), f"{userinfo}{host}", path, "", ""))
 
 
-def _resolve_git_path(root: Path, value: str) -> Path:
+def _resolve_git_path(
+    root: Path,
+    value: str,
+    *,
+    deadline_ns: int | None = None,
+) -> Path:
+    _check_deadline(deadline_ns)
     path = Path(value)
     if not path.is_absolute():
         path = root / path
-    return path.resolve(strict=True)
+    resolved = path.resolve(strict=True)
+    _check_deadline(deadline_ns)
+    return resolved
 
 
-def _read_source_regular(path: Path) -> bytes:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+def _read_source_regular(
+    path: Path,
+    *,
+    deadline_ns: int | None = None,
+) -> bytes:
+    _check_deadline(deadline_ns)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
@@ -199,6 +245,7 @@ def _read_source_regular(path: Path) -> bytes:
             )
         chunks: list[bytes] = []
         while True:
+            _check_deadline(deadline_ns)
             try:
                 chunk = os.read(descriptor, 1024 * 1024)
             except InterruptedError:
@@ -206,6 +253,7 @@ def _read_source_regular(path: Path) -> bytes:
             if not chunk:
                 break
             chunks.append(chunk)
+        _check_deadline(deadline_ns)
         after = os.fstat(descriptor)
     finally:
         os.close(descriptor)
@@ -221,30 +269,49 @@ def _read_source_regular(path: Path) -> bytes:
     return b"".join(chunks)
 
 
-def discover_source(source_root: Path) -> SourceIdentity:
+def discover_source(
+    source_root: Path,
+    *,
+    deadline_ns: int | None = None,
+) -> SourceIdentity:
     """Discover source identity without mutating the checkout or Git metadata."""
 
+    _check_deadline(deadline_ns)
     root = source_root.resolve(strict=True)
+    _check_deadline(deadline_ns)
     if not root.is_dir():
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
-    top_level = Path(_git(root, "rev-parse", "--show-toplevel")).resolve(strict=True)
+    top_level = Path(
+        _git(root, "rev-parse", "--show-toplevel", deadline_ns=deadline_ns)
+    ).resolve(strict=True)
+    _check_deadline(deadline_ns)
     if top_level != root:
         raise SourceDiscoveryError(f"source root must be the Git top level: {top_level}")
 
     config_path = root / ".graphify" / "workspace.toml"
-    config_bytes = _read_source_regular(config_path)
+    config_bytes = _read_source_regular(config_path, deadline_ns=deadline_ns)
     try:
         config = WorkspaceConfig.from_toml(config_bytes)
     except ContractError as exc:
         raise SourceDiscoveryError(f"invalid workspace config: {exc}") from exc
     repo_uuid = str(config.to_dict()["repo_uuid"])
 
-    git_common_dir = _resolve_git_path(root, _git(root, "rev-parse", "--git-common-dir"))
-    git_dir = _resolve_git_path(root, _git(root, "rev-parse", "--git-dir"))
+    git_common_dir = _resolve_git_path(
+        root,
+        _git(root, "rev-parse", "--git-common-dir", deadline_ns=deadline_ns),
+        deadline_ns=deadline_ns,
+    )
+    git_dir = _resolve_git_path(
+        root,
+        _git(root, "rev-parse", "--git-dir", deadline_ns=deadline_ns),
+        deadline_ns=deadline_ns,
+    )
+    _check_deadline(deadline_ns)
     details = git_common_dir.stat()
+    _check_deadline(deadline_ns)
     worktree_id = "main" if git_dir == git_common_dir else git_dir.name
 
-    remote_output = _git(root, "remote", "-v")
+    remote_output = _git(root, "remote", "-v", deadline_ns=deadline_ns)
     remote_pairs: dict[str, str] = {}
     for line in remote_output.splitlines():
         fields = line.split()
@@ -275,9 +342,20 @@ def discover_source(source_root: Path) -> SourceIdentity:
         "remote_aliases": remote_aliases,
         "worktree_id": worktree_id,
     }
-    head = _git(root, "rev-parse", "HEAD")
+    head = _git(root, "rev-parse", "HEAD", deadline_ns=deadline_ns)
     roots = tuple(
-        sorted(filter(None, _git(root, "rev-list", "--max-parents=0", "HEAD").splitlines()))
+        sorted(
+            filter(
+                None,
+                _git(
+                    root,
+                    "rev-list",
+                    "--max-parents=0",
+                    "HEAD",
+                    deadline_ns=deadline_ns,
+                ).splitlines(),
+            )
+        )
     )
     if not roots:
         raise SourceDiscoveryError("source history has no root commit")
@@ -315,6 +393,7 @@ __all__ = [
     "OperatorAuthorization",
     "SourceAmbiguousError",
     "SourceDiscoveryError",
+    "SourceDiscoveryTimeout",
     "SourceIdentity",
     "UUIDCollisionError",
     "discover_source",

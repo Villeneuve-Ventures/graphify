@@ -65,8 +65,11 @@ A reader loads the pointer, opens the already-created coordination object
 read-only, takes a shared kernel advisory lock, reloads the exact pointer, and
 verifies the receipt and payload. Hidden pending-recovery intent does not mask
 the complete visible pointer from readers; a reader whose pointer changed
-before its lock stabilized retries against the new visible generation. It
-acquires no writer lease and calls no mutating persistence primitive.
+before its lock stabilized retries against the new visible generation. This
+read exception applies only after the journal durably records the exact visible
+pointer revision; a visible-pointer-only crash boundary still fails closed. A
+residual pending intent remains a mutation barrier until fenced recovery. The
+reader acquires no writer lease and calls no mutating persistence primitive.
 
 GC requires a live fenced `GC` operation and an explicit `GcProtection` set for
 migration, rollback, lease, fixture, proof, and rollback-artifact reachability

@@ -4206,6 +4206,12 @@ def _extract_parallel(
                     per_file[idx] = result
                 except Exception as exc:
                     pos = futures[future]
+                    idx = work_items[pos][0]
+                    per_file[idx] = {
+                        "nodes": [],
+                        "edges": [],
+                        "error": f"parallel worker failed: {type(exc).__name__}",
+                    }
                     print(
                         f"  warning: worker failed for {work_items[pos][1]}: {exc}",
                         file=sys.stderr, flush=True,
@@ -4290,6 +4296,7 @@ def extract(
     paths: list[Path],
     cache_root: Path | None = None,
     *,
+    source_root: Path | None = None,
     parallel: bool = True,
     max_workers: int | None = None,
 ) -> dict:
@@ -4300,11 +4307,17 @@ def extract(
     2. Cross-file import resolution: turns file-level imports into
        class-level INFERRED edges (DigestAuth --uses--> Response)
 
+    The returned ``errors`` list preserves per-file extractor failures so
+    certifying callers can reject incomplete output instead of relying on
+    console warnings.
+
     Args:
         paths: files to extract from
         cache_root: explicit root for graphify-out/cache/ (overrides the
             inferred common path prefix). Pass Path('.') when running on a
             subdirectory so the cache stays at ./graphify-out/cache/.
+        source_root: optional corpus anchor for cache keys, node ids, symbol
+            resolution, and XAML project scans when ``cache_root`` is external.
         parallel: if True and there are >= _PARALLEL_THRESHOLD uncached files,
             use ProcessPoolExecutor for multi-core extraction.
         max_workers: max subprocess count. Defaults to cpu_count (or the
@@ -4334,9 +4347,13 @@ def extract(
             root = Path(*paths[0].parts[:common_len]) if common_len else Path(".")
     except Exception:
         root = Path(".")
-    if cache_root is not None:
+    error_root = source_root if source_root is not None else root
+    if source_root is not None:
+        root = source_root
+    elif cache_root is not None:
         root = cache_root
     root = root.resolve()
+    error_root = Path(os.path.abspath(os.fspath(error_root)))
 
     # #1774: the cache is an OUTPUT, so when no explicit cache_root is given it is
     # written under the current working directory — never `root` (the inferred
@@ -4454,7 +4471,18 @@ def extract(
     all_nodes: list[dict] = []
     all_edges: list[dict] = []
     all_raw_calls: list[dict] = []
-    for result in per_file:
+    source_errors: list[dict[str, str]] = []
+    for path, maybe_result in zip(paths, per_file):
+        result = maybe_result or {"nodes": [], "edges": []}
+        error = result.get("error")
+        if error:
+            absolute_path = Path(os.path.abspath(os.fspath(path)))
+            try:
+                error_path = absolute_path.relative_to(error_root).as_posix()
+            except ValueError:
+                path_digest = hashlib.sha256(os.fsencode(absolute_path)).hexdigest()
+                error_path = f"@external/{path_digest}/{absolute_path.name}"
+            source_errors.append({"path": error_path, "error": str(error)})
         all_nodes.extend(result.get("nodes", []))
         all_edges.extend(result.get("edges", []))
         all_raw_calls.extend(result.get("raw_calls", []))
@@ -4969,6 +4997,7 @@ def extract(
     return {
         "nodes": all_nodes,
         "edges": all_edges,
+        "errors": source_errors,
         "input_tokens": 0,
         "output_tokens": 0,
     }

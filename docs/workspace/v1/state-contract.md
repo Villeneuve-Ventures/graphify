@@ -132,4 +132,6 @@ detector, receipt, and payload hashes and require two stable inventory passes.
 This is an observation-based contract. It does not claim an atomic whole-tree
 snapshot, strict source linearizability against non-cooperative writers,
 detection of an ABA edit wholly between observations, or coverage of changes
-after the documented release boundary.
+after completion of the post-query source observation. That completion is the
+source release-observation boundary; later registry, pointer, receipt, and
+release checks do not extend source linearizability.

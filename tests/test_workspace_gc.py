@@ -29,6 +29,8 @@ from graphify.workspace.persistence import (
 from graphify.workspace.pointers import PointerCAS, PointerStore
 
 from tests.workspace_p3_helpers import (
+    COMPATIBILITY_MANIFEST,
+    COMPATIBILITY_SHA256,
     REPO_UUID,
     START,
     acquire,
@@ -153,6 +155,7 @@ def _runtime(tmp_path: Path):
         harness.state_root,
         harness.leases,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     receipts = {}
@@ -176,7 +179,7 @@ def _runtime(tmp_path: Path):
             observation_manifest_sha256="2" * 64,
             queue_watermark=0,
             semantic_completeness="not_required",
-            compatibility_sha256="3" * 64,
+            compatibility_sha256=COMPATIBILITY_SHA256,
             validations=("payload_manifest", "coordination_lock_precreated"),
         )
         receipts[generation_id] = generations.certify(
@@ -194,6 +197,7 @@ def _runtime(tmp_path: Path):
         harness.leases,
         generations,
         journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
     current = receipts["gen-current"]

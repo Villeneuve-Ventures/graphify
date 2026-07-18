@@ -1,7 +1,9 @@
 import os
+import sys
 import unicodedata
 from pathlib import Path
 from graphify.detect import classify_file, count_words, detect, detect_incremental, save_manifest, FileType, _looks_like_paper, _is_ignored, _load_graphifyignore, _is_sensitive
+from graphify.detect import _comparison_walk
 from graphify import detect as detect_mod
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -52,6 +54,38 @@ def test_detect_finds_fixtures():
     assert result["total_files"] >= 2
     assert "code" in result["files"]
     assert "document" in result["files"]
+
+
+def test_detect_keeps_graphify_memory_in_ordinary_scans(tmp_path):
+    memory = tmp_path / "graphify-out" / "memory"
+    memory.mkdir(parents=True)
+    remembered = memory / "prior-query.py"
+    remembered.write_text("remembered = True\n", encoding="utf-8")
+
+    result = detect(tmp_path)
+
+    assert str(remembered) in result["files"]["code"]
+
+
+def test_comparison_walk_handles_logical_depth_without_python_recursion():
+    root = Path("/logical-root")
+    depth = sys.getrecursionlimit() + 50
+    errors: list[OSError] = []
+
+    def directory_lister(directory: Path) -> tuple[list[str], list[str]]:
+        current_depth = len(directory.parts) - len(root.parts)
+        return (["child"] if current_depth < depth else []), []
+
+    walked = list(
+        _comparison_walk(
+            root,
+            onerror=errors.append,
+            directory_lister=directory_lister,
+        )
+    )
+
+    assert len(walked) == depth + 1
+    assert errors == []
 
 def test_detect_warns_small_corpus():
     result = detect(FIXTURES)
