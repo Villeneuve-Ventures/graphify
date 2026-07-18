@@ -288,6 +288,31 @@ def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path:
     assert _tree_bytes(source) == before
 
 
+def test_0916_structural_build_rejects_unsupported_remote_comparison(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / "remote.gdoc").write_bytes(b"\x00not-json\xff")
+    before = _tree_bytes(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(
+        ObservationUnsupported,
+        match="Google Workspace shortcuts require an unsupported remote comparison",
+    ):
+        adapter.build_structural(source, output_root=output)
+
+    assert list(output.iterdir()) == []
+    assert _tree_bytes(source) == before
+
+
 def test_0916_structural_build_rejects_output_inside_source_checkout(
     tmp_path: Path,
 ) -> None:
@@ -1575,7 +1600,7 @@ def test_observer_rechecks_path_before_reading_when_no_follow_is_unavailable(
     assert reads == 0
 
 
-@pytest.mark.parametrize("unsafe_name", ["script", "notes.md", ".gitignore"])
+@pytest.mark.parametrize("unsafe_name", ["script", "token", "notes.md", ".gitignore"])
 def test_read_only_observation_rejects_classifier_inputs_without_blocking(
     tmp_path: Path,
     unsafe_name: str,
@@ -1676,6 +1701,54 @@ def test_read_only_observation_skips_sensitive_unsafe_inputs_before_pinning(
     observation = adapter.observe(source)
 
     assert {entry.path for entry in observation.entries} == {"app.py"}
+
+
+def test_read_only_observation_classifies_extensionless_keyword_shebang_source(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    script = source / "token"
+    script.write_text(
+        "#!/usr/bin/env python3\nVALUE = 1\n",
+        encoding="utf-8",
+    )
+    _init_git_repo(source, "token")
+    before = _tree_bytes(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    ordinary = detect(source)
+    observation = adapter.observe(source)
+
+    assert ordinary["files"]["code"] == [str(script)]
+    assert {entry.path for entry in observation.entries} == {"token"}
+    assert _tree_bytes(source) == before
+
+
+def test_read_only_observation_skips_extensionless_keyword_non_shebang(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    sensitive = source / "token"
+    sensitive.write_text("synthetic credential fixture\n", encoding="utf-8")
+    _init_git_repo(source, "app.py", "token")
+    before = _tree_bytes(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    ordinary = detect(source)
+    observation = adapter.observe(source)
+
+    assert ordinary["skipped_sensitive"] == [str(sensitive)]
+    assert {entry.path for entry in observation.entries} == {"app.py"}
+    assert _tree_bytes(source) == before
 
 
 @pytest.mark.parametrize(
