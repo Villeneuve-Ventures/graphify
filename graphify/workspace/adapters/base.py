@@ -158,6 +158,8 @@ class QueryRequest:
         if any(not isinstance(item, str) for item in context_filters):
             raise QueryRejected("context filters must be a sequence of strings")
         object.__setattr__(self, "context_filters", context_filters)
+        if not isinstance(self.question, str):
+            raise QueryRejected("question must be a string")
         if not self.question or self.question.strip() != self.question:
             raise QueryRejected("question must be non-empty and trimmed")
         if len(self.question.encode("utf-8")) > _MAX_QUERY_QUESTION_BYTES:

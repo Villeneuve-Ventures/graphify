@@ -19,6 +19,8 @@ from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME, out_path
 
 
 ComparisonReader = Callable[[Path, int | None], bytes]
+# True means a singular regular file is pinned, False means the path is absent,
+# and None means the callback does not report presence. Unsafe entries must raise.
 ComparisonPinner = Callable[[Path], bool | None]
 ComparisonDirectoryLister = Callable[[Path], tuple[list[str], list[str]]]
 
@@ -32,6 +34,24 @@ def _read_detector_text(
     if comparison_reader is None:
         return path.read_text(encoding="utf-8", errors="ignore")
     return comparison_reader(path, max_bytes).decode("utf-8", errors="ignore")
+
+
+def _comparison_file_present(
+    path: Path,
+    comparison_reader: ComparisonReader | None,
+    comparison_pinner: ComparisonPinner | None,
+) -> bool:
+    if comparison_reader is None:
+        return path.exists()
+    if comparison_pinner is not None:
+        pinned_present = comparison_pinner(path)
+        if pinned_present is not None:
+            return pinned_present
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 class FileType(str, Enum):
@@ -900,11 +920,15 @@ def _git_info_exclude(
         return None
     exclude = git_dir / "info" / "exclude"
     if comparison_reader is not None:
-        if comparison_pinner is not None:
-            pinned_present = comparison_pinner(exclude)
-            if pinned_present is not None:
-                return exclude if pinned_present else None
-        return exclude if exclude.exists() or exclude.is_symlink() else None
+        return (
+            exclude
+            if _comparison_file_present(
+                exclude,
+                comparison_reader,
+                comparison_pinner,
+            )
+            else None
+        )
     return exclude if exclude.is_file() else None
 
 
@@ -933,13 +957,13 @@ def _load_dir_own_ignore(
     patterns: list[tuple[Path, str]] = []
     for fname in (".gitignore", ".graphifyignore"):
         ignore_file = d / fname
-        if ignore_file.exists() or (
-            comparison_reader is not None and ignore_file.is_symlink()
+        if _comparison_file_present(
+            ignore_file,
+            comparison_reader,
+            comparison_pinner,
         ):
             if policy_paths is not None:
                 policy_paths.add(ignore_file)
-            if comparison_pinner is not None:
-                comparison_pinner(ignore_file)
             for raw in _read_detector_text(
                 ignore_file,
                 comparison_reader,
@@ -1134,13 +1158,13 @@ def _load_graphifyinclude(
     patterns: list[tuple[Path, str]] = []
     for d in dirs:
         include_file = d / ".graphifyinclude"
-        if include_file.exists() or (
-            comparison_reader is not None and include_file.is_symlink()
+        if _comparison_file_present(
+            include_file,
+            comparison_reader,
+            comparison_pinner,
         ):
             if policy_paths is not None:
                 policy_paths.add(include_file)
-            if comparison_pinner is not None:
-                comparison_pinner(include_file)
             for raw in _read_detector_text(
                 include_file,
                 comparison_reader,
@@ -1294,7 +1318,8 @@ def detect(
     ``read_only`` is the workspace comparison seam. It requires a caller-owned
     ``comparison_reader`` for every classifier and policy content probe.
     ``comparison_pinner`` can bind each enumerated input before those probes
-    and can report whether the pinned input is a singular regular file,
+    and can report ``True`` for a singular regular file, ``False`` for absence,
+    or ``None`` when it does not report presence; unsafe inputs must raise,
     while ``comparison_directory_lister`` supplies descriptor-bound listings.
     Read-only detection bypasses the persistent stat/word-count cache and never
     materializes Office or Google Workspace conversion sidecars. Office source
@@ -1412,9 +1437,6 @@ def detect(
         )
         for dirpath, dirnames, filenames in walker:
             dp = Path(dirpath)
-            if comparison_pinner is not None:
-                for filename in filenames:
-                    comparison_pinner(dp / filename)
             if follow_symlinks and os.path.islink(dirpath):
                 real = os.path.realpath(dirpath)
                 parent_real = os.path.realpath(os.path.dirname(dirpath))
@@ -1486,7 +1508,9 @@ def detect(
                 continue
         if not in_memory and _is_ignored(p, root, ignore_patterns, _cache=ignore_cache):
             continue
-        if not _resolves_under_root(p, root):
+        if comparison_pinner is not None:
+            comparison_pinner(p)
+        if comparison_pinner is None and not _resolves_under_root(p, root):
             skipped_sensitive.append(str(p) + " [symlink target outside scan root]")
             continue
         if _is_sensitive(p, comparison_reader=comparison_reader):

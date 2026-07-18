@@ -207,6 +207,12 @@ def test_query_request_rejects_non_sequence_or_non_string_context_filters(
         QueryRequest(question="bounded", context_filters=context_filters)
 
 
+@pytest.mark.parametrize("question", [None, 123, b"bounded"])
+def test_query_request_rejects_non_string_question(question: Any) -> None:
+    with pytest.raises(QueryRejected, match="question must be a string"):
+        QueryRequest(question=question)
+
+
 def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path: Path) -> None:
     source = tmp_path / "source"
     output = tmp_path / "staging"
@@ -1311,6 +1317,105 @@ def test_read_only_observation_rejects_classifier_inputs_without_blocking(
     )
 
     assert probe.returncode == 0, probe.stderr
+
+
+@pytest.mark.parametrize("unsafe_kind", ["fifo", "symlink"])
+def test_read_only_observation_skips_ignored_unsafe_inputs(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    if unsafe_kind == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("named pipes are unavailable on this platform")
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (source / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    _init_git_repo(source, "app.py", ".gitignore")
+    ignored = source / "ignored.py"
+    if unsafe_kind == "fifo":
+        os.mkfifo(ignored)
+    else:
+        external = tmp_path / "external.py"
+        external.write_text("external_secret = 1\n", encoding="utf-8")
+        ignored.symlink_to(external)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    observation = adapter.observe(source)
+
+    assert {entry.path for entry in observation.entries} == {"app.py"}
+
+
+@pytest.mark.parametrize(
+    "policy_name",
+    [".gitignore", ".graphifyignore", ".graphifyinclude"],
+)
+def test_read_only_policy_probe_pins_before_path_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy_name: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    external = tmp_path / "external-policy"
+    external.write_text("*.py\n", encoding="utf-8")
+    policy = source / policy_name
+    policy.symlink_to(external)
+    original_exists = Path.exists
+    policy_exists_calls = 0
+
+    def forbid_policy_exists(path: Path) -> bool:
+        nonlocal policy_exists_calls
+        if path == policy:
+            policy_exists_calls += 1
+            raise AssertionError("read-only policy probe followed Path.exists")
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", forbid_policy_exists)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="singular regular file"):
+        adapter.observe(source)
+
+    assert policy_exists_calls == 0
+
+
+def test_descriptor_directory_enumeration_checks_deadline_between_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.py").write_text("one = 1\n", encoding="utf-8")
+    (source / "two.py").write_text("two = 2\n", encoding="utf-8")
+    reader = adapter_module._PinnedSourceReader.open(source)
+    reader.deadline_ns = 10
+    ticks = iter((0, 10))
+    monkeypatch.setattr(
+        adapter_module.time,
+        "monotonic_ns",
+        lambda: next(ticks),
+    )
+
+    try:
+        with pytest.raises(ObservationTimeout):
+            reader.list_directory(
+                source,
+                expected=None,
+                expected_identities=None,
+            )
+    finally:
+        reader.close()
 
 
 def test_observer_rejects_detected_ancestor_swaps_without_external_read(
@@ -2431,7 +2536,7 @@ def test_0916_structural_query_rejects_payload_ancestor_swap_without_external_re
         encoding="utf-8",
     )
     external_identity = external_graph.stat()
-    original_check = adapter_module.check_graph_file_size_cap
+    original_pin = adapter_module._PinnedSourceReader.pin_regular
     original_read = adapter_module.os.read
     external_reads = 0
     swapped = False
@@ -2446,15 +2551,24 @@ def test_0916_structural_query_rejects_payload_ancestor_swap_without_external_re
             external_reads += 1
         return original_read(descriptor, size)
 
-    def check_then_swap(path: Path) -> None:
+    def pin_then_swap(
+        reader: Any,
+        path: Path,
+    ) -> Any:
         nonlocal swapped
-        original_check(path)
-        payload_parent.rename(parked)
-        payload_parent.symlink_to(external, target_is_directory=True)
-        swapped = True
+        pinned = original_pin(reader, path)
+        if path == local_graph and not swapped:
+            payload_parent.rename(parked)
+            payload_parent.symlink_to(external, target_is_directory=True)
+            swapped = True
+        return pinned
 
     monkeypatch.setattr(adapter_module.os, "read", tracked_read)
-    monkeypatch.setattr(adapter_module, "check_graph_file_size_cap", check_then_swap)
+    monkeypatch.setattr(
+        adapter_module._PinnedSourceReader,
+        "pin_regular",
+        pin_then_swap,
+    )
     adapter = select_adapter(
         SUPPORTED_COMPATIBILITY,
         intent=AdapterIntent.QUERY,
@@ -2465,6 +2579,70 @@ def test_0916_structural_query_rejects_payload_ancestor_swap_without_external_re
 
     assert swapped is True
     assert external_reads == 0
+    assert external_graph.read_text(encoding="utf-8").endswith(
+        '"label":"external-secret"}],"links":[]}\n'
+    )
+
+
+def test_0916_structural_query_does_not_path_stat_graph_after_pinning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    payload = tmp_path / "graphify-out"
+    payload.mkdir()
+    graph_path = payload / "graph.json"
+    parked = payload / "graph.parked"
+    external_graph = tmp_path / "external-graph.json"
+    graph_path.write_text(
+        '{"nodes":[{"id":"local","label":"local"}],"links":[]}\n',
+        encoding="utf-8",
+    )
+    external_graph.write_text(
+        '{"nodes":[{"id":"secret","label":"external-secret"}],"links":[]}\n',
+        encoding="utf-8",
+    )
+    original_pin = adapter_module._PinnedSourceReader.pin_regular
+    original_stat = Path.stat
+    swapped = False
+    path_stat_calls = 0
+
+    def pin_then_swap(
+        reader: Any,
+        path: Path,
+    ) -> Any:
+        nonlocal swapped
+        pinned = original_pin(reader, path)
+        if path == graph_path and not swapped:
+            graph_path.rename(parked)
+            graph_path.symlink_to(external_graph)
+            swapped = True
+        return pinned
+
+    def forbid_graph_path_stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        nonlocal path_stat_calls
+        if path == graph_path:
+            path_stat_calls += 1
+            raise AssertionError("query path-statted graph.json after pinning")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        adapter_module._PinnedSourceReader,
+        "pin_regular",
+        pin_then_swap,
+    )
+    monkeypatch.setattr(Path, "stat", forbid_graph_path_stat)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="singular regular file"):
+        adapter.query_structural(payload, QueryRequest(question="local"))
+
+    assert swapped is True
+    assert path_stat_calls == 0
     assert external_graph.read_text(encoding="utf-8").endswith(
         '"label":"external-secret"}],"links":[]}\n'
     )

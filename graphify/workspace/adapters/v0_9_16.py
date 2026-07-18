@@ -23,7 +23,7 @@ from graphify.build import build_from_json
 from graphify.detect import detect
 from graphify.export import to_json
 from graphify.extract import extract
-from graphify.security import _max_graph_file_bytes, check_graph_file_size_cap
+from graphify.security import _max_graph_file_bytes
 from graphify.workspace.contracts import CANDIDATE_DISTRIBUTION_VERSION, canonical_json_bytes
 
 from .base import (
@@ -918,8 +918,10 @@ class _PinnedSourceReader:
                     )
             discovered: list[tuple[str, os.stat_result]] = []
             try:
+                _deadline(self.deadline_ns)
                 with os.scandir(descriptor) as entries:
                     for entry in entries:
+                        _deadline(self.deadline_ns)
                         try:
                             details = entry.stat(follow_symlinks=False)
                         except FileNotFoundError as exc:
@@ -931,7 +933,9 @@ class _PinnedSourceReader:
                                 f"source entry cannot be inspected safely during enumeration: "
                                 f"{path / entry.name}: {exc}"
                             ) from exc
+                        _deadline(self.deadline_ns)
                         discovered.append((entry.name, details))
+                _deadline(self.deadline_ns)
             except OSError as exc:
                 raise ObservationUnavailable(
                     f"source directory cannot be enumerated safely: {path}: {exc}"
@@ -2146,7 +2150,6 @@ class Graphify0916Adapter:
             try:
                 root_details = reader.directory_details(root)
                 pinned_graph = reader.pin_regular(graph_path)
-                check_graph_file_size_cap(graph_path)
                 _digest, _details, payload = reader.observe(
                     graph_path,
                     collect=True,
