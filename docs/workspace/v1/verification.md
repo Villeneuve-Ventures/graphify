@@ -152,9 +152,10 @@ output remains ignored and must not widen the P1 product diff.
   `info/exclude` routing/policy reads can cross the checkout boundary;
 - structural extraction consumes only a descriptor-validated external source
   snapshot in a private build directory, publishes through a pinned empty output
-  descriptor with pre/post ancestry binding checks, normalizes staged payload
-  modes independently of caller umask, and deterministic contract bundles
-  exclude generated adapter cache trees;
+  descriptor while retaining source authority through publication, revalidates
+  source/output bindings and exact destination contents around the copy,
+  normalizes staged payload modes independently of caller umask, and deterministic
+  contract bundles exclude generated adapter cache trees;
 - query text, term work, context filters, depth, and token budgets reject above
   their workspace bounds before freshness locks are acquired;
 - deterministic schedules cover edit, create, delete, rename, replacement,

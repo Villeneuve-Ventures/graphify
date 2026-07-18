@@ -19,7 +19,7 @@ from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME, out_path
 
 
 ComparisonReader = Callable[[Path, int | None], bytes]
-ComparisonPinner = Callable[[Path], None]
+ComparisonPinner = Callable[[Path], bool | None]
 ComparisonDirectoryLister = Callable[[Path], tuple[list[str], list[str]]]
 
 
@@ -900,6 +900,10 @@ def _git_info_exclude(
         return None
     exclude = git_dir / "info" / "exclude"
     if comparison_reader is not None:
+        if comparison_pinner is not None:
+            pinned_present = comparison_pinner(exclude)
+            if pinned_present is not None:
+                return exclude if pinned_present else None
         return exclude if exclude.exists() or exclude.is_symlink() else None
     return exclude if exclude.is_file() else None
 
@@ -1289,7 +1293,8 @@ def detect(
 
     ``read_only`` is the workspace comparison seam. It requires a caller-owned
     ``comparison_reader`` for every classifier and policy content probe.
-    ``comparison_pinner`` can bind each enumerated input before those probes,
+    ``comparison_pinner`` can bind each enumerated input before those probes
+    and can report whether the pinned input is a singular regular file,
     while ``comparison_directory_lister`` supplies descriptor-bound listings.
     Read-only detection bypasses the persistent stat/word-count cache and never
     materializes Office or Google Workspace conversion sidecars. Office source

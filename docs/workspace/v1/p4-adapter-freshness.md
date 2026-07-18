@@ -56,19 +56,23 @@ installed rooted path is revalidated after hashing. The `0.9.16`
 extractor/build implementation runs only against that snapshot in an ephemeral
 private build directory. The adapter requires existing, real-directory ancestry
 for the requested output root, opens it descriptor-relative without following
-links, and keeps it pinned while copying the normalized result. Its binding is
-revalidated immediately before and after the descriptor-relative copy, so an
-ancestor replacement cannot redirect writes. The adapter persists the queryable
+links, and keeps it pinned while copying the normalized result. The source read
+authority remains open through publication, and both source and output bindings
+are revalidated immediately before and after the descriptor-relative copy. The
+destination must still be empty immediately before publication and must contain
+exactly the published `graphify-out` tree afterward, so an ancestor replacement
+or concurrent destination entry cannot redirect or contaminate writes. The
+adapter persists the queryable
 `graphify-out/graph.json` artifact there, normalizes the staging root to `0700`,
 directories to `0755`, and files to `0644`, and reports non-code dispatched
 inputs that it did not structurally extract. The snapshot preserves the
 source-relative tree, including the XAML project-resolution anchor, and both
 ephemeral trees are removed before the build returns.
 
-Detection and snapshotting retain the same pinned source authority. Every
+Detection, snapshotting, and publication retain the same pinned source authority. Every
 selected code file and its ancestor identities are recorded after detection and
 must still match before any snapshot read, so a real-directory replacement in
-that boundary fails without reading the replacement inode.
+that boundary or before publication fails without reading the replacement inode.
 
 ## `current_only` release protocol
 

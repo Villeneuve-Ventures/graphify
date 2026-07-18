@@ -1008,9 +1008,8 @@ class _PinnedReadAuthority:
     common_dir: _PinnedSourceReader | None
     git_file: Path | None
     commondir_file: Path | None
-    comparison_paths: dict[Path, _PinnedRegularPath | None] = field(
-        default_factory=dict
-    )
+    comparison_paths: dict[Path, _PinnedOptionalPath] = field(default_factory=dict)
+    comparison_readers: dict[Path, _PinnedSourceReader] = field(default_factory=dict)
     comparison_directories: dict[Path, os.stat_result] = field(default_factory=dict)
 
     @staticmethod
@@ -1029,7 +1028,7 @@ class _PinnedReadAuthority:
         common_dir: _PinnedSourceReader | None = None
         git_file: Path | None = None
         commondir_file: Path | None = None
-        comparison_paths: dict[Path, _PinnedRegularPath | None] = {}
+        comparison_paths: dict[Path, _PinnedOptionalPath] = {}
         try:
             dot_git = source_anchor / ".git"
             dot_git_details = source.entry_details(dot_git, allow_missing=True)
@@ -1163,12 +1162,18 @@ class _PinnedReadAuthority:
         size_cap: int,
         allow_missing: bool = False,
     ) -> bytes | None:
-        if reader.entry_details(path, allow_missing=allow_missing) is None:
-            return None
-        pinned = reader.pin_regular(path)
-        self.comparison_paths[self._comparison_key(path)] = pinned
+        key = self._comparison_key(path)
+        pinned = self._pin_optional_with_reader(reader, key)
+        if isinstance(pinned, _PinnedAbsentPath):
+            if allow_missing:
+                return None
+            raise ObservationUnstable(f"Git metadata input is unavailable: {path}")
+        if isinstance(pinned, _PinnedUnsafePath):
+            raise ObservationUnsupported(
+                f"Git metadata input is not a singular regular file: {path}"
+            )
         _digest, _details, payload = reader.observe(
-            path,
+            key,
             collect=True,
             size_cap=size_cap,
             expected_path=pinned,
@@ -1347,38 +1352,43 @@ class _PinnedReadAuthority:
                 filenames.append(name)
         return dirnames, filenames
 
-    def pin_comparison(self, path: Path) -> None:
-        key = self._comparison_key(path)
-        if key in self.comparison_paths:
-            return
-        reader = self._reader_for(key)
-        self._require_comparison_directory_bindings(key.parent)
-        details = reader.entry_details(key, allow_missing=True)
-        if (
-            details is None
-            or not stat.S_ISREG(details.st_mode)
-            or details.st_nlink != 1
-        ):
-            self.comparison_paths[key] = None
-            return
-        pinned = reader.pin_regular(key)
-        self._require_comparison_directory_bindings(key.parent)
-        self.comparison_paths[key] = pinned
-
-    def pin_optional_comparison(self, path: Path) -> _PinnedOptionalPath:
-        key = self._comparison_key(path)
-        if key in self.comparison_paths:
-            raise ObservationUnstable(
-                f"optional comparison input was pinned more than once: {path}"
-            )
-        reader = self._reader_for(key)
+    def _pin_optional_with_reader(
+        self,
+        reader: _PinnedSourceReader,
+        key: Path,
+    ) -> _PinnedOptionalPath:
+        pinned = self.comparison_paths.get(key)
+        if pinned is not None:
+            recorded_reader = self.comparison_readers.get(key)
+            if recorded_reader is not None and recorded_reader is not reader:
+                raise ObservationUnsupported(
+                    f"comparison input crossed pinned read authorities: {key}"
+                )
+            self.comparison_readers[key] = reader
+            if isinstance(pinned, _PinnedAbsentPath):
+                reader.require_absent(key, pinned)
+            return pinned
         self._require_comparison_directory_bindings(key.parent)
         pinned = reader.pin_optional_regular(key)
         self._require_comparison_directory_bindings(key.parent)
-        self.comparison_paths[key] = (
-            pinned if isinstance(pinned, _PinnedRegularPath) else None
-        )
+        self.comparison_paths[key] = pinned
+        self.comparison_readers[key] = reader
         return pinned
+
+    def pin_comparison(self, path: Path) -> bool:
+        key = self._comparison_key(path)
+        reader = self._reader_for(key)
+        pinned = self._pin_optional_with_reader(reader, key)
+        if isinstance(pinned, _PinnedUnsafePath):
+            raise ObservationUnsupported(
+                f"comparison input is not a singular regular file: {path}"
+            )
+        return isinstance(pinned, _PinnedRegularPath)
+
+    def pin_optional_comparison(self, path: Path) -> _PinnedOptionalPath:
+        key = self._comparison_key(path)
+        reader = self._reader_for(key)
+        return self._pin_optional_with_reader(reader, key)
 
     def require_comparison_path(self, path: Path) -> _PinnedRegularPath:
         key = self._comparison_key(path)
@@ -1387,7 +1397,13 @@ class _PinnedReadAuthority:
                 f"comparison input was not pinned during enumeration: {path}"
             )
         pinned = self.comparison_paths[key]
-        if pinned is None:
+        reader = self.comparison_readers.get(key) or self._reader_for(key)
+        if isinstance(pinned, _PinnedAbsentPath):
+            reader.require_absent(key, pinned)
+            raise ObservationUnstable(
+                f"comparison input disappeared after enumeration: {path}"
+            )
+        if isinstance(pinned, _PinnedUnsafePath):
             raise ObservationUnsupported(
                 f"comparison input is not a singular regular file: {path}"
             )
@@ -1404,7 +1420,9 @@ class _PinnedReadAuthority:
             raise ObservationUnsupported(
                 f"comparison input is not a singular regular file: {path}"
             )
-        self._reader_for(path).require_absent(path, pinned)
+        key = self._comparison_key(path)
+        reader = self.comparison_readers.get(key) or self._reader_for(key)
+        reader.require_absent(key, pinned)
         return None
 
     def observe(
@@ -1421,6 +1439,13 @@ class _PinnedReadAuthority:
             self.git_dir.require_anchor_binding()
         if self.common_dir is not None and self.common_dir is not self.git_dir:
             self.common_dir.require_anchor_binding()
+        for path, pinned in sorted(
+            self.comparison_paths.items(),
+            key=lambda item: os.fspath(item[0]),
+        ):
+            if isinstance(pinned, _PinnedAbsentPath):
+                reader = self.comparison_readers.get(path) or self._reader_for(path)
+                reader.require_absent(path, pinned)
 
     def policy_label(self, path: Path, source_root: Path) -> str:
         if path.name == "exclude" and path.parent.name == "info":
@@ -1488,14 +1513,19 @@ def _snapshot_code_files(
                 f"detected source escapes the active root: {source}"
             ) from exc
         target = snapshot_root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("xb") as handle:
-            reader.observe(
-                source,
-                chunk_consumer=handle.write,
-                expected_path=expected_path,
-            )
-        target.chmod(0o600)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as handle:
+                reader.observe(
+                    source,
+                    chunk_consumer=handle.write,
+                    expected_path=expected_path,
+                )
+            target.chmod(0o600)
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"source snapshot could not be staged safely: {source}: {exc}"
+            ) from exc
         snapshots.append(target)
     reader.require_directory_binding(root, source_details)
     reader.require_anchor_binding()
@@ -1760,6 +1790,30 @@ def _require_output_binding(output: Path, identity: tuple[int, int]) -> None:
         os.close(descriptor)
 
 
+def _require_output_contents(
+    descriptor: int,
+    expected: tuple[str, ...],
+) -> None:
+    scan_descriptor: int | None = None
+    try:
+        scan_descriptor = os.open(
+            ".",
+            _anchored_directory_flags(),
+            dir_fd=descriptor,
+        )
+        with os.scandir(scan_descriptor) as entries:
+            names = tuple(sorted(entry.name for entry in entries))
+    except OSError as exc:
+        raise ObservationUnavailable(
+            f"engine output root cannot be enumerated safely: {exc}"
+        ) from exc
+    finally:
+        if scan_descriptor is not None:
+            os.close(scan_descriptor)
+    if names != expected:
+        raise ObservationUnstable("engine output root contents changed while staging")
+
+
 def _write_all(descriptor: int, payload: bytes) -> None:
     offset = 0
     while offset < len(payload):
@@ -1975,13 +2029,13 @@ class Graphify0916Adapter:
         try:
             with tempfile.TemporaryDirectory(prefix="graphify-workspace-build-") as temporary:
                 engine_output = Path(temporary)
-                with tempfile.TemporaryDirectory(
-                    prefix=".graphify-source-",
-                    dir=engine_output,
-                ) as snapshot_temporary:
-                    snapshot_root = Path(snapshot_temporary)
-                    authority = _PinnedReadAuthority.open(policy_root)
-                    try:
+                authority = _PinnedReadAuthority.open(policy_root)
+                try:
+                    with tempfile.TemporaryDirectory(
+                        prefix=".graphify-source-",
+                        dir=engine_output,
+                    ) as snapshot_temporary:
+                        snapshot_root = Path(snapshot_temporary)
                         source_details = authority.source.directory_details(root)
                         authority.bind_comparison_directory(root, source_details)
                         authority.pin_comparison(
@@ -2036,31 +2090,38 @@ class Graphify0916Adapter:
                             source_details,
                         )
                         authority.require_bindings()
-                    finally:
-                        authority.close()
-                    extraction = extract(
-                        list(snapshot_files),
-                        cache_root=engine_output,
-                        source_root=snapshot_root,
-                    )
-                    graph = build_from_json(extraction, root=snapshot_root)
-                payload_root = engine_output / "graphify-out"
-                payload_root.mkdir(parents=True, exist_ok=True)
-                if not to_json(
-                    graph,
-                    {},
-                    str(payload_root / "graph.json"),
-                    built_at_commit="",
-                ):
-                    raise ObservationUnavailable(
-                        "structural graph artifact could not be persisted"
-                    )
-                _normalize_structural_output(engine_output)
-                _require_policy_root_binding(root, policy_root)
-                _require_output_binding(output, output_identity)
-                _publish_structural_output(engine_output, output_descriptor)
-                _require_output_binding(output, output_identity)
-                _require_policy_root_binding(root, policy_root)
+                        extraction = extract(
+                            list(snapshot_files),
+                            cache_root=engine_output,
+                            source_root=snapshot_root,
+                        )
+                        graph = build_from_json(extraction, root=snapshot_root)
+                    payload_root = engine_output / "graphify-out"
+                    payload_root.mkdir(parents=True, exist_ok=True)
+                    if not to_json(
+                        graph,
+                        {},
+                        str(payload_root / "graph.json"),
+                        built_at_commit="",
+                    ):
+                        raise ObservationUnavailable(
+                            "structural graph artifact could not be persisted"
+                        )
+                    _normalize_structural_output(engine_output)
+                    authority.source.require_directory_binding(root, source_details)
+                    authority.require_bindings()
+                    _require_policy_root_binding(root, policy_root)
+                    _require_output_binding(output, output_identity)
+                    _require_output_contents(output_descriptor, ())
+                    _publish_structural_output(engine_output, output_descriptor)
+                    _require_output_contents(output_descriptor, ("graphify-out",))
+                    _require_output_binding(output, output_identity)
+                    authority.source.require_directory_binding(root, source_details)
+                    authority.require_bindings()
+                    _require_policy_root_binding(root, policy_root)
+                    _require_output_contents(output_descriptor, ("graphify-out",))
+                finally:
+                    authority.close()
         finally:
             os.close(output_descriptor)
         return StructuralBuild(

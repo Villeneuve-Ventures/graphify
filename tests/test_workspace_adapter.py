@@ -196,6 +196,17 @@ def test_query_request_copies_context_filters_before_validation() -> None:
     assert request.context_filters == ("call",)
 
 
+@pytest.mark.parametrize(
+    "context_filters",
+    ["call", b"call", ["call", 7]],
+)
+def test_query_request_rejects_non_sequence_or_non_string_context_filters(
+    context_filters: Any,
+) -> None:
+    with pytest.raises(QueryRejected, match="sequence of strings"):
+        QueryRequest(question="bounded", context_filters=context_filters)
+
+
 def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path: Path) -> None:
     source = tmp_path / "source"
     output = tmp_path / "staging"
@@ -281,6 +292,110 @@ def test_0916_structural_build_rechecks_checkout_before_publication(
         adapter.build_structural(source, output_root=output)
 
     assert list(output.iterdir()) == []
+
+
+def test_0916_structural_build_rechecks_source_identity_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    parked = tmp_path / "parked-source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    original_normalize = adapter_module._normalize_structural_output
+
+    def normalize_then_replace_source(engine_output: Path) -> None:
+        original_normalize(engine_output)
+        source.rename(parked)
+        source.mkdir()
+        (source / ".git").mkdir()
+        (source / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_normalize_structural_output",
+        normalize_then_replace_source,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="source directory changed"):
+        adapter.build_structural(source, output_root=output)
+
+    assert list(output.iterdir()) == []
+
+
+def test_0916_structural_build_revalidates_output_contents_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    original_publish = adapter_module._publish_structural_output
+
+    def publish_after_intruder(engine_output: Path, destination_descriptor: int) -> None:
+        (output / "intruder").write_text("unexpected\n", encoding="utf-8")
+        original_publish(engine_output, destination_descriptor)
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_publish_structural_output",
+        publish_after_intruder,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="output root contents changed"):
+        adapter.build_structural(source, output_root=output)
+
+
+def test_0916_structural_build_normalizes_snapshot_write_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    original_observe = adapter_module._PinnedSourceReader.observe
+
+    def fail_snapshot_write(
+        reader: Any,
+        path: Path,
+        **kwargs: Any,
+    ) -> Any:
+        if kwargs.get("chunk_consumer") is not None:
+            raise OSError(errno.ENOSPC, "synthetic snapshot filesystem full")
+        return original_observe(reader, path, **kwargs)
+
+    monkeypatch.setattr(
+        adapter_module._PinnedSourceReader,
+        "observe",
+        fail_snapshot_write,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnavailable, match="snapshot could not be staged"):
+        adapter.build_structural(source, output_root=output)
 
 
 def test_0916_structural_build_normalizes_payload_modes_under_group_umask(
@@ -1976,6 +2091,75 @@ def test_observer_pins_git_head_across_checkout_ancestor_swap_without_external_r
     assert observation.entries[0].sha256 == hashlib.sha256(local_payload).hexdigest()
 
 
+def test_observer_revalidates_absent_loose_git_ref_before_packed_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    subprocess.run(
+        ["git", "pack-refs", "--all", "--prune"],
+        cwd=source,
+        check=True,
+    )
+    old_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    ref_name = (source / ".git" / "HEAD").read_text(encoding="ascii").strip()
+    assert ref_name.startswith("ref: ")
+    loose_ref = source / ".git" / ref_name.removeprefix("ref: ")
+    assert not loose_ref.exists()
+    new_commit = "f" * 40 if old_commit != "f" * 40 else "e" * 40
+    original_git_payload = adapter_module._PinnedReadAuthority._git_payload
+    loose_lookups = 0
+
+    def create_loose_ref_after_final_absence_check(
+        authority: adapter_module._PinnedReadAuthority,
+        reader: adapter_module._PinnedSourceReader,
+        path: Path,
+        *,
+        size_cap: int,
+        allow_missing: bool = False,
+    ) -> bytes | None:
+        nonlocal loose_lookups
+        payload = original_git_payload(
+            authority,
+            reader,
+            path,
+            size_cap=size_cap,
+            allow_missing=allow_missing,
+        )
+        if allow_missing and path == loose_ref:
+            loose_lookups += 1
+            if loose_lookups == 4 and payload is None:
+                loose_ref.parent.mkdir(parents=True, exist_ok=True)
+                loose_ref.write_text(f"{new_commit}\n", encoding="ascii")
+        return payload
+
+    monkeypatch.setattr(
+        adapter_module._PinnedReadAuthority,
+        "_git_payload",
+        create_loose_ref_after_final_absence_check,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    observation = adapter.observe(source, max_inventory_passes=4)
+
+    assert loose_lookups >= 4
+    assert observation.source_commit == new_commit
+
+
 def test_0916_structural_build_supports_linked_worktree_source(
     tmp_path: Path,
 ) -> None:
@@ -2034,6 +2218,50 @@ def test_observer_hashes_every_effective_policy_input(
     assert after.entries == before.entries
     assert after.inventory_sha256 == before.inventory_sha256
     assert after.policy_sha256 != before.policy_sha256
+
+
+def test_observer_revalidates_missing_git_info_exclude(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphify.detect as detect_module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    exclude = source / ".git" / "info" / "exclude"
+    exclude.unlink()
+    original_git_info_exclude = detect_module._git_info_exclude
+    missing_resolutions = 0
+
+    def create_exclude_after_second_missing_resolution(
+        vcs_root: Path,
+        **kwargs: Any,
+    ) -> Path | None:
+        nonlocal missing_resolutions
+        resolved = original_git_info_exclude(vcs_root, **kwargs)
+        if resolved is None:
+            missing_resolutions += 1
+            if missing_resolutions == 2:
+                exclude.write_text("# appeared after absence check\n", encoding="utf-8")
+        return resolved
+
+    monkeypatch.setattr(
+        detect_module,
+        "_git_info_exclude",
+        create_exclude_after_second_missing_resolution,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    raced = adapter.observe(source, max_inventory_passes=4)
+    stable = adapter.observe(source)
+
+    assert missing_resolutions == 2
+    assert raced.policy_sha256 == stable.policy_sha256
 
 
 def test_observer_revalidates_workspace_policy_pinned_before_detection(
