@@ -2096,6 +2096,10 @@ class Graphify0916Adapter:
                             raise ObservationUnavailable(
                                 "source directory enumeration was incomplete"
                             )
+                        if detection.get("comparison_unsupported"):
+                            raise ObservationUnsupported(
+                                "Google Workspace shortcuts require an unsupported remote comparison"
+                            )
                         code_files = tuple(
                             str(path)
                             for path in detection["files"].get("code", [])

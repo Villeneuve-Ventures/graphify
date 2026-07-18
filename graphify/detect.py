@@ -262,6 +262,11 @@ def _is_sensitive_without_content(path: Path) -> bool:
     if not _generic_keyword_hit(name):
         return False
     extension = path.suffix.lower()
+    if not extension:
+        # Extensionless source cannot be distinguished from a secret store by
+        # name alone. Let the pinned comparison reader perform the same bounded
+        # shebang probe used by ordinary detection before deciding sensitivity.
+        return False
     return extension not in CODE_EXTENSIONS or extension in _SECRET_PRONE_DATA_EXTS
 
 
