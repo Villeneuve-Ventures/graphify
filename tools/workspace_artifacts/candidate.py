@@ -457,6 +457,12 @@ def _assert_hashed_requirements(requirements: Path, *, label: str) -> None:
             continue
 
         logical_requirement = " ".join(entry)
+        requirement_token = logical_requirement.split(maxsplit=1)[0]
+        if requirement_token.startswith(("-", ";")):
+            raise ArtifactError(
+                f"{label} requirements lack a requirement specifier at line "
+                f"{entry_line}: {requirements}"
+            )
         hashes = re.findall(r"(?<!\S)--hash=([^\s]+)", logical_requirement)
         if not hashes or any(
             re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in hashes

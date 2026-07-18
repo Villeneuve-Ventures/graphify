@@ -384,6 +384,7 @@ def test_runtime_export_scrubs_untrusted_package_sources(
         ("networkx==3.6.1\n", "lack valid SHA-256 hashes"),
         ("networkx==3.6.1 --hash=sha256:bad\n", "lack valid SHA-256 hashes"),
         ("networkx==3.6.1 --hash=sha512:" + "0" * 128 + "\n", "lack valid SHA-256 hashes"),
+        ("--hash=sha256:" + "0" * 64 + "\n", "lack a requirement specifier"),
         ("networkx==3.6.1 \\\n", "unterminated continuation"),
         ("# empty export\n", "contain no locked entries"),
     ],
