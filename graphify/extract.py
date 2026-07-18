@@ -4341,11 +4341,13 @@ def extract(
             root = Path(*paths[0].parts[:common_len]) if common_len else Path(".")
     except Exception:
         root = Path(".")
+    error_root = source_root if source_root is not None else root
     if source_root is not None:
         root = source_root
     elif cache_root is not None:
         root = cache_root
     root = root.resolve()
+    error_root = error_root.resolve()
 
     # #1774: the cache is an OUTPUT, so when no explicit cache_root is given it is
     # written under the current working directory — never `root` (the inferred
@@ -4468,10 +4470,12 @@ def extract(
         result = maybe_result or {"nodes": [], "edges": []}
         error = result.get("error")
         if error:
+            absolute_path = Path(os.path.abspath(os.fspath(path)))
             try:
-                error_path = path.relative_to(root).as_posix()
+                error_path = absolute_path.relative_to(error_root).as_posix()
             except ValueError:
-                error_path = path.name
+                path_digest = hashlib.sha256(os.fsencode(absolute_path)).hexdigest()
+                error_path = f"@external/{path_digest}/{absolute_path.name}"
             source_errors.append({"path": error_path, "error": str(error)})
         all_nodes.extend(result.get("nodes", []))
         all_edges.extend(result.get("edges", []))

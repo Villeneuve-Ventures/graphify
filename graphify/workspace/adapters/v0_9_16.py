@@ -1033,6 +1033,7 @@ class _PinnedReadAuthority:
         git_file: Path | None = None
         commondir_file: Path | None = None
         comparison_paths: dict[Path, _PinnedOptionalPath] = {}
+        comparison_readers: dict[Path, _PinnedSourceReader] = {}
         try:
             dot_git = source_anchor / ".git"
             dot_git_details = source.entry_details(dot_git, allow_missing=True)
@@ -1080,12 +1081,17 @@ class _PinnedReadAuthority:
                 )
             git_file = dot_git
             candidate = git_dir_path / "commondir"
-            commondir_details = git_dir.entry_details(candidate, allow_missing=True)
-            if commondir_details is None:
+            candidate_key = cls._comparison_key(candidate)
+            pinned_commondir = git_dir.pin_optional_regular(candidate)
+            comparison_paths[candidate_key] = pinned_commondir
+            comparison_readers[candidate_key] = git_dir
+            if isinstance(pinned_commondir, _PinnedAbsentPath):
                 common_dir = git_dir
+            elif isinstance(pinned_commondir, _PinnedUnsafePath):
+                raise ObservationUnsupported(
+                    "Git common-directory pointer must be a singular regular file"
+                )
             else:
-                pinned_commondir = git_dir.pin_regular(candidate)
-                comparison_paths[cls._comparison_key(candidate)] = pinned_commondir
                 _digest, _details, commondir_payload = git_dir.observe(
                     candidate,
                     collect=True,
@@ -1122,6 +1128,7 @@ class _PinnedReadAuthority:
                 git_file,
                 commondir_file,
                 comparison_paths,
+                comparison_readers,
             )
         except BaseException:
             if common_dir is not None and common_dir is not git_dir:
@@ -2198,6 +2205,7 @@ class Graphify0916Adapter:
                     )
                     _require_policy_root_binding(root, policy_root)
                     _require_output_contents(output_descriptor, ("graphify-out",))
+                    _require_output_binding(output, output_identity)
                 finally:
                     authority.close()
         finally:

@@ -393,6 +393,48 @@ def test_0916_structural_build_revalidates_output_contents_after_publication(
         adapter.build_structural(source, output_root=output)
 
 
+def test_0916_structural_build_rebinds_visible_output_at_final_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    parked = tmp_path / "parked-staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    original_require_contents = adapter_module._require_output_contents
+    published_checks = 0
+
+    def replace_after_final_content_check(
+        descriptor: int,
+        expected_names: tuple[str, ...],
+    ) -> None:
+        nonlocal published_checks
+        original_require_contents(descriptor, expected_names)
+        if expected_names != ("graphify-out",):
+            return
+        published_checks += 1
+        if published_checks == 2:
+            output.rename(parked)
+            output.mkdir()
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_require_output_contents",
+        replace_after_final_content_check,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnstable, match="output root changed"):
+        adapter.build_structural(source, output_root=output)
+
+
 @pytest.mark.parametrize(
     ("input_name", "expected_kind"),
     [("app.py", "source"), (".gitignore", "policy")],
@@ -2308,6 +2350,32 @@ def test_observer_supports_linked_worktree_policy_roots_without_unapproved_reads
     assert after.inventory_sha256 == before.inventory_sha256
     assert after.policy_sha256 != before.policy_sha256
     assert unexpected_reads == []
+
+
+def test_read_authority_pins_absent_linked_worktree_commondir(
+    tmp_path: Path,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    git_dir = tmp_path / "external-git-dir"
+    source.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    shutil.move(source / ".git", git_dir)
+    (source / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    authority = adapter_module._PinnedReadAuthority.open(source)
+    candidate = git_dir / "commondir"
+    key = authority._comparison_key(candidate)
+    try:
+        pinned = authority.comparison_paths[key]
+        assert authority.comparison_readers[key] is authority.git_dir
+        candidate.write_text(".\n", encoding="ascii")
+        with pytest.raises(ObservationUnstable, match="after absent pin"):
+            authority.require_optional_comparison_path(candidate, pinned)
+    finally:
+        authority.close()
 
 
 def test_observer_pins_git_head_across_checkout_ancestor_swap_without_external_read(

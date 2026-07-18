@@ -614,6 +614,24 @@ def test_mutation_after_release_boundary_is_a_subsequent_change(tmp_path: Path) 
     )
 
 
+def test_source_mutation_after_post_observation_is_a_subsequent_change(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+
+    def hook(event: str, _details: Mapping[str, object]) -> None:
+        if event == "freshness:post_observed":
+            _edit(runtime.repo)
+
+    result = runtime.authority._run(REPO_UUID, _query, hook=hook)
+
+    assert result.decision == "release"
+    assert result.reason == "observed_current"
+    assert (runtime.repo / "README.md").read_text(encoding="utf-8") == (
+        "edited after pre-observation\n"
+    )
+
+
 def test_pointer_change_before_release_discards_output(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path)
     pointer_path = runtime.state_root / "workspaces" / REPO_UUID / "pointers.json"

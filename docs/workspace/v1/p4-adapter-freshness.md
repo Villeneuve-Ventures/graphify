@@ -111,9 +111,11 @@ that boundary or before publication fails without reading the replacement inode.
    question text or term work exceeds its bound, or context filters exceed their
    count, item, or aggregate bounds. This library path deliberately bypasses
    optional query logging.
-6. Repeat source identity and the complete observation, revalidate source
-   identity once more, and revalidate the pointer/receipt while both shared
-   locks remain held.
+6. Repeat source identity and the complete observation. Completion of this
+   post-query source observation is the source release-observation boundary.
+   Revalidate registry source identity and the pointer/receipt while both shared
+   locks remain held; those authority checks do not extend source
+   linearizability beyond the completed observation.
 7. Release output only when both observations equal each other and the sealed
    tuple. Drift, unstable inventory, timeout, unsupported comparison, corrupt or
    unavailable authority, and pointer change discard output.
@@ -125,6 +127,6 @@ above, so callers cannot substitute a stateful payload function.
 `current_only` is an observation protocol, not an atomic checkout snapshot. It
 does not claim strict source linearizability or detection of an edit that is
 fully made and reverted between the two observations. A change after the
-documented release-observation boundary is a subsequent change outside that
+completed post-query source observation is a subsequent change outside that
 decision. Watchers and future queues are accelerators only; P4 freshness does
 not consult them, so an outage or missed event cannot authorize stale output.
