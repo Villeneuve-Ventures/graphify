@@ -443,6 +443,102 @@ def test_freshness_deadline_bounds_shared_lock_acquisition(
         holder.wait(timeout=5)
 
 
+def test_freshness_deadline_expires_during_pointer_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    before = {
+        "source_tree": tree_snapshot(runtime.repo),
+        "source_metadata": metadata_snapshot(runtime.repo),
+        "source_xattrs": _xattr_snapshot(runtime.repo),
+        "workspace_tree": tree_snapshot(runtime.state_root),
+        "workspace_metadata": metadata_snapshot(runtime.state_root),
+        "workspace_xattrs": _xattr_snapshot(runtime.state_root),
+    }
+    now = 0
+    original_verify = runtime.pointers.generations.verify_generation
+
+    def monotonic_ns() -> int:
+        return now
+
+    def verify_generation(repo_uuid: str, generation_id: str) -> GenerationReceipt:
+        nonlocal now
+        receipt = original_verify(repo_uuid, generation_id)
+        now = 2
+        return receipt
+
+    def forbidden_journal_verification(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("expired pointer read reached journal verification")
+
+    monkeypatch.setattr(time, "monotonic_ns", monotonic_ns)
+    monkeypatch.setattr(
+        runtime.pointers.generations,
+        "verify_generation",
+        verify_generation,
+    )
+    monkeypatch.setattr(
+        runtime.pointers,
+        "_verify_visible_pointer_journal",
+        forbidden_journal_verification,
+    )
+
+    result = runtime.authority.query(REPO_UUID, QUERY, timeout_ns=1)
+
+    assert result.decision == "withhold"
+    assert result.reason == "timeout"
+    assert result.query_executed is False
+    assert result.output is None
+    assert {
+        "source_tree": tree_snapshot(runtime.repo),
+        "source_metadata": metadata_snapshot(runtime.repo),
+        "source_xattrs": _xattr_snapshot(runtime.repo),
+        "workspace_tree": tree_snapshot(runtime.state_root),
+        "workspace_metadata": metadata_snapshot(runtime.state_root),
+        "workspace_xattrs": _xattr_snapshot(runtime.state_root),
+    } == before
+
+
+def test_freshness_deadline_expires_before_release_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime(tmp_path)
+    now = 0
+    journal_checks = 0
+    original_journal_verification = runtime.pointers._verify_visible_pointer_journal
+
+    def monotonic_ns() -> int:
+        return now
+
+    def hook(event: str, _details: Mapping[str, object]) -> None:
+        nonlocal now
+        if event == "freshness:post_observed":
+            now = 2
+
+    def count_journal_verification(repo_uuid: str, pointer: PointerSet) -> None:
+        nonlocal journal_checks
+        journal_checks += 1
+        if journal_checks > 1:
+            raise AssertionError("expired release reached journal revalidation")
+        original_journal_verification(repo_uuid, pointer)
+
+    monkeypatch.setattr(time, "monotonic_ns", monotonic_ns)
+    monkeypatch.setattr(
+        runtime.pointers,
+        "_verify_visible_pointer_journal",
+        count_journal_verification,
+    )
+
+    result = runtime.authority.query(REPO_UUID, QUERY, timeout_ns=1, hook=hook)
+
+    assert result.decision == "withhold"
+    assert result.reason == "timeout"
+    assert result.query_executed is True
+    assert result.output is None
+    assert journal_checks == 1
+
+
 def test_deadline_expiring_after_pre_observation_skips_query(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

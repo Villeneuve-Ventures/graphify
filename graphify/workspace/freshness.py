@@ -316,7 +316,11 @@ class FreshnessAuthority:
                     )
                     _emit(hook, "freshness:post_observed")
                     authority_release = self._authority_snapshot(document, repo_uuid)
-                    self.pointers.revalidate_read(repo_uuid, reading)
+                    self.pointers.revalidate_read(
+                        repo_uuid,
+                        reading,
+                        deadline_ns=deadline_ns,
+                    )
                     post_value = self._observation_value(authority_release, reading, post)
                     mismatch = self._sealed_mismatch(authority_release, reading, post)
                     if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:

@@ -4301,6 +4301,10 @@ def extract(
     2. Cross-file import resolution: turns file-level imports into
        class-level INFERRED edges (DigestAuth --uses--> Response)
 
+    The returned ``errors`` list preserves per-file extractor failures so
+    certifying callers can reject incomplete output instead of relying on
+    console warnings.
+
     Args:
         paths: files to extract from
         cache_root: explicit root for graphify-out/cache/ (overrides the
@@ -4459,7 +4463,16 @@ def extract(
     all_nodes: list[dict] = []
     all_edges: list[dict] = []
     all_raw_calls: list[dict] = []
-    for result in per_file:
+    source_errors: list[dict[str, str]] = []
+    for path, maybe_result in zip(paths, per_file):
+        result = maybe_result or {"nodes": [], "edges": []}
+        error = result.get("error")
+        if error:
+            try:
+                error_path = path.relative_to(root).as_posix()
+            except ValueError:
+                error_path = path.name
+            source_errors.append({"path": error_path, "error": str(error)})
         all_nodes.extend(result.get("nodes", []))
         all_edges.extend(result.get("edges", []))
         all_raw_calls.extend(result.get("raw_calls", []))
@@ -4974,6 +4987,7 @@ def extract(
     return {
         "nodes": all_nodes,
         "edges": all_edges,
+        "errors": source_errors,
         "input_tokens": 0,
         "output_tokens": 0,
     }

@@ -64,6 +64,40 @@ def test_extract_merges_multiple_files():
     assert result["input_tokens"] == 0
 
 
+def test_extract_surfaces_per_file_errors(tmp_path, monkeypatch):
+    from graphify import extract as extract_mod
+
+    source = tmp_path / "app.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+
+    def failed_sequential(
+        uncached_work,
+        per_file,
+        root,
+        total_files,
+        cache_location=None,
+    ):
+        del uncached_work, root, total_files, cache_location
+        per_file[0] = {
+            "nodes": [],
+            "edges": [],
+            "error": "synthetic extractor failure",
+        }
+
+    monkeypatch.setattr(extract_mod, "_extract_sequential", failed_sequential)
+
+    result = extract_mod.extract(
+        [source],
+        cache_root=tmp_path / "cache",
+        source_root=tmp_path,
+        parallel=False,
+    )
+
+    assert result["errors"] == [
+        {"path": "app.py", "error": "synthetic extractor failure"}
+    ]
+
+
 def test_extract_disambiguates_duplicate_symbol_ids_by_source_path(tmp_path):
     first = tmp_path / "apps/api/Program.cs"
     second = tmp_path / "tools/api/Program.cs"

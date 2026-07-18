@@ -153,14 +153,17 @@ output remains ignored and must not widen the P1 product diff.
 - structural extraction consumes only a descriptor-validated external source
   snapshot in a private build directory, publishes through a pinned empty output
   descriptor while retaining source authority through publication, revalidates
-  source/output bindings and exact destination contents around the copy,
-  normalizes staged payload modes independently of caller umask, and deterministic
-  contract bundles exclude generated adapter cache trees;
+  the digest of every selected source and effective policy input plus
+  source/output bindings and exact destination contents around the copy, rejects
+  per-file extractor errors, preserves reciprocal directed edges, normalizes
+  staged payload modes independently of caller umask, and deterministic contract
+  bundles exclude generated adapter cache trees;
 - query mode, depth, and token-budget types reject before comparison; query text,
   term work, context filters, depth, and token budgets reject above their
   workspace bounds before freshness locks are acquired; registry and generation
-  lock contention is bounded by the same deadline and performs zero source or
-  workspace writes;
+  lock contention plus subsequent registry, pointer, receipt, journal, and
+  release-revalidation phases are bounded by the same deadline and perform zero
+  source or workspace writes;
 - deterministic schedules cover edit, create, delete, rename, replacement,
   source, classifier, policy, query-payload, and output ancestor-to-symlink
   replacement, plus a real-directory detection/snapshot replacement, with zero

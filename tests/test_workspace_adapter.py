@@ -393,6 +393,189 @@ def test_0916_structural_build_revalidates_output_contents_after_publication(
         adapter.build_structural(source, output_root=output)
 
 
+@pytest.mark.parametrize(
+    ("input_name", "expected_kind"),
+    [("app.py", "source"), (".gitignore", "policy")],
+)
+def test_0916_structural_build_revalidates_regular_inputs_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_name: str,
+    expected_kind: str,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / ".gitignore").write_text("# initial policy\n", encoding="utf-8")
+    changed = source / input_name
+    original_normalize = adapter_module._normalize_structural_output
+
+    def normalize_then_change_input(engine_output: Path) -> None:
+        original_normalize(engine_output)
+        changed.write_text("changed during build\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_normalize_structural_output",
+        normalize_then_change_input,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(
+        ObservationUnstable,
+        match=rf"{expected_kind} input changed during structural build",
+    ):
+        adapter.build_structural(source, output_root=output)
+
+    assert list(output.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("input_name", "expected_kind"),
+    [("app.py", "source"), (".gitignore", "policy")],
+)
+def test_0916_structural_build_revalidates_regular_inputs_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    input_name: str,
+    expected_kind: str,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / ".gitignore").write_text("# initial policy\n", encoding="utf-8")
+    changed = source / input_name
+    original_publish = adapter_module._publish_structural_output
+
+    def publish_then_change_input(
+        engine_output: Path,
+        destination_descriptor: int,
+    ) -> None:
+        original_publish(engine_output, destination_descriptor)
+        changed.write_text("changed during publication\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_publish_structural_output",
+        publish_then_change_input,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(
+        ObservationUnstable,
+        match=rf"{expected_kind} input changed during structural build",
+    ):
+        adapter.build_structural(source, output_root=output)
+
+    assert (output / "graphify-out" / "graph.json").is_file()
+
+
+def test_0916_structural_build_rejects_extractor_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def failed_extract(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "nodes": [],
+            "edges": [],
+            "errors": [{"path": "app.py", "error": "synthetic extractor failure"}],
+        }
+
+    monkeypatch.setattr(adapter_module, "extract", failed_extract)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnavailable, match="structural extraction failed"):
+        adapter.build_structural(source, output_root=output)
+
+    assert list(output.iterdir()) == []
+
+
+def test_0916_structural_build_preserves_reciprocal_edge_directions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "staging"
+    source.mkdir()
+    output.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def reciprocal_extract(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "nodes": [
+                {
+                    "id": "alpha",
+                    "label": "alpha",
+                    "file_type": "code",
+                    "source_file": "app.py",
+                },
+                {
+                    "id": "beta",
+                    "label": "beta",
+                    "file_type": "code",
+                    "source_file": "app.py",
+                },
+            ],
+            "edges": [
+                {
+                    "source": "alpha",
+                    "target": "beta",
+                    "relation": "calls",
+                    "confidence": "EXTRACTED",
+                },
+                {
+                    "source": "beta",
+                    "target": "alpha",
+                    "relation": "calls",
+                    "confidence": "EXTRACTED",
+                },
+            ],
+        }
+
+    monkeypatch.setattr(adapter_module, "extract", reciprocal_extract)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    adapter.build_structural(source, output_root=output)
+
+    graph = json.loads((output / "graphify-out" / "graph.json").read_bytes())
+    calls = {
+        (edge["source"], edge["target"])
+        for edge in graph["links"]
+        if edge["relation"] == "calls"
+    }
+    assert calls == {("alpha", "beta"), ("beta", "alpha")}
+
+
 def test_0916_structural_build_normalizes_snapshot_write_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -896,7 +1079,7 @@ def test_0916_structural_build_rejects_real_directory_replacement_before_snapsho
         snapshot_root: Path,
         reader: adapter_module._PinnedSourceReader,
         source_details: os.stat_result,
-    ) -> tuple[Path, ...]:
+    ) -> tuple[tuple[Path, ...], dict[Path, str]]:
         nonlocal swapped
         package.rename(parked)
         replacement.rename(package)

@@ -54,13 +54,19 @@ from a pinned source-root descriptor into an ephemeral external snapshot.
 Every ancestor is opened descriptor-relative without following links, and the
 installed rooted path is revalidated after hashing. The `0.9.16`
 extractor/build implementation runs only against that snapshot in an ephemeral
-private build directory. The adapter requires existing, real-directory ancestry
+private build directory. Per-file extractor errors reject the build, and the
+payload is constructed as a directed graph so reciprocal relationships remain
+distinct. The adapter requires existing, real-directory ancestry
 for the requested output root, opens it descriptor-relative without following
 links, and keeps it pinned while copying the normalized result. The source read
 authority remains open through publication, and both source and output bindings
 are revalidated immediately before and after the descriptor-relative copy. The
-destination must still be empty immediately before publication and must contain
-exactly the published `graphify-out` tree afterward, so an ancestor replacement
+content digests recorded for every snapshotted code file and effective policy
+input are also re-read through their pinned descriptors at both boundaries, so
+an in-place edit cannot publish a graph derived from stale source or policy
+bytes. The destination must still be empty immediately before publication and
+must contain exactly the published `graphify-out` tree afterward, so an ancestor
+replacement
 or concurrent destination entry cannot redirect or contaminate writes. The
 adapter persists the queryable
 `graphify-out/graph.json` artifact there, normalizes the staging root to `0700`,
@@ -84,7 +90,9 @@ that boundary or before publication fails without reading the replacement inode.
    then open the current generation through its pre-created shared coordination
    lock. This preserves registry-before-generation lock ordering. A caller
    deadline bounds both acquisitions through nonmutating nonblocking polling;
-   expiry withholds as `timeout` before source observation or query execution.
+   the same deadline is checked between registry, pointer, receipt, journal, and
+   release revalidation reads. Expiry withholds as `timeout` before the next
+   protected phase or output release.
 3. Discover source identity and collect a complete no-write pre-query
    observation. Detection and hashing share one pinned read authority spanning
    the checkout plus the bounded per-worktree and common Git metadata roots.

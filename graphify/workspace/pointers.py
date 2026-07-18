@@ -30,6 +30,7 @@ from graphify.workspace.persistence import (
     RuntimeCapabilities,
     StatePathError,
     Syscalls,
+    require_before_deadline,
 )
 
 
@@ -1067,10 +1068,18 @@ class PointerStore:
         deadline_ns: int | None = None,
     ) -> Iterator[GenerationRead]:
         while True:
+            require_before_deadline(
+                deadline_ns,
+                "current pointer read exceeded its deadline",
+            )
             pointer = self._read_pointer(
                 self._current(repo_uuid),
                 allow_missing=False,
                 expected_repo_uuid=repo_uuid,
+            )
+            require_before_deadline(
+                deadline_ns,
+                "current pointer read exceeded its deadline",
             )
             assert pointer is not None
             value = pointer.to_dict()
@@ -1083,19 +1092,35 @@ class PointerStore:
                 exclusive=False,
                 deadline_ns=deadline_ns,
             ):
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
+                )
                 reloaded = self._read_pointer(
                     self._current(repo_uuid),
                     allow_missing=False,
                     expected_repo_uuid=repo_uuid,
+                )
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
                 )
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
                 receipt = self._require_compatible(
                     self.generations.verify_generation(repo_uuid, generation_id)
                 )
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
+                )
                 if receipt.sha256 != current["receipt_sha256"]:
                     raise PointerCorrupt("current pointer receipt hash does not match generation")
                 self._verify_visible_pointer_journal(repo_uuid, pointer)
+                require_before_deadline(
+                    deadline_ns,
+                    "current pointer read exceeded its deadline",
+                )
                 yield GenerationRead(
                     pointer=pointer,
                     receipt=receipt,
@@ -1105,7 +1130,13 @@ class PointerStore:
                 )
                 return
 
-    def revalidate_read(self, repo_uuid: str, reading: GenerationRead) -> None:
+    def revalidate_read(
+        self,
+        repo_uuid: str,
+        reading: GenerationRead,
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
         """Revalidate a protected read without releasing its shared lock.
 
         Callers use this immediately before an output-release boundary. The
@@ -1113,15 +1144,31 @@ class PointerStore:
         is a conflict and the caller must discard its output.
         """
 
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
         pointer = self._read_pointer(
             self._current(repo_uuid),
             allow_missing=False,
             expected_repo_uuid=repo_uuid,
         )
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
         if pointer is None or pointer.canonical != reading.pointer.canonical:
             raise PointerConflict("current pointer changed during protected read")
         receipts = self.verify_pointer(pointer, expected_repo_uuid=repo_uuid)
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
         self._verify_visible_pointer_journal(repo_uuid, pointer)
+        require_before_deadline(
+            deadline_ns,
+            "current pointer revalidation exceeded its deadline",
+        )
         if receipts["current"].canonical != reading.receipt.canonical:
             raise PointerConflict("current receipt changed during protected read")
         current = cast(dict[str, Any], pointer.to_dict()["current"])

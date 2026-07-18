@@ -66,6 +66,13 @@ class LockTimeout(WorkspaceRuntimeError):
     code = "lock_timeout"
 
 
+def require_before_deadline(deadline_ns: int | None, detail: str) -> None:
+    """Raise the stable timeout error after an absolute monotonic deadline."""
+
+    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+        raise LockTimeout(detail)
+
+
 class InjectedFault(RuntimeError):
     """Test-only process-death analogue raised by named failpoint hooks."""
 

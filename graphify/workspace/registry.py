@@ -34,6 +34,7 @@ from graphify.workspace.persistence import (
     StatePathError,
     Syscalls,
     WORKSPACE_LOCK_RANK,
+    require_before_deadline,
 )
 
 if TYPE_CHECKING:
@@ -149,7 +150,15 @@ class RegistryStore:
             exclusive=False,
             deadline_ns=deadline_ns,
         ):
+            require_before_deadline(
+                deadline_ns,
+                "registry snapshot read exceeded its deadline",
+            )
             document = self._load_locked(recover=False)
+            require_before_deadline(
+                deadline_ns,
+                "registry snapshot read exceeded its deadline",
+            )
             if document is None:  # pragma: no cover - narrowed by allow_missing=False
                 raise StateCorrupt("registry current record is missing")
             yield document

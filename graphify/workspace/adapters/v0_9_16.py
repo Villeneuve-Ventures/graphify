@@ -1503,8 +1503,9 @@ def _snapshot_code_files(
     snapshot_root: Path,
     reader: _PinnedSourceReader,
     source_details: os.stat_result,
-) -> tuple[Path, ...]:
+) -> tuple[tuple[Path, ...], dict[Path, str]]:
     snapshots: list[Path] = []
+    source_digests: dict[Path, str] = {}
     reader.require_directory_binding(root, source_details)
     reader.require_anchor_binding()
     for raw_path in code_files:
@@ -1520,11 +1521,12 @@ def _snapshot_code_files(
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("xb") as handle:
-                reader.observe(
+                digest, _details, _payload = reader.observe(
                     source,
                     chunk_consumer=handle.write,
                     expected_path=expected_path,
                 )
+                source_digests[source] = digest
             target.chmod(0o600)
         except OSError as exc:
             raise ObservationUnavailable(
@@ -1533,7 +1535,30 @@ def _snapshot_code_files(
         snapshots.append(target)
     reader.require_directory_binding(root, source_details)
     reader.require_anchor_binding()
-    return tuple(snapshots)
+    return tuple(snapshots), source_digests
+
+
+def _require_structural_input_digests(
+    authority: _PinnedReadAuthority,
+    pinned_paths: Mapping[Path, _PinnedRegularPath],
+    expected_digests: Mapping[Path, str],
+    *,
+    kind: str,
+) -> None:
+    for path in sorted(expected_digests, key=os.fspath):
+        try:
+            digest, _details, _payload = authority.observe(
+                path,
+                expected_path=pinned_paths[path],
+            )
+        except ObservationUnstable as exc:
+            raise ObservationUnstable(
+                f"{kind} input changed during structural build: {path}"
+            ) from exc
+        if digest != expected_digests[path]:
+            raise ObservationUnstable(
+                f"{kind} input changed during structural build: {path}"
+            )
 
 
 def _normalize_structural_output(output: Path) -> None:
@@ -2042,7 +2067,7 @@ class Graphify0916Adapter:
                         snapshot_root = Path(snapshot_temporary)
                         source_details = authority.source.directory_details(root)
                         authority.bind_comparison_directory(root, source_details)
-                        authority.pin_comparison(
+                        workspace_policy = authority.pin_optional_comparison(
                             root / ".graphify" / "workspace.toml"
                         )
                         detection = detect(
@@ -2072,6 +2097,23 @@ class Graphify0916Adapter:
                             Path(raw_path): authority.require_comparison_path(Path(raw_path))
                             for raw_path in code_files
                         }
+                        policy_paths = _policy_paths(
+                            root,
+                            authority,
+                            detection,
+                            workspace_policy,
+                        )
+                        pinned_policies = {
+                            path: authority.require_comparison_path(path)
+                            for path in policy_paths
+                        }
+                        policy_digests = {
+                            path: authority.observe(
+                                path,
+                                expected_path=pinned_policies[path],
+                            )[0]
+                            for path in policy_paths
+                        }
                         authority.source.require_directory_binding(
                             root,
                             source_details,
@@ -2085,7 +2127,7 @@ class Graphify0916Adapter:
                                 for path in paths
                             )
                         )
-                        snapshot_files = _snapshot_code_files(
+                        snapshot_files, source_digests = _snapshot_code_files(
                             code_files,
                             pinned_files,
                             root,
@@ -2099,7 +2141,15 @@ class Graphify0916Adapter:
                             cache_root=engine_output,
                             source_root=snapshot_root,
                         )
-                        graph = build_from_json(extraction, root=snapshot_root)
+                        if extraction.get("errors"):
+                            raise ObservationUnavailable(
+                                "structural extraction failed for detected code input"
+                            )
+                        graph = build_from_json(
+                            extraction,
+                            directed=True,
+                            root=snapshot_root,
+                        )
                     payload_root = engine_output / "graphify-out"
                     payload_root.mkdir(parents=True, exist_ok=True)
                     if not to_json(
@@ -2114,6 +2164,18 @@ class Graphify0916Adapter:
                     _normalize_structural_output(engine_output)
                     authority.source.require_directory_binding(root, source_details)
                     authority.require_bindings()
+                    _require_structural_input_digests(
+                        authority,
+                        pinned_files,
+                        source_digests,
+                        kind="source",
+                    )
+                    _require_structural_input_digests(
+                        authority,
+                        pinned_policies,
+                        policy_digests,
+                        kind="policy",
+                    )
                     _require_policy_root_binding(root, policy_root)
                     _require_output_binding(output, output_identity)
                     _require_output_contents(output_descriptor, ())
@@ -2122,6 +2184,18 @@ class Graphify0916Adapter:
                     _require_output_binding(output, output_identity)
                     authority.source.require_directory_binding(root, source_details)
                     authority.require_bindings()
+                    _require_structural_input_digests(
+                        authority,
+                        pinned_files,
+                        source_digests,
+                        kind="source",
+                    )
+                    _require_structural_input_digests(
+                        authority,
+                        pinned_policies,
+                        policy_digests,
+                        kind="policy",
+                    )
                     _require_policy_root_binding(root, policy_root)
                     _require_output_contents(output_descriptor, ("graphify-out",))
                 finally:
