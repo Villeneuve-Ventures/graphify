@@ -4206,6 +4206,12 @@ def _extract_parallel(
                     per_file[idx] = result
                 except Exception as exc:
                     pos = futures[future]
+                    idx = work_items[pos][0]
+                    per_file[idx] = {
+                        "nodes": [],
+                        "edges": [],
+                        "error": f"parallel worker failed: {type(exc).__name__}",
+                    }
                     print(
                         f"  warning: worker failed for {work_items[pos][1]}: {exc}",
                         file=sys.stderr, flush=True,
@@ -4347,7 +4353,7 @@ def extract(
     elif cache_root is not None:
         root = cache_root
     root = root.resolve()
-    error_root = error_root.resolve()
+    error_root = Path(os.path.abspath(os.fspath(error_root)))
 
     # #1774: the cache is an OUTPUT, so when no explicit cache_root is given it is
     # written under the current working directory — never `root` (the inferred

@@ -196,6 +196,24 @@ def test_query_request_copies_context_filters_before_validation() -> None:
     assert request.context_filters == ("call",)
 
 
+def test_query_request_stops_context_filter_iteration_at_the_entry_bound() -> None:
+    class TooManyFilters:
+        yielded = 0
+
+        def __iter__(self):
+            for _ in range(17):
+                self.yielded += 1
+                yield "call"
+            raise AssertionError("context filter iteration exceeded the entry bound")
+
+    filters: Any = TooManyFilters()
+
+    with pytest.raises(QueryRejected, match="context filters must not exceed 16"):
+        QueryRequest(question="bounded", context_filters=filters)
+
+    assert filters.yielded == 17
+
+
 @pytest.mark.parametrize(
     "context_filters",
     ["call", b"call", ["call", 7]],
@@ -530,22 +548,50 @@ def test_0916_structural_build_rejects_extractor_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import concurrent.futures
+    from graphify import extract as extract_module
     from graphify.workspace.adapters import v0_9_16 as adapter_module
 
     source = tmp_path / "source"
     output = tmp_path / "staging"
     source.mkdir()
     output.mkdir()
-    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    source_names = {f"app-{index:02d}.py" for index in range(20)}
+    for name in source_names:
+        (source / name).write_text("VALUE = 1\n", encoding="utf-8")
+    observed_errors: list[dict[str, str]] = []
+    actual_extract = extract_module.extract
 
-    def failed_extract(*_args: object, **_kwargs: object) -> dict[str, object]:
-        return {
-            "nodes": [],
-            "edges": [],
-            "errors": [{"path": "app.py", "error": "synthetic extractor failure"}],
-        }
+    class FailedFuture:
+        def result(self):
+            raise RuntimeError("synthetic worker crash")
 
-    monkeypatch.setattr(adapter_module, "extract", failed_extract)
+    class FakePool:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, *args, **kwargs):
+            return FailedFuture()
+
+    def extract_and_capture(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = actual_extract(*args, **kwargs)
+        observed_errors.extend(result["errors"])
+        return result
+
+    monkeypatch.setattr(
+        concurrent.futures,
+        "ProcessPoolExecutor",
+        lambda *args, **kwargs: FakePool(),
+    )
+    monkeypatch.setattr(
+        concurrent.futures,
+        "as_completed",
+        lambda futures: tuple(futures),
+    )
+    monkeypatch.setattr(adapter_module, "extract", extract_and_capture)
     adapter = select_adapter(
         SUPPORTED_COMPATIBILITY,
         intent=AdapterIntent.EXECUTE,
@@ -554,6 +600,11 @@ def test_0916_structural_build_rejects_extractor_errors(
     with pytest.raises(ObservationUnavailable, match="structural extraction failed"):
         adapter.build_structural(source, output_root=output)
 
+    assert {row["path"] for row in observed_errors} == source_names
+    assert {row["error"] for row in observed_errors} == {
+        "parallel worker failed: RuntimeError"
+    }
+    assert str(tmp_path) not in json.dumps(observed_errors)
     assert list(output.iterdir()) == []
 
 
@@ -1588,6 +1639,35 @@ def test_read_only_observation_skips_ignored_unsafe_inputs(
         external = tmp_path / "external.py"
         external.write_text("external_secret = 1\n", encoding="utf-8")
         ignored.symlink_to(external)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    observation = adapter.observe(source)
+
+    assert {entry.path for entry in observation.entries} == {"app.py"}
+
+
+@pytest.mark.parametrize("unsafe_kind", ["fifo", "symlink"])
+def test_read_only_observation_skips_sensitive_unsafe_inputs_before_pinning(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    if unsafe_kind == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("named pipes are unavailable on this platform")
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    _init_git_repo(source, "app.py")
+    sensitive = source / ".env"
+    if unsafe_kind == "fifo":
+        os.mkfifo(sensitive)
+    else:
+        external = tmp_path / "external.env"
+        external.write_text("TOKEN=secret\n", encoding="utf-8")
+        sensitive.symlink_to(external)
     adapter = select_adapter(
         SUPPORTED_COMPATIBILITY,
         intent=AdapterIntent.QUERY,
@@ -3027,6 +3107,31 @@ def test_read_only_detection_suppresses_stat_cache_and_office_sidecars(
     assert observation.stable_inventory_passes == 2
     assert {entry.path for entry in observation.entries} == {"book.xlsx", "notes.md"}
     assert not (source / "graphify-out").exists()
+    assert _tree_bytes(source) == before
+
+
+def test_read_only_observation_omits_legacy_graphify_memory(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("value = 1\n", encoding="utf-8")
+    legacy_memory = source / "graphify-out" / "memory"
+    legacy_memory.mkdir(parents=True)
+    (legacy_memory / "prior-query.py").write_text(
+        "legacy_result = True\n",
+        encoding="utf-8",
+    )
+    _init_git_repo(source, "app.py")
+    before = _tree_bytes(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.QUERY,
+    ).require_adapter()
+
+    observation = adapter.observe(source)
+
+    assert {entry.path for entry in observation.entries} == {"app.py"}
     assert _tree_bytes(source) == before
 
 

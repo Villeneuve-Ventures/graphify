@@ -30,6 +30,7 @@ from graphify.workspace.identity import (
     IdentityError,
     SourceAmbiguousError,
     SourceDiscoveryError,
+    SourceDiscoveryTimeout,
     SourceIdentity,
     discover_source,
 )
@@ -102,13 +103,22 @@ class FreshnessAuthority:
             raise SourceAmbiguousError(f"registry has no singular entry for {repo_uuid}")
         return cast(dict[str, Any], matches[0])
 
-    def _authority_snapshot(self, document: Any, repo_uuid: str) -> _AuthoritySnapshot:
+    def _authority_snapshot(
+        self,
+        document: Any,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None,
+    ) -> _AuthoritySnapshot:
         entry = self._entry(document, repo_uuid)
         recorded = cast(dict[str, Any], entry["active_source"])
         active_source_revision = int(entry["active_source_revision"])
         entry_canonical = canonical_json_bytes(entry)
         try:
-            source = discover_source(Path(str(recorded["path"])))
+            source = discover_source(
+                Path(str(recorded["path"])),
+                deadline_ns=deadline_ns,
+            )
         except OSError as exc:
             raise SourceDiscoveryError(
                 f"selected active source is unavailable: {recorded['path']}"
@@ -247,7 +257,11 @@ class FreshnessAuthority:
             # shared lock open makes active-source selection stable for the
             # complete two-sided observation and query window.
             with self.registry.read_only_snapshot(deadline_ns=deadline_ns) as document:
-                authority_pre = self._authority_snapshot(document, repo_uuid)
+                authority_pre = self._authority_snapshot(
+                    document,
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
                 with self.pointers.read_current(
                     repo_uuid,
                     deadline_ns=deadline_ns,
@@ -307,7 +321,11 @@ class FreshnessAuthority:
                             release=release,
                             query_executed=True,
                         )
-                    authority_post = self._authority_snapshot(document, repo_uuid)
+                    authority_post = self._authority_snapshot(
+                        document,
+                        repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
                     post = self._observe(
                         authority_post.source,
                         phase="post",
@@ -315,7 +333,11 @@ class FreshnessAuthority:
                         hook=hook,
                     )
                     _emit(hook, "freshness:post_observed")
-                    authority_release = self._authority_snapshot(document, repo_uuid)
+                    authority_release = self._authority_snapshot(
+                        document,
+                        repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
                     self.pointers.revalidate_read(
                         repo_uuid,
                         reading,
@@ -376,7 +398,7 @@ class FreshnessAuthority:
                 FreshnessResult[OutputT],
                 self._without_observation("unstable", query_executed=query_executed),
             )
-        except (LockTimeout, ObservationTimeout):
+        except (LockTimeout, ObservationTimeout, SourceDiscoveryTimeout):
             return cast(
                 FreshnessResult[OutputT],
                 self._without_observation("timeout", query_executed=query_executed),

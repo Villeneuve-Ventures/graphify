@@ -56,6 +56,17 @@ def test_detect_finds_fixtures():
     assert "document" in result["files"]
 
 
+def test_detect_keeps_graphify_memory_in_ordinary_scans(tmp_path):
+    memory = tmp_path / "graphify-out" / "memory"
+    memory.mkdir(parents=True)
+    remembered = memory / "prior-query.py"
+    remembered.write_text("remembered = True\n", encoding="utf-8")
+
+    result = detect(tmp_path)
+
+    assert str(remembered) in result["files"]["code"]
+
+
 def test_comparison_walk_handles_logical_depth_without_python_recursion():
     root = Path("/logical-root")
     depth = sys.getrecursionlimit() + 50

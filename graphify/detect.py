@@ -252,6 +252,19 @@ def _is_sensitive(
     return False
 
 
+def _is_sensitive_without_content(path: Path) -> bool:
+    """Recognize sensitive paths without opening or pinning the candidate."""
+    if any(part in _SENSITIVE_DIRS for part in path.parts[:-1]):
+        return True
+    name = path.name
+    if any(pattern.search(name) for pattern in _SENSITIVE_PATTERNS):
+        return True
+    if not _generic_keyword_hit(name):
+        return False
+    extension = path.suffix.lower()
+    return extension not in CODE_EXTENSIONS or extension in _SECRET_PRONE_DATA_EXTS
+
+
 def _looks_like_paper(
     path: Path,
     *,
@@ -1397,10 +1410,13 @@ def detect(
         policy_paths=comparison_policy_paths,
     )
 
-    # Always include graphify-out/memory/ - query results filed back into the graph
+    # Ordinary detection includes graphify-out/memory/ so query results can be
+    # filed back into the graph. Certified read-only comparison deliberately
+    # excludes this pre-workspace generated state from source authority.
     memory_dir = root / GRAPHIFY_OUT / "memory"
+    memory_present = not read_only and memory_dir.exists()
     scan_paths = [root]
-    if memory_dir.exists():
+    if memory_present:
         scan_paths.append(memory_dir)
 
     seen: set[Path] = set()
@@ -1425,7 +1441,7 @@ def detect(
         )
 
     for scan_root in scan_paths:
-        in_memory_tree = memory_dir.exists() and str(scan_root).startswith(str(memory_dir))
+        in_memory_tree = memory_present and str(scan_root).startswith(str(memory_dir))
         walker = (
             os.walk(scan_root, followlinks=follow_symlinks, onerror=_on_walk_error)
             if comparison_directory_lister is None
@@ -1501,12 +1517,15 @@ def detect(
 
     for p in all_files:
         # For memory dir files, skip hidden/noise filtering
-        in_memory = memory_dir.exists() and str(p).startswith(str(memory_dir))
+        in_memory = memory_present and str(p).startswith(str(memory_dir))
         if not in_memory:
             # Skip files inside our own converted/ dir (avoid re-processing sidecars)
             if str(p).startswith(str(converted_dir)):
                 continue
         if not in_memory and _is_ignored(p, root, ignore_patterns, _cache=ignore_cache):
+            continue
+        if comparison_pinner is not None and _is_sensitive_without_content(p):
+            skipped_sensitive.append(str(p))
             continue
         if comparison_pinner is not None:
             comparison_pinner(p)

@@ -379,6 +379,87 @@ def test_expired_freshness_deadline_fails_before_query(tmp_path: Path) -> None:
     assert result.output is None
 
 
+def test_freshness_deadline_bounds_source_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphify.workspace.identity as identity_module
+
+    runtime = _runtime(tmp_path)
+    before = {
+        "source_tree": tree_snapshot(runtime.repo),
+        "source_metadata": metadata_snapshot(runtime.repo),
+        "source_xattrs": _xattr_snapshot(runtime.repo),
+        "workspace_tree": tree_snapshot(runtime.state_root),
+        "workspace_metadata": metadata_snapshot(runtime.state_root),
+        "workspace_xattrs": _xattr_snapshot(runtime.state_root),
+    }
+
+    def blocked_git(command: list[str], **kwargs: Any) -> Any:
+        timeout = kwargs.get("timeout")
+        if timeout is None:
+            raise AssertionError("freshness deadline did not reach source discovery")
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(identity_module.subprocess, "run", blocked_git)
+
+    result = runtime.authority.query(
+        REPO_UUID,
+        QUERY,
+        timeout_ns=1_000_000_000,
+    )
+
+    assert result.decision == "withhold"
+    assert result.reason == "timeout"
+    assert result.query_executed is False
+    assert result.output is None
+    assert {
+        "source_tree": tree_snapshot(runtime.repo),
+        "source_metadata": metadata_snapshot(runtime.repo),
+        "source_xattrs": _xattr_snapshot(runtime.repo),
+        "workspace_tree": tree_snapshot(runtime.state_root),
+        "workspace_metadata": metadata_snapshot(runtime.state_root),
+        "workspace_xattrs": _xattr_snapshot(runtime.state_root),
+    } == before
+
+
+def test_freshness_deadline_does_not_block_on_fifo_workspace_config(
+    tmp_path: Path,
+) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("named pipes are unavailable on this platform")
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "import os, sys",
+                    "from pathlib import Path",
+                    "from tests.test_workspace_freshness import QUERY, _runtime",
+                    "from tests.workspace_p3_helpers import REPO_UUID",
+                    "runtime = _runtime(Path(sys.argv[1]))",
+                    "config = runtime.repo / '.graphify' / 'workspace.toml'",
+                    "config.unlink()",
+                    "os.mkfifo(config)",
+                    "result = runtime.authority.query(REPO_UUID, QUERY, timeout_ns=60_000_000_000)",
+                    "assert result.decision == 'withhold'",
+                    "assert result.reason == 'source_unavailable'",
+                    "assert result.query_executed is False",
+                )
+            ),
+            str(tmp_path / "fifo-probe"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
 @pytest.mark.parametrize("lock_kind", ["registry", "generation"])
 def test_freshness_deadline_bounds_shared_lock_acquisition(
     tmp_path: Path,
@@ -457,6 +538,7 @@ def test_freshness_deadline_expires_during_pointer_verification(
         "workspace_xattrs": _xattr_snapshot(runtime.state_root),
     }
     now = 0
+    timeout_ns = 60_000_000_000
     original_verify = runtime.pointers.generations.verify_generation
 
     def monotonic_ns() -> int:
@@ -465,7 +547,7 @@ def test_freshness_deadline_expires_during_pointer_verification(
     def verify_generation(repo_uuid: str, generation_id: str) -> GenerationReceipt:
         nonlocal now
         receipt = original_verify(repo_uuid, generation_id)
-        now = 2
+        now = timeout_ns
         return receipt
 
     def forbidden_journal_verification(*_args: object, **_kwargs: object) -> None:
@@ -483,7 +565,7 @@ def test_freshness_deadline_expires_during_pointer_verification(
         forbidden_journal_verification,
     )
 
-    result = runtime.authority.query(REPO_UUID, QUERY, timeout_ns=1)
+    result = runtime.authority.query(REPO_UUID, QUERY, timeout_ns=timeout_ns)
 
     assert result.decision == "withhold"
     assert result.reason == "timeout"
@@ -505,6 +587,7 @@ def test_freshness_deadline_expires_before_release_revalidation(
 ) -> None:
     runtime = _runtime(tmp_path)
     now = 0
+    timeout_ns = 60_000_000_000
     journal_checks = 0
     original_journal_verification = runtime.pointers._verify_visible_pointer_journal
 
@@ -514,7 +597,7 @@ def test_freshness_deadline_expires_before_release_revalidation(
     def hook(event: str, _details: Mapping[str, object]) -> None:
         nonlocal now
         if event == "freshness:post_observed":
-            now = 2
+            now = timeout_ns
 
     def count_journal_verification(repo_uuid: str, pointer: PointerSet) -> None:
         nonlocal journal_checks
@@ -530,7 +613,12 @@ def test_freshness_deadline_expires_before_release_revalidation(
         count_journal_verification,
     )
 
-    result = runtime.authority.query(REPO_UUID, QUERY, timeout_ns=1, hook=hook)
+    result = runtime.authority.query(
+        REPO_UUID,
+        QUERY,
+        timeout_ns=timeout_ns,
+        hook=hook,
+    )
 
     assert result.decision == "withhold"
     assert result.reason == "timeout"
@@ -545,6 +633,7 @@ def test_deadline_expiring_after_pre_observation_skips_query(
 ) -> None:
     runtime = _runtime(tmp_path)
     now = 0
+    timeout_ns = 60_000_000_000
     calls = 0
 
     def monotonic_ns() -> int:
@@ -553,7 +642,7 @@ def test_deadline_expiring_after_pre_observation_skips_query(
     def hook(event: str, _details: Mapping[str, object]) -> None:
         nonlocal now
         if event == "freshness:pre_observed":
-            now = 5
+            now = timeout_ns
 
     def query(payload: Path) -> str:
         nonlocal calls
@@ -565,7 +654,7 @@ def test_deadline_expiring_after_pre_observation_skips_query(
     result = runtime.authority._run(
         REPO_UUID,
         query,
-        timeout_ns=5,
+        timeout_ns=timeout_ns,
         hook=hook,
     )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -150,7 +151,9 @@ class QueryRequest:
         if isinstance(raw_filters, (str, bytes)):
             raise QueryRejected("context filters must be a sequence of strings")
         try:
-            context_filters = tuple(raw_filters)
+            context_filters = tuple(
+                islice(raw_filters, _MAX_QUERY_CONTEXT_FILTERS + 1)
+            )
         except TypeError:
             raise QueryRejected(
                 "context filters must be a sequence of strings"
