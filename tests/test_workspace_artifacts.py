@@ -343,7 +343,7 @@ def test_runtime_export_scrubs_untrusted_package_sources(
         commands.append(list(command))
         calls.append(dict(env or {}))
         if "requirements.txt" in command:
-            stdout = "networkx==3.6.1\n"
+            stdout = "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n"
         else:
             stdout = json.dumps(
                 {
@@ -376,6 +376,88 @@ def test_runtime_export_scrubs_untrusted_package_sources(
             "PIP_INDEX_URL",
         }:
             assert name not in env
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        ("networkx==3.6.1\n", "lack valid SHA-256 hashes"),
+        ("networkx==3.6.1 --hash=sha256:bad\n", "lack valid SHA-256 hashes"),
+        ("networkx==3.6.1 --hash=sha512:" + "0" * 128 + "\n", "lack valid SHA-256 hashes"),
+        ("networkx==3.6.1 \\\n", "unterminated continuation"),
+        ("# empty export\n", "contain no locked entries"),
+    ],
+)
+def test_hashed_requirements_validation_fails_closed(
+    tmp_path: Path,
+    contents: str,
+    message: str,
+) -> None:
+    requirements = _write(tmp_path / "requirements.txt", contents)
+
+    with pytest.raises(ArtifactError, match=message):
+        candidate_artifacts._assert_hashed_requirements(requirements, label="fixture")
+
+
+def test_hashed_requirements_validation_accepts_uv_multiline_entries(tmp_path: Path) -> None:
+    requirements = _write(
+        tmp_path / "requirements.txt",
+        "networkx==3.6.1 ; python_full_version >= '3.11' \\\n"
+        "    --hash=sha256:" + "0" * 64 + " \\\n"
+        "    --hash=sha256:" + "1" * 64 + "\n"
+        "numpy==2.4.6 --hash=sha256:" + "2" * 64 + "\n",
+    )
+
+    candidate_artifacts._assert_hashed_requirements(requirements, label="fixture")
+
+
+def test_runtime_export_rejects_unhashed_requirements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="networkx==3.6.1\n",
+            stderr="",
+        ),
+    )
+    (tmp_path / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+
+    with pytest.raises(ArtifactError, match="candidate runtime requirements lack valid"):
+        candidate_artifacts._export_runtime(
+            tmp_path,
+            tmp_path / "runtime-requirements.txt",
+            tmp_path / "sbom.cdx.json",
+        )
+
+
+def test_audit_scope_export_rejects_unhashed_requirements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="networkx==3.6.1\n",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(ArtifactError, match="all-extras-requirements requirements lack valid"):
+        candidate_artifacts._export_audit_scope(
+            tmp_path,
+            tmp_path / "all-extras-requirements.txt",
+            arguments=("--all-extras", "--no-dev"),
+        )
 
 
 def test_hashed_requirements_audit_never_scans_the_editable_environment(
@@ -743,7 +825,10 @@ def test_candidate_install_rejects_editable_directory_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     wheel = _write(tmp_path / WHEEL_NAME, b"fixture")
-    requirements = _write(tmp_path / "runtime-requirements.txt", "")
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n",
+    )
     monkeypatch.setattr(
         candidate_artifacts,
         "_wheel_metadata",
@@ -785,7 +870,10 @@ def test_candidate_install_rejects_broken_wheel_console(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     wheel = _write(tmp_path / WHEEL_NAME, b"fixture")
-    requirements = _write(tmp_path / "runtime-requirements.txt", "")
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n",
+    )
     monkeypatch.setattr(
         candidate_artifacts,
         "_wheel_metadata",
@@ -813,7 +901,10 @@ def test_candidate_install_accepts_module_under_resolved_symlinked_venv(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     wheel = _write(tmp_path / WHEEL_NAME, b"fixture")
-    requirements = _write(tmp_path / "runtime-requirements.txt", "")
+    requirements = _write(
+        tmp_path / "runtime-requirements.txt",
+        "networkx==3.6.1 --hash=sha256:" + "0" * 64 + "\n",
+    )
     real_root = tmp_path / "real-root"
     real_root.mkdir()
     linked_root = tmp_path / "linked-root"

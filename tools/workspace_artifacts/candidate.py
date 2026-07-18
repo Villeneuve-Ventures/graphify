@@ -435,6 +435,48 @@ def _download_verified_upstream_wheel(destination: Path) -> dict[str, str]:
     }
 
 
+def _assert_hashed_requirements(requirements: Path, *, label: str) -> None:
+    """Require every logical requirement to carry valid SHA-256 artifact hashes."""
+    try:
+        lines = requirements.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ArtifactError(f"cannot read {label} requirements: {requirements}: {exc}") from exc
+
+    entry: list[str] = []
+    entry_line = 0
+    entry_count = 0
+    for line_number, raw_line in enumerate(lines, start=1):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not entry:
+            entry_line = line_number
+        continued = stripped.endswith("\\")
+        entry.append(stripped[:-1].rstrip() if continued else stripped)
+        if continued:
+            continue
+
+        logical_requirement = " ".join(entry)
+        hashes = re.findall(r"(?<!\S)--hash=([^\s]+)", logical_requirement)
+        if not hashes or any(
+            re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in hashes
+        ):
+            raise ArtifactError(
+                f"{label} requirements lack valid SHA-256 hashes at line "
+                f"{entry_line}: {requirements}"
+            )
+        entry_count += 1
+        entry = []
+
+    if entry:
+        raise ArtifactError(
+            f"{label} requirements end with an unterminated continuation at line "
+            f"{entry_line}: {requirements}"
+        )
+    if entry_count == 0:
+        raise ArtifactError(f"{label} requirements contain no locked entries: {requirements}")
+
+
 def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
     env = _controlled_upstream_environment(os.environ)
     uv = _uv()
@@ -454,6 +496,7 @@ def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
         env=env,
     )
     requirements.write_text(requirements_result.stdout, encoding="utf-8")
+    _assert_hashed_requirements(requirements, label="candidate runtime")
     sbom_result = _run(
         [
             uv,
@@ -486,6 +529,7 @@ def _audit_requirements(
     """Audit one hashed lock export without inspecting the local environment."""
     if not requirements.is_absolute() or requirements.is_symlink() or not requirements.is_file():
         raise ArtifactError(f"{label} requirements must be an absolute regular file: {requirements}")
+    _assert_hashed_requirements(requirements, label=label)
     result = _run(
         [
             sys.executable,
@@ -629,6 +673,7 @@ def _export_audit_scope(
         env=_controlled_upstream_environment(os.environ),
     )
     destination.write_text(result.stdout, encoding="utf-8")
+    _assert_hashed_requirements(destination, label=destination.stem)
 
 
 def _wheel_metadata(wheel: Path) -> dict[str, str]:
@@ -665,6 +710,7 @@ def _verify_noneditable_candidate_install(
     work_root: Path,
 ) -> dict[str, object]:
     metadata = _wheel_metadata(wheel)
+    _assert_hashed_requirements(requirements, label="candidate runtime")
     uv = _uv()
     env = _controlled_upstream_environment(os.environ)
     env.pop("PYTHONPATH", None)
