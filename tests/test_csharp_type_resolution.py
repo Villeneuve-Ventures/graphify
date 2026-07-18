@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from graphify.extract import extract
+from graphify.extractors.engine import _csharp_namespace_id
 
 
 def _write(path: Path, text: str) -> Path:
@@ -206,6 +207,17 @@ def test_csharp_namespace_nodes_canonical_and_discriminated(tmp_path: Path):
     assert len(by_label.get("N", [])) == 1, "namespace N must be one canonical node across files"
     assert "Outer.Inner" in by_label, sorted(by_label)
     assert all(n["id"].startswith("csharp_namespace:") for n in ns), [n["id"] for n in ns]
+
+
+def test_non_security_sha1_namespace_ids_are_stable():
+    assert {
+        name: _csharp_namespace_id(name)
+        for name in ("N", "Outer.Inner", "Game.Core")
+    } == {
+        "N": "csharp_namespace:b51a60734da64be0",
+        "Outer.Inner": "csharp_namespace:d21670375b5b7dd1",
+        "Game.Core": "csharp_namespace:47dd3340150f465d",
+    }
 
 
 def test_csharp_import_edges_carry_using_kind(tmp_path: Path):

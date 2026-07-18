@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from email import policy
+from email.parser import BytesParser
 import hashlib
 from io import BytesIO
 import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import shutil
 import stat
 # Fixed argv only; shell execution is never used.
@@ -19,9 +22,14 @@ import tarfile
 import tempfile
 from typing import Iterator, Mapping
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request, url2pathname, urlopen
 import uuid
 import zipfile
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib  # pyright: ignore[reportMissingImports,reportAssignmentType]
 
 from graphify.workspace import (
     ADAPTER_CONTRACT_VERSION,
@@ -32,6 +40,7 @@ from graphify.workspace import (
     STATE_SCHEMA_VERSION,
     UPSTREAM_BASELINE_COMMIT,
     CompatibilityManifest,
+    ContractError,
     canonical_json_bytes,
     canonical_sha256,
 )
@@ -465,6 +474,379 @@ def _export_runtime(repo_root: Path, requirements: Path, sbom: Path) -> None:
     if not isinstance(parsed, dict):
         raise ArtifactError("uv emitted a non-object CycloneDX SBOM")
     sbom.write_bytes(_normalize_cyclonedx(parsed, sha256_file(repo_root / "uv.lock")))
+
+
+def _audit_requirements(
+    requirements: Path,
+    *,
+    cwd: Path,
+    label: str,
+    expected_dependency_count: int | None = None,
+) -> dict[str, int]:
+    """Audit one hashed lock export without inspecting the local environment."""
+    if not requirements.is_absolute() or requirements.is_symlink() or not requirements.is_file():
+        raise ArtifactError(f"{label} requirements must be an absolute regular file: {requirements}")
+    result = _run(
+        [
+            sys.executable,
+            "-m",
+            "pip_audit",
+            "--strict",
+            "--require-hashes",
+            "--no-deps",
+            "--disable-pip",
+            "--progress-spinner",
+            "off",
+            "--desc",
+            "off",
+            "--format",
+            "json",
+            "--requirement",
+            str(requirements),
+        ],
+        cwd=cwd,
+        env=_controlled_upstream_environment(os.environ),
+    )
+    try:
+        document = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ArtifactError(f"{label} pip-audit result is invalid JSON: {exc}") from exc
+    if not isinstance(document, dict) or not isinstance(document.get("dependencies"), list):
+        raise ArtifactError(f"{label} pip-audit result omits dependencies")
+    dependencies = document["dependencies"]
+    if expected_dependency_count is not None and len(dependencies) != expected_dependency_count:
+        raise ArtifactError(
+            f"{label} audited {len(dependencies)} of {expected_dependency_count} locked records"
+        )
+    if any(
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("name"), str)
+        or not isinstance(entry.get("version"), str)
+        or not isinstance(entry.get("vulns"), list)
+        for entry in dependencies
+    ):
+        raise ArtifactError(f"{label} pip-audit result contains an unresolved dependency")
+    vulnerabilities = sum(
+        len(entry.get("vulns", []))
+        for entry in dependencies
+        if isinstance(entry, dict) and isinstance(entry.get("vulns", []), list)
+    )
+    if vulnerabilities:
+        raise ArtifactError(f"{label} has {vulnerabilities} known vulnerability records")
+    return {
+        "dependency_count": len(dependencies),
+        "vulnerability_count": vulnerabilities,
+    }
+
+
+def _locked_registry_requirement_files(
+    repo_root: Path,
+    destination: Path,
+) -> list[tuple[Path, int]]:
+    """Render marker-free hashed cohorts covering every registry record in uv.lock."""
+    lock_path = repo_root / "uv.lock"
+    try:
+        document = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ArtifactError(f"cannot read candidate lock for complete audit: {exc}") from exc
+    packages = document.get("package")
+    if not isinstance(packages, list):
+        raise ArtifactError("candidate lock omits package records")
+
+    records: dict[str, dict[str, set[str]]] = {}
+    for package in packages:
+        if not isinstance(package, dict):
+            raise ArtifactError("candidate lock contains a non-object package record")
+        name = package.get("name")
+        version = package.get("version")
+        source = package.get("source")
+        if not isinstance(name, str) or not isinstance(version, str) or not isinstance(source, dict):
+            raise ArtifactError("candidate lock contains an incomplete package identity")
+        registry = source.get("registry")
+        if registry is None:
+            if name == "graphifyy" and source.get("editable") == ".":
+                continue
+            raise ArtifactError(f"locked package {name} {version} is not registry-auditable")
+        if registry != CONTROLLED_UPSTREAM_INDEX:
+            raise ArtifactError(f"locked package {name} {version} uses untrusted registry {registry}")
+
+        hashes: set[str] = set()
+        sdist = package.get("sdist")
+        if isinstance(sdist, dict) and isinstance(sdist.get("hash"), str):
+            hashes.add(sdist["hash"])
+        wheels = package.get("wheels")
+        if isinstance(wheels, list):
+            hashes.update(
+                wheel["hash"]
+                for wheel in wheels
+                if isinstance(wheel, dict) and isinstance(wheel.get("hash"), str)
+            )
+        if not hashes or any(re.fullmatch(r"sha256:[0-9a-f]{64}", item) is None for item in hashes):
+            raise ArtifactError(f"locked package {name} {version} lacks valid SHA-256 artifacts")
+        normalized = re.sub(r"[-_.]+", "-", name).lower()
+        records.setdefault(normalized, {}).setdefault(version, set()).update(hashes)
+
+    if not records:
+        raise ArtifactError("candidate lock contains no registry packages to audit")
+    destination.mkdir(parents=True, exist_ok=True)
+    version_sets = {name: sorted(versions.items()) for name, versions in records.items()}
+    cohort_count = max(len(versions) for versions in version_sets.values())
+    cohorts: list[tuple[Path, int]] = []
+    for index in range(cohort_count):
+        lines: list[str] = []
+        for name in sorted(version_sets):
+            versions = version_sets[name]
+            if index >= len(versions):
+                continue
+            version, hashes = versions[index]
+            hash_arguments = " ".join(f"--hash={item}" for item in sorted(hashes))
+            lines.append(f"{name}=={version} {hash_arguments}")
+        path = destination / f"locked-registry-{index + 1}.txt"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        cohorts.append((path, len(lines)))
+    return cohorts
+
+
+def _export_audit_scope(
+    repo_root: Path,
+    destination: Path,
+    *,
+    arguments: tuple[str, ...],
+) -> None:
+    result = _run(
+        [
+            _uv(),
+            "export",
+            "--locked",
+            *arguments,
+            "--no-emit-project",
+            "--no-annotate",
+            "--no-header",
+            "--format",
+            "requirements.txt",
+        ],
+        cwd=repo_root,
+        env=_controlled_upstream_environment(os.environ),
+    )
+    destination.write_text(result.stdout, encoding="utf-8")
+
+
+def _wheel_metadata(wheel: Path) -> dict[str, str]:
+    if not wheel.is_absolute() or wheel.is_symlink() or not wheel.is_file():
+        raise ArtifactError(f"candidate wheel must be an absolute regular file: {wheel}")
+    with zipfile.ZipFile(wheel) as archive:
+        metadata_names = [
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        ]
+        if len(metadata_names) != 1:
+            raise ArtifactError(
+                f"candidate wheel must contain one METADATA file: {metadata_names}"
+            )
+        message = BytesParser(policy=policy.default).parsebytes(archive.read(metadata_names[0]))
+    name = message.get("Name")
+    version = message.get("Version")
+    if name != "graphifyy" or version != CANDIDATE_DISTRIBUTION_VERSION:
+        raise ArtifactError(f"candidate wheel metadata identifies {name!r} {version!r}")
+    return {"distribution": name, "version": version}
+
+
+def _venv_python(venv: Path) -> Path:
+    return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def _venv_graphify(venv: Path) -> Path:
+    return venv / ("Scripts/graphify.exe" if os.name == "nt" else "bin/graphify")
+
+
+def _verify_noneditable_candidate_install(
+    *,
+    wheel: Path,
+    requirements: Path,
+    work_root: Path,
+) -> dict[str, object]:
+    metadata = _wheel_metadata(wheel)
+    uv = _uv()
+    env = _controlled_upstream_environment(os.environ)
+    env.pop("PYTHONPATH", None)
+    venv = work_root / "candidate-venv"
+    _run(
+        [uv, "venv", "--no-project", "--python", sys.executable, str(venv)],
+        cwd=work_root,
+        env=env,
+    )
+    python = _venv_python(venv)
+    _run(
+        [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--no-deps",
+            "--require-hashes",
+            "--requirements",
+            str(requirements),
+        ],
+        cwd=work_root,
+        env=env,
+    )
+    _run(
+        [uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)],
+        cwd=work_root,
+        env=env,
+    )
+    _run([uv, "pip", "check", "--python", str(python)], cwd=work_root, env=env)
+    graphify = _venv_graphify(venv)
+    installed_version = _run([str(graphify), "--version"], cwd=work_root, env=env).stdout.strip()
+    if installed_version != f"graphify {metadata['version']}":
+        raise ArtifactError(f"candidate wheel console reports unexpected version: {installed_version}")
+    _run([str(graphify), "--help"], cwd=work_root, env=env)
+    inspection = _run(
+        [
+            str(python),
+            "-c",
+            (
+                "import importlib.metadata as m,json;"
+                "import graphify;"
+                "from pathlib import Path;"
+                "d=m.distribution('graphifyy');"
+                "u=json.loads(d.read_text('direct_url.json') or '{}');"
+                "print(json.dumps({'version':d.version,'direct_url':u,"
+                "'module_file':str(Path(graphify.__file__).resolve())},sort_keys=True))"
+            ),
+        ],
+        cwd=work_root,
+        env=env,
+    )
+    try:
+        installed = json.loads(inspection.stdout)
+    except json.JSONDecodeError as exc:
+        raise ArtifactError(f"candidate installation inspection is invalid JSON: {exc}") from exc
+    direct_url = installed.get("direct_url") if isinstance(installed, dict) else None
+    source_url = direct_url.get("url") if isinstance(direct_url, dict) else None
+    parsed_source = urlparse(source_url) if isinstance(source_url, str) else None
+    installed_archive = (
+        Path(url2pathname(parsed_source.path)).resolve()
+        if parsed_source is not None
+        and parsed_source.scheme == "file"
+        and parsed_source.netloc in {"", "localhost"}
+        else None
+    )
+    if (
+        not isinstance(direct_url, dict)
+        or installed_archive != wheel.resolve()
+        or not isinstance(direct_url.get("archive_info"), dict)
+        or "dir_info" in direct_url
+    ):
+        raise ArtifactError("candidate installation is not bound to the non-editable wheel archive")
+    if installed.get("version") != metadata["version"]:
+        raise ArtifactError("installed candidate version does not match wheel metadata")
+    module_file = installed.get("module_file")
+    if not isinstance(module_file, str) or not Path(module_file).is_relative_to(venv.resolve()):
+        raise ArtifactError("candidate import did not resolve from the isolated wheel environment")
+    return {
+        **metadata,
+        "editable": False,
+        "source": source_url,
+        "module_file": module_file,
+        "console_version": installed_version,
+        "dependencies_consistent": True,
+    }
+
+
+def audit_candidate(*, repo_root: Path, artifact_root: Path) -> dict[str, object]:
+    """Verify and audit the exact candidate wheel plus all locked dependency scopes."""
+    repo_root = repo_root.resolve()
+    artifact_root = artifact_root.resolve()
+    uv = _uv()
+    head, tree = _assert_candidate_source(repo_root)
+    try:
+        trusted = (artifact_root / "trusted-manifest.json").read_bytes()
+        verify_trusted_manifest(artifact_root=artifact_root, trusted_manifest=trusted)
+        compatibility_data = json.loads(
+            (artifact_root / "compatibility.json").read_text(encoding="utf-8")
+        )
+        provenance = json.loads((artifact_root / "provenance.json").read_text(encoding="utf-8"))
+        compatibility = CompatibilityManifest.from_mapping(compatibility_data).to_dict()
+    except (OSError, json.JSONDecodeError, ContractError) as exc:
+        raise ArtifactError(f"candidate audit cannot validate artifact identity: {exc}") from exc
+    expected_identity = {
+        "fork_commit": head,
+        "runtime_lock_sha256": sha256_file(repo_root / "uv.lock"),
+    }
+    if any(compatibility.get(name) != value for name, value in expected_identity.items()):
+        raise ArtifactError("candidate compatibility does not match the audited checkout and lock")
+    if provenance.get("fork_commit") != head or provenance.get("fork_tree") != tree:
+        raise ArtifactError("candidate provenance does not match the audited checkout tree")
+
+    wheel = artifact_root / WHEEL_NAME
+    runtime_requirements = artifact_root / "runtime-requirements.txt"
+    with tempfile.TemporaryDirectory(prefix="graphify-candidate-audit-") as raw:
+        work_root = Path(raw)
+        optional_requirements = work_root / "all-extras-requirements.txt"
+        dev_requirements = work_root / "dev-requirements.txt"
+        locked_registry = _locked_registry_requirement_files(repo_root, work_root / "lock-audit")
+        _export_audit_scope(
+            repo_root,
+            optional_requirements,
+            arguments=("--no-dev", "--all-extras"),
+        )
+        _export_audit_scope(
+            repo_root,
+            dev_requirements,
+            arguments=("--only-dev",),
+        )
+        installation = _verify_noneditable_candidate_install(
+            wheel=wheel,
+            requirements=runtime_requirements,
+            work_root=work_root,
+        )
+        audits = {
+            "runtime": _audit_requirements(
+                runtime_requirements,
+                cwd=repo_root,
+                label="candidate runtime",
+            ),
+            "all_extras": _audit_requirements(
+                optional_requirements,
+                cwd=repo_root,
+                label="locked runtime plus all extras",
+            ),
+            "dev": _audit_requirements(
+                dev_requirements,
+                cwd=repo_root,
+                label="locked development dependencies",
+            ),
+        }
+        locked_results = [
+            _audit_requirements(
+                requirements,
+                cwd=repo_root,
+                label=f"complete locked registry cohort {index}",
+                expected_dependency_count=expected_count,
+            )
+            for index, (requirements, expected_count) in enumerate(locked_registry, start=1)
+        ]
+        audits["all_locked_registry_records"] = {
+            "cohort_count": len(locked_results),
+            "dependency_count": sum(result["dependency_count"] for result in locked_results),
+            "vulnerability_count": sum(
+                result["vulnerability_count"] for result in locked_results
+            ),
+        }
+    pip_audit = _run([sys.executable, "-m", "pip_audit", "--version"], cwd=repo_root)
+    return {
+        "artifact_root": str(artifact_root),
+        "fork_commit": head,
+        "fork_tree": tree,
+        "wheel_sha256": sha256_file(wheel),
+        "runtime_requirements_sha256": sha256_file(runtime_requirements),
+        "sbom_sha256": sha256_file(artifact_root / "sbom.cdx.json"),
+        "installation": installation,
+        "audits": audits,
+        "pip_audit": pip_audit.stdout.strip(),
+        "uv": _run([uv, "--version"], cwd=repo_root).stdout.strip(),
+    }
 
 
 def _write_prior_home(home: Path, codex_home: Path) -> None:
@@ -958,6 +1340,7 @@ __all__ = [
     "UPSTREAM_WHEEL_NAME",
     "UPSTREAM_WHEEL_SHA256",
     "WHEEL_NAME",
+    "audit_candidate",
     "build_and_compare_candidates",
     "build_candidate",
     "compare_candidate_roots",

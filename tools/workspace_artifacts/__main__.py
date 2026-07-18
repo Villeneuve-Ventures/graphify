@@ -7,6 +7,7 @@ import sys
 
 from tools.workspace_artifacts import ArtifactError, verify_trusted_manifest
 from tools.workspace_artifacts.candidate import (
+    audit_candidate,
     build_and_compare_candidates,
     build_candidate,
     prove_candidate,
@@ -16,7 +17,7 @@ from tools.workspace_artifacts.candidate import (
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m tools.workspace_artifacts",
-        description="Build and prove the isolated Graphify workspace P1 candidate.",
+        description="Build, audit, and prove the isolated Graphify workspace candidate.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -32,6 +33,13 @@ def _parser() -> argparse.ArgumentParser:
     verify = commands.add_parser("verify", help="verify against a frozen local manifest")
     verify.add_argument("--artifact-root", type=Path, required=True)
     verify.add_argument("--manifest", type=Path)
+
+    audit = commands.add_parser(
+        "audit",
+        help="audit the trusted candidate wheel, runtime, optional, and dev dependencies",
+    )
+    audit.add_argument("--repo-root", type=Path, required=True)
+    audit.add_argument("--artifact-root", type=Path, required=True)
 
     prove = commands.add_parser("prove", help="run isolated home/tamper/rollback proofs")
     prove.add_argument("--artifact-root", type=Path, required=True)
@@ -69,6 +77,11 @@ def main() -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         result = {"verified": True, "artifact_root": str(artifact_root)}
+    elif args.command == "audit":
+        result = audit_candidate(
+            repo_root=args.repo_root.resolve(),
+            artifact_root=args.artifact_root.resolve(),
+        )
     else:
         result = prove_candidate(
             artifact_root=args.artifact_root.resolve(),

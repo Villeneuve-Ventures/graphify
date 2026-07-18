@@ -41,6 +41,12 @@ def test_update_mutates_hashvalues():
     assert not np.array_equal(m.hashvalues, before)
 
 
+def test_non_security_sha1_minhash_output_is_stable():
+    m = MinHash(num_perm=4)
+    m.update(b"hello")
+    assert m.hashvalues.tolist() == [1532289145, 657939710, 878936045, 1550743288]
+
+
 # ── MinHashLSH ────────────────────────────────────────────────────────────────
 
 def test_near_duplicates_are_candidates():

@@ -47,6 +47,60 @@
 - the real global Graphify binary and installed skill tree match their pre-P1
   digests afterward.
 
+## H2 candidate packaging and security gates
+
+Candidate packaging uses PEP 639 metadata (`license = "MIT"` plus the explicit
+`LICENSE` file) and setuptools `>=83.0.0`. The redundant standalone `wheel`
+development dependency is intentionally absent because setuptools has owned the
+`bdist_wheel` command since 70.1. The unused Nuitka dev dependency is also absent:
+its unconditional legacy `wheel.bdist_wheel` entry points polluted ordinary
+setuptools builds, and no repository command or test consumes it. Candidate
+builds must not emit either the deprecated TOML-table license warning or the
+standalone-wheel command warning.
+
+All release-security commands use exact uv `0.11.29`:
+
+```sh
+uv sync --all-extras --frozen
+uv run --frozen bandit -r graphify tools/workspace_artifacts -lll
+uv run --frozen python -m tools.workspace_artifacts build \
+  --repo-root "$PWD" \
+  --output-root /absolute/empty/candidate-a \
+  --comparison-output-root /absolute/empty/candidate-b
+uv run --frozen python -m tools.workspace_artifacts audit \
+  --repo-root "$PWD" \
+  --artifact-root /absolute/empty/candidate-a
+```
+
+The audit command verifies the trusted manifest, checkout commit/tree, lock
+digest, wheel metadata, runtime requirements, SBOM, and a non-editable isolated
+wheel installation before running `uv pip check`. It then invokes strict
+`pip-audit` with `--require-hashes --no-deps --disable-pip` against the
+candidate's exact `runtime-requirements.txt`, fresh locked all-extras and
+dev-only exports, and marker-free hashed cohorts containing every registry
+package/version record in `uv.lock`. The complete-lock cohorts prevent the host
+interpreter from skipping Python- or platform-conditioned records and reject
+any unauditable or non-PyPI lock source. The command never audits the editable
+checkout or asks PyPI to resolve the unpublished local candidate.
+
+The H2 refresh found and remediated every current advisory without an ignore or
+baseline exception:
+
+| Scope/package | Prior lock | Advisory disposition | H2 lock |
+|---|---:|---|---:|
+| optional `mcp` | 1.27.1 | CVE-2026-52870, CVE-2026-52869, and CVE-2026-59950 fixed; the published extra now floors the fully fixed release | 1.28.1 |
+| optional `pillow` | 12.2.0 | PYSEC-2026-2253, -2254, -2255, -2256, -2257, -3451, -3452, and -3453 fixed | 12.3.0 |
+| dev `pip` | 26.1.1 | PYSEC-2026-196 fixed; the duplicated alias record is the same underlying advisory | 26.1.2 |
+| optional/dev `setuptools` | 82.0.1 | PYSEC-2026-3447 fixed and the direct build/dev floor raised | 83.0.0 |
+| optional `soupsieve` | 2.8.3 | PYSEC-2026-3071 and PYSEC-2026-3072 fixed | 2.8.4 |
+
+The three remaining high Bandit findings were non-security SHA-1 uses for
+MinHash compatibility, C# namespace IDs, and path-collision salts. Each call
+passes `usedforsecurity=False`; focused tests freeze the exact derived values so
+this disposition cannot silently change persisted IDs or deduplication output.
+The blocking CI gate reports high severity only; inherited medium findings stay
+owned by H3.
+
 ## P2 runtime gates
 
 - enrollment, adoption, evidence rotation, rebind, and activation each require
