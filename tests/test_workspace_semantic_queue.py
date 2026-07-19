@@ -2195,6 +2195,107 @@ def test_claim_rejects_policy_changed_without_registry_rebind(
     assert queue.inspect(REPO_UUID).canonical == before
 
 
+def test_claim_rejects_policy_replaced_after_checkout_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    config_path = harness.repo / ".graphify/workspace.toml"
+    config = WorkspaceConfig.from_toml(config_path.read_bytes())
+    replacement = (
+        'contract = "graphify.workspace.config"\n'
+        "schema_version = 1\n"
+        f'repo_uuid = "{REPO_UUID}"\n'
+        "\n"
+        "[policy]\n"
+        'freshness = "current_only"\n'
+        'semantic_mode = "explicit_backend"\n'
+        "network_egress = true\n"
+        'headless_backends = ["gemini"]\n'
+    ).encode()
+    original_verify = semantic_queue_module.verify_source_checkout
+    replaced = False
+
+    def verify_then_replace(*args: Any, **kwargs: Any) -> None:
+        nonlocal replaced
+        original_verify(*args, **kwargs)
+        config_path.write_bytes(replacement)
+        replaced = True
+
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "verify_source_checkout",
+        verify_then_replace,
+    )
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_(mismatch|unavailable)",
+    ):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=True,
+            explicit_backend=None,
+            monotonic_ns=20_001,
+        )
+
+    assert replaced
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
+def test_claim_rejects_source_replaced_after_checkout_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    config_path = harness.repo / ".graphify/workspace.toml"
+    config_bytes = config_path.read_bytes()
+    config = WorkspaceConfig.from_toml(config_bytes)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    original_verify = semantic_queue_module.verify_source_checkout
+    verify_calls = 0
+
+    def verify_then_replace(*args: Any, **kwargs: Any) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        original_verify(*args, **kwargs)
+        if verify_calls == 1:
+            harness.repo.rename(tmp_path / "original-repo")
+            (harness.repo / ".graphify").mkdir(parents=True)
+            config_path.write_bytes(config_bytes)
+
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "verify_source_checkout",
+        verify_then_replace,
+    )
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_unavailable",
+    ):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=True,
+            explicit_backend=None,
+            monotonic_ns=20_001,
+        )
+
+    assert verify_calls == 2
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
 def test_claim_rejects_source_path_replacement_before_reading_active_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2421,7 +2522,7 @@ def test_claim_rejects_aba_policy_replacement_during_config_read(
             monotonic_ns=20_001,
         )
 
-    assert read_calls == 2
+    assert read_calls == 3
     assert queue.inspect(REPO_UUID).canonical == before
 
 
@@ -2583,6 +2684,124 @@ def test_activation_between_registry_snapshot_and_queue_lock_rejects_claim(
 
     assert activated
     assert queue.inspect(REPO_UUID).canonical == queue_before
+
+
+def test_claim_requires_exact_reconciliation_after_active_source_changes(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    linked_source, registry_revision, active_source_revision = (
+        _rebind_linked_policy_source(harness, tmp_path)
+    )
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queued = queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    assert queued.active_source_revision == active_source_revision
+    harness.leases.release(build)
+    _activate_linked_policy_source(
+        harness,
+        linked_source,
+        registry_revision=registry_revision,
+        active_source_revision=active_source_revision,
+        nonce="activate-stale-queue",
+        monotonic_ns=30_000,
+    )
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=4)
+    config = WorkspaceConfig.from_toml(
+        (linked_source.root / ".graphify/workspace.toml").read_bytes()
+    )
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(SemanticQueueConflict, match="active source.*reconciliation"):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=False,
+            explicit_backend="gemini",
+            monotonic_ns=40_001,
+        )
+
+    assert queue.inspect(REPO_UUID).canonical == before
+    harness.leases.release(semantic)
+    successor_build = acquire(harness, "BUILD", tick=5)
+    successor_work = _work("docs/a.md", 2, digest="a" * 64)
+    reconciled = queue.reconcile(
+        successor_build,
+        (successor_work,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(
+            harness,
+            source_commit=linked_source.head_commit,
+        ),
+        desired_watermark=2,
+        semantic_required=True,
+        monotonic_ns=50_001,
+    )
+    assert reconciled.active_source_revision == successor_build.active_source_revision
+    harness.leases.release(successor_build)
+    successor_semantic = acquire(harness, "SEMANTIC_CLAIM", tick=6)
+
+    claim = queue.claim(
+        successor_semantic,
+        config=config,
+        host_agent_active=False,
+        explicit_backend="gemini",
+        monotonic_ns=60_001,
+    )
+
+    assert claim is not None
+    assert claim.work == successor_work
+
+
+def test_source_change_rejects_same_watermark_reconciliation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    linked_source, registry_revision, active_source_revision = (
+        _rebind_linked_policy_source(harness, tmp_path)
+    )
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    desired = _work("docs/a.md", 1)
+    source_observations = _source_observations(harness)
+    before = queue.reconcile(
+        build,
+        (desired,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=source_observations,
+        desired_watermark=1,
+        semantic_required=True,
+        monotonic_ns=10_001,
+    )
+    harness.leases.release(build)
+    _activate_linked_policy_source(
+        harness,
+        linked_source,
+        registry_revision=registry_revision,
+        active_source_revision=active_source_revision,
+        nonce="activate-same-watermark",
+        monotonic_ns=20_000,
+    )
+    successor_build = acquire(harness, "BUILD", tick=3)
+
+    with pytest.raises(
+        SemanticQueueConflict,
+        match="active source changed.*desired revision must advance",
+    ):
+        queue.reconcile(
+            successor_build,
+            (desired,),
+            source_epoch=1,
+            policy_sha256="1" * 64,
+            source_observations=source_observations,
+            desired_watermark=1,
+            semantic_required=True,
+            monotonic_ns=30_001,
+        )
+
+    assert queue.inspect(REPO_UUID).canonical == before.canonical
 
 
 def test_activation_cannot_commit_before_semantic_grant_compaction(

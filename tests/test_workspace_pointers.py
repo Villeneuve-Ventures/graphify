@@ -98,7 +98,11 @@ def _request(commit: str, *, queue_watermark: int) -> CertificationRequest:
         queue_watermark=queue_watermark,
         semantic_completeness="not_required",
         compatibility_sha256=COMPATIBILITY_SHA256,
-        validations=("payload_manifest", "coordination_lock_precreated"),
+        validations=(
+            "payload_manifest",
+            "coordination_lock_precreated",
+            "stable_semantic_queue",
+        ),
     )
 
 

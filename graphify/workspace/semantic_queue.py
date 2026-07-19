@@ -756,6 +756,7 @@ class SemanticQueueSnapshot:
     """Canonical internal durable state for one workspace semantic queue."""
 
     repo_uuid: str
+    active_source_revision: int | None
     revision: int
     desired_watermark: int
     completed_watermark: int
@@ -782,6 +783,7 @@ class SemanticQueueSnapshot:
             "contract": "graphify.workspace.semantic_queue.internal",
             "format_version": 1,
             "repo_uuid": self.repo_uuid,
+            "active_source_revision": self.active_source_revision,
             "revision": self.revision,
             "desired_watermark": self.desired_watermark,
             "completed_watermark": self.completed_watermark,
@@ -802,6 +804,7 @@ class SemanticQueueSnapshot:
     ) -> "SemanticQueueSnapshot":
         return cls(
             repo_uuid=repo_uuid,
+            active_source_revision=None,
             revision=0,
             desired_watermark=0,
             completed_watermark=0,
@@ -822,6 +825,7 @@ class SemanticQueueSnapshot:
                 "contract",
                 "format_version",
                 "repo_uuid",
+                "active_source_revision",
                 "revision",
                 "desired_watermark",
                 "completed_watermark",
@@ -837,6 +841,16 @@ class SemanticQueueSnapshot:
         if _integer(data["format_version"], "$.format_version", minimum=1) != 1:
             raise ContractError("$.format_version: unsupported semantic queue state version")
         repo_uuid = str(LeaseStore._directory(_string(data["repo_uuid"], "$.repo_uuid")).parts[-1])
+        active_source_revision_value = data["active_source_revision"]
+        active_source_revision = (
+            None
+            if active_source_revision_value is None
+            else _integer(
+                active_source_revision_value,
+                "$.active_source_revision",
+                minimum=1,
+            )
+        )
         revision = _integer(data["revision"], "$.revision")
         desired_watermark = _integer(data["desired_watermark"], "$.desired_watermark")
         completed_watermark = _integer(
@@ -891,6 +905,12 @@ class SemanticQueueSnapshot:
             raise ContractError("$.items: coalescing keys must be unique")
         if any(item.desired_revision > desired_watermark for item in items):
             raise ContractError("$.items: desired revision exceeds queue watermark")
+        if active_source_revision is None and (
+            desired_watermark != 0 or reconciliation is not None or items
+        ):
+            raise ContractError(
+                "$.active_source_revision: durable desired work must bind an active source"
+            )
         if reconciliation is not None:
             desired_by_identity = {work.identity: work for work in reconciliation.desired}
             for item in items:
@@ -916,6 +936,7 @@ class SemanticQueueSnapshot:
                 )
         return cls(
             repo_uuid=repo_uuid,
+            active_source_revision=active_source_revision,
             revision=revision,
             desired_watermark=desired_watermark,
             completed_watermark=completed_watermark,
@@ -1383,15 +1404,45 @@ class SemanticQueueStore:
                 expected_git_common_inode=cast(int, common_inode),
                 expected_root_identity=root_identity,
             )
-            if config_sha256 != expected_config_sha256:
+            confirmed_config, confirmed_config_sha256 = read_workspace_config_with_digest(
+                source_root
+            )
+            verify_source_checkout(
+                source_root,
+                expected_git_common_dir=Path(cast(str, recorded["git_common_dir"])),
+                expected_worktree_id=cast(str, recorded["worktree_id"]),
+                expected_git_common_device=cast(int, common_device),
+                expected_git_common_inode=cast(int, common_inode),
+                expected_root_identity=root_identity,
+            )
+            if (
+                config_sha256 != expected_config_sha256
+                or confirmed_config_sha256 != expected_config_sha256
+                or confirmed_config != config
+            ):
                 raise SemanticCapabilityUnavailable("workspace_config_mismatch")
         except (ContractError, OSError, IdentityError) as exc:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
-        return config, config_sha256
+        return confirmed_config, confirmed_config_sha256
 
     @staticmethod
     def _sorted_items(items: Sequence[SemanticQueueItem]) -> tuple[SemanticQueueItem, ...]:
         return tuple(sorted(items, key=lambda item: item.work.sort_key))
+
+    @staticmethod
+    def _require_current_source(
+        snapshot: SemanticQueueSnapshot,
+        operation: LeaseOperation,
+    ) -> None:
+        if (
+            snapshot.active_source_revision is None
+            and snapshot.desired_watermark == 0
+            and snapshot.reconciliation is None
+            and not snapshot.items
+        ):
+            return
+        if snapshot.active_source_revision != operation.grant.active_source_revision:
+            raise SemanticQueueConflict("active source changed; exact reconciliation is required")
 
     def enqueue(
         self,
@@ -1407,6 +1458,13 @@ class SemanticQueueStore:
             allowed_operations=_MUTATING_OPERATIONS,
         ) as operation:
             current = self._load_locked(operation.repo_uuid)
+            if current.active_source_revision not in {
+                None,
+                operation.grant.active_source_revision,
+            }:
+                raise SemanticQueueConflict(
+                    "active source changed; exact reconciliation is required"
+                )
             by_key = {item.work.coalescing_key: item for item in current.items}
             existing = by_key.get(desired.coalescing_key)
             if existing is not None and existing.work == desired:
@@ -1433,6 +1491,7 @@ class SemanticQueueStore:
             )
             candidate = replace(
                 current,
+                active_source_revision=operation.grant.active_source_revision,
                 desired_watermark=desired.desired_revision,
                 reconciliation=None,
                 items=self._sorted_items(tuple(by_key.values())),
@@ -1467,7 +1526,17 @@ class SemanticQueueStore:
             current = self._load_locked(operation.repo_uuid)
             if desired_watermark < current.desired_watermark:
                 raise SemanticQueueConflict("reconciliation desired revision moved backward")
-            existing_by_identity = {item.work.identity: item for item in current.items}
+            source_changed = current.active_source_revision not in {
+                None,
+                operation.grant.active_source_revision,
+            }
+            if source_changed and desired_watermark == current.desired_watermark:
+                raise SemanticQueueConflict(
+                    "active source changed; reconciliation desired revision must advance"
+                )
+            existing_by_identity = (
+                {} if source_changed else {item.work.identity: item for item in current.items}
+            )
             items = tuple(
                 existing_by_identity.get(
                     work.identity,
@@ -1534,6 +1603,7 @@ class SemanticQueueStore:
             )
             candidate = replace(
                 current,
+                active_source_revision=operation.grant.active_source_revision,
                 desired_watermark=desired_watermark,
                 completed_watermark=completed,
                 reconciliation=reconciliation,
@@ -1646,6 +1716,7 @@ class SemanticQueueStore:
             if not capability.available:
                 raise SemanticCapabilityUnavailable(capability.reason)
             current = self._load_locked(operation.repo_uuid)
+            self._require_current_source(current, operation)
             changed = False
             recovered: list[SemanticQueueItem] = []
             active: SemanticClaim | None = None
@@ -1766,6 +1837,7 @@ class SemanticQueueStore:
             raise ContractError("$.checkpoint: expected non-empty string")
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
             current = self._load_locked(operation.repo_uuid)
+            self._require_current_source(current, operation)
             index, item = self._claimed_item(current, claim, operation)
             updated_claim = replace(cast(SemanticClaim, item.claim), checkpoint=checkpoint_value)
             items = list(current.items)
@@ -1804,6 +1876,7 @@ class SemanticQueueStore:
     ) -> SemanticQueueSnapshot:
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
             current = self._load_locked(operation.repo_uuid)
+            self._require_current_source(current, operation)
             index, item = self._claimed_item(current, claim, operation)
             items = list(current.items)
             items[index] = replace(
@@ -1837,6 +1910,7 @@ class SemanticQueueStore:
             raise SemanticQueueError("error_code must be a stable lowercase classification")
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
             current = self._load_locked(operation.repo_uuid)
+            self._require_current_source(current, operation)
             index, item = self._claimed_item(current, claim, operation)
             failures = item.failure_count + 1
             status = (
@@ -1874,6 +1948,10 @@ class SemanticQueueStore:
             allowed_operations=_MUTATING_OPERATIONS,
         ) as operation:
             current = self._load_locked(operation.repo_uuid)
+            if current.active_source_revision != operation.grant.active_source_revision:
+                raise SemanticCertificationBlocked(
+                    "active source changed; exact reconciliation is required"
+                )
             reconciliation = current.reconciliation
             if reconciliation is None:
                 raise SemanticCertificationBlocked(
@@ -1914,6 +1992,7 @@ class SemanticQueueStore:
             registry_required=True,
         ) as operation:
             current = self._load_locked(operation.repo_uuid)
+            self._require_current_source(current, operation)
             items = current.items
             if current.completed_watermark == current.desired_watermark:
                 items = tuple(item for item in items if item.status != "completed")
@@ -2128,6 +2207,10 @@ class SemanticQueueStore:
             allowed_operations=frozenset({"BUILD", "MIGRATE"}),
         ) as operation:
             snapshot = self._load_locked(operation.repo_uuid)
+            if snapshot.active_source_revision != operation.grant.active_source_revision:
+                raise SemanticCertificationBlocked(
+                    "active source changed; exact reconciliation is required"
+                )
             return self._view_from_snapshot(
                 snapshot,
                 source_epoch=source_epoch,
@@ -2143,6 +2226,10 @@ class SemanticQueueStore:
         """Revalidate a captured view while GenerationStore holds the workspace lock."""
 
         snapshot = self._load_locked(operation.repo_uuid)
+        if snapshot.active_source_revision != operation.grant.active_source_revision:
+            raise SemanticCertificationBlocked(
+                "active source changed; exact reconciliation is required"
+            )
         if snapshot.revision != view.queue_revision or snapshot.sha256 != view.queue_state_sha256:
             raise SemanticCertificationBlocked("queue view changed before certification")
         reconciliation = snapshot.reconciliation

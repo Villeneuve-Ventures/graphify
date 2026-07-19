@@ -69,10 +69,13 @@ agent/named-backend inputs. A foreign or same-UUID relabeled policy and an
 arbitrary decision object are never authority. Host-agent use must be stated by
 the caller; a headless backend must be explicitly named, policy-allowlisted, and
 permitted network egress. Ambient provider or credential environment variables
-are not capability or authority. Semantic mutations retain the current registry
-lock while nesting the workspace lock; an activation between source discovery
-and claim validation therefore makes the old lease stale instead of authorizing
-work from retired policy.
+are not capability or authority. Semantic-grant mutations retain the current
+registry lock while nesting the workspace lock. Lifecycle queue mutations use
+the normal stable-registry-snapshot then workspace-lock path, where the live
+lifecycle lease excludes activation. An activation before claim validation
+therefore makes the old lease stale instead of authorizing work from retired
+policy. The active-source revision that produced desired work is persisted with
+the queue, and retained work requires a new exact reconciliation after activation.
 
 Claim IDs bind the workspace UUID, desired work, owner, fence, source revision,
 and operation and migration epochs. This prevents a stale worker, expired

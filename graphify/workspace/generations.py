@@ -948,7 +948,10 @@ class GenerationStore:
         if payload["manifest_sha256"] != payload_manifest_sha256("graphify-out", declared):
             raise GenerationError("generation receipt manifest digest does not match")
         queue_watermark = int(value["queue_watermark"])
-        if queue_watermark > 0:
+        validations = tuple(
+            str(validation) for validation in cast(list[object], value["validations"])
+        )
+        if "stable_semantic_queue" in validations:
             request = CertificationRequest(
                 source_commit=str(value["source_commit"]),
                 source_epoch=int(value["source_epoch"]),
@@ -957,10 +960,7 @@ class GenerationStore:
                 queue_watermark=queue_watermark,
                 semantic_completeness=str(value["semantic_completeness"]),
                 compatibility_sha256=str(value["compatibility_sha256"]),
-                validations=tuple(
-                    str(validation)
-                    for validation in cast(list[object], value["validations"])
-                ),
+                validations=validations,
             )
             try:
                 queue_view = SemanticQueueStore.verify_certification_binding_at(
@@ -1293,6 +1293,16 @@ class GenerationStore:
             registry_required=True,
         ) as capacity_operation:
             self._require_allocation(capacity_operation, allocation)
+            self._receipt(
+                capacity_operation,
+                allocation,
+                request,
+                declared_entries,
+            )
+            if "stable_semantic_queue" not in request.validations:
+                raise SemanticCertificationBlocked(
+                    "certification request lacks stable semantic queue validation"
+                )
             queue_view = self.semantic_queue.certification_binding_locked(
                 capacity_operation,
                 generation_id=allocation.generation_id,

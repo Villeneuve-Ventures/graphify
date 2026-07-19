@@ -81,10 +81,12 @@ P5A adds this per-workspace state under the same external lifecycle root:
 Despite the retained `.jsonl` path name, each file is one canonical internal
 JSON record handled by the existing current/previous/pending durable-record
 protocol. The record is not a new public v1 schema and does not change the
-frozen receipt schema. Its monotonically increasing desired and completed
-watermarks, exact desired-set reconciliation, claim state, retry/dead-letter
-state, typed repeated-source-observation evidence, sealed staged-input binding,
-and compaction epoch are external lifecycle state, never source-checkout content.
+frozen receipt schema. Its active-source revision, monotonically increasing
+desired and completed watermarks, exact desired-set reconciliation, claim state,
+retry/dead-letter state, typed repeated-source-observation evidence, sealed
+staged-input binding, and compaction epoch are external lifecycle state, never
+source-checkout content. A source activation requires a newer exact
+reconciliation before retained desired work is eligible again.
 Each certification file is a separate immutable, store-owned internal record
 binding one generation and certification request to the revalidated queue view
 and exact sealed staged-input manifest.

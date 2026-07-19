@@ -479,7 +479,11 @@ def _request(
         queue_watermark=queue_watermark,
         semantic_completeness="not_required",
         compatibility_sha256=COMPATIBILITY_SHA256,
-        validations=("payload_manifest", "coordination_lock_precreated"),
+        validations=(
+            "payload_manifest",
+            "coordination_lock_precreated",
+            "stable_semantic_queue",
+        ),
     )
 
 
@@ -2316,7 +2320,11 @@ def test_certification_reobserves_source_before_trusting_reconciliation(
         queue_watermark=1,
         semantic_completeness="not_required",
         compatibility_sha256=COMPATIBILITY_SHA256,
-        validations=("payload_manifest", "coordination_lock_precreated"),
+        validations=(
+            "payload_manifest",
+            "coordination_lock_precreated",
+            "stable_semantic_queue",
+        ),
     )
 
     with pytest.raises(
@@ -2427,7 +2435,11 @@ def test_certification_rejects_persistent_source_replacement_during_reobservatio
                 queue_watermark=1,
                 semantic_completeness="not_required",
                 compatibility_sha256=COMPATIBILITY_SHA256,
-                validations=("payload_manifest", "coordination_lock_precreated"),
+                validations=(
+                    "payload_manifest",
+                    "coordination_lock_precreated",
+                    "stable_semantic_queue",
+                ),
             ),
             source_observations=observations,
             declared_entries=declared,
@@ -2481,6 +2493,31 @@ def test_positive_watermark_generation_requires_its_durable_semantic_binding(
         declared,
         monotonic_ns=10_002,
     )
+    unmarked = replace(
+        request,
+        validations=tuple(
+            validation
+            for validation in request.validations
+            if validation != "stable_semantic_queue"
+        ),
+    )
+    with pytest.raises(
+        SemanticCertificationBlocked,
+        match="lacks stable semantic queue validation",
+    ):
+        store.certify(
+            grant,
+            allocation,
+            unmarked,
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_003,
+        )
+    binding_path = queue.state.path(
+        queue._certification_binding_path(REPO_UUID, allocation.generation_id)
+    )
+    assert not binding_path.exists()
     receipt = store.certify(
         grant,
         allocation,
@@ -2488,12 +2525,9 @@ def test_positive_watermark_generation_requires_its_durable_semantic_binding(
         source_observations=observations,
         declared_entries=declared,
         occurred_at=START,
-        monotonic_ns=10_003,
+        monotonic_ns=10_004,
     )
     assert receipt.to_dict()["queue_watermark"] > 0
-    binding_path = queue.state.path(
-        queue._certification_binding_path(REPO_UUID, allocation.generation_id)
-    )
     if damage == "missing":
         binding_path.unlink()
     else:
@@ -2501,6 +2535,65 @@ def test_positive_watermark_generation_requires_its_durable_semantic_binding(
 
     with pytest.raises(GenerationError, match="semantic certification binding"):
         store.verify_generation(REPO_UUID, allocation.generation_id)
+
+
+def test_legacy_positive_watermark_generation_without_p5a_marker_remains_readable(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-legacy-positive-watermark",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("legacy positive watermark\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    legacy_request = CertificationRequest(
+        source_commit="a" * 40,
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        observation_manifest_sha256="2" * 64,
+        queue_watermark=1,
+        semantic_completeness="not_required",
+        compatibility_sha256=COMPATIBILITY_SHA256,
+        validations=("payload_manifest", "coordination_lock_precreated"),
+    )
+    with harness.leases.current_operation(
+        grant,
+        monotonic_ns=10_002,
+        allowed_operations=frozenset({"BUILD", "MIGRATE"}),
+    ) as operation:
+        receipt = store._receipt(operation, allocation, legacy_request, declared)
+    receipt_path = allocation.staging_path / "receipt.json"
+    receipt_path.write_bytes(receipt.canonical)
+    receipt_path.chmod(0o600)
+    final_path = store.state.path(store._generation(REPO_UUID, allocation.generation_id))
+    final_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    final_path.parent.chmod(0o700)
+    allocation.staging_path.rename(final_path)
+
+    verified = store.verify_generation(REPO_UUID, allocation.generation_id)
+
+    assert "stable_semantic_queue" not in verified.to_dict()["validations"]
+    assert verified.canonical == receipt.canonical
 
 
 def test_invalid_request_does_not_poison_certification_binding_retry(

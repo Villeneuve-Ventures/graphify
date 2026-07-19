@@ -126,11 +126,13 @@ operation, or migration epoch invalidates that lease's commit authority.
 ## Semantic desired-work queue
 
 `graphify.workspace.semantic_queue.internal` format version 1 is one canonical
-per-workspace durable record. It contains the workspace UUID, record revision,
-desired and completed watermarks, compaction epoch, last-served operation,
-explicit queue policy, exact reconciliation evidence, and deterministically
-sorted queue items. The explicit policy has item, byte, and retry bounds; no
-capacity or provider default is inferred from the environment.
+per-workspace durable record. It contains the workspace UUID, active-source
+revision that produced the desired work, record revision, desired and completed
+watermarks, compaction epoch, last-served operation, explicit queue policy,
+exact reconciliation evidence, and deterministically sorted queue items. The
+explicit policy has item, byte, and retry bounds; no capacity or provider default
+is inferred from the environment. Activation makes retained desired work
+ineligible until a newer exact reconciliation binds it to the new source revision.
 Capability decisions are advisory reports, not claim authority. The claim
 mutation boundary resolves the registry-selected active source, safely reads
 and validates its workspace configuration, and requires the canonically
@@ -138,7 +140,8 @@ revalidated caller configuration to match it exactly. Only then does it derive
 availability from explicit live host-agent and named-backend inputs; a matching
 repository UUID alone is not policy authority. Claim resolves source identity
 before locks, then retains the current registry lock through the workspace
-mutation and rechecks that identity plus a fresh safe config read. Checkpoint,
+mutation and rechecks that identity plus a second safe config read after checkout
+verification. Checkpoint,
 completion, failure, and compaction under a semantic grant retain the same
 registry-through-workspace boundary, so activation cannot advance the active
 source during any semantic mutation.
@@ -198,6 +201,11 @@ payload conflict fails closed. The record is installed under the workspace lock
 after request-contract and staged-manifest validation plus queue revalidation,
 and before the generation lock or receipt. Rejected malformed input creates no
 binding, so a corrected retry of the reserved generation remains possible.
+P5A certification requests and receipts carry the schema-valid
+`stable_semantic_queue` validation marker. Verification requires the immutable
+binding only when that marker is present; pre-P5A receipts without it, including
+legacy positive-watermark receipts permitted by the frozen schema, remain
+readable without being retroactively treated as P5A authority.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct
