@@ -486,18 +486,27 @@ def test_checkpoint_and_completion_require_the_exact_fenced_claim(
     )
     assert claim is not None
 
+    before = queue.inspect(REPO_UUID).canonical
+    with pytest.raises(ContractError, match="checkpoint"):
+        queue.checkpoint(
+            semantic,
+            claim,
+            checkpoint=cast(Any, None),
+            monotonic_ns=20_002,
+        )
+    assert queue.inspect(REPO_UUID).canonical == before
     checkpointed = queue.checkpoint(
         semantic,
         claim,
         checkpoint="semantic-cache-written",
-        monotonic_ns=20_002,
+        monotonic_ns=20_003,
     )
     assert checkpointed.checkpoint == "semantic-cache-written"
-    completed = queue.complete(semantic, checkpointed, monotonic_ns=20_003)
+    completed = queue.complete(semantic, checkpointed, monotonic_ns=20_004)
 
     assert completed.items[0].status == "completed"
     with pytest.raises(StaleSemanticClaim):
-        queue.complete(semantic, checkpointed, monotonic_ns=20_004)
+        queue.complete(semantic, checkpointed, monotonic_ns=20_005)
 
 
 def test_failed_claim_attempt_cannot_complete_after_reclaim_under_same_grant(
@@ -558,6 +567,327 @@ def test_same_path_preserves_revision_order_across_upsert_then_delete(
     second = queue.claim(semantic, **capability, monotonic_ns=20_003)
     assert second is not None
     assert (second.work.operation, second.work.desired_revision) == ("DELETE", 2)
+
+
+def test_reconcile_revokes_newer_claim_when_older_predecessor_is_discovered(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    queue = _queue(harness)
+    newer = _work("docs/a.md", 2, operation="DELETE")
+    queue.reconcile(
+        build,
+        (newer,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=2,
+        semantic_required=True,
+        monotonic_ns=10_001,
+    )
+    superseded_claim = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert superseded_claim is not None
+    older = _work("docs/a.md", 1)
+
+    reconciled = queue.reconcile(
+        build,
+        (older, newer),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=3,
+        semantic_required=True,
+        monotonic_ns=20_002,
+    )
+
+    assert all(item.status == "pending" and item.claim is None for item in reconciled.items)
+    invalidated = next(item for item in reconciled.items if item.work == newer)
+    assert invalidated.failure_count == 1
+    assert invalidated.last_error == "reconciliation_predecessor"
+    replayed_reconciliation = queue.reconcile(
+        build,
+        (older, newer),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=3,
+        semantic_required=True,
+        monotonic_ns=20_003,
+    )
+    assert replayed_reconciliation.revision == reconciled.revision
+    replayed_invalidated = next(
+        item for item in replayed_reconciliation.items if item.work == newer
+    )
+    assert replayed_invalidated.failure_count == 1
+    with pytest.raises(StaleSemanticClaim):
+        queue.complete(semantic, superseded_claim, monotonic_ns=20_004)
+    predecessor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_005,
+    )
+    assert predecessor is not None
+    assert (predecessor.work.operation, predecessor.work.desired_revision) == ("UPSERT", 1)
+    queue.complete(semantic, predecessor, monotonic_ns=20_006)
+    successor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_007,
+    )
+    assert successor is not None
+    assert (successor.work.operation, successor.work.desired_revision) == ("DELETE", 2)
+    assert successor.claim_id != superseded_claim.claim_id
+    with pytest.raises(StaleSemanticClaim):
+        queue.checkpoint(
+            semantic,
+            superseded_claim,
+            checkpoint="revived-token",
+            monotonic_ns=20_008,
+        )
+    with pytest.raises(StaleSemanticClaim):
+        queue.complete(semantic, superseded_claim, monotonic_ns=20_009)
+    with pytest.raises(StaleSemanticClaim):
+        queue.fail(
+            semantic,
+            superseded_claim,
+            error_code="revived_token",
+            retryable=True,
+            monotonic_ns=20_010,
+        )
+
+
+def test_reconcile_replays_completed_successor_after_discovering_predecessor(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    queue = _queue(harness)
+    newer = _work("docs/a.md", 2, operation="DELETE")
+    queue.reconcile(
+        build,
+        (newer,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=2,
+        semantic_required=True,
+        monotonic_ns=10_001,
+    )
+    original_successor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert original_successor is not None
+    queue.complete(semantic, original_successor, monotonic_ns=20_002)
+    queue.bind_sealed_inputs(
+        build,
+        sealed_input_manifest_sha256="a" * 64,
+        monotonic_ns=20_003,
+    )
+    older = _work("docs/a.md", 1)
+
+    reconciled = queue.reconcile(
+        build,
+        (older, newer),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=3,
+        semantic_required=True,
+        monotonic_ns=20_004,
+    )
+
+    assert all(item.status == "pending" for item in reconciled.items)
+    assert reconciled.reconciliation is not None
+    assert reconciled.reconciliation.sealed_input_manifest_sha256 is None
+    replay = next(item for item in reconciled.items if item.work == newer)
+    assert replay.failure_count == 1
+    assert replay.last_error == "reconciliation_predecessor"
+    predecessor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_005,
+    )
+    assert predecessor is not None
+    assert (predecessor.work.operation, predecessor.work.desired_revision) == ("UPSERT", 1)
+    after_predecessor = queue.complete(semantic, predecessor, monotonic_ns=20_006)
+    assert after_predecessor.completed_watermark < after_predecessor.desired_watermark
+    with pytest.raises(SemanticCertificationBlocked):
+        queue.bind_sealed_inputs(
+            build,
+            sealed_input_manifest_sha256="b" * 64,
+            monotonic_ns=20_007,
+        )
+    replayed_successor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_008,
+    )
+    assert replayed_successor is not None
+    assert (replayed_successor.work.operation, replayed_successor.work.desired_revision) == (
+        "DELETE",
+        2,
+    )
+    assert replayed_successor.claim_id != original_successor.claim_id
+    with pytest.raises(StaleSemanticClaim):
+        queue.complete(semantic, original_successor, monotonic_ns=20_009)
+    completed = queue.complete(semantic, replayed_successor, monotonic_ns=20_010)
+    assert completed.completed_watermark == completed.desired_watermark == 3
+    assert all(item.status == "completed" for item in completed.items)
+
+
+def test_reconcile_dead_letters_invalidated_claim_when_retry_budget_is_exhausted(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    queue = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=SemanticQueuePolicy(
+            max_items=QUEUE_POLICY.max_items,
+            max_bytes=QUEUE_POLICY.max_bytes,
+            retry_budget=0,
+        ),
+        capabilities=harness.leases.state.capabilities,
+    )
+    newer = _work("docs/a.md", 2, operation="DELETE")
+    queue.reconcile(
+        build,
+        (newer,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=2,
+        semantic_required=True,
+        monotonic_ns=10_001,
+    )
+    superseded = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert superseded is not None
+    older = _work("docs/a.md", 1)
+
+    reconciled = queue.reconcile(
+        build,
+        (older, newer),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=3,
+        semantic_required=True,
+        monotonic_ns=20_002,
+    )
+
+    invalidated = next(item for item in reconciled.items if item.work == newer)
+    assert invalidated.status == "dead_letter"
+    assert invalidated.failure_count == 1
+    assert invalidated.last_error == "reconciliation_predecessor"
+    with pytest.raises(StaleSemanticClaim):
+        queue.complete(semantic, superseded, monotonic_ns=20_003)
+    predecessor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_004,
+    )
+    assert predecessor is not None and predecessor.work == older
+    after_predecessor = queue.complete(semantic, predecessor, monotonic_ns=20_005)
+    assert after_predecessor.completed_watermark < after_predecessor.desired_watermark
+    assert (
+        queue.claim(
+            semantic,
+            **_host_claim_inputs(harness),
+            monotonic_ns=20_006,
+        )
+        is None
+    )
+
+
+def test_compacted_successor_replay_cannot_revive_original_claim(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    queue = _queue(harness)
+    newer = _work("docs/a.md", 2, operation="DELETE")
+    queue.reconcile(
+        build,
+        (newer,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=2,
+        semantic_required=True,
+        monotonic_ns=10_001,
+    )
+    original_successor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert original_successor is not None
+    queue.complete(semantic, original_successor, monotonic_ns=20_002)
+    compacted = queue.compact(build, monotonic_ns=20_003)
+    assert not compacted.items
+    older = _work("docs/a.md", 1)
+    queue.reconcile(
+        build,
+        (older, newer),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=3,
+        semantic_required=True,
+        monotonic_ns=20_004,
+    )
+    predecessor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_005,
+    )
+    assert predecessor is not None and predecessor.work == older
+    queue.complete(semantic, predecessor, monotonic_ns=20_006)
+
+    replayed_successor = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_007,
+    )
+
+    assert replayed_successor is not None and replayed_successor.work == newer
+    assert replayed_successor.attempt > original_successor.attempt
+    assert replayed_successor.claim_id != original_successor.claim_id
+    before = queue.inspect(REPO_UUID).canonical
+    with pytest.raises(StaleSemanticClaim):
+        queue.checkpoint(
+            semantic,
+            original_successor,
+            checkpoint="compacted-token",
+            monotonic_ns=20_008,
+        )
+    with pytest.raises(StaleSemanticClaim):
+        queue.complete(semantic, original_successor, monotonic_ns=20_009)
+    with pytest.raises(StaleSemanticClaim):
+        queue.fail(
+            semantic,
+            original_successor,
+            error_code="compacted_token",
+            retryable=True,
+            monotonic_ns=20_010,
+        )
+    assert queue.inspect(REPO_UUID).canonical == before
 
 
 def test_mixed_arrivals_preserve_per_path_causality_without_starvation(
@@ -1491,6 +1821,37 @@ def test_corrupt_or_noncanonical_queue_state_fails_closed(tmp_path: Path) -> Non
         queue.inspect(REPO_UUID)
 
     assert current.read_bytes() == before
+
+
+def test_null_observation_detector_id_fails_as_queue_corruption(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.reconcile(
+        build,
+        (_work("docs/a.md", 1),),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=1,
+        semantic_required=True,
+        monotonic_ns=10_001,
+    )
+    current = harness.state_root / "workspaces" / REPO_UUID / "queue" / "semantic.jsonl"
+    document = SemanticQueueSnapshot.from_json(current.read_bytes()).to_dict()
+    reconciliation = cast(dict[str, Any], document["reconciliation"])
+    evidence = cast(dict[str, Any], reconciliation["source_observations"])
+    observations = cast(list[dict[str, Any]], evidence["observations"])
+    observations[0]["detector_id"] = None
+    current.write_bytes(canonical_json_bytes(document))
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticQueueCorrupt, match="detector_id"):
+        queue.inspect(REPO_UUID)
+
+    assert tree_snapshot(harness.state_root) == before
 
 
 def test_tampered_claim_id_fails_closed_without_repair_or_mutation(

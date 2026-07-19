@@ -514,7 +514,8 @@ class _SemanticSourceObservation:
         if _COMMIT_RE.fullmatch(source_commit) is None:
             raise ContractError("$.source_commit: expected lowercase Git commit")
         detector_id = _optional_text(data["detector_id"], "$.detector_id", maximum=128)
-        assert detector_id is not None
+        if detector_id is None:
+            raise ContractError("$.detector_id: expected non-empty string")
         stable_inventory_passes = _integer(
             data["stable_inventory_passes"],
             "$.stable_inventory_passes",
@@ -1480,6 +1481,32 @@ class SemanticQueueStore:
                 )
                 for work in reconciliation.desired
             )
+            causal_items: list[SemanticQueueItem] = []
+            for item in items:
+                has_unfinished_predecessor = any(
+                    predecessor.path == item.path
+                    and predecessor.desired_revision < item.desired_revision
+                    and predecessor.status != "completed"
+                    for predecessor in items
+                )
+                if item.status not in {"claimed", "completed"} or not (
+                    has_unfinished_predecessor
+                ):
+                    causal_items.append(item)
+                    continue
+                failures = item.failure_count + 1
+                causal_items.append(
+                    replace(
+                        item,
+                        status=(
+                            "pending" if failures <= self.policy.retry_budget else "dead_letter"
+                        ),
+                        failure_count=failures,
+                        last_error="reconciliation_predecessor",
+                        claim=None,
+                    )
+                )
+            items = tuple(causal_items)
             if desired_watermark == current.desired_watermark:
                 existing_reconciliation = current.reconciliation
                 if existing_reconciliation is not None and (
@@ -1677,7 +1704,10 @@ class SemanticQueueStore:
             claim = self._claim_for(
                 operation,
                 selected.work,
-                attempt=selected.failure_count + 1,
+                # The queue revision is a durable monotonic claim generation.
+                # Failure counts can disappear with compacted tombstones, so
+                # they cannot safely fence a reconstructed item's old token.
+                attempt=current.revision + 1,
             )
             claimed_items = [
                 replace(item, status="claimed", claim=claim)
@@ -1732,7 +1762,8 @@ class SemanticQueueStore:
         monotonic_ns: int,
     ) -> SemanticClaim:
         checkpoint_value = _optional_text(checkpoint, "$.checkpoint", maximum=256)
-        assert checkpoint_value is not None
+        if checkpoint_value is None:
+            raise ContractError("$.checkpoint: expected non-empty string")
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
             current = self._load_locked(operation.repo_uuid)
             index, item = self._claimed_item(current, claim, operation)
