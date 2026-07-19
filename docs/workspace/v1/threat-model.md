@@ -61,13 +61,15 @@ secrets are excluded from argv and persisted state.
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted
 `SEMANTIC_CLAIM` lease and an explicit live capability decision. At the claim
-mutation boundary, the queue re-derives that decision from a validated workspace
-configuration whose repository UUID matches the locked lease operation, and the
-caller-stated live host-agent/named-backend inputs. A foreign workspace policy
-or arbitrary decision object is never authority. Host-agent use must be stated
-by the caller; a headless backend must be explicitly named, policy-allowlisted,
-and permitted network egress. Ambient provider or credential environment
-variables are not capability or authority.
+mutation boundary, the queue resolves the registry-selected active source,
+safely reads and validates its workspace configuration, and requires the
+canonically revalidated caller configuration to match it exactly. The decision
+is then derived from that active-source policy and the caller-stated live host-
+agent/named-backend inputs. A foreign or same-UUID relabeled policy and an
+arbitrary decision object are never authority. Host-agent use must be stated by
+the caller; a headless backend must be explicitly named, policy-allowlisted, and
+permitted network egress. Ambient provider or credential environment variables
+are not capability or authority.
 
 Claim IDs bind desired work, owner, fence, source revision, and operation and
 migration epochs. This prevents a stale worker, expired claim, or replaced

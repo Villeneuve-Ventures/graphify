@@ -132,10 +132,11 @@ explicit queue policy, exact reconciliation evidence, and deterministically
 sorted queue items. The explicit policy has item, byte, and retry bounds; no
 capacity or provider default is inferred from the environment.
 Capability decisions are advisory reports, not claim authority. The claim
-mutation boundary derives availability again from one validated workspace
-configuration, canonically revalidates it, requires its repository UUID to match
-the locked lease operation, and then uses explicit live host-agent and named-
-backend inputs.
+mutation boundary resolves the registry-selected active source, safely reads
+and validates its workspace configuration, and requires the canonically
+revalidated caller configuration to match it exactly. Only then does it derive
+availability from explicit live host-agent and named-backend inputs; a matching
+repository UUID alone is not policy authority.
 
 Each desired-work identity binds a positive source epoch, policy SHA-256,
 `UPSERT` or `DELETE`, canonical contained relative path, content SHA-256, and

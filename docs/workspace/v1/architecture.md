@@ -44,6 +44,9 @@ the distinct operation epoch and accepted workspace-operation fence token that
 a future activation CAS must revalidate. Paths, worktree coordinates, and
 normalized remote URLs remain discovery aliases, not stable identity. A query
 never guesses among aliases.
+Semantic claim capability is derived only from the validated configuration read
+through that registry-selected active source; a caller configuration must match
+it canonically, because a matching UUID label alone is not policy authority.
 
 P2 writes only this external lifecycle state:
 

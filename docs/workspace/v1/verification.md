@@ -153,9 +153,9 @@ output remains ignored and must not widen the P1 product diff.
 - only an explicitly available host agent or policy-allowlisted explicit
   backend may claim work, ambient environment cannot select a provider, and an
   unavailable capability decision performs no mutation; `claim` re-derives the
-  decision from identity-matched validated policy and explicit live inputs, so
-  a forged `available=True` report or foreign-workspace allowlist cannot claim
-  work;
+  decision from the registry-selected active-source policy and explicit live
+  inputs, so a forged `available=True` report, foreign allowlist, or same-UUID
+  relabeled policy cannot claim work;
 - `SEMANTIC_CLAIM` owner/fence/source/operation/migration evidence is exact;
   one lease owns at most one active item, stale workers cannot checkpoint,
   complete, fail, or overwrite newer desired work, and successor recovery is

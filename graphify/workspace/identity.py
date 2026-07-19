@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -114,6 +114,7 @@ class SourceIdentity:
 
     root: Path
     repo_uuid: str
+    config: WorkspaceConfig = field(repr=False, compare=False)
     registry_source: dict[str, Any]
     source_sha256: str
     head_commit: str
@@ -362,6 +363,7 @@ def discover_source(
     return SourceIdentity(
         root=root,
         repo_uuid=repo_uuid,
+        config=config,
         registry_source=registry_source,
         source_sha256=canonical_sha256(registry_source),
         head_commit=head,

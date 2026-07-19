@@ -17,6 +17,7 @@ from graphify.workspace.contracts import (
     WorkspaceConfig,
     canonical_json_bytes,
 )
+from graphify.workspace.identity import IdentityError, discover_source
 from graphify.workspace.leases import (
     LeaseExpired,
     LeaseGrant,
@@ -1297,6 +1298,26 @@ class SemanticQueueStore:
             raise StaleSemanticClaim(str(exc)) from exc
 
     @staticmethod
+    def _active_workspace_config(operation: LeaseOperation) -> WorkspaceConfig:
+        workspaces = cast(
+            list[dict[str, Any]],
+            operation.registry.to_dict()["workspaces"],
+        )
+        entries = [
+            entry for entry in workspaces if entry["repo_uuid"] == operation.repo_uuid
+        ]
+        if len(entries) != 1:
+            raise SemanticCapabilityUnavailable("workspace_config_unavailable")
+        recorded = cast(dict[str, Any], entries[0]["active_source"])
+        try:
+            source = discover_source(Path(cast(str, recorded["path"])))
+        except (OSError, IdentityError) as exc:
+            raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
+        if source.repo_uuid != operation.repo_uuid or source.registry_source != recorded:
+            raise SemanticCapabilityUnavailable("workspace_config_mismatch")
+        return source.config
+
+    @staticmethod
     def _sorted_items(items: Sequence[SemanticQueueItem]) -> tuple[SemanticQueueItem, ...]:
         return tuple(sorted(items, key=lambda item: item.work.sort_key))
 
@@ -1490,8 +1511,11 @@ class SemanticQueueStore:
                 raise SemanticCapabilityUnavailable("workspace_config_invalid") from exc
             if validated_config.to_dict()["repo_uuid"] != operation.repo_uuid:
                 raise SemanticCapabilityUnavailable("workspace_config_mismatch")
+            active_config = self._active_workspace_config(operation)
+            if validated_config.to_dict() != active_config.to_dict():
+                raise SemanticCapabilityUnavailable("workspace_config_mismatch")
             capability = decide_semantic_capability(
-                validated_config,
+                active_config,
                 host_agent_active=host_agent_active,
                 explicit_backend=explicit_backend,
             )

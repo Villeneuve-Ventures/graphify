@@ -1454,6 +1454,46 @@ def test_explicit_backend_rejection_is_stable_and_contains_no_ambient_values(
     assert "ambient-model" not in repr(decision.to_dict())
 
 
+def test_claim_accepts_only_an_explicit_backend_from_the_active_source_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    config_path = harness.repo / ".graphify/workspace.toml"
+    config_path.write_text(
+        'contract = "graphify.workspace.config"\n'
+        "schema_version = 1\n"
+        f'repo_uuid = "{REPO_UUID}"\n'
+        "\n"
+        "[policy]\n"
+        'freshness = "current_only"\n'
+        'semantic_mode = "explicit_backend"\n'
+        "network_egress = true\n"
+        'headless_backends = ["gemini"]\n',
+        encoding="utf-8",
+    )
+    config = WorkspaceConfig.from_toml(config_path.read_bytes())
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    source_before = tree_snapshot(harness.repo)
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-secret")
+    monkeypatch.setenv("GRAPHIFY_GEMINI_MODEL", "ambient-model")
+
+    claim = queue.claim(
+        semantic,
+        config=config,
+        host_agent_active=False,
+        explicit_backend="gemini",
+        monotonic_ns=20_001,
+    )
+
+    assert claim is not None
+    assert claim.work.path == "docs/a.md"
+    assert tree_snapshot(harness.repo) == source_before
+
+
 def test_claim_rejects_an_unavailable_capability_without_queue_mutation(
     tmp_path: Path,
 ) -> None:
@@ -1515,8 +1555,14 @@ def test_claim_boundary_rejects_forged_or_policy_forbidden_capability(
     assert tree_snapshot(harness.state_root) == before
 
 
-def test_claim_rejects_cross_workspace_capability_policy_without_mutation(
+@pytest.mark.parametrize(
+    "config_repo_uuid",
+    ("22222222-2222-4222-8222-222222222222", REPO_UUID),
+    ids=("foreign-uuid", "relabeled-current-uuid"),
+)
+def test_claim_rejects_substituted_capability_policy_without_mutation(
     tmp_path: Path,
+    config_repo_uuid: str,
 ) -> None:
     harness = create_harness(tmp_path)
     build = acquire(harness, "BUILD", tick=1)
@@ -1529,7 +1575,7 @@ def test_claim_rejects_cross_workspace_capability_policy_without_mutation(
         WorkspaceConfig.from_mapping(
             {
                 **config.to_dict(),
-                "repo_uuid": "22222222-2222-4222-8222-222222222222",
+                "repo_uuid": config_repo_uuid,
                 "policy": {
                     **config.to_dict()["policy"],
                     "semantic_mode": "explicit_backend",
