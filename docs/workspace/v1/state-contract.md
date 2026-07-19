@@ -169,11 +169,12 @@ incomplete item. Compaction may remove completed item tombstones only after that
 equality holds; it retains the watermarks, reconciliation, observation pair, and
 staged-input binding.
 
-A claimed item additionally binds the exact desired work to the
-`SEMANTIC_CLAIM` owner, fence token, operation epoch, migration epoch, active-
-source revision, positive attempt number, deterministic claim ID, and optional
-bounded checkpoint. A failed or expired attempt increments durable failure state
-so a retry under the same lease has a different attempt and claim ID. One
+A claimed item additionally binds the workspace UUID and exact desired work to
+the `SEMANTIC_CLAIM` owner, fence token, operation epoch, migration epoch,
+active-source revision, positive attempt number, deterministic claim ID, and
+optional bounded checkpoint. A failed or expired attempt increments durable
+failure state so a retry under the same lease has a different attempt and claim
+ID. One
 semantic lease owns at most one active claim. Stale or expired claims cannot
 checkpoint, complete, fail, or overwrite a newer desired revision. Successor
 claim recovery increments the failure count and either retries or dead-letters

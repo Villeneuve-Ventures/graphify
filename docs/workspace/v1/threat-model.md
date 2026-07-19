@@ -74,9 +74,10 @@ lock while nesting the workspace lock; an activation between source discovery
 and claim validation therefore makes the old lease stale instead of authorizing
 work from retired policy.
 
-Claim IDs bind desired work, owner, fence, source revision, and operation and
-migration epochs. This prevents a stale worker, expired claim, or replaced
-desired revision from committing semantic completion. Deterministic operation
+Claim IDs bind the workspace UUID, desired work, owner, fence, source revision,
+and operation and migration epochs. This prevents a stale worker, expired
+claim, cross-workspace collision, or replaced desired revision from committing
+semantic completion. Deterministic operation
 rotation prevents one operation class from starving the other. Explicit queue
 item/byte limits, retry budgets, stable error classifications, and durable dead-
 letter state bound poison-work and capacity amplification. Compaction retains

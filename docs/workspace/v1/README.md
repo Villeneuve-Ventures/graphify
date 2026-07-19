@@ -1,6 +1,6 @@
 # Graphify workspace contract v1
 
-Status: P4 adapter and observed-current library runtime for
+Status: P5A semantic queue, P4 adapter, and observed-current library runtime for
 `graphifyy 0.9.16+workspace.1`; the public v1 contract fields remain frozen.
 
 This directory defines the first version of Graphify's workspace control-plane
@@ -10,9 +10,11 @@ fenced lease allocation. P3 adds caller-supplied generation staging and
 certification, a framed segmented journal, atomic pointer movement and repair,
 retained coordination locks, explicit capacity preflight, and offline GC. P4
 adds the sole `0.9.16` engine adapter, the no-write comparison seam, and
-two-sided observed-current release. It does not provide a retained-state import
-path or a `graphify workspace` command. Semantic queues, services, and commands
-remain P5 work.
+two-sided observed-current release. P5A adds only the durable semantic desired-
+work queue, fenced worker claims, exact reconciliation evidence, and the
+generation-certification binding to one stable queue watermark. It does not
+provide a retained-state import path or a `graphify workspace` command.
+Services and commands remain later P5 work.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build
@@ -33,7 +35,8 @@ or fork engine logic inside the package.
 - `graphify.workspace.persistence`, `.identity`, `.registry`, `.leases`,
   `.generations`, `.journal`, `.pointers`, and `.gc` implement the P2/P3
   runtime boundary. `.adapters` and `.freshness` implement the bounded P4
-  read-only engine/query boundary. Lifecycle mutation fails closed
+  read-only engine/query boundary. `.semantic_queue` implements the bounded
+  P5A durable queue and certification boundary. Lifecycle mutation fails closed
   outside non-elevated macOS on local APFS; tests use an explicit injected
   capability seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,

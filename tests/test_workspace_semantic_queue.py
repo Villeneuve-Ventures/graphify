@@ -15,7 +15,9 @@ import pytest
 from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
     CapacityPolicy,
+    ContractError,
     WorkspaceConfig,
+    canonical_json_bytes,
     payload_manifest_sha256,
 )
 from graphify.workspace.generations import (
@@ -58,7 +60,9 @@ from tests.workspace_p3_helpers import (
     START,
     RuntimeHarness,
     acquire,
+    authorization,
     create_harness,
+    create_repo,
     tree_snapshot,
 )
 
@@ -318,6 +322,29 @@ def test_byte_capacity_is_deterministic_and_fails_without_partial_state(
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_semantic_required_reconciliation_rejects_an_empty_desired_set(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(ContractError, match="semantic-required"):
+        queue.reconcile(
+            build,
+            (),
+            source_epoch=1,
+            policy_sha256="1" * 64,
+            source_observations=_source_observations(harness),
+            desired_watermark=1,
+            semantic_required=True,
+            monotonic_ns=10_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_claim_selection_rotates_operations_before_retrying_one_class(
     tmp_path: Path,
 ) -> None:
@@ -354,6 +381,91 @@ def test_claim_selection_rotates_operations_before_retrying_one_class(
     queue.complete(semantic, second, monotonic_ns=20_004)
     third = queue.claim(semantic, **capability, monotonic_ns=20_005)
     assert third is not None and third.work.operation == "DELETE"
+
+
+def test_claim_ids_are_namespaced_by_workspace(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path / "primary")
+    other_uuid = "22222222-2222-4222-8222-222222222222"
+    other_repo = create_repo(tmp_path / "other-repo", other_uuid)
+    harness.registry.enroll(
+        discover_source(other_repo),
+        authorization("enroll-other-workspace"),
+        expected_revision=1,
+    )
+    queue = _queue(harness)
+
+    def acquire_for(repo_uuid: str, operation: str, *, tick: int) -> LeaseGrant:
+        registry = harness.registry.load()
+        entry = next(
+            workspace
+            for workspace in registry.to_dict()["workspaces"]
+            if workspace["repo_uuid"] == repo_uuid
+        )
+        state = harness.leases.inspect(repo_uuid)
+        return harness.leases.acquire(
+            repo_uuid,
+            operation,
+            harness.leases.current_owner(),
+            expected_registry_revision=int(registry.to_dict()["revision"]),
+            expected_active_source_revision=int(entry["active_source_revision"]),
+            expected_operation_epoch=state.operation_epoch,
+            expected_migration_epoch=state.migration_epoch,
+            acquired_at=START + timedelta(seconds=tick),
+            monotonic_ns=tick * 10_000,
+            ttl_ns=1_000_000,
+        )
+
+    primary_build = acquire_for(REPO_UUID, "BUILD", tick=1)
+    other_build = acquire_for(other_uuid, "BUILD", tick=1)
+    work = _work("docs/a.md", 1)
+    queue.enqueue(primary_build, work, monotonic_ns=10_001)
+    queue.enqueue(other_build, work, monotonic_ns=10_001)
+    primary_semantic = acquire_for(REPO_UUID, "SEMANTIC_CLAIM", tick=2)
+    other_semantic = acquire_for(other_uuid, "SEMANTIC_CLAIM", tick=2)
+    primary_claim = queue.claim(
+        primary_semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    other_config = WorkspaceConfig.from_toml(
+        (other_repo / ".graphify/workspace.toml").read_bytes()
+    )
+    other_claim = queue.claim(
+        other_semantic,
+        config=other_config,
+        host_agent_active=True,
+        explicit_backend=None,
+        monotonic_ns=20_001,
+    )
+
+    assert primary_claim is not None
+    assert other_claim is not None
+    assert primary_claim.claim_id != other_claim.claim_id
+    before = queue.inspect(other_uuid).canonical
+    with pytest.raises(StaleSemanticClaim, match="claim is no longer current"):
+        queue.checkpoint(
+            other_semantic,
+            primary_claim,
+            checkpoint="wrong-workspace",
+            monotonic_ns=20_002,
+        )
+    with pytest.raises(StaleSemanticClaim, match="claim is no longer current"):
+        queue.complete(
+            other_semantic,
+            primary_claim,
+            monotonic_ns=20_003,
+        )
+    with pytest.raises(StaleSemanticClaim, match="claim is no longer current"):
+        queue.fail(
+            other_semantic,
+            primary_claim,
+            error_code="wrong_workspace",
+            retryable=True,
+            monotonic_ns=20_004,
+        )
+    assert queue.inspect(other_uuid).canonical == before
 
 
 def test_checkpoint_and_completion_require_the_exact_fenced_claim(
@@ -1376,6 +1488,34 @@ def test_corrupt_or_noncanonical_queue_state_fails_closed(tmp_path: Path) -> Non
         queue.inspect(REPO_UUID)
 
     assert current.read_bytes() == before
+
+
+def test_tampered_claim_id_fails_closed_without_repair_or_mutation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    claim = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert claim is not None
+    current = harness.state_root / "workspaces" / REPO_UUID / "queue" / "semantic.jsonl"
+    document = SemanticQueueSnapshot.from_json(current.read_bytes()).to_dict()
+    items = cast(list[dict[str, Any]], document["items"])
+    stored_claim = cast(dict[str, Any], items[0]["claim"])
+    stored_claim["claim_id"] = "0" * 64
+    current.write_bytes(canonical_json_bytes(document))
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticQueueCorrupt, match="claim_id"):
+        queue.inspect(REPO_UUID)
+
+    assert tree_snapshot(harness.state_root) == before
 
 
 @pytest.mark.parametrize(

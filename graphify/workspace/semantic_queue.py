@@ -368,6 +368,17 @@ class SemanticClaim:
         )
 
 
+def _semantic_claim_id(repo_uuid: str, body: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                **body,
+                "repo_uuid": repo_uuid,
+            }
+        )
+    ).hexdigest()
+
+
 @dataclass(frozen=True)
 class SemanticQueueItem:
     work: SemanticDesiredWork
@@ -709,6 +720,10 @@ class _SemanticReconciliation:
                 raise ContractError(
                     f"$.desired[{index}].desired_revision: exceeds desired watermark"
                 )
+        if semantic_required and not desired:
+            raise ContractError(
+                "$.desired: semantic-required reconciliation must contain desired work"
+            )
         if not semantic_required and desired:
             raise ContractError("$.desired: semantic-not-required reconciliation must be empty")
         expected_digest = hashlib.sha256(
@@ -858,6 +873,16 @@ class SemanticQueueSnapshot:
             )
             for index, item in enumerate(raw_items)
         )
+        for index, item in enumerate(items):
+            if item.claim is None:
+                continue
+            claim_body = item.claim.to_dict()
+            del claim_body["claim_id"]
+            del claim_body["checkpoint"]
+            if item.claim.claim_id != _semantic_claim_id(repo_uuid, claim_body):
+                raise ContractError(
+                    f"$.items[{index}].claim.claim_id: does not bind workspace claim"
+                )
         if items != tuple(sorted(items, key=lambda item: item.work.sort_key)):
             raise ContractError("$.items: work must be deterministically sorted")
         keys = [item.work.coalescing_key for item in items]
@@ -1492,7 +1517,7 @@ class SemanticQueueStore:
         return SemanticClaim.from_mapping(
             {
                 **body,
-                "claim_id": hashlib.sha256(canonical_json_bytes(body)).hexdigest(),
+                "claim_id": _semantic_claim_id(operation.repo_uuid, body),
                 "checkpoint": None,
             }
         )
