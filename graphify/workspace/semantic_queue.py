@@ -1525,33 +1525,26 @@ class SemanticQueueStore:
                     )
                 )
                 changed = True
-            if active is not None:
+            eligible: list[SemanticQueueItem] = []
+            if active is None:
+                pending = [item for item in recovered if item.status == "pending"]
+                eligible = [
+                    item
+                    for item in pending
+                    if not any(
+                        other.path == item.path
+                        and other.desired_revision < item.desired_revision
+                        and other.status != "completed"
+                        for other in recovered
+                    )
+                ]
+            if active is not None or not eligible:
                 if changed:
                     self._commit_locked(
                         current,
                         replace(current, items=self._sorted_items(recovered)),
                     )
                 return active
-            pending = [item for item in recovered if item.status == "pending"]
-            if not pending:
-                if changed:
-                    self._commit_locked(
-                        current,
-                        replace(current, items=self._sorted_items(recovered)),
-                    )
-                return None
-            eligible = [
-                item
-                for item in pending
-                if not any(
-                    other.path == item.path
-                    and other.desired_revision < item.desired_revision
-                    and other.status != "completed"
-                    for other in recovered
-                )
-            ]
-            if not eligible:
-                return None
             selected_operation = self._next_operation(
                 current.last_served_operation,
                 eligible,

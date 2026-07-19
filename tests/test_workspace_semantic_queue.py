@@ -598,6 +598,61 @@ def test_successor_recovers_an_expired_claim_under_a_higher_fence(
         queue.complete(first_grant, first_claim, monotonic_ns=30_002)
 
 
+def test_expired_claim_recovery_persists_when_same_path_successor_is_blocked(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    policy = SemanticQueuePolicy(
+        max_items=16,
+        max_bytes=64 * 1024,
+        retry_budget=0,
+    )
+    queue = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=policy,
+        capabilities=harness.leases.state.capabilities,
+    )
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    first_grant = acquire(harness, "SEMANTIC_CLAIM", tick=2, ttl_ns=5)
+    first_claim = queue.claim(
+        first_grant,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert first_claim is not None
+    queue.enqueue(
+        build,
+        _work("docs/a.md", 2, operation="DELETE"),
+        monotonic_ns=20_002,
+    )
+
+    successor = acquire(harness, "SEMANTIC_CLAIM", tick=3)
+    assert (
+        queue.claim(
+            successor,
+            **_host_claim_inputs(harness),
+            monotonic_ns=30_001,
+        )
+        is None
+    )
+
+    persisted = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=policy,
+        capabilities=harness.leases.state.capabilities,
+    ).inspect(REPO_UUID)
+    old, newer = sorted(persisted.items, key=lambda item: item.desired_revision)
+    assert old.status == "dead_letter"
+    assert old.failure_count == 1
+    assert old.last_error == "claim_expired"
+    assert old.claim is None
+    assert newer.status == "pending"
+    assert newer.failure_count == 0
+
+
 def test_exact_reconciliation_not_queue_emptiness_creates_certification_view(
     tmp_path: Path,
 ) -> None:
