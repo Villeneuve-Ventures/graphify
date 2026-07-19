@@ -1738,6 +1738,11 @@ def test_claim_accepts_only_an_explicit_backend_from_the_active_source_policy(
     source_before = tree_snapshot(harness.repo)
     monkeypatch.setenv("GEMINI_API_KEY", "ambient-secret")
     monkeypatch.setenv("GRAPHIFY_GEMINI_MODEL", "ambient-model")
+    monkeypatch.setattr(
+        harness.registry,
+        "resolve_active_source",
+        lambda _repo_uuid: pytest.fail("claim performed full source discovery"),
+    )
 
     claim = queue.claim(
         semantic,
@@ -1773,20 +1778,27 @@ def test_claim_rejects_source_path_replacement_before_reading_active_policy(
         'headless_backends = ["gemini"]\n'
     ).encode()
     forged = WorkspaceConfig.from_toml(forged_bytes)
-    original_resolve = harness.registry.resolve_active_source
+    original_read = semantic_queue_module.read_workspace_config_with_digest
     swapped = False
+    read_calls = 0
 
-    def resolve_then_replace(repo_uuid: str) -> SourceIdentity:
-        nonlocal swapped
-        source = original_resolve(repo_uuid)
+    def replace_before_read(source_root: Path):
+        nonlocal read_calls, swapped
+        read_calls += 1
+        if read_calls == 1:
+            return original_read(source_root)
         if not swapped:
             swapped = True
             harness.repo.rename(tmp_path / "original-repo")
             (harness.repo / ".graphify").mkdir(parents=True)
             (harness.repo / ".graphify/workspace.toml").write_bytes(forged_bytes)
-        return source
+        return original_read(source_root)
 
-    monkeypatch.setattr(harness.registry, "resolve_active_source", resolve_then_replace)
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "read_workspace_config_with_digest",
+        replace_before_read,
+    )
     before = queue.inspect(REPO_UUID).canonical
 
     with pytest.raises(
@@ -1802,6 +1814,58 @@ def test_claim_rejects_source_path_replacement_before_reading_active_policy(
         )
 
     assert swapped
+    assert read_calls == 2
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
+def test_claim_rejects_same_policy_source_replacement_during_locked_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    config_bytes = (harness.repo / ".graphify/workspace.toml").read_bytes()
+    config = WorkspaceConfig.from_toml(config_bytes)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    original_read = semantic_queue_module.read_workspace_config_with_digest
+    swapped = False
+    read_calls = 0
+
+    def replace_before_read(source_root: Path):
+        nonlocal read_calls, swapped
+        read_calls += 1
+        if read_calls == 1:
+            return original_read(source_root)
+        if not swapped:
+            swapped = True
+            harness.repo.rename(tmp_path / "original-repo")
+            (harness.repo / ".graphify").mkdir(parents=True)
+            (harness.repo / ".graphify/workspace.toml").write_bytes(config_bytes)
+        return original_read(source_root)
+
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "read_workspace_config_with_digest",
+        replace_before_read,
+    )
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_unavailable",
+    ):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=True,
+            explicit_backend=None,
+            monotonic_ns=20_001,
+        )
+
+    assert swapped
+    assert read_calls == 2
     assert queue.inspect(REPO_UUID).canonical == before
 
 
@@ -1832,6 +1896,8 @@ def test_claim_rejects_aba_policy_replacement_during_config_read(
     def read_during_replacement(source_root: Path):
         nonlocal read_calls
         read_calls += 1
+        if read_calls == 1:
+            return original_read(source_root)
         original_root = tmp_path / "original-repo"
         harness.repo.rename(original_root)
         (harness.repo / ".graphify").mkdir(parents=True)
@@ -1861,7 +1927,7 @@ def test_claim_rejects_aba_policy_replacement_during_config_read(
             monotonic_ns=20_001,
         )
 
-    assert read_calls == 1
+    assert read_calls == 2
     assert queue.inspect(REPO_UUID).canonical == before
 
 

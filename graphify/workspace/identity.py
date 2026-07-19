@@ -315,6 +315,66 @@ def read_workspace_config_with_digest(
     return config, hashlib.sha256(config_bytes).hexdigest()
 
 
+def verify_source_checkout(
+    source_root: Path,
+    *,
+    expected_git_common_dir: Path,
+    expected_git_common_device: int,
+    expected_git_common_inode: int,
+    expected_root_identity: tuple[int, int],
+    deadline_ns: int | None = None,
+) -> None:
+    """Verify the selected checkout with one live local Git identity read."""
+
+    _check_deadline(deadline_ns)
+    root = source_root.resolve(strict=True)
+    expected_common = expected_git_common_dir.resolve(strict=True)
+    _check_deadline(deadline_ns)
+    before = root.stat()
+    if not stat.S_ISDIR(before.st_mode):
+        raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    if (before.st_dev, before.st_ino) != expected_root_identity:
+        raise SourceDiscoveryError("source root identity changed")
+    resolved = _git(
+        root,
+        "rev-parse",
+        "--show-toplevel",
+        "--git-common-dir",
+        deadline_ns=deadline_ns,
+    ).splitlines()
+    if len(resolved) != 2:
+        raise SourceDiscoveryError("Git source identity response is malformed")
+    top_level = _resolve_git_path(root, resolved[0], deadline_ns=deadline_ns)
+    git_common_dir = _resolve_git_path(root, resolved[1], deadline_ns=deadline_ns)
+    if top_level != root or git_common_dir != expected_common:
+        raise SourceDiscoveryError("source root no longer matches registry Git identity")
+    common_details = git_common_dir.stat()
+    if (
+        common_details.st_dev != expected_git_common_device
+        or common_details.st_ino != expected_git_common_inode
+    ):
+        raise SourceDiscoveryError("Git common-directory identity changed")
+    after = root.stat()
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        raise SourceDiscoveryError("source root changed during identity verification")
+
+
+def source_root_identity(
+    source_root: Path,
+    *,
+    deadline_ns: int | None = None,
+) -> tuple[int, int]:
+    """Capture the directory identity that a later live Git check must retain."""
+
+    _check_deadline(deadline_ns)
+    root = source_root.resolve(strict=True)
+    details = root.stat()
+    _check_deadline(deadline_ns)
+    if not stat.S_ISDIR(details.st_mode):
+        raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    return (details.st_dev, details.st_ino)
+
+
 def discover_source(
     source_root: Path,
     *,
@@ -441,4 +501,6 @@ __all__ = [
     "identity_evidence",
     "read_workspace_config",
     "read_workspace_config_with_digest",
+    "source_root_identity",
+    "verify_source_checkout",
 ]

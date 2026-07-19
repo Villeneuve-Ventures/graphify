@@ -19,8 +19,9 @@ from graphify.workspace.contracts import (
 )
 from graphify.workspace.identity import (
     IdentityError,
-    SourceIdentity,
     read_workspace_config_with_digest,
+    source_root_identity,
+    verify_source_checkout,
 )
 from graphify.workspace.leases import (
     LeaseExpired,
@@ -1328,11 +1329,10 @@ class SemanticQueueStore:
         except (LeaseExpired, StaleLease) as exc:
             raise StaleSemanticClaim(str(exc)) from exc
 
-    @staticmethod
     def _active_workspace_config(
+        self,
         operation: LeaseOperation,
-        source: SourceIdentity,
-    ) -> WorkspaceConfig:
+    ) -> tuple[WorkspaceConfig, str]:
         workspaces = cast(
             list[dict[str, Any]],
             operation.registry.to_dict()["workspaces"],
@@ -1343,15 +1343,36 @@ class SemanticQueueStore:
         if len(entries) != 1:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable")
         recorded = cast(dict[str, Any], entries[0]["active_source"])
-        if source.repo_uuid != operation.repo_uuid or source.registry_source != recorded:
+        active_evidence = cast(dict[str, Any], entries[0]["active_source_evidence"])
+        try:
+            evidence = self.leases.registry.read_evidence(
+                cast(str, active_evidence["rebind_evidence_sha256"])
+            )
+        except (OSError, StateCorrupt, StatePathError) as exc:
+            raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
+        if evidence.get("repo_uuid") != operation.repo_uuid or evidence.get("source") != recorded:
             raise SemanticCapabilityUnavailable("workspace_config_mismatch")
         try:
-            config, config_sha256 = read_workspace_config_with_digest(source.root)
-        except (OSError, IdentityError) as exc:
+            common_device = evidence.get("git_common_device")
+            common_inode = evidence.get("git_common_inode")
+            if any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in (common_device, common_inode)
+            ):
+                raise ContractError("$.git_common_identity: invalid device or inode")
+            source_root = Path(cast(str, recorded["path"]))
+            root_identity = source_root_identity(source_root)
+            config, config_sha256 = read_workspace_config_with_digest(source_root)
+            verify_source_checkout(
+                source_root,
+                expected_git_common_dir=Path(cast(str, recorded["git_common_dir"])),
+                expected_git_common_device=cast(int, common_device),
+                expected_git_common_inode=cast(int, common_inode),
+                expected_root_identity=root_identity,
+            )
+        except (ContractError, OSError, IdentityError) as exc:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
-        if config_sha256 != source.config_sha256:
-            raise SemanticCapabilityUnavailable("workspace_config_mismatch")
-        return config
+        return config, config_sha256
 
     @staticmethod
     def _sorted_items(items: Sequence[SemanticQueueItem]) -> tuple[SemanticQueueItem, ...]:
@@ -1538,9 +1559,27 @@ class SemanticQueueStore:
         """Claim work only after deriving authority at this mutation boundary."""
 
         repo_uuid = cast(str, grant.lease.to_dict()["repo_uuid"])
+        # The pre-lock and locked reads are the two policy observations required
+        # to reject replacement/ABA without repeating full source discovery.
         try:
-            active_source = self.leases.registry.resolve_active_source(repo_uuid)
-        except (OSError, IdentityError) as exc:
+            observed_registry = self.leases.registry.load()
+            observed_entries = [
+                entry
+                for entry in cast(
+                    list[dict[str, Any]],
+                    observed_registry.to_dict()["workspaces"],
+                )
+                if entry["repo_uuid"] == repo_uuid
+            ]
+            if len(observed_entries) != 1:
+                raise SemanticCapabilityUnavailable("workspace_config_unavailable")
+            observed_source = cast(dict[str, Any], observed_entries[0]["active_source"])
+            _observed_config, observed_config_sha256 = read_workspace_config_with_digest(
+                Path(cast(str, observed_source["path"]))
+            )
+        except SemanticCapabilityUnavailable:
+            raise
+        except (OSError, IdentityError, StateCorrupt, StatePathError) as exc:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
             try:
@@ -1552,8 +1591,11 @@ class SemanticQueueStore:
                 raise SemanticCapabilityUnavailable("workspace_config_invalid") from exc
             if validated_config.to_dict()["repo_uuid"] != operation.repo_uuid:
                 raise SemanticCapabilityUnavailable("workspace_config_mismatch")
-            active_config = self._active_workspace_config(operation, active_source)
-            if validated_config.to_dict() != active_config.to_dict():
+            active_config, active_config_sha256 = self._active_workspace_config(operation)
+            if (
+                validated_config.to_dict() != active_config.to_dict()
+                or observed_config_sha256 != active_config_sha256
+            ):
                 raise SemanticCapabilityUnavailable("workspace_config_mismatch")
             capability = decide_semantic_capability(
                 active_config,

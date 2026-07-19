@@ -2858,10 +2858,14 @@ def test_durable_certification_binding_recovers_before_receipt_after_queue_advan
         semantic_required=False,
         monotonic_ns=10_004,
     )
+    reordered_request = replace(
+        request,
+        validations=tuple(reversed(request.validations)),
+    )
     receipt = store.certify(
         grant,
         allocation,
-        request,
+        reordered_request,
         source_observations=observations,
         declared_entries=declared,
         occurred_at=START,
@@ -2869,6 +2873,7 @@ def test_durable_certification_binding_recovers_before_receipt_after_queue_advan
     )
 
     assert receipt.to_dict()["queue_watermark"] == QUEUE_WATERMARK
+    assert receipt.to_dict()["validations"] == sorted(request.validations)
     assert queue.inspect(REPO_UUID).desired_watermark == 2
     assert (
         store.verify_generation(REPO_UUID, allocation.generation_id).canonical == receipt.canonical

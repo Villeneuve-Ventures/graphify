@@ -863,7 +863,7 @@ class GenerationStore:
                         "manifest_sha256": payload_manifest_sha256("graphify-out", entries),
                         "entries": list(entries),
                     },
-                    "validations": list(request.validations),
+                    "validations": sorted(request.validations),
                 }
             ),
         )
@@ -1224,7 +1224,7 @@ class GenerationStore:
                     "queue_watermark": request.queue_watermark,
                     "semantic_completeness": request.semantic_completeness,
                     "compatibility_sha256": request.compatibility_sha256,
-                    "validations": list(request.validations),
+                    "validations": sorted(request.validations),
                 }
             )
         ).hexdigest()
