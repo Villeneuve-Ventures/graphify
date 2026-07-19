@@ -72,6 +72,7 @@ P5A adds this per-workspace state under the same external lifecycle root:
   semantic.jsonl
   semantic.previous.jsonl
   semantic.pending.jsonl
+  certifications/<generation_id>.json
 ```
 
 Despite the retained `.jsonl` path name, each file is one canonical internal
@@ -81,6 +82,9 @@ frozen receipt schema. Its monotonically increasing desired and completed
 watermarks, exact desired-set reconciliation, claim state, retry/dead-letter
 state, typed repeated-source-observation evidence, sealed staged-input binding,
 and compaction epoch are external lifecycle state, never source-checkout content.
+Each certification file is a separate immutable, store-owned internal record
+binding one generation and certification request to the revalidated queue view
+and exact sealed staged-input manifest.
 
 ## Ordering
 
@@ -105,11 +109,14 @@ binds the queue watermark to the exact staged-payload manifest. Certification
 first captures that queue view from two equal typed source observations under
 the accepted build or migration lease, then revalidates the exact queue revision
 and canonical-state hash while `GenerationStore` holds the workspace lock and
-before it takes the generation lock. A queue transition between capture and
-sealing therefore blocks certification instead of producing a receipt against
-mixed evidence. Once the staged or installed receipt is durable, that receipt
-owns idempotent crash recovery even if newer desired work later advances the
-queue.
+before it takes the generation lock. It then durably installs an immutable
+store-owned certification binding before the generation lock or staged receipt
+can become authority. A queue transition between capture and binding therefore
+blocks certification instead of producing a receipt against mixed evidence.
+Once the binding is durable, the exact request and payload can recover even if
+newer desired work later advances the queue; a staged receipt alone is never
+queue authority. The receipt remains the idempotent boundary for the subsequent
+generation install and journal transition.
 
 Activation, migration, promotion, rollback, repair, pointer recovery, and GC
 share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved

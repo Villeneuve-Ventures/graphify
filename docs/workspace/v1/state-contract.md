@@ -53,9 +53,13 @@ represented by an exact durable `not_required` reconciliation at a positive
 watermark; queue absence or scalar watermark zero is not new-certification
 authority. Historical queue-zero receipts remain readable. The captured queue
 revision and canonical-state hash are revalidated under the workspace lock
-before the generation lock is taken and the receipt is sealed. A durable staged
-or installed receipt remains the idempotent recovery authority after that
-boundary even if later work advances the current queue.
+before the generation lock is taken. Certification then installs an immutable,
+store-owned binding of generation ID, request digest, queue view, and sealed
+staged-input manifest before sealing any receipt. That binding is the queue-
+authority recovery boundary even if later work advances the current queue; a
+caller-preseeded staged receipt cannot replace it. A durable staged or installed
+receipt remains the idempotent recovery boundary for generation installation
+and the journal after the binding exists.
 
 Every payload entry is a regular file with path, size, SHA-256, and allowed
 mode. The v1 root is exactly `graphify-out`, and every entry path must be a
@@ -170,6 +174,18 @@ recovery protocol at `workspaces/<repo_uuid>/queue/semantic*.jsonl`. Malformed,
 noncanonical, cross-workspace, policy-mismatched, or ambiguous state fails
 closed. Read-only inspection takes shared registry and workspace locks and does
 not create missing queue paths.
+
+Each new certification additionally installs one canonical immutable internal
+record at
+`workspaces/<repo_uuid>/queue/certifications/<generation_id>.json`. It binds the
+workspace and generation identities, the full certification-request digest,
+and the stable queue view, including its revision, canonical-state hash, typed
+observation evidence, watermarks, completeness, and sealed-input manifest. An
+exact retry may reuse that record after queue advancement; any request or
+payload conflict fails closed. The record is installed under the workspace lock
+after request-contract and staged-manifest validation plus queue revalidation,
+and before the generation lock or receipt. Rejected malformed input creates no
+binding, so a corrected retry of the reserved generation remains possible.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

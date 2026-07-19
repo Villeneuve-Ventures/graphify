@@ -863,6 +863,33 @@ class GenerationStore:
             ),
         )
 
+    def _prevalidate_certification_binding_inputs(
+        self,
+        operation: LeaseOperation,
+        allocation: GenerationAllocation,
+        request: CertificationRequest,
+        declared_entries: Sequence[Mapping[str, object]],
+    ) -> None:
+        # Constructing the frozen receipt validates every request and manifest
+        # field before an immutable semantic binding can make the request
+        # unrecoverable. The receipt itself is not installed at this boundary.
+        self._receipt(operation, allocation, request, declared_entries)
+        staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
+        if self.state.read_optional_existing_bytes(staging_relative / "receipt.json") is not None:
+            raise SemanticCertificationBlocked(
+                "staged receipt has no durable semantic certification binding"
+            )
+        inventory = self._inventory(
+            allocation.staging_path,
+            allowed_root_entries=frozenset({"graphify-out"}),
+        )
+        if canonical_json_bytes(list(inventory.entries)) != canonical_json_bytes(
+            list(declared_entries)
+        ):
+            raise PayloadChanged("declared payload manifest differs from staged payload")
+        if inventory.total_bytes > allocation.expected_payload_bytes:
+            raise CapacityExceeded("staged payload exceeds its durable reservation")
+
     def _sync_inventory(
         self,
         repo_uuid: str,
@@ -1136,6 +1163,23 @@ class GenerationStore:
         )
         return receipt
 
+    @staticmethod
+    def _semantic_request_sha256(request: CertificationRequest) -> str:
+        return hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "source_commit": request.source_commit,
+                    "source_epoch": request.source_epoch,
+                    "policy_sha256": request.policy_sha256,
+                    "observation_manifest_sha256": request.observation_manifest_sha256,
+                    "queue_watermark": request.queue_watermark,
+                    "semantic_completeness": request.semantic_completeness,
+                    "compatibility_sha256": request.compatibility_sha256,
+                    "validations": list(request.validations),
+                }
+            )
+        ).hexdigest()
+
     def certify(
         self,
         grant: LeaseGrant,
@@ -1154,6 +1198,15 @@ class GenerationStore:
             raise UnsupportedCompatibility(
                 "generation certification is not bound to the selected compatibility manifest"
             )
+        if self.semantic_queue is None:
+            raise SemanticCertificationBlocked(
+                "generation certification requires durable semantic queue authority"
+            )
+        sealed_input_manifest_sha256 = payload_manifest_sha256(
+            "graphify-out",
+            declared_entries,
+        )
+        request_sha256 = self._semantic_request_sha256(request)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
@@ -1161,36 +1214,20 @@ class GenerationStore:
             registry_required=True,
         ) as capacity_operation:
             self._require_allocation(capacity_operation, allocation)
-            durable_receipt_present = self.state.private_directory_exists(
-                self._generation(
-                    capacity_operation.repo_uuid,
-                    allocation.generation_id,
-                )
-            ) or (
-                self.state.read_optional_existing_bytes(
-                    self._staging(
-                        capacity_operation.repo_uuid,
-                        allocation.generation_id,
-                    )
-                    / "receipt.json"
-                )
-                is not None
+            queue_view = self.semantic_queue.certification_binding_locked(
+                capacity_operation,
+                generation_id=allocation.generation_id,
+                request_sha256=request_sha256,
+                sealed_input_manifest_sha256=sealed_input_manifest_sha256,
             )
 
-        queue_view: SemanticCertificationView | None = None
-        if not durable_receipt_present:
-            if self.semantic_queue is None:
-                raise SemanticCertificationBlocked(
-                    "generation certification requires durable semantic queue authority"
-                )
+        binding_exists = queue_view is not None
+        if queue_view is None:
             queue_view = self.semantic_queue.certification_view(
                 grant,
                 source_epoch=request.source_epoch,
                 source_observations=source_observations,
-                sealed_input_manifest_sha256=payload_manifest_sha256(
-                    "graphify-out",
-                    declared_entries,
-                ),
+                sealed_input_manifest_sha256=sealed_input_manifest_sha256,
                 monotonic_ns=monotonic_ns,
             )
             if (
@@ -1204,14 +1241,37 @@ class GenerationStore:
                     "certification request does not match stable queue evidence"
                 )
             self.fault_hook(f"generation:{allocation.generation_id}:queue_view_captured")
+        assert queue_view is not None
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"BUILD", "MIGRATE"}),
         ) as operation:
-            if queue_view is not None:
-                assert self.semantic_queue is not None
+            if binding_exists:
+                durable_view = self.semantic_queue.certification_binding_locked(
+                    operation,
+                    generation_id=allocation.generation_id,
+                    request_sha256=request_sha256,
+                    sealed_input_manifest_sha256=sealed_input_manifest_sha256,
+                )
+                if durable_view != queue_view:
+                    raise SemanticCertificationBlocked(
+                        "durable semantic certification binding changed"
+                    )
+            else:
+                self._prevalidate_certification_binding_inputs(
+                    operation,
+                    allocation,
+                    request,
+                    declared_entries,
+                )
                 self.semantic_queue.assert_certification_view_locked(operation, queue_view)
+                queue_view = self.semantic_queue.ensure_certification_binding_locked(
+                    operation,
+                    generation_id=allocation.generation_id,
+                    request_sha256=request_sha256,
+                    view=queue_view,
+                )
             lock = self._lock(operation.repo_uuid, allocation.generation_id)
             with self.state.existing_generation_lock(
                 lock,

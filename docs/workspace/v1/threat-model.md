@@ -79,10 +79,16 @@ requiring two equal typed source observations, durably binding the completed
 watermark to the exact staged-payload manifest, capturing the queue revision and
 canonical-state hash, then revalidating both under the workspace lock before
 generation sealing. A changed queue, mismatched observation pair, or different
-staged manifest blocks the receipt. A durable staged or installed receipt is the
-recovery boundary and remains recoverable after later queue advancement. The
-claim remains local crash durability and stale-process fencing; it does not
-authenticate an uncompromised same-UID worker or semantic backend.
+staged manifest blocks certification. Before any receipt is accepted, the store
+installs an immutable internal binding from the generation and request to that
+revalidated queue view and manifest. Request and staged-manifest validation run
+before that immutable boundary, so malformed input cannot poison a reserved
+generation. A caller-controlled staged receipt without the binding cannot
+bypass queue authority or cause the binding to be created. The binding remains
+recoverable after later queue advancement, while the receipt separately recovers
+generation installation and journaling. The claim remains local crash durability
+and stale-process fencing; it does not authenticate an uncompromised same-UID
+worker or semantic backend.
 
 ## Explicit non-claims
 

@@ -168,9 +168,13 @@ output remains ignored and must not widen the P1 product diff.
   pair and exact sealed staged-input manifest binding;
 - generation certification rejects caller queue/completeness mismatches and
   revalidates the captured queue revision and canonical-state hash under the
-  workspace lock before sealing, including an injected queue-change race;
-  queue-less new certification and same-watermark/different-payload reuse fail,
-  while a durable receipt can recover after later queue advancement; and
+  workspace lock before installing an immutable generation/request/queue-view/
+  payload binding, including an injected queue-change race; queue-less new
+  certification, a caller-preseeded staged receipt without that binding, and
+  same-watermark/different-payload reuse fail; malformed requests create no
+  immutable binding and corrected retries succeed, while injected binding-
+  install uncertainty and later receipt/install faults recover after queue
+  advancement; and
 - recursive before/after source snapshots prove queue, claim, fault-recovery,
   reconciliation, compaction, and certification operations never write the
   source checkout.

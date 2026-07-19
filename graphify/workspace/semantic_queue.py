@@ -41,6 +41,7 @@ _MUTATING_OPERATIONS = frozenset({"BUILD", "MIGRATE", "REPAIR"})
 _COMPACTION_OPERATIONS = _MUTATING_OPERATIONS | frozenset({"SEMANTIC_CLAIM"})
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$", re.ASCII)
+_GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
 _ERROR_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$", re.ASCII)
 _BACKEND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", re.ASCII)
 
@@ -1007,6 +1008,180 @@ class SemanticCertificationView:
     sealed_input_manifest_sha256: str
     semantic_completeness: str
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "repo_uuid": self.repo_uuid,
+            "queue_revision": self.queue_revision,
+            "queue_state_sha256": self.queue_state_sha256,
+            "queue_watermark": self.queue_watermark,
+            "completed_watermark": self.completed_watermark,
+            "compaction_epoch": self.compaction_epoch,
+            "source_epoch": self.source_epoch,
+            "source_commit": self.source_commit,
+            "policy_sha256": self.policy_sha256,
+            "observation_manifest_sha256": self.observation_manifest_sha256,
+            "observation_evidence_sha256": self.observation_evidence_sha256,
+            "sealed_input_manifest_sha256": self.sealed_input_manifest_sha256,
+            "semantic_completeness": self.semantic_completeness,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "SemanticCertificationView":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "repo_uuid",
+                "queue_revision",
+                "queue_state_sha256",
+                "queue_watermark",
+                "completed_watermark",
+                "compaction_epoch",
+                "source_epoch",
+                "source_commit",
+                "policy_sha256",
+                "observation_manifest_sha256",
+                "observation_evidence_sha256",
+                "sealed_input_manifest_sha256",
+                "semantic_completeness",
+            },
+        )
+        repo_uuid = str(LeaseStore._directory(_string(data["repo_uuid"], "$.repo_uuid")).parts[-1])
+        source_commit = _string(data["source_commit"], "$.source_commit")
+        if _COMMIT_RE.fullmatch(source_commit) is None:
+            raise ContractError("$.source_commit: expected lowercase Git commit")
+        queue_watermark = _integer(
+            data["queue_watermark"],
+            "$.queue_watermark",
+            minimum=1,
+        )
+        completed_watermark = _integer(
+            data["completed_watermark"],
+            "$.completed_watermark",
+            minimum=1,
+        )
+        if completed_watermark != queue_watermark:
+            raise ContractError("$.completed_watermark: certification requires exact watermark")
+        completeness = _string(data["semantic_completeness"], "$.semantic_completeness")
+        if completeness not in {"complete", "not_required"}:
+            raise ContractError("$.semantic_completeness: unsupported certification value")
+        return cls(
+            repo_uuid=repo_uuid,
+            queue_revision=_integer(data["queue_revision"], "$.queue_revision", minimum=1),
+            queue_state_sha256=_digest(data["queue_state_sha256"], "$.queue_state_sha256"),
+            queue_watermark=queue_watermark,
+            completed_watermark=completed_watermark,
+            compaction_epoch=_integer(data["compaction_epoch"], "$.compaction_epoch"),
+            source_epoch=_integer(data["source_epoch"], "$.source_epoch", minimum=1),
+            source_commit=source_commit,
+            policy_sha256=_digest(data["policy_sha256"], "$.policy_sha256"),
+            observation_manifest_sha256=_digest(
+                data["observation_manifest_sha256"],
+                "$.observation_manifest_sha256",
+            ),
+            observation_evidence_sha256=_digest(
+                data["observation_evidence_sha256"],
+                "$.observation_evidence_sha256",
+            ),
+            sealed_input_manifest_sha256=_digest(
+                data["sealed_input_manifest_sha256"],
+                "$.sealed_input_manifest_sha256",
+            ),
+            semantic_completeness=completeness,
+        )
+
+
+@dataclass(frozen=True)
+class _SemanticCertificationBinding:
+    repo_uuid: str
+    generation_id: str
+    request_sha256: str
+    view: SemanticCertificationView
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "contract": "graphify.workspace.semantic_certification_binding.internal",
+            "format_version": 1,
+            "repo_uuid": self.repo_uuid,
+            "generation_id": self.generation_id,
+            "request_sha256": self.request_sha256,
+            "view": self.view.to_dict(),
+        }
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        repo_uuid: str,
+        generation_id: str,
+        request_sha256: str,
+        view: SemanticCertificationView,
+    ) -> "_SemanticCertificationBinding":
+        return cls.from_mapping(
+            {
+                "contract": "graphify.workspace.semantic_certification_binding.internal",
+                "format_version": 1,
+                "repo_uuid": repo_uuid,
+                "generation_id": generation_id,
+                "request_sha256": request_sha256,
+                "view": view.to_dict(),
+            }
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "_SemanticCertificationBinding":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "repo_uuid",
+                "generation_id",
+                "request_sha256",
+                "view",
+            },
+        )
+        if data["contract"] != "graphify.workspace.semantic_certification_binding.internal":
+            raise ContractError("$.contract: unsupported semantic certification binding")
+        if _integer(data["format_version"], "$.format_version", minimum=1) != 1:
+            raise ContractError("$.format_version: unsupported certification binding version")
+        repo_uuid = str(LeaseStore._directory(_string(data["repo_uuid"], "$.repo_uuid")).parts[-1])
+        generation_id = _string(data["generation_id"], "$.generation_id")
+        if _GENERATION_RE.fullmatch(generation_id) is None:
+            raise ContractError("$.generation_id: invalid generation identity")
+        view = SemanticCertificationView.from_mapping(
+            cast(Mapping[str, object], _mapping(data["view"], "$.view"))
+        )
+        if view.repo_uuid != repo_uuid:
+            raise ContractError("$.view.repo_uuid: differs from certification binding")
+        return cls(
+            repo_uuid=repo_uuid,
+            generation_id=generation_id,
+            request_sha256=_digest(data["request_sha256"], "$.request_sha256"),
+            view=view,
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "_SemanticCertificationBinding":
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ContractError(f"$: invalid JSON: {exc}") from exc
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(cast(Mapping[str, object], parsed))
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: semantic certification binding is not canonical JSON")
+        return document
+
 
 class SemanticQueueStore:
     """Durable queue state under the existing registry-before-workspace lock order."""
@@ -1588,6 +1763,86 @@ class SemanticQueueStore:
         with self.leases.registry.read_only_snapshot():
             with self.leases.read_only_workspace_lock(canonical):
                 return self._load_locked(canonical, recover=False)
+
+    @staticmethod
+    def _certification_binding_path(repo_uuid: str, generation_id: str) -> Path:
+        if _GENERATION_RE.fullmatch(generation_id) is None:
+            raise SemanticCertificationBlocked("invalid generation identity")
+        return (
+            LeaseStore._directory(repo_uuid) / "queue" / "certifications" / f"{generation_id}.json"
+        )
+
+    def certification_binding_locked(
+        self,
+        operation: LeaseOperation,
+        *,
+        generation_id: str,
+        request_sha256: str,
+        sealed_input_manifest_sha256: str,
+    ) -> SemanticCertificationView | None:
+        """Read and validate immutable prior queue authority under the workspace lock."""
+
+        request_digest = _digest(request_sha256, "$.request_sha256")
+        sealed_digest = _digest(
+            sealed_input_manifest_sha256,
+            "$.sealed_input_manifest_sha256",
+        )
+        path = self._certification_binding_path(operation.repo_uuid, generation_id)
+        try:
+            raw = self.state.read_optional_existing_bytes(path)
+            if raw is None:
+                return None
+            binding = _SemanticCertificationBinding.from_json(raw)
+        except (ContractError, StateCorrupt, StatePathError) as exc:
+            raise SemanticCertificationBlocked(
+                f"durable semantic certification binding is invalid: {exc}"
+            ) from exc
+        if (
+            binding.repo_uuid != operation.repo_uuid
+            or binding.generation_id != generation_id
+            or binding.request_sha256 != request_digest
+            or binding.view.sealed_input_manifest_sha256 != sealed_digest
+        ):
+            raise SemanticCertificationBlocked(
+                "durable semantic certification binding differs from the request"
+            )
+        return binding.view
+
+    def ensure_certification_binding_locked(
+        self,
+        operation: LeaseOperation,
+        *,
+        generation_id: str,
+        request_sha256: str,
+        view: SemanticCertificationView,
+    ) -> SemanticCertificationView:
+        """Install queue-view provenance before any staged receipt becomes authority."""
+
+        binding = _SemanticCertificationBinding.create(
+            repo_uuid=operation.repo_uuid,
+            generation_id=generation_id,
+            request_sha256=request_sha256,
+            view=view,
+        )
+        path = self._certification_binding_path(operation.repo_uuid, generation_id)
+        try:
+            self.state.install_once_bytes(
+                path,
+                binding.canonical,
+                label=f"semantic_certification:{generation_id}",
+            )
+            installed = _SemanticCertificationBinding.from_json(
+                self.state.read_existing_bytes(path)
+            )
+        except (ContractError, StateCorrupt, StatePathError) as exc:
+            raise SemanticCertificationBlocked(
+                f"durable semantic certification binding failed: {exc}"
+            ) from exc
+        if installed != binding:
+            raise SemanticCertificationBlocked(
+                "durable semantic certification binding differs from the stable queue view"
+            )
+        return installed.view
 
     @staticmethod
     def _view_from_snapshot(

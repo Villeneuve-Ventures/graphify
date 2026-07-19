@@ -1554,16 +1554,27 @@ def test_certification_rejects_noncanonical_manifest_and_mutation_during_sealing
         )
     assert mutated
 
-    bad = [dict(declared[0])]
+    malformed = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-noncanonical-manifest",
+        occurred_at=START,
+        monotonic_ns=10_003,
+    )
+    malformed_payload = malformed.staging_path / "graphify-out"
+    malformed_payload.mkdir()
+    (malformed_payload / "graph.json").write_text("initial\n", encoding="utf-8")
+    bad = [dict(store.inspect_staged_payload(malformed)[0])]
     bad[0]["path"] = "graphify-out/../escape"
     with pytest.raises((ContractError, GenerationError)):
         store.certify(
             grant,
-            allocation,
+            malformed,
             _request("a" * 40, queue_watermark=2),
             declared_entries=bad,
             occurred_at=START,
-            monotonic_ns=10_003,
+            monotonic_ns=10_004,
         )
 
 
@@ -2172,6 +2183,199 @@ def test_new_certification_without_durable_queue_authority_is_rejected(
         )
 
 
+def test_preseeded_staged_receipt_cannot_replace_durable_queue_authority(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-preseeded-receipt",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("caller supplied\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    observations = _observations(harness)
+    request = _request(observations)
+    with harness.leases.current_operation(
+        grant,
+        monotonic_ns=10_002,
+        allowed_operations=frozenset({"BUILD", "MIGRATE"}),
+    ) as operation:
+        receipt = store._receipt(operation, allocation, request, declared)
+    (allocation.staging_path / "receipt.json").write_bytes(receipt.canonical)
+
+    with pytest.raises(
+        SemanticCertificationBlocked,
+        match="requires durable semantic queue authority",
+    ):
+        store.certify(
+            grant,
+            allocation,
+            request,
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_003,
+        )
+
+    assert (allocation.staging_path / "receipt.json").read_bytes() == receipt.canonical
+    assert not store.state.private_directory_exists(
+        store._generation(REPO_UUID, allocation.generation_id)
+    )
+    transitions = [
+        event.to_dict()["transition"]
+        for event in journal.recover(grant, monotonic_ns=10_004).for_generation(
+            allocation.generation_id
+        )
+    ]
+    assert transitions == ["ALLOCATED", "STAGING"]
+
+
+def test_invalid_request_does_not_poison_certification_binding_retry(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    queue = _queue(harness)
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-invalid-request-retry",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("retryable request\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    request, observations = _bind_certification(
+        harness, queue, grant, declared, monotonic_ns=10_002
+    )
+
+    with pytest.raises(ContractError, match="at least one validation"):
+        store.certify(
+            grant,
+            allocation,
+            replace(request, validations=()),
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_003,
+        )
+
+    binding_path = queue._certification_binding_path(REPO_UUID, allocation.generation_id)
+    assert not queue.state.path(binding_path).exists()
+    receipt = store.certify(
+        grant,
+        allocation,
+        request,
+        source_observations=observations,
+        declared_entries=declared,
+        occurred_at=START,
+        monotonic_ns=10_004,
+    )
+    assert receipt.to_dict()["generation_id"] == allocation.generation_id
+
+
+def test_preseeded_receipt_with_queue_cannot_create_certification_binding(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    queue = _queue(harness)
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-preseeded-receipt-with-queue",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("queue cannot bless receipt\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    request, observations = _bind_certification(
+        harness, queue, grant, declared, monotonic_ns=10_002
+    )
+    with harness.leases.current_operation(
+        grant,
+        monotonic_ns=10_003,
+        allowed_operations=frozenset({"BUILD", "MIGRATE"}),
+    ) as operation:
+        receipt = store._receipt(operation, allocation, request, declared)
+    receipt_path = allocation.staging_path / "receipt.json"
+    receipt_path.write_bytes(receipt.canonical)
+    receipt_path.chmod(0o600)
+
+    with pytest.raises(
+        SemanticCertificationBlocked,
+        match="staged receipt has no durable semantic certification binding",
+    ):
+        store.certify(
+            grant,
+            allocation,
+            request,
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_004,
+        )
+
+    binding_path = queue._certification_binding_path(REPO_UUID, allocation.generation_id)
+    assert not queue.state.path(binding_path).exists()
+    receipt_path.unlink()
+    installed = store.certify(
+        grant,
+        allocation,
+        request,
+        source_observations=observations,
+        declared_entries=declared,
+        occurred_at=START,
+        monotonic_ns=10_005,
+    )
+    assert installed.to_dict()["generation_id"] == allocation.generation_id
+
+
 def test_completed_queue_watermark_cannot_bind_or_certify_different_payload(
     tmp_path: Path,
 ) -> None:
@@ -2321,6 +2525,95 @@ def test_durable_receipt_recovery_succeeds_after_queue_advances(
     )
 
     assert receipt.to_dict()["queue_watermark"] == QUEUE_WATERMARK
+    assert (
+        store.verify_generation(REPO_UUID, allocation.generation_id).canonical == receipt.canonical
+    )
+
+
+def test_durable_certification_binding_recovers_before_receipt_after_queue_advances(
+    tmp_path: Path,
+) -> None:
+    armed = True
+
+    def fail(event: str) -> None:
+        nonlocal armed
+        if armed and event == "semantic_certification:gen-binding-recovery:installed":
+            armed = False
+            raise InjectedFault(event)
+
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    queue = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=QUEUE_POLICY,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=fail,
+    )
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-binding-recovery",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("binding recovery\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    request, observations = _bind_certification(
+        harness, queue, grant, declared, monotonic_ns=10_002
+    )
+
+    with pytest.raises(CommitUnknown, match="semantic_certification:gen-binding-recovery"):
+        store.certify(
+            grant,
+            allocation,
+            request,
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_003,
+        )
+
+    binding_path = queue._certification_binding_path(REPO_UUID, allocation.generation_id)
+    assert queue.state.read_existing_bytes(binding_path)
+    assert not (allocation.staging_path / "receipt.json").exists()
+
+    queue.reconcile(
+        grant,
+        (),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=observations,
+        desired_watermark=2,
+        semantic_required=False,
+        monotonic_ns=10_004,
+    )
+    receipt = store.certify(
+        grant,
+        allocation,
+        request,
+        source_observations=observations,
+        declared_entries=declared,
+        occurred_at=START,
+        monotonic_ns=10_005,
+    )
+
+    assert receipt.to_dict()["queue_watermark"] == QUEUE_WATERMARK
+    assert queue.inspect(REPO_UUID).desired_watermark == 2
     assert (
         store.verify_generation(REPO_UUID, allocation.generation_id).canonical == receipt.canonical
     )
