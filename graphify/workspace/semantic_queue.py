@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
+import time
 from typing import Any, Iterator, Mapping, Sequence, cast
 import unicodedata
 
@@ -49,6 +50,8 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$", re.ASCII)
 _GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
 _ERROR_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$", re.ASCII)
+_WORKSPACE_CONFIG_MAX_BYTES = 64 * 1024
+_WORKSPACE_CONFIG_READ_TIMEOUT_NS = 5_000_000_000
 
 
 class SemanticQueueError(RuntimeError):
@@ -1364,6 +1367,8 @@ class SemanticQueueStore:
     def _active_workspace_config(
         self,
         operation: LeaseOperation,
+        *,
+        deadline_ns: int,
     ) -> tuple[WorkspaceConfig, str]:
         workspaces = cast(
             list[dict[str, Any]],
@@ -1397,8 +1402,15 @@ class SemanticQueueStore:
             ):
                 raise ContractError("$.git_common_identity: invalid device or inode")
             source_root = Path(cast(str, recorded["path"]))
-            root_identity = source_root_identity(source_root)
-            config, config_sha256 = read_workspace_config_with_digest(source_root)
+            root_identity = source_root_identity(
+                source_root,
+                deadline_ns=deadline_ns,
+            )
+            config, config_sha256 = read_workspace_config_with_digest(
+                source_root,
+                deadline_ns=deadline_ns,
+                max_bytes=_WORKSPACE_CONFIG_MAX_BYTES,
+            )
             verify_source_checkout(
                 source_root,
                 expected_git_common_dir=Path(cast(str, recorded["git_common_dir"])),
@@ -1406,9 +1418,12 @@ class SemanticQueueStore:
                 expected_git_common_device=cast(int, common_device),
                 expected_git_common_inode=cast(int, common_inode),
                 expected_root_identity=root_identity,
+                deadline_ns=deadline_ns,
             )
             confirmed_config, confirmed_config_sha256 = read_workspace_config_with_digest(
-                source_root
+                source_root,
+                deadline_ns=deadline_ns,
+                max_bytes=_WORKSPACE_CONFIG_MAX_BYTES,
             )
             verify_source_checkout(
                 source_root,
@@ -1417,6 +1432,7 @@ class SemanticQueueStore:
                 expected_git_common_device=cast(int, common_device),
                 expected_git_common_inode=cast(int, common_inode),
                 expected_root_identity=root_identity,
+                deadline_ns=deadline_ns,
             )
             if (
                 config_sha256 != expected_config_sha256
@@ -1540,12 +1556,28 @@ class SemanticQueueStore:
             existing_by_identity = (
                 {} if source_changed else {item.work.identity: item for item in current.items}
             )
+            compacted_completed_identities = (
+                {
+                    work.identity
+                    for work in current.reconciliation.desired
+                }
+                if (
+                    not source_changed
+                    and current.reconciliation is not None
+                    and current.completed_watermark == current.desired_watermark
+                )
+                else set()
+            )
             items = tuple(
                 existing_by_identity.get(
                     work.identity,
                     SemanticQueueItem(
                         work=work,
-                        status="pending",
+                        status=(
+                            "completed"
+                            if work.identity in compacted_completed_identities
+                            else "pending"
+                        ),
                         failure_count=0,
                         last_error=None,
                         claim=None,
@@ -1673,6 +1705,7 @@ class SemanticQueueStore:
         """Claim work only after deriving authority at this mutation boundary."""
 
         repo_uuid = cast(str, grant.lease.to_dict()["repo_uuid"])
+        policy_deadline_ns = time.monotonic_ns() + _WORKSPACE_CONFIG_READ_TIMEOUT_NS
         # The pre-lock and locked reads are the two policy observations required
         # to reject replacement/ABA without repeating full source discovery.
         try:
@@ -1689,7 +1722,9 @@ class SemanticQueueStore:
                 raise SemanticCapabilityUnavailable("workspace_config_unavailable")
             observed_source = cast(dict[str, Any], observed_entries[0]["active_source"])
             _observed_config, observed_config_sha256 = read_workspace_config_with_digest(
-                Path(cast(str, observed_source["path"]))
+                Path(cast(str, observed_source["path"])),
+                deadline_ns=policy_deadline_ns,
+                max_bytes=_WORKSPACE_CONFIG_MAX_BYTES,
             )
         except SemanticCapabilityUnavailable:
             raise
@@ -1705,7 +1740,10 @@ class SemanticQueueStore:
                 raise SemanticCapabilityUnavailable("workspace_config_invalid") from exc
             if validated_config.to_dict()["repo_uuid"] != operation.repo_uuid:
                 raise SemanticCapabilityUnavailable("workspace_config_mismatch")
-            active_config, active_config_sha256 = self._active_workspace_config(operation)
+            active_config, active_config_sha256 = self._active_workspace_config(
+                operation,
+                deadline_ns=policy_deadline_ns,
+            )
             if (
                 validated_config.to_dict() != active_config.to_dict()
                 or observed_config_sha256 != active_config_sha256

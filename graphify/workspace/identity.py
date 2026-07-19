@@ -225,7 +225,12 @@ def _read_source_regular(
     path: Path,
     *,
     deadline_ns: int | None = None,
+    max_bytes: int | None = None,
 ) -> bytes:
+    if max_bytes is not None and (
+        isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
+    ):
+        raise ValueError("max_bytes must be a positive integer")
     _check_deadline(deadline_ns)
     flags = (
         os.O_RDONLY
@@ -243,15 +248,30 @@ def _read_source_regular(
             raise SourceDiscoveryError(
                 f"source identity file is not a singular regular file: {path}"
             )
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise SourceDiscoveryError(
+                f"source identity file exceeds byte limit {max_bytes}: {path}"
+            )
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
             _check_deadline(deadline_ns)
             try:
-                chunk = os.read(descriptor, 1024 * 1024)
+                read_size = (
+                    1024 * 1024
+                    if max_bytes is None
+                    else min(1024 * 1024, max_bytes - total_bytes + 1)
+                )
+                chunk = os.read(descriptor, read_size)
             except InterruptedError:
                 continue
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise SourceDiscoveryError(
+                    f"source identity file exceeds byte limit {max_bytes}: {path}"
+                )
             chunks.append(chunk)
         _check_deadline(deadline_ns)
         after = os.fstat(descriptor)
@@ -273,10 +293,12 @@ def _read_workspace_config(
     root: Path,
     *,
     deadline_ns: int | None = None,
+    max_bytes: int | None = None,
 ) -> tuple[WorkspaceConfig, bytes]:
     config_bytes = _read_source_regular(
         root / ".graphify" / "workspace.toml",
         deadline_ns=deadline_ns,
+        max_bytes=max_bytes,
     )
     try:
         config = WorkspaceConfig.from_toml(config_bytes)
@@ -289,12 +311,14 @@ def read_workspace_config(
     source_root: Path,
     *,
     deadline_ns: int | None = None,
+    max_bytes: int | None = None,
 ) -> WorkspaceConfig:
     """Safely read validated policy from an already selected source root."""
 
     config, _digest = read_workspace_config_with_digest(
         source_root,
         deadline_ns=deadline_ns,
+        max_bytes=max_bytes,
     )
     return config
 
@@ -303,6 +327,7 @@ def read_workspace_config_with_digest(
     source_root: Path,
     *,
     deadline_ns: int | None = None,
+    max_bytes: int | None = None,
 ) -> tuple[WorkspaceConfig, str]:
     """Safely read policy plus the raw-byte digest used by source identity."""
 
@@ -311,7 +336,11 @@ def read_workspace_config_with_digest(
     _check_deadline(deadline_ns)
     if not root.is_dir():
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
-    config, config_bytes = _read_workspace_config(root, deadline_ns=deadline_ns)
+    config, config_bytes = _read_workspace_config(
+        root,
+        deadline_ns=deadline_ns,
+        max_bytes=max_bytes,
+    )
     return config, hashlib.sha256(config_bytes).hexdigest()
 
 

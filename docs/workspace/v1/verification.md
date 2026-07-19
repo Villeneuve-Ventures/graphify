@@ -158,7 +158,9 @@ output remains ignored and must not widen the P1 product diff.
   relabeled policy cannot claim work; deterministic activation in the former
   registry-snapshot/workspace-lock gap makes the old claim grant stale and
   leaves the queue unchanged, while semantic-grant compaction serializes before
-  activation rather than mutating under a retired source revision;
+  activation rather than mutating under a retired source revision; every active-
+  policy observation and checkout verification shares one five-second monotonic
+  deadline, and every policy read is capped at 64 KiB;
 - `SEMANTIC_CLAIM` owner/fence/source/operation/migration evidence is exact;
   one lease owns at most one active item, stale workers cannot checkpoint,
   complete, fail, or overwrite newer desired work, and successor recovery is
@@ -171,7 +173,9 @@ output remains ignored and must not widen the P1 product diff.
   authority;
 - compaction can remove only completed tombstones and retains the reconciliation
   and watermark proof needed by certification, including the typed observation
-  pair and exact sealed staged-input manifest binding;
+  pair and exact sealed staged-input manifest binding; a later same-source
+  reconciliation preserves exact carried completion without duplicate claims,
+  while changed identities and unfinished predecessors remain pending;
 - generation certification rejects caller queue/completeness mismatches and
   revalidates the captured queue revision and canonical-state hash under the
   workspace lock before installing an immutable generation/request/queue-view/

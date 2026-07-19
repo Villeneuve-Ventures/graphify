@@ -30,6 +30,7 @@ from graphify.workspace.generations import (
 from graphify.workspace.identity import (
     IdentityAction,
     OperatorAuthorization,
+    SourceDiscoveryError,
     SourceIdentity,
     discover_source,
 )
@@ -1441,6 +1442,58 @@ def test_completion_and_compaction_preserve_the_stable_certification_watermark(
     assert duplicate.revision == compacted.revision
 
 
+def test_reconciliation_preserves_carried_completion_after_compaction(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    work = _work("docs/a.md", 1)
+    queue.reconcile(
+        build,
+        (work,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=1,
+        semantic_required=True,
+        monotonic_ns=10_001,
+    )
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    claim = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert claim is not None
+    queue.complete(semantic, claim, monotonic_ns=20_002)
+    compacted = queue.compact(build, monotonic_ns=20_003)
+    assert compacted.items == ()
+
+    carried = queue.reconcile(
+        build,
+        (work,),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=_source_observations(harness),
+        desired_watermark=2,
+        semantic_required=True,
+        monotonic_ns=20_004,
+    )
+
+    assert carried.completed_watermark == 2
+    assert len(carried.items) == 1
+    assert carried.items[0].status == "completed"
+    assert (
+        queue.claim(
+            semantic,
+            **_host_claim_inputs(harness),
+            monotonic_ns=20_005,
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "failpoint",
     [
@@ -2292,6 +2345,75 @@ def test_claim_accepts_only_an_explicit_backend_from_the_active_source_policy(
     assert tree_snapshot(harness.repo) == source_before
 
 
+def test_claim_bounds_every_active_policy_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    original_read = semantic_queue_module.read_workspace_config_with_digest
+    original_root_identity = semantic_queue_module.source_root_identity
+    original_verify = semantic_queue_module.verify_source_checkout
+    read_bounds: list[tuple[int | None, int | None]] = []
+    root_identity_deadlines: list[int | None] = []
+    verify_deadlines: list[int | None] = []
+    policy_now_ns = 1_000_000_000
+
+    monkeypatch.setattr(
+        semantic_queue_module.time,
+        "monotonic_ns",
+        lambda: policy_now_ns,
+    )
+
+    def bounded_read(
+        source_root: Path,
+        **kwargs: Any,
+    ) -> tuple[WorkspaceConfig, str]:
+        read_bounds.append((kwargs.get("max_bytes"), kwargs.get("deadline_ns")))
+        return original_read(source_root, **kwargs)
+
+    def bounded_root_identity(source_root: Path, **kwargs: Any) -> tuple[int, int]:
+        root_identity_deadlines.append(kwargs.get("deadline_ns"))
+        return original_root_identity(source_root, **kwargs)
+
+    def bounded_verify(*args: Any, **kwargs: Any) -> None:
+        verify_deadlines.append(kwargs.get("deadline_ns"))
+        original_verify(*args, **kwargs)
+
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "read_workspace_config_with_digest",
+        bounded_read,
+    )
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "source_root_identity",
+        bounded_root_identity,
+    )
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "verify_source_checkout",
+        bounded_verify,
+    )
+
+    claim = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+
+    assert claim is not None
+    assert len(read_bounds) == 3
+    assert {maximum for maximum, _deadline in read_bounds} == {64 * 1024}
+    deadlines = {deadline for _maximum, deadline in read_bounds}
+    assert deadlines == {policy_now_ns + 5_000_000_000}
+    assert root_identity_deadlines == [next(iter(deadlines))]
+    assert verify_deadlines == [next(iter(deadlines)), next(iter(deadlines))]
+
+
 def test_claim_rejects_policy_changed_without_registry_rebind(
     tmp_path: Path,
 ) -> None:
@@ -2328,6 +2450,36 @@ def test_claim_rejects_policy_changed_without_registry_rebind(
             monotonic_ns=20_001,
         )
 
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
+def test_claim_rejects_an_oversized_active_policy_before_reading_it(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    config_path = harness.repo / ".graphify/workspace.toml"
+    config = WorkspaceConfig.from_toml(config_path.read_bytes())
+    config_path.write_bytes(config_path.read_bytes() + b"\n#" + b"x" * (64 * 1024))
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_unavailable",
+    ) as error:
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=True,
+            explicit_backend=None,
+            monotonic_ns=20_001,
+        )
+
+    assert isinstance(error.value.__cause__, SourceDiscoveryError)
+    assert "byte limit" in str(error.value.__cause__)
     assert queue.inspect(REPO_UUID).canonical == before
 
 
@@ -2457,17 +2609,17 @@ def test_claim_rejects_source_path_replacement_before_reading_active_policy(
     swapped = False
     read_calls = 0
 
-    def replace_before_read(source_root: Path):
+    def replace_before_read(source_root: Path, **kwargs: Any):
         nonlocal read_calls, swapped
         read_calls += 1
         if read_calls == 1:
-            return original_read(source_root)
+            return original_read(source_root, **kwargs)
         if not swapped:
             swapped = True
             harness.repo.rename(tmp_path / "original-repo")
             (harness.repo / ".graphify").mkdir(parents=True)
             (harness.repo / ".graphify/workspace.toml").write_bytes(forged_bytes)
-        return original_read(source_root)
+        return original_read(source_root, **kwargs)
 
     monkeypatch.setattr(
         semantic_queue_module,
@@ -2508,17 +2660,17 @@ def test_claim_rejects_same_policy_source_replacement_during_locked_read(
     swapped = False
     read_calls = 0
 
-    def replace_before_read(source_root: Path):
+    def replace_before_read(source_root: Path, **kwargs: Any):
         nonlocal read_calls, swapped
         read_calls += 1
         if read_calls == 1:
-            return original_read(source_root)
+            return original_read(source_root, **kwargs)
         if not swapped:
             swapped = True
             harness.repo.rename(tmp_path / "original-repo")
             (harness.repo / ".graphify").mkdir(parents=True)
             (harness.repo / ".graphify/workspace.toml").write_bytes(config_bytes)
-        return original_read(source_root)
+        return original_read(source_root, **kwargs)
 
     monkeypatch.setattr(
         semantic_queue_module,
@@ -2624,17 +2776,17 @@ def test_claim_rejects_aba_policy_replacement_during_config_read(
     original_read = semantic_queue_module.read_workspace_config_with_digest
     read_calls = 0
 
-    def read_during_replacement(source_root: Path):
+    def read_during_replacement(source_root: Path, **kwargs: Any):
         nonlocal read_calls
         read_calls += 1
         if read_calls == 1:
-            return original_read(source_root)
+            return original_read(source_root, **kwargs)
         original_root = tmp_path / "original-repo"
         harness.repo.rename(original_root)
         (harness.repo / ".graphify").mkdir(parents=True)
         (harness.repo / ".graphify/workspace.toml").write_bytes(forged_bytes)
         try:
-            return original_read(source_root)
+            return original_read(source_root, **kwargs)
         finally:
             shutil.rmtree(harness.repo)
             original_root.rename(harness.repo)

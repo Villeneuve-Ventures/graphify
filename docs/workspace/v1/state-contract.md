@@ -139,8 +139,9 @@ and validates its workspace configuration, and requires the canonically
 revalidated caller configuration to match it exactly. Only then does it derive
 availability from explicit live host-agent and named-backend inputs; a matching
 repository UUID alone is not policy authority. Claim resolves source identity
-before locks, then retains the current registry lock through the workspace
-mutation and rechecks that identity plus a second safe config read after checkout
+before locks under one five-second monotonic deadline and a 64 KiB configuration
+byte limit, then retains the current registry lock through the workspace mutation
+and rechecks that identity plus a second bounded config read after checkout
 verification. Checkpoint,
 completion, failure, and compaction under a semantic grant retain the same
 registry-through-workspace boundary, so activation cannot advance the active
@@ -171,7 +172,10 @@ certification requires the observation pair, durable staged-input binding, and
 a completed watermark equal to the desired watermark with no retained
 incomplete item. Compaction may remove completed item tombstones only after that
 equality holds; it retains the watermarks, reconciliation, observation pair, and
-staged-input binding.
+staged-input binding. A later same-source reconciliation recovers only exact
+desired-work identities from that retained completed reconciliation as completed;
+new or changed identities remain pending, and unfinished lower predecessors still
+invalidate carried completion.
 
 A claimed item additionally binds the workspace UUID and exact desired work to
 the `SEMANTIC_CLAIM` owner, fence token, operation epoch, migration epoch,
