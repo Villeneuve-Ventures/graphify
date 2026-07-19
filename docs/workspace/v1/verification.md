@@ -141,6 +141,59 @@ After code changes, run the absolute repo-local Graphify binary to update the
 repo graph. Because the release checkout has no committed graph, bootstrap
 output remains ignored and must not widen the P1 product diff.
 
+## P5A semantic queue gates
+
+- enqueue and exact reconciliation monotonically advance the desired watermark,
+  coalesce deterministically, reject backward or conflicting revisions, and
+  leave state unchanged when item or canonical-byte capacity would be exceeded;
+- the persisted record round-trips canonically, recovers across every
+  pending/previous/current durable-write failpoint, rejects corrupt or ambiguous
+  candidates, and tolerates injected short writes, `EINTR`, `ENOSPC`, `EDQUOT`,
+  and `EIO` at write, sync, and replace boundaries;
+- only an explicitly available host agent or policy-allowlisted explicit
+  backend may claim work, ambient environment cannot select a provider, and an
+  unavailable capability decision performs no mutation; `claim` re-derives the
+  decision from the registry-selected active-source policy and explicit live
+  inputs, so a forged `available=True` report, foreign allowlist, or same-UUID
+  relabeled policy cannot claim work; deterministic activation in the former
+  registry-snapshot/workspace-lock gap makes the old claim grant stale and
+  leaves the queue unchanged, while semantic-grant compaction serializes before
+  activation rather than mutating under a retired source revision; every active-
+  policy observation and checkout verification shares one five-second monotonic
+  deadline, and every policy read is capped at 64 KiB;
+- `SEMANTIC_CLAIM` owner/fence/source/operation/migration evidence is exact;
+  one lease owns at most one active item, stale workers cannot checkpoint,
+  complete, fail, or overwrite newer desired work, and successor recovery is
+  bounded by the retry/dead-letter policy;
+- deterministic round-robin operation selection and seeded replay schedules
+  cover fairness, retries, stale claims, coalescing, completion, and compaction;
+- queue emptiness alone cannot certify: exact source-epoch, policy, desired-set,
+  watermark, and two equal typed source observations are required, with
+  completed watermark equal to desired watermark; a raw pass count is not
+  authority;
+- compaction can remove only completed tombstones and retains the reconciliation
+  and watermark proof needed by certification, including the typed observation
+  pair and exact sealed staged-input manifest binding; a later same-source
+  reconciliation preserves exact carried completion without duplicate claims,
+  while changed identities and unfinished predecessors remain pending;
+- generation certification rejects caller queue/completeness mismatches and
+  revalidates the captured queue revision and canonical-state hash under the
+  workspace lock before installing an immutable generation/request/queue-view/
+  payload binding, including an injected queue-change race; queue-less new
+  certification, a caller-preseeded staged receipt without that binding, and
+  same-watermark/different-payload reuse fail; malformed requests create no
+  immutable binding and corrected retries succeed, while injected binding-
+  install uncertainty and later receipt/install faults recover after queue
+  advancement; and
+- recursive before/after source snapshots prove queue, claim, fault-recovery,
+  reconciliation, compaction, and certification operations never write the
+  source checkout.
+
+Run the focused queue suite first, then the existing workspace runtime,
+generation, and freshness suites. P5A also requires the repository gates above,
+exact-head CI, a current Graphify graph, and independent code, architecture, and
+verification reviews.
+
 ## P3 runtime gates
 
 - capacity limits and the filesystem reserve fail before allocation mutation,
@@ -231,8 +284,10 @@ output remains ignored and must not widen the P1 product diff.
   security, packaging, graph-refresh, exact-head CI, and independent-review
   gates.
 
-P4 verification does not satisfy P5 semantic queue, service, workspace CLI,
-installation, performance, or live-cutover gates.
+P5A verification satisfies only the durable semantic queue and stable-watermark
+certification slice. It does not satisfy the remaining P5 watch, service,
+workspace CLI, installation, performance, candidate-publication, or live-cutover
+gates, nor P6 or H3.
 
 The P1 fixture bundle is deliberately limited to synthetic contract fixtures;
 it is not claimed as the representative repository corpus required by the

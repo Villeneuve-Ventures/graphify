@@ -225,7 +225,12 @@ def _read_source_regular(
     path: Path,
     *,
     deadline_ns: int | None = None,
+    max_bytes: int | None = None,
 ) -> bytes:
+    if max_bytes is not None and (
+        isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
+    ):
+        raise ValueError("max_bytes must be a positive integer")
     _check_deadline(deadline_ns)
     flags = (
         os.O_RDONLY
@@ -243,15 +248,30 @@ def _read_source_regular(
             raise SourceDiscoveryError(
                 f"source identity file is not a singular regular file: {path}"
             )
+        if max_bytes is not None and before.st_size > max_bytes:
+            raise SourceDiscoveryError(
+                f"source identity file exceeds byte limit {max_bytes}: {path}"
+            )
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
             _check_deadline(deadline_ns)
             try:
-                chunk = os.read(descriptor, 1024 * 1024)
+                read_size = (
+                    1024 * 1024
+                    if max_bytes is None
+                    else min(1024 * 1024, max_bytes - total_bytes + 1)
+                )
+                chunk = os.read(descriptor, read_size)
             except InterruptedError:
                 continue
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if max_bytes is not None and total_bytes > max_bytes:
+                raise SourceDiscoveryError(
+                    f"source identity file exceeds byte limit {max_bytes}: {path}"
+                )
             chunks.append(chunk)
         _check_deadline(deadline_ns)
         after = os.fstat(descriptor)
@@ -267,6 +287,127 @@ def _read_source_regular(
     if installed.st_dev != after.st_dev or installed.st_ino != after.st_ino:
         raise SourceDiscoveryError(f"source identity file was replaced while it was read: {path}")
     return b"".join(chunks)
+
+
+def _read_workspace_config(
+    root: Path,
+    *,
+    deadline_ns: int | None = None,
+    max_bytes: int | None = None,
+) -> tuple[WorkspaceConfig, bytes]:
+    config_bytes = _read_source_regular(
+        root / ".graphify" / "workspace.toml",
+        deadline_ns=deadline_ns,
+        max_bytes=max_bytes,
+    )
+    try:
+        config = WorkspaceConfig.from_toml(config_bytes)
+    except ContractError as exc:
+        raise SourceDiscoveryError(f"invalid workspace config: {exc}") from exc
+    return config, config_bytes
+
+
+def read_workspace_config(
+    source_root: Path,
+    *,
+    deadline_ns: int | None = None,
+    max_bytes: int | None = None,
+) -> WorkspaceConfig:
+    """Safely read validated policy from an already selected source root."""
+
+    config, _digest = read_workspace_config_with_digest(
+        source_root,
+        deadline_ns=deadline_ns,
+        max_bytes=max_bytes,
+    )
+    return config
+
+
+def read_workspace_config_with_digest(
+    source_root: Path,
+    *,
+    deadline_ns: int | None = None,
+    max_bytes: int | None = None,
+) -> tuple[WorkspaceConfig, str]:
+    """Safely read policy plus the raw-byte digest used by source identity."""
+
+    _check_deadline(deadline_ns)
+    root = source_root.resolve(strict=True)
+    _check_deadline(deadline_ns)
+    if not root.is_dir():
+        raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    config, config_bytes = _read_workspace_config(
+        root,
+        deadline_ns=deadline_ns,
+        max_bytes=max_bytes,
+    )
+    return config, hashlib.sha256(config_bytes).hexdigest()
+
+
+def verify_source_checkout(
+    source_root: Path,
+    *,
+    expected_git_common_dir: Path,
+    expected_worktree_id: str,
+    expected_git_common_device: int,
+    expected_git_common_inode: int,
+    expected_root_identity: tuple[int, int],
+    deadline_ns: int | None = None,
+) -> None:
+    """Verify the selected checkout with one live local Git identity read."""
+
+    _check_deadline(deadline_ns)
+    root = source_root.resolve(strict=True)
+    expected_common = expected_git_common_dir.resolve(strict=True)
+    _check_deadline(deadline_ns)
+    before = root.stat()
+    if not stat.S_ISDIR(before.st_mode):
+        raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    if (before.st_dev, before.st_ino) != expected_root_identity:
+        raise SourceDiscoveryError("source root identity changed")
+    resolved = _git(
+        root,
+        "rev-parse",
+        "--show-toplevel",
+        "--git-common-dir",
+        "--git-dir",
+        deadline_ns=deadline_ns,
+    ).splitlines()
+    if len(resolved) != 3:
+        raise SourceDiscoveryError("Git source identity response is malformed")
+    top_level = _resolve_git_path(root, resolved[0], deadline_ns=deadline_ns)
+    git_common_dir = _resolve_git_path(root, resolved[1], deadline_ns=deadline_ns)
+    git_dir = _resolve_git_path(root, resolved[2], deadline_ns=deadline_ns)
+    if top_level != root or git_common_dir != expected_common:
+        raise SourceDiscoveryError("source root no longer matches registry Git identity")
+    worktree_id = "main" if git_dir == git_common_dir else git_dir.name
+    if worktree_id != expected_worktree_id:
+        raise SourceDiscoveryError("source worktree no longer matches registry Git identity")
+    common_details = git_common_dir.stat()
+    if (
+        common_details.st_dev != expected_git_common_device
+        or common_details.st_ino != expected_git_common_inode
+    ):
+        raise SourceDiscoveryError("Git common-directory identity changed")
+    after = root.stat()
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        raise SourceDiscoveryError("source root changed during identity verification")
+
+
+def source_root_identity(
+    source_root: Path,
+    *,
+    deadline_ns: int | None = None,
+) -> tuple[int, int]:
+    """Capture the directory identity that a later live Git check must retain."""
+
+    _check_deadline(deadline_ns)
+    root = source_root.resolve(strict=True)
+    details = root.stat()
+    _check_deadline(deadline_ns)
+    if not stat.S_ISDIR(details.st_mode):
+        raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    return (details.st_dev, details.st_ino)
 
 
 def discover_source(
@@ -288,12 +429,7 @@ def discover_source(
     if top_level != root:
         raise SourceDiscoveryError(f"source root must be the Git top level: {top_level}")
 
-    config_path = root / ".graphify" / "workspace.toml"
-    config_bytes = _read_source_regular(config_path, deadline_ns=deadline_ns)
-    try:
-        config = WorkspaceConfig.from_toml(config_bytes)
-    except ContractError as exc:
-        raise SourceDiscoveryError(f"invalid workspace config: {exc}") from exc
+    config, config_bytes = _read_workspace_config(root, deadline_ns=deadline_ns)
     repo_uuid = str(config.to_dict()["repo_uuid"])
 
     git_common_dir = _resolve_git_path(
@@ -398,4 +534,8 @@ __all__ = [
     "UUIDCollisionError",
     "discover_source",
     "identity_evidence",
+    "read_workspace_config",
+    "read_workspace_config_with_digest",
+    "source_root_identity",
+    "verify_source_checkout",
 ]

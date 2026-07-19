@@ -30,8 +30,10 @@ the same boundary. Sudden hardware power-loss durability is not claimed.
 
 P3 executes generation, journal, pointer, and explicit offline-GC transitions.
 P4 adds read-only adapter/freshness operations and external-output structural
-builds. Service, command, installation, route, and migration transitions remain
-absent.
+builds. P5A adds only durable semantic desired-work reconciliation, fenced
+claims, bounded retries/dead letters, and stable-watermark certification.
+Service, command, installation, route, publication, and live-cutover transitions
+remain absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -56,6 +58,51 @@ source, staging-only writes, and host-agent instruction/data separation.
 Backend endpoints and credentials are operator configuration, never repo policy;
 secrets are excluded from argv and persisted state.
 
+P5A treats semantic work and its outputs as untrusted until exact reconciliation
+and generation sealing. A worker cannot claim work without an accepted
+`SEMANTIC_CLAIM` lease and an explicit live capability decision. At the claim
+mutation boundary, the queue resolves the registry-selected active source,
+safely reads and validates its workspace configuration, and requires the
+canonically revalidated caller configuration to match it exactly. The decision
+is then derived from that active-source policy and the caller-stated live host-
+agent/named-backend inputs. A foreign or same-UUID relabeled policy and an
+arbitrary decision object are never authority. Host-agent use must be stated by
+the caller; a headless backend must be explicitly named, policy-allowlisted, and
+permitted network egress. Ambient provider or credential environment variables
+are not capability or authority. Semantic-grant mutations retain the current
+registry lock while nesting the workspace lock. Lifecycle queue mutations use
+the normal stable-registry-snapshot then workspace-lock path, where the live
+lifecycle lease excludes activation. An activation before claim validation
+therefore makes the old lease stale instead of authorizing work from retired
+policy. The active-source revision that produced desired work is persisted with
+the queue, and retained work requires a new exact reconciliation after activation.
+
+Claim IDs bind the workspace UUID, desired work, owner, fence, source revision,
+and operation and migration epochs. This prevents a stale worker, expired
+claim, cross-workspace collision, or replaced desired revision from committing
+semantic completion. Deterministic operation
+rotation prevents one operation class from starving the other. Explicit queue
+item/byte limits, retry budgets, stable error classifications, and durable dead-
+letter state bound poison-work and capacity amplification. Compaction retains
+the reconciliation and watermark proof, so tombstone deletion cannot turn an
+empty queue into false completeness.
+
+Certification defends against a queue/build time-of-check/time-of-use race by
+requiring two equal typed source observations, durably binding the completed
+watermark to the exact staged-payload manifest, capturing the queue revision and
+canonical-state hash, then revalidating both under the workspace lock before
+generation sealing. A changed queue, mismatched observation pair, or different
+staged manifest blocks certification. Before any receipt is accepted, the store
+installs an immutable internal binding from the generation and request to that
+revalidated queue view and manifest. Request and staged-manifest validation run
+before that immutable boundary, so malformed input cannot poison a reserved
+generation. A caller-controlled staged receipt without the binding cannot
+bypass queue authority or cause the binding to be created. The binding remains
+recoverable after later queue advancement, while the receipt separately recovers
+generation installation and journaling. The claim remains local crash durability
+and stale-process fencing; it does not authenticate an uncompromised same-UID
+worker or semantic backend.
+
 ## Explicit non-claims
 
 V1 does not resist a compromised source-control or CI system, or a malicious
@@ -66,5 +113,6 @@ automatic online GC, strict source-linearizable query, and inter-observation ABA
 detection are deferred.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
-must promote identical digests. P5 implements candidate publication and
-login-service integration; P9 alone owns the real stable switch.
+must promote identical digests. Later P5 work implements candidate publication
+and login-service integration; P9 alone owns the real stable switch. P5A alone
+does not make P5 complete.

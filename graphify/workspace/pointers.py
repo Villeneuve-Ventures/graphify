@@ -268,11 +268,18 @@ class PointerStore:
             )
         return receipt
 
+    def _verify_generation(self, repo_uuid: str, generation_id: str) -> GenerationReceipt:
+        try:
+            receipt = self.generations.verify_generation(repo_uuid, generation_id)
+        except UnsupportedCompatibility as exc:
+            raise UnsupportedCompatibility(
+                "pointer receipt does not match the selected compatibility manifest"
+            ) from exc
+        return self._require_compatible(receipt)
+
     def _verify_ref(self, repo_uuid: str, reference: dict[str, Any]) -> GenerationReceipt:
         generation_id = str(reference["generation_id"])
-        receipt = self._require_compatible(
-            self.generations.verify_generation(repo_uuid, generation_id)
-        )
+        receipt = self._verify_generation(repo_uuid, generation_id)
         if receipt.sha256 != reference["receipt_sha256"]:
             raise PointerCorrupt(f"pointer receipt hash is stale for {generation_id}")
         return receipt
@@ -322,11 +329,10 @@ class PointerStore:
             if not generation_path.exists():
                 continue
             try:
-                receipt = self.generations.verify_generation(repo_uuid, generation_id)
+                receipt = self._verify_generation(repo_uuid, generation_id)
             except GenerationError:
                 corrupt_generations.add(generation_id)
                 continue
-            self._require_compatible(receipt)
             if receipt.sha256 == ref["receipt_sha256"]:
                 receipts[name] = receipt
         if "current" in receipts:
@@ -636,11 +642,9 @@ class PointerStore:
             )
             with self.state.existing_generation_locks(locks, exclusive=True):
                 current = self._preliminary_pointer(operation.repo_uuid)
-                candidate = self._require_compatible(
-                    self.generations.verify_generation(
-                        operation.repo_uuid,
-                        cas.candidate_generation_id,
-                    )
+                candidate = self._verify_generation(
+                    operation.repo_uuid,
+                    cas.candidate_generation_id,
                 )
                 self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
                 snapshot = self.journal.recover_locked(operation)
@@ -1107,9 +1111,7 @@ class PointerStore:
                 )
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
-                receipt = self._require_compatible(
-                    self.generations.verify_generation(repo_uuid, generation_id)
-                )
+                receipt = self._verify_generation(repo_uuid, generation_id)
                 require_before_deadline(
                     deadline_ns,
                     "current pointer read exceeded its deadline",

@@ -14,7 +14,12 @@ from typing import Any
 
 import pytest
 
-from graphify.workspace.contracts import CapacityPolicy, GcIntentState
+from graphify.workspace.adapters.base import SourceObservation
+from graphify.workspace.contracts import (
+    CapacityPolicy,
+    GcIntentState,
+    payload_manifest_sha256,
+)
 from graphify.workspace.gc import GcError, GcProtection, GcRecoveryRequired, GcStore
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
@@ -27,6 +32,7 @@ from graphify.workspace.persistence import (
     StatePathError,
 )
 from graphify.workspace.pointers import PointerCAS, PointerStore
+from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueueStore
 
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
@@ -36,6 +42,7 @@ from tests.workspace_p3_helpers import (
     acquire,
     create_harness,
     metadata_snapshot,
+    trust_source_observations,
     tree_snapshot,
 )
 
@@ -151,11 +158,22 @@ def _runtime(tmp_path: Path):
         harness.leases,
         capabilities=harness.leases.state.capabilities,
     )
+    semantic_queue = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=SemanticQueuePolicy(
+            max_items=16,
+            max_bytes=64 * 1024,
+            retry_budget=1,
+        ),
+        capabilities=harness.leases.state.capabilities,
+    )
     generations = GenerationStore(
         harness.state_root,
         harness.leases,
         journal,
         compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue=semantic_queue,
         capabilities=harness.leases.state.capabilities,
     )
     receipts = {}
@@ -172,20 +190,55 @@ def _runtime(tmp_path: Path):
         payload.mkdir()
         (payload / "graph.json").write_text(f"{generation_id}\n", encoding="utf-8")
         entries = generations.inspect_staged_payload(allocation)
-        request = CertificationRequest(
-            source_commit=hashlib.sha1(generation_id.encode()).hexdigest(),
+        source_commit = hashlib.sha1(generation_id.encode()).hexdigest()
+        observation_manifest_sha256 = hashlib.sha256(generation_id.encode()).hexdigest()
+        observation = SourceObservation(
+            source_commit=source_commit,
+            inventory_sha256=observation_manifest_sha256,
+            policy_sha256="1" * 64,
+            detector_id="test-workspace-gc",
+            stable_inventory_passes=2,
+            entries=(),
+        )
+        source_observations = (observation, observation)
+        queue_watermark = offset + 1
+        semantic_queue.reconcile(
+            build,
+            (),
             source_epoch=1,
             policy_sha256="1" * 64,
-            observation_manifest_sha256="2" * 64,
-            queue_watermark=0,
+            source_observations=source_observations,
+            desired_watermark=queue_watermark,
+            semantic_required=False,
+            monotonic_ns=10_002 + offset * 2,
+        )
+        semantic_queue.bind_sealed_inputs(
+            build,
+            sealed_input_manifest_sha256=payload_manifest_sha256(
+                "graphify-out", entries
+            ),
+            monotonic_ns=10_002 + offset * 2,
+        )
+        request = CertificationRequest(
+            source_commit=source_commit,
+            source_epoch=1,
+            policy_sha256="1" * 64,
+            observation_manifest_sha256=observation_manifest_sha256,
+            queue_watermark=queue_watermark,
             semantic_completeness="not_required",
             compatibility_sha256=COMPATIBILITY_SHA256,
-            validations=("payload_manifest", "coordination_lock_precreated"),
+            validations=(
+                "payload_manifest",
+                "coordination_lock_precreated",
+                "stable_semantic_queue",
+            ),
         )
+        trust_source_observations(generations, source_observations)
         receipts[generation_id] = generations.certify(
             build,
             allocation,
             request,
+            source_observations=source_observations,
             declared_entries=entries,
             occurred_at=START,
             monotonic_ns=10_002 + offset * 2,
@@ -238,6 +291,16 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         pointers,
         capabilities=harness.leases.state.capabilities,
     )
+    queue = generations.semantic_queue
+    assert queue is not None
+    current_binding = queue.state.path(
+        queue._certification_binding_path(REPO_UUID, "gen-current")
+    )
+    unused_binding = queue.state.path(
+        queue._certification_binding_path(REPO_UUID, "gen-unused")
+    )
+    assert current_binding.is_file()
+    assert unused_binding.is_file()
     lock = generations.state.path(generations._lock(REPO_UUID, "gen-unused"))
     holder = subprocess.Popen(
         [
@@ -311,6 +374,8 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         / f"gen-unused.{completion.operation_epoch}"
     )
     assert quarantine.is_dir()
+    assert current_binding.is_file()
+    assert unused_binding.is_file()
     assert not (harness.state_root / "workspaces" / REPO_UUID / "generations/gen-unused").exists()
     retained_lock = (
         harness.state_root / "workspaces" / REPO_UUID / "locks/generations/gen-unused.lock"
@@ -327,6 +392,8 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     )
     assert purge.purged == ("gen-unused",)
     assert not quarantine.exists()
+    assert current_binding.is_file()
+    assert not unused_binding.exists()
     assert retained_lock.stat().st_ino == inode
 
 
@@ -1195,13 +1262,22 @@ def test_gc_reconciles_every_durable_intent_quarantine_and_completion_boundary(
 
 @pytest.mark.parametrize(
     "phase",
-    ["gc:gen-unused:purged", "gc:purge:installed", "gc:purge_complete"],
+    [
+        "gc:gen-unused:purged",
+        "gc:gen-unused:semantic_binding:unlinked",
+        "gc:gen-unused:semantic_binding:parent_durable",
+        "gc:gen-unused:semantic_binding_removed",
+        "gc:purge:installed",
+        "gc:purge_complete",
+    ],
 )
 def test_gc_purge_retries_after_each_visibility_boundary(tmp_path: Path, phase: str) -> None:
     armed = False
+    events: list[str] = []
 
     def fail_at_phase(event: str) -> None:
         nonlocal armed
+        events.append(event)
         if armed and event == phase:
             armed = False
             raise InjectedFault(event)
@@ -1251,6 +1327,9 @@ def test_gc_purge_retries_after_each_visibility_boundary(tmp_path: Path, phase: 
     )
 
     assert purge.purged == ("gen-unused",)
+    assert "gc:gen-unused:semantic_binding_parent_durable" in events
+    binding = SemanticQueueStore._certification_binding_path(REPO_UUID, "gen-unused")
+    assert not gc.state.path(binding).exists()
     assert not (
         harness.state_root
         / "workspaces"
