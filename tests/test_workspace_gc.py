@@ -14,7 +14,12 @@ from typing import Any
 
 import pytest
 
-from graphify.workspace.contracts import CapacityPolicy, GcIntentState
+from graphify.workspace.adapters.base import SourceObservation
+from graphify.workspace.contracts import (
+    CapacityPolicy,
+    GcIntentState,
+    payload_manifest_sha256,
+)
 from graphify.workspace.gc import GcError, GcProtection, GcRecoveryRequired, GcStore
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
@@ -27,6 +32,7 @@ from graphify.workspace.persistence import (
     StatePathError,
 )
 from graphify.workspace.pointers import PointerCAS, PointerStore
+from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueueStore
 
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
@@ -151,11 +157,22 @@ def _runtime(tmp_path: Path):
         harness.leases,
         capabilities=harness.leases.state.capabilities,
     )
+    semantic_queue = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=SemanticQueuePolicy(
+            max_items=16,
+            max_bytes=64 * 1024,
+            retry_budget=1,
+        ),
+        capabilities=harness.leases.state.capabilities,
+    )
     generations = GenerationStore(
         harness.state_root,
         harness.leases,
         journal,
         compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue=semantic_queue,
         capabilities=harness.leases.state.capabilities,
     )
     receipts = {}
@@ -172,12 +189,41 @@ def _runtime(tmp_path: Path):
         payload.mkdir()
         (payload / "graph.json").write_text(f"{generation_id}\n", encoding="utf-8")
         entries = generations.inspect_staged_payload(allocation)
-        request = CertificationRequest(
-            source_commit=hashlib.sha1(generation_id.encode()).hexdigest(),
+        source_commit = hashlib.sha1(generation_id.encode()).hexdigest()
+        observation_manifest_sha256 = hashlib.sha256(generation_id.encode()).hexdigest()
+        observation = SourceObservation(
+            source_commit=source_commit,
+            inventory_sha256=observation_manifest_sha256,
+            policy_sha256="1" * 64,
+            detector_id="test-workspace-gc",
+            stable_inventory_passes=2,
+            entries=(),
+        )
+        source_observations = (observation, observation)
+        queue_watermark = offset + 1
+        semantic_queue.reconcile(
+            build,
+            (),
             source_epoch=1,
             policy_sha256="1" * 64,
-            observation_manifest_sha256="2" * 64,
-            queue_watermark=0,
+            source_observations=source_observations,
+            desired_watermark=queue_watermark,
+            semantic_required=False,
+            monotonic_ns=10_002 + offset * 2,
+        )
+        semantic_queue.bind_sealed_inputs(
+            build,
+            sealed_input_manifest_sha256=payload_manifest_sha256(
+                "graphify-out", entries
+            ),
+            monotonic_ns=10_002 + offset * 2,
+        )
+        request = CertificationRequest(
+            source_commit=source_commit,
+            source_epoch=1,
+            policy_sha256="1" * 64,
+            observation_manifest_sha256=observation_manifest_sha256,
+            queue_watermark=queue_watermark,
             semantic_completeness="not_required",
             compatibility_sha256=COMPATIBILITY_SHA256,
             validations=("payload_manifest", "coordination_lock_precreated"),
@@ -186,6 +232,7 @@ def _runtime(tmp_path: Path):
             build,
             allocation,
             request,
+            source_observations=source_observations,
             declared_entries=entries,
             occurred_at=START,
             monotonic_ns=10_002 + offset * 2,

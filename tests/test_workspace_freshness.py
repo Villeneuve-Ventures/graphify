@@ -16,16 +16,19 @@ from typing import Any, Callable, Mapping, cast
 import pytest
 
 from graphify.workspace.adapters import QueryRequest
+from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
     CapacityPolicy,
     CompatibilityManifest,
     GenerationReceipt,
     PointerSet,
+    payload_manifest_sha256,
 )
 from graphify.workspace.freshness import FreshnessAuthority
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.pointers import PointerCAS, PointerStore
+from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueueStore
 from tests.workspace_p3_helpers import (
     REPO_UUID,
     START,
@@ -55,6 +58,11 @@ POLICY = CapacityPolicy.from_mapping(
         "workspace_max_generations": 8,
         "reserve_bytes": 1024,
     }
+)
+QUEUE_POLICY = SemanticQueuePolicy(
+    max_items=16,
+    max_bytes=64 * 1024,
+    retry_budget=1,
 )
 
 
@@ -95,11 +103,18 @@ def _runtime(
         harness.leases,
         capabilities=harness.leases.state.capabilities,
     )
+    semantic_queue = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=QUEUE_POLICY,
+        capabilities=harness.leases.state.capabilities,
+    )
     generations = GenerationStore(
         harness.state_root,
         harness.leases,
         journal,
         compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue=semantic_queue,
         capabilities=harness.leases.state.capabilities,
     )
     pointers = PointerStore(
@@ -130,6 +145,28 @@ def _runtime(
     payload.mkdir()
     (payload / "graph.json").write_text('{"nodes": [], "edges": []}\n', encoding="utf-8")
     entries = generations.inspect_staged_payload(allocation)
+    source_observations: tuple[SourceObservation, SourceObservation] = (
+        observation,
+        observation,
+    )
+    semantic_queue.reconcile(
+        build,
+        (),
+        source_epoch=1,
+        policy_sha256=observation.policy_sha256,
+        source_observations=source_observations,
+        desired_watermark=1,
+        semantic_required=False,
+        monotonic_ns=10_002,
+    )
+    semantic_queue.bind_sealed_inputs(
+        build,
+        sealed_input_manifest_sha256=payload_manifest_sha256(
+            "graphify-out",
+            entries,
+        ),
+        monotonic_ns=10_003,
+    )
     receipt = generations.certify(
         build,
         allocation,
@@ -138,14 +175,19 @@ def _runtime(
             source_epoch=1,
             policy_sha256=observation.policy_sha256,
             observation_manifest_sha256=observation.inventory_sha256,
-            queue_watermark=0,
+            queue_watermark=1,
             semantic_completeness="not_required",
             compatibility_sha256=COMPATIBILITY_SHA256,
-            validations=("payload_manifest", "coordination_lock_precreated"),
+            validations=(
+                "payload_manifest",
+                "coordination_lock_precreated",
+                "stable_semantic_queue",
+            ),
         ),
+        source_observations=source_observations,
         declared_entries=entries,
         occurred_at=START,
-        monotonic_ns=10_002,
+        monotonic_ns=10_004,
     )
     harness.leases.release(build)
     promote = acquire(harness, "PROMOTE", tick=2)

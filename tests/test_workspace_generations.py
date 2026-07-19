@@ -12,13 +12,18 @@ from typing import Any, cast
 
 import pytest
 
-from graphify.workspace.adapters import AdapterIntent, UnsupportedCompatibility
+from graphify.workspace.adapters import (
+    AdapterIntent,
+    SourceObservation,
+    UnsupportedCompatibility,
+)
 from graphify.workspace.contracts import (
     CapacityPolicy,
     CapacityReservationState,
     CompatibilityManifest,
     ContractError,
     canonical_json_bytes,
+    payload_manifest_sha256,
 )
 from graphify.workspace.identity import discover_source
 from graphify.workspace.leases import LeaseGrant, LeaseRecoveryRequired
@@ -27,11 +32,17 @@ from graphify.workspace.generations import (
     CertificationRequest,
     GenerationConflict,
     GenerationError,
-    GenerationStore,
+    GenerationStore as RuntimeGenerationStore,
     PayloadChanged,
 )
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.persistence import CommitUnknown, InjectedFault, StatePathError
+from graphify.workspace.semantic_queue import (
+    SemanticCertificationBlocked,
+    SemanticQueueConflict,
+    SemanticQueuePolicy,
+    SemanticQueueStore,
+)
 
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
@@ -61,6 +72,79 @@ POLICY = CapacityPolicy.from_mapping(
         "reserve_bytes": 1024,
     }
 )
+
+QUEUE_POLICY = SemanticQueuePolicy(
+    max_items=16,
+    max_bytes=64 * 1024,
+    retry_budget=1,
+)
+QUEUE_WATERMARK = 1
+
+
+class GenerationStore(RuntimeGenerationStore):
+    """Test store that gives certification cases explicit durable queue authority."""
+
+    def __init__(self, state_root: Path, leases: Any, journal: Any, **kwargs: Any) -> None:
+        kwargs.setdefault(
+            "semantic_queue",
+            SemanticQueueStore(
+                state_root,
+                leases,
+                policy=QUEUE_POLICY,
+                capabilities=kwargs.get("capabilities"),
+            ),
+        )
+        super().__init__(state_root, leases, journal, **kwargs)
+
+    def certify(
+        self,
+        grant: LeaseGrant,
+        allocation: Any,
+        request: CertificationRequest,
+        *,
+        source_observations: Any = None,
+        declared_entries: Any,
+        occurred_at: Any,
+        monotonic_ns: int,
+    ) -> Any:
+        observations = source_observations
+        if observations is None:
+            observation = SourceObservation(
+                source_commit=request.source_commit,
+                inventory_sha256=request.observation_manifest_sha256,
+                policy_sha256=request.policy_sha256,
+                detector_id="test-workspace-generations",
+                stable_inventory_passes=2,
+                entries=(),
+            )
+            observations = (observation, observation)
+            assert self.semantic_queue is not None
+            self.semantic_queue.reconcile(
+                grant,
+                (),
+                source_epoch=request.source_epoch,
+                policy_sha256=request.policy_sha256,
+                source_observations=observations,
+                desired_watermark=request.queue_watermark,
+                semantic_required=False,
+                monotonic_ns=monotonic_ns,
+            )
+            self.semantic_queue.bind_sealed_inputs(
+                grant,
+                sealed_input_manifest_sha256=payload_manifest_sha256(
+                    "graphify-out", declared_entries
+                ),
+                monotonic_ns=monotonic_ns,
+            )
+        return super().certify(
+            grant,
+            allocation,
+            request,
+            source_observations=observations,
+            declared_entries=declared_entries,
+            occurred_at=occurred_at,
+            monotonic_ns=monotonic_ns,
+        )
 
 
 def _install_legacy_capacity_state(
@@ -353,17 +437,75 @@ def test_allocation_rejects_reservation_from_different_manifest_without_state_mu
     assert tree_snapshot(harness.state_root) == before
 
 
-def _request(source_commit: str) -> CertificationRequest:
+def _observations(
+    harness: Any,
+    *,
+    inventory_sha256: str = "2" * 64,
+) -> tuple[SourceObservation, SourceObservation]:
+    observation = SourceObservation(
+        source_commit=discover_source(harness.repo).head_commit,
+        inventory_sha256=inventory_sha256,
+        policy_sha256="1" * 64,
+        detector_id="test-workspace-generations",
+        stable_inventory_passes=2,
+        entries=(),
+    )
+    return (observation, observation)
+
+
+def _queue(harness: Any) -> SemanticQueueStore:
+    return SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=QUEUE_POLICY,
+        capabilities=harness.leases.state.capabilities,
+    )
+
+
+def _request(
+    source: str | tuple[SourceObservation, SourceObservation],
+    *,
+    queue_watermark: int = QUEUE_WATERMARK,
+) -> CertificationRequest:
+    source_commit = source if isinstance(source, str) else source[0].source_commit
     return CertificationRequest(
         source_commit=source_commit,
         source_epoch=1,
         policy_sha256="1" * 64,
         observation_manifest_sha256="2" * 64,
-        queue_watermark=0,
+        queue_watermark=queue_watermark,
         semantic_completeness="not_required",
         compatibility_sha256=COMPATIBILITY_SHA256,
         validations=("payload_manifest", "coordination_lock_precreated"),
     )
+
+
+def _bind_certification(
+    harness: Any,
+    queue: SemanticQueueStore,
+    grant: LeaseGrant,
+    declared_entries: Any,
+    *,
+    monotonic_ns: int,
+    queue_watermark: int = QUEUE_WATERMARK,
+) -> tuple[CertificationRequest, tuple[SourceObservation, SourceObservation]]:
+    observations = _observations(harness)
+    queue.reconcile(
+        grant,
+        (),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=observations,
+        desired_watermark=queue_watermark,
+        semantic_required=False,
+        monotonic_ns=monotonic_ns,
+    )
+    queue.bind_sealed_inputs(
+        grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", declared_entries),
+        monotonic_ns=monotonic_ns,
+    )
+    return _request(observations, queue_watermark=queue_watermark), observations
 
 
 def test_capacity_policy_is_internal_explicit_and_has_no_implicit_limits() -> None:
@@ -816,12 +958,14 @@ def test_cross_workspace_certification_does_not_hold_the_global_registry_lock(
         harness.leases,
         capabilities=harness.leases.state.capabilities,
     )
+    queue = _queue(harness)
     store = GenerationStore(
         harness.state_root,
         harness.leases,
         journal,
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
         fault_hook=pause_first,
     )
     work = []
@@ -840,14 +984,23 @@ def test_cross_workspace_certification_does_not_hold_the_global_registry_lock(
         payload = allocation.staging_path / "graphify-out"
         payload.mkdir()
         (payload / "graph.json").write_text(f"{generation_id}\n", encoding="utf-8")
-        work.append((grant, allocation, store.inspect_staged_payload(allocation)))
+        entries = store.inspect_staged_payload(allocation)
+        request, observations = _bind_certification(
+            harness,
+            queue,
+            grant,
+            entries,
+            monotonic_ns=tick * 10_000 + 2,
+        )
+        work.append((grant, allocation, entries, request, observations))
 
-    def certify(item: tuple[LeaseGrant, Any, Any], monotonic_ns: int):
-        grant, allocation, entries = item
+    def certify(item: tuple[LeaseGrant, Any, Any, Any, Any], monotonic_ns: int):
+        grant, allocation, entries, request, observations = item
         return store.certify(
             grant,
             allocation,
-            _request("d" * 40),
+            request,
+            source_observations=observations,
             declared_entries=entries,
             occurred_at=START,
             monotonic_ns=monotonic_ns,
@@ -876,12 +1029,14 @@ def test_certification_seals_exact_payload_and_installs_lock_before_certified_ev
         capabilities=harness.leases.state.capabilities,
         fault_hook=events.append,
     )
+    queue = _queue(harness)
     store = GenerationStore(
         harness.state_root,
         harness.leases,
         journal,
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
         fault_hook=events.append,
     )
     allocation = store.allocate(
@@ -898,11 +1053,15 @@ def test_certification_seals_exact_payload_and_installs_lock_before_certified_ev
     (payload / "nested").mkdir()
     (payload / "nested/report.md").write_text("# report\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
+    request, observations = _bind_certification(
+        harness, queue, grant, declared, monotonic_ns=10_002
+    )
 
     receipt = store.certify(
         grant,
         allocation,
-        _request("a" * 40),
+        request,
+        source_observations=observations,
         declared_entries=declared,
         occurred_at=START,
         monotonic_ns=10_002,
@@ -936,12 +1095,14 @@ def test_certification_rejects_compatibility_mismatch_without_state_mutation(
         harness.leases,
         capabilities=harness.leases.state.capabilities,
     )
+    queue = _queue(harness)
     store = GenerationStore(
         harness.state_root,
         harness.leases,
         journal,
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
     )
     allocation = store.allocate(
         grant,
@@ -955,7 +1116,9 @@ def test_certification_rejects_compatibility_mismatch_without_state_mutation(
     payload.mkdir()
     (payload / "graph.json").write_text("{}\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
-    request = _request("a" * 40)
+    request, observations = _bind_certification(
+        harness, queue, grant, declared, monotonic_ns=10_002
+    )
     if mismatch == "allocation":
         allocation = replace(allocation, compatibility_sha256="d" * 64)
     else:
@@ -970,6 +1133,7 @@ def test_certification_rejects_compatibility_mismatch_without_state_mutation(
             grant,
             allocation,
             request,
+            source_observations=observations,
             declared_entries=declared,
             occurred_at=START,
             monotonic_ns=10_002,
@@ -1396,7 +1560,7 @@ def test_certification_rejects_noncanonical_manifest_and_mutation_during_sealing
         store.certify(
             grant,
             allocation,
-            _request("a" * 40),
+            _request("a" * 40, queue_watermark=2),
             declared_entries=bad,
             occurred_at=START,
             monotonic_ns=10_003,
@@ -1962,3 +2126,201 @@ def test_certification_recovers_receipt_and_generation_visibility_boundaries(
         for event in journal.recover(grant, monotonic_ns=10_004).for_generation("gen-crash")
     ]
     assert transitions == ["ALLOCATED", "STAGING", "BUILT", "VALIDATING", "CERTIFIED"]
+
+
+def test_new_certification_without_durable_queue_authority_is_rejected(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-queue-authority-required",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("queue required\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    observations = _observations(harness)
+
+    with pytest.raises(
+        SemanticCertificationBlocked,
+        match="requires durable semantic queue authority",
+    ):
+        store.certify(
+            grant,
+            allocation,
+            _request(observations),
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_002,
+        )
+
+
+def test_completed_queue_watermark_cannot_bind_or_certify_different_payload(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    queue = _queue(harness)
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
+    )
+    first = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-bound-payload-a",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    first_payload = first.staging_path / "graphify-out"
+    first_payload.mkdir()
+    (first_payload / "graph.json").write_text("payload a\n", encoding="utf-8")
+    first_entries = store.inspect_staged_payload(first)
+    request, observations = _bind_certification(
+        harness, queue, grant, first_entries, monotonic_ns=10_002
+    )
+
+    second = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-bound-payload-b",
+        occurred_at=START,
+        monotonic_ns=10_003,
+    )
+    second_payload = second.staging_path / "graphify-out"
+    second_payload.mkdir()
+    (second_payload / "graph.json").write_text("payload b\n", encoding="utf-8")
+    second_entries = store.inspect_staged_payload(second)
+
+    with pytest.raises(SemanticQueueConflict, match="different staged inputs"):
+        queue.bind_sealed_inputs(
+            grant,
+            sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", second_entries),
+            monotonic_ns=10_004,
+        )
+    with pytest.raises(SemanticCertificationBlocked, match="staged inputs differ"):
+        RuntimeGenerationStore.certify(
+            store,
+            grant,
+            second,
+            request,
+            source_observations=observations,
+            declared_entries=second_entries,
+            occurred_at=START,
+            monotonic_ns=10_005,
+        )
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        "generation:gen-queue-recovery:receipt_durable",
+        "generation:gen-queue-recovery:installed",
+    ],
+)
+def test_durable_receipt_recovery_succeeds_after_queue_advances(
+    tmp_path: Path,
+    failpoint: str,
+) -> None:
+    armed = True
+
+    def fail(event: str) -> None:
+        nonlocal armed
+        if armed and event == failpoint:
+            armed = False
+            raise InjectedFault(event)
+
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root, harness.leases, capabilities=harness.leases.state.capabilities
+    )
+    queue = _queue(harness)
+    store = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+        semantic_queue=queue,
+        fault_hook=fail,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-queue-recovery",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("recover me\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    request, observations = _bind_certification(
+        harness, queue, grant, declared, monotonic_ns=10_002
+    )
+
+    with pytest.raises(InjectedFault):
+        RuntimeGenerationStore.certify(
+            store,
+            grant,
+            allocation,
+            request,
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_003,
+        )
+
+    queue.reconcile(
+        grant,
+        (),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=observations,
+        desired_watermark=2,
+        semantic_required=False,
+        monotonic_ns=10_004,
+    )
+    receipt = RuntimeGenerationStore.certify(
+        store,
+        grant,
+        allocation,
+        request,
+        source_observations=observations,
+        declared_entries=declared,
+        occurred_at=START,
+        monotonic_ns=10_005,
+    )
+
+    assert receipt.to_dict()["queue_watermark"] == QUEUE_WATERMARK
+    assert (
+        store.verify_generation(REPO_UUID, allocation.generation_id).canonical == receipt.canonical
+    )

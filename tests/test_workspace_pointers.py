@@ -14,10 +14,12 @@ from typing import Any, cast
 import pytest
 
 from graphify.workspace.adapters import UnsupportedCompatibility
+from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
     CapacityPolicy,
     CompatibilityManifest,
     PriorPointerRecord,
+    payload_manifest_sha256,
 )
 from graphify.workspace.generations import (
     CertificationRequest,
@@ -36,11 +38,13 @@ from graphify.workspace.pointers import (
     PointerStore,
     PointerSuperseded,
 )
+from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueueStore
 
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
     COMPATIBILITY_SHA256,
     REPO_UUID,
+    RuntimeHarness,
     START,
     acquire,
     authorization,
@@ -65,6 +69,12 @@ POLICY = CapacityPolicy.from_mapping(
     }
 )
 
+SEMANTIC_QUEUE_POLICY = SemanticQueuePolicy(
+    max_items=16,
+    max_bytes=1024 * 1024,
+    retry_budget=2,
+)
+
 
 def _alternate_manifest() -> CompatibilityManifest:
     return cast(
@@ -78,17 +88,38 @@ def _alternate_manifest() -> CompatibilityManifest:
     )
 
 
-def _request(commit: str) -> CertificationRequest:
+def _request(commit: str, *, queue_watermark: int) -> CertificationRequest:
     return CertificationRequest(
         source_commit=commit,
         source_epoch=1,
         policy_sha256="1" * 64,
         observation_manifest_sha256="2" * 64,
-        queue_watermark=0,
+        queue_watermark=queue_watermark,
         semantic_completeness="not_required",
         compatibility_sha256=COMPATIBILITY_SHA256,
         validations=("payload_manifest", "coordination_lock_precreated"),
     )
+
+
+def _semantic_queue(harness: RuntimeHarness) -> SemanticQueueStore:
+    return SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=SEMANTIC_QUEUE_POLICY,
+        capabilities=harness.leases.state.capabilities,
+    )
+
+
+def _source_observations(source_commit: str) -> tuple[SourceObservation, SourceObservation]:
+    observation = SourceObservation(
+        source_commit=source_commit,
+        inventory_sha256="2" * 64,
+        policy_sha256="1" * 64,
+        detector_id="test-workspace-pointers",
+        stable_inventory_passes=2,
+        entries=(),
+    )
+    return (observation, observation)
 
 
 def _certify(
@@ -112,16 +143,38 @@ def _certify(
     payload.mkdir()
     (payload / "graph.json").write_text(content, encoding="utf-8")
     entries = store.inspect_staged_payload(allocation)
+    source_commit = hashlib.sha1(generation_id.encode()).hexdigest()
+    source_observations = _source_observations(source_commit)
+    queue = store.semantic_queue
+    assert queue is not None
+    repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
+    queue_watermark = queue.inspect(repo_uuid).desired_watermark + 1
+    queue.reconcile(
+        grant,
+        (),
+        source_epoch=1,
+        policy_sha256="1" * 64,
+        source_observations=source_observations,
+        desired_watermark=queue_watermark,
+        semantic_required=False,
+        monotonic_ns=monotonic_ns + 1,
+    )
+    queue.bind_sealed_inputs(
+        grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", entries),
+        monotonic_ns=monotonic_ns + 2,
+    )
     return store.certify(
         grant,
         allocation,
         replace(
-            _request(hashlib.sha1(generation_id.encode()).hexdigest()),
+            _request(source_commit, queue_watermark=queue_watermark),
             compatibility_sha256=compatibility_sha256,
         ),
+        source_observations=source_observations,
         declared_entries=entries,
         occurred_at=START,
-        monotonic_ns=monotonic_ns + 1,
+        monotonic_ns=monotonic_ns + 3,
     )
 
 
@@ -199,6 +252,7 @@ def _promotion_runtime(
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
@@ -268,6 +322,7 @@ def test_promotion_rejects_different_manifest_generation_without_state_mutation(
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=alternate_manifest,
         capabilities=harness.leases.state.capabilities,
     )
@@ -327,6 +382,7 @@ def test_rollback_rejects_different_manifest_generation_without_state_mutation(
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
@@ -341,6 +397,7 @@ def test_rollback_rejects_different_manifest_generation_without_state_mutation(
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=alternate_manifest,
         capabilities=harness.leases.state.capabilities,
     )
@@ -401,6 +458,7 @@ def test_recovery_rejects_incompatible_pending_pointer_without_state_mutation(
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=alternate_manifest,
         capabilities=harness.leases.state.capabilities,
     )
@@ -809,6 +867,7 @@ def test_pointer_promotion_retains_prior_before_visibility_and_loser_is_supersed
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
@@ -920,6 +979,7 @@ def test_shared_reader_is_nonmutating_and_holds_retained_generation_lock(tmp_pat
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )
@@ -1094,6 +1154,7 @@ def test_visible_pointer_commit_unknown_repairs_to_new_monotonic_revision(tmp_pa
         harness.state_root,
         harness.leases,
         journal,
+        semantic_queue=_semantic_queue(harness),
         compatibility_manifest=COMPATIBILITY_MANIFEST,
         capabilities=harness.leases.state.capabilities,
     )

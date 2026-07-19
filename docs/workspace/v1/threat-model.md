@@ -30,8 +30,10 @@ the same boundary. Sudden hardware power-loss durability is not claimed.
 
 P3 executes generation, journal, pointer, and explicit offline-GC transitions.
 P4 adds read-only adapter/freshness operations and external-output structural
-builds. Service, command, installation, route, and migration transitions remain
-absent.
+builds. P5A adds only durable semantic desired-work reconciliation, fenced
+claims, bounded retries/dead letters, and stable-watermark certification.
+Service, command, installation, route, publication, and live-cutover transitions
+remain absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -56,6 +58,32 @@ source, staging-only writes, and host-agent instruction/data separation.
 Backend endpoints and credentials are operator configuration, never repo policy;
 secrets are excluded from argv and persisted state.
 
+P5A treats semantic work and its outputs as untrusted until exact reconciliation
+and generation sealing. A worker cannot claim work without an accepted
+`SEMANTIC_CLAIM` lease and an explicit live capability decision. Host-agent use
+must be stated by the caller; a headless backend must be explicitly named,
+policy-allowlisted, and permitted network egress. Ambient provider or credential
+environment variables are not capability or authority.
+
+Claim IDs bind desired work, owner, fence, source revision, and operation and
+migration epochs. This prevents a stale worker, expired claim, or replaced
+desired revision from committing semantic completion. Deterministic operation
+rotation prevents one operation class from starving the other. Explicit queue
+item/byte limits, retry budgets, stable error classifications, and durable dead-
+letter state bound poison-work and capacity amplification. Compaction retains
+the reconciliation and watermark proof, so tombstone deletion cannot turn an
+empty queue into false completeness.
+
+Certification defends against a queue/build time-of-check/time-of-use race by
+requiring two equal typed source observations, durably binding the completed
+watermark to the exact staged-payload manifest, capturing the queue revision and
+canonical-state hash, then revalidating both under the workspace lock before
+generation sealing. A changed queue, mismatched observation pair, or different
+staged manifest blocks the receipt. A durable staged or installed receipt is the
+recovery boundary and remains recoverable after later queue advancement. The
+claim remains local crash durability and stale-process fencing; it does not
+authenticate an uncompromised same-UID worker or semantic backend.
+
 ## Explicit non-claims
 
 V1 does not resist a compromised source-control or CI system, or a malicious
@@ -66,5 +94,6 @@ automatic online GC, strict source-linearizable query, and inter-observation ABA
 detection are deferred.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
-must promote identical digests. P5 implements candidate publication and
-login-service integration; P9 alone owns the real stable switch.
+must promote identical digests. Later P5 work implements candidate publication
+and login-service integration; P9 alone owns the real stable switch. P5A alone
+does not make P5 complete.

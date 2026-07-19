@@ -1,11 +1,12 @@
-"""Versioned workspace contracts plus the bounded P2-P4 library runtime.
+"""Versioned workspace contracts plus the bounded P2-P5A library runtime.
 
 P2 adds external registry persistence, operator-authorized UUID/source
 identity, explicit active-source CAS, and fenced leases. P3 adds immutable
 generation certification, a framed lifecycle journal, atomic pointers and
 recovery, retained coordination locks, explicit capacity policy, and offline
-GC. P4 adds one 0.9.16 adapter and two-sided observed-current freshness.
-Queues, services, and commands remain deferred.
+GC. P4 adds one 0.9.16 adapter and two-sided observed-current freshness. P5A
+adds the durable semantic queue and stable-watermark certification binding.
+Services, commands, installation, and candidate publication remain deferred.
 """
 
 from graphify.workspace.adapters import (
@@ -142,6 +143,24 @@ from graphify.workspace.freshness import (
     FreshnessAuthority,
     FreshnessResult,
 )
+from graphify.workspace.semantic_queue import (
+    SemanticCapabilityDecision,
+    SemanticCapabilityUnavailable,
+    SemanticCertificationBlocked,
+    SemanticCertificationView,
+    SemanticClaim,
+    SemanticDesiredWork,
+    SemanticQueueCapacityExceeded,
+    SemanticQueueConflict,
+    SemanticQueueCorrupt,
+    SemanticQueueError,
+    SemanticQueueItem,
+    SemanticQueuePolicy,
+    SemanticQueueSnapshot,
+    SemanticQueueStore,
+    StaleSemanticClaim,
+    decide_semantic_capability,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -229,6 +248,20 @@ __all__ = [
     "RegistryStore",
     "RevisionConflict",
     "RuntimeCapabilities",
+    "SemanticCapabilityDecision",
+    "SemanticCapabilityUnavailable",
+    "SemanticCertificationBlocked",
+    "SemanticCertificationView",
+    "SemanticClaim",
+    "SemanticDesiredWork",
+    "SemanticQueueCapacityExceeded",
+    "SemanticQueueConflict",
+    "SemanticQueueCorrupt",
+    "SemanticQueueError",
+    "SemanticQueueItem",
+    "SemanticQueuePolicy",
+    "SemanticQueueSnapshot",
+    "SemanticQueueStore",
     "SourceAmbiguousError",
     "SourceDiscoveryError",
     "SourceDiscoveryTimeout",
@@ -236,6 +269,7 @@ __all__ = [
     "SourceObservation",
     "StructuralBuild",
     "SUPPORTED_COMPATIBILITY",
+    "StaleSemanticClaim",
     "StaleLease",
     "SystemLeaseIdentityProvider",
     "StateCorrupt",
@@ -248,6 +282,7 @@ __all__ = [
     "WorkspaceRuntimeError",
     "canonical_json_bytes",
     "canonical_sha256",
+    "decide_semantic_capability",
     "decode_journal_frame",
     "discover_source",
     "encode_journal_frame",

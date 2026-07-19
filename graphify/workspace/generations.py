@@ -17,6 +17,7 @@ from graphify.workspace.adapters import (
     UnsupportedCompatibility,
     select_adapter,
 )
+from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
     CapacityPolicy,
     CapacityReservation,
@@ -37,6 +38,11 @@ from graphify.workspace.persistence import (
     StateCorrupt,
     StatePathError,
     Syscalls,
+)
+from graphify.workspace.semantic_queue import (
+    SemanticCertificationBlocked,
+    SemanticCertificationView,
+    SemanticQueueStore,
 )
 
 
@@ -165,6 +171,7 @@ class GenerationStore:
         journal: JournalStore,
         *,
         compatibility_manifest: CompatibilityManifest,
+        semantic_queue: SemanticQueueStore | None = None,
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
@@ -182,6 +189,13 @@ class GenerationStore:
         )
         if self.state.root != leases.state.root or self.state.root != journal.state.root:
             raise GenerationError("generation, journal, and lease stores must share one root")
+        if semantic_queue is not None and (
+            semantic_queue.state.root != self.state.root or semantic_queue.leases is not leases
+        ):
+            raise GenerationError(
+                "generation and semantic queue stores must share one lease authority"
+            )
+        self.semantic_queue = semantic_queue
         self.fault_hook = fault_hook or (lambda _event: None)
 
     @staticmethod
@@ -1128,6 +1142,7 @@ class GenerationStore:
         allocation: GenerationAllocation,
         request: CertificationRequest,
         *,
+        source_observations: Sequence[SourceObservation],
         declared_entries: Sequence[Mapping[str, object]],
         occurred_at: datetime,
         monotonic_ns: int,
@@ -1146,11 +1161,57 @@ class GenerationStore:
             registry_required=True,
         ) as capacity_operation:
             self._require_allocation(capacity_operation, allocation)
+            durable_receipt_present = self.state.private_directory_exists(
+                self._generation(
+                    capacity_operation.repo_uuid,
+                    allocation.generation_id,
+                )
+            ) or (
+                self.state.read_optional_existing_bytes(
+                    self._staging(
+                        capacity_operation.repo_uuid,
+                        allocation.generation_id,
+                    )
+                    / "receipt.json"
+                )
+                is not None
+            )
+
+        queue_view: SemanticCertificationView | None = None
+        if not durable_receipt_present:
+            if self.semantic_queue is None:
+                raise SemanticCertificationBlocked(
+                    "generation certification requires durable semantic queue authority"
+                )
+            queue_view = self.semantic_queue.certification_view(
+                grant,
+                source_epoch=request.source_epoch,
+                source_observations=source_observations,
+                sealed_input_manifest_sha256=payload_manifest_sha256(
+                    "graphify-out",
+                    declared_entries,
+                ),
+                monotonic_ns=monotonic_ns,
+            )
+            if (
+                request.queue_watermark != queue_view.queue_watermark
+                or request.semantic_completeness != queue_view.semantic_completeness
+                or request.source_commit != queue_view.source_commit
+                or request.policy_sha256 != queue_view.policy_sha256
+                or request.observation_manifest_sha256 != queue_view.observation_manifest_sha256
+            ):
+                raise SemanticCertificationBlocked(
+                    "certification request does not match stable queue evidence"
+                )
+            self.fault_hook(f"generation:{allocation.generation_id}:queue_view_captured")
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"BUILD", "MIGRATE"}),
         ) as operation:
+            if queue_view is not None:
+                assert self.semantic_queue is not None
+                self.semantic_queue.assert_certification_view_locked(operation, queue_view)
             lock = self._lock(operation.repo_uuid, allocation.generation_id)
             with self.state.existing_generation_lock(
                 lock,
