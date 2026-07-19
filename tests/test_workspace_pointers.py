@@ -50,6 +50,7 @@ from tests.workspace_p3_helpers import (
     authorization,
     create_harness,
     create_repo,
+    trust_source_observations,
     tree_snapshot,
 )
 
@@ -164,6 +165,7 @@ def _certify(
         sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", entries),
         monotonic_ns=monotonic_ns + 2,
     )
+    trust_source_observations(store, source_observations)
     return store.certify(
         grant,
         allocation,

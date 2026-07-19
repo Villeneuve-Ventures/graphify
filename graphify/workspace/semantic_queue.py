@@ -20,7 +20,7 @@ from graphify.workspace.contracts import (
 from graphify.workspace.identity import (
     IdentityError,
     SourceIdentity,
-    read_workspace_config,
+    read_workspace_config_with_digest,
 )
 from graphify.workspace.leases import (
     LeaseExpired,
@@ -48,7 +48,6 @@ _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$", re.ASCII)
 _GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
 _ERROR_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$", re.ASCII)
-_BACKEND_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", re.ASCII)
 
 
 class SemanticQueueError(RuntimeError):
@@ -970,7 +969,9 @@ def decide_semantic_capability(
     mode = str(policy["semantic_mode"])
     allowlist = tuple(str(value) for value in cast(list[object], policy["headless_backends"]))
     network_egress = bool(policy["network_egress"])
-    if explicit_backend is not None and _BACKEND_RE.fullmatch(explicit_backend) is None:
+    if explicit_backend is not None and (
+        not isinstance(explicit_backend, str) or not explicit_backend
+    ):
         return SemanticCapabilityDecision(
             available=False,
             executor=None,
@@ -1345,9 +1346,12 @@ class SemanticQueueStore:
         if source.repo_uuid != operation.repo_uuid or source.registry_source != recorded:
             raise SemanticCapabilityUnavailable("workspace_config_mismatch")
         try:
-            return read_workspace_config(source.root)
+            config, config_sha256 = read_workspace_config_with_digest(source.root)
         except (OSError, IdentityError) as exc:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
+        if config_sha256 != source.config_sha256:
+            raise SemanticCapabilityUnavailable("workspace_config_mismatch")
+        return config
 
     @staticmethod
     def _sorted_items(items: Sequence[SemanticQueueItem]) -> tuple[SemanticQueueItem, ...]:
@@ -1847,6 +1851,42 @@ class SemanticQueueStore:
             LeaseStore._directory(repo_uuid) / "queue" / "certifications" / f"{generation_id}.json"
         )
 
+    @classmethod
+    def _certification_binding_from_state(
+        cls,
+        state: DurableStateRoot,
+        repo_uuid: str,
+        *,
+        generation_id: str,
+        request_sha256: str,
+        sealed_input_manifest_sha256: str,
+    ) -> SemanticCertificationView | None:
+        request_digest = _digest(request_sha256, "$.request_sha256")
+        sealed_digest = _digest(
+            sealed_input_manifest_sha256,
+            "$.sealed_input_manifest_sha256",
+        )
+        path = cls._certification_binding_path(repo_uuid, generation_id)
+        try:
+            raw = state.read_optional_existing_bytes(path)
+            if raw is None:
+                return None
+            binding = _SemanticCertificationBinding.from_json(raw)
+        except (ContractError, StateCorrupt, StatePathError) as exc:
+            raise SemanticCertificationBlocked(
+                f"durable semantic certification binding is invalid: {exc}"
+            ) from exc
+        if (
+            binding.repo_uuid != repo_uuid
+            or binding.generation_id != generation_id
+            or binding.request_sha256 != request_digest
+            or binding.view.sealed_input_manifest_sha256 != sealed_digest
+        ):
+            raise SemanticCertificationBlocked(
+                "durable semantic certification binding differs from the request"
+            )
+        return binding.view
+
     def certification_binding_locked(
         self,
         operation: LeaseOperation,
@@ -1857,31 +1897,38 @@ class SemanticQueueStore:
     ) -> SemanticCertificationView | None:
         """Read and validate immutable prior queue authority under the workspace lock."""
 
-        request_digest = _digest(request_sha256, "$.request_sha256")
-        sealed_digest = _digest(
-            sealed_input_manifest_sha256,
-            "$.sealed_input_manifest_sha256",
+        return self._certification_binding_from_state(
+            self.state,
+            operation.repo_uuid,
+            generation_id=generation_id,
+            request_sha256=request_sha256,
+            sealed_input_manifest_sha256=sealed_input_manifest_sha256,
         )
-        path = self._certification_binding_path(operation.repo_uuid, generation_id)
-        try:
-            raw = self.state.read_optional_existing_bytes(path)
-            if raw is None:
-                return None
-            binding = _SemanticCertificationBinding.from_json(raw)
-        except (ContractError, StateCorrupt, StatePathError) as exc:
+
+    @classmethod
+    def verify_certification_binding_at(
+        cls,
+        state: DurableStateRoot,
+        repo_uuid: str,
+        *,
+        generation_id: str,
+        request_sha256: str,
+        sealed_input_manifest_sha256: str,
+    ) -> SemanticCertificationView:
+        """Require immutable queue authority through a reopened durable state root."""
+
+        view = cls._certification_binding_from_state(
+            state,
+            repo_uuid,
+            generation_id=generation_id,
+            request_sha256=request_sha256,
+            sealed_input_manifest_sha256=sealed_input_manifest_sha256,
+        )
+        if view is None:
             raise SemanticCertificationBlocked(
-                f"durable semantic certification binding is invalid: {exc}"
-            ) from exc
-        if (
-            binding.repo_uuid != operation.repo_uuid
-            or binding.generation_id != generation_id
-            or binding.request_sha256 != request_digest
-            or binding.view.sealed_input_manifest_sha256 != sealed_digest
-        ):
-            raise SemanticCertificationBlocked(
-                "durable semantic certification binding differs from the request"
+                "durable semantic certification binding is missing"
             )
-        return binding.view
+        return view
 
     def ensure_certification_binding_locked(
         self,

@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import os
 import shutil
+import subprocess
 from types import SimpleNamespace
 import threading
 from typing import Any, cast
@@ -54,6 +55,7 @@ from tests.workspace_p3_helpers import (
     create_harness,
     create_repo,
     metadata_snapshot,
+    trust_source_observations,
     tree_snapshot,
 )
 
@@ -136,6 +138,7 @@ class GenerationStore(RuntimeGenerationStore):
                 ),
                 monotonic_ns=monotonic_ns,
             )
+        trust_source_observations(self, observations)
         return super().certify(
             grant,
             allocation,
@@ -482,6 +485,7 @@ def _request(
 
 def _bind_certification(
     harness: Any,
+    store: RuntimeGenerationStore,
     queue: SemanticQueueStore,
     grant: LeaseGrant,
     declared_entries: Any,
@@ -490,6 +494,7 @@ def _bind_certification(
     queue_watermark: int = QUEUE_WATERMARK,
 ) -> tuple[CertificationRequest, tuple[SourceObservation, SourceObservation]]:
     observations = _observations(harness)
+    trust_source_observations(store, observations)
     queue.reconcile(
         grant,
         (),
@@ -987,6 +992,7 @@ def test_cross_workspace_certification_does_not_hold_the_global_registry_lock(
         entries = store.inspect_staged_payload(allocation)
         request, observations = _bind_certification(
             harness,
+            store,
             queue,
             grant,
             entries,
@@ -1054,7 +1060,7 @@ def test_certification_seals_exact_payload_and_installs_lock_before_certified_ev
     (payload / "nested/report.md").write_text("# report\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
     request, observations = _bind_certification(
-        harness, queue, grant, declared, monotonic_ns=10_002
+        harness, store, queue, grant, declared, monotonic_ns=10_002
     )
 
     receipt = store.certify(
@@ -1117,7 +1123,7 @@ def test_certification_rejects_compatibility_mismatch_without_state_mutation(
     (payload / "graph.json").write_text("{}\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
     request, observations = _bind_certification(
-        harness, queue, grant, declared, monotonic_ns=10_002
+        harness, store, queue, grant, declared, monotonic_ns=10_002
     )
     if mismatch == "allocation":
         allocation = replace(allocation, compatibility_sha256="d" * 64)
@@ -2247,6 +2253,256 @@ def test_preseeded_staged_receipt_cannot_replace_durable_queue_authority(
     assert transitions == ["ALLOCATED", "STAGING"]
 
 
+def test_certification_reobserves_source_before_trusting_reconciliation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    queue = _queue(harness)
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue=queue,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-forged-observation",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("forged observation\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    forged = SourceObservation(
+        source_commit="f" * 40,
+        inventory_sha256="e" * 64,
+        policy_sha256="d" * 64,
+        detector_id="caller-forged-observation",
+        stable_inventory_passes=2,
+        entries=(),
+    )
+    observations = (forged, forged)
+    queue.reconcile(
+        grant,
+        (),
+        source_epoch=1,
+        policy_sha256=forged.policy_sha256,
+        source_observations=observations,
+        desired_watermark=1,
+        semantic_required=False,
+        monotonic_ns=10_002,
+    )
+    queue.bind_sealed_inputs(
+        grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", declared),
+        monotonic_ns=10_003,
+    )
+    request = CertificationRequest(
+        source_commit=forged.source_commit,
+        source_epoch=1,
+        policy_sha256=forged.policy_sha256,
+        observation_manifest_sha256=forged.inventory_sha256,
+        queue_watermark=1,
+        semantic_completeness="not_required",
+        compatibility_sha256=COMPATIBILITY_SHA256,
+        validations=("payload_manifest", "coordination_lock_precreated"),
+    )
+
+    with pytest.raises(
+        SemanticCertificationBlocked,
+        match="trusted source observations",
+    ):
+        store.certify(
+            grant,
+            allocation,
+            request,
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_004,
+        )
+
+    binding_path = queue._certification_binding_path(REPO_UUID, allocation.generation_id)
+    assert not queue.state.path(binding_path).exists()
+    assert allocation.staging_path.is_dir()
+
+
+def test_certification_rejects_persistent_source_replacement_during_reobservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    replacement = create_repo(tmp_path / "replacement")
+    (replacement / "README.md").write_text("replacement source\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=replacement, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "replacement source"],
+        cwd=replacement,
+        check=True,
+    )
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    queue = _queue(harness)
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue=queue,
+        capabilities=harness.leases.state.capabilities,
+    )
+    observations = (
+        store.adapter.observe(replacement),
+        store.adapter.observe(replacement),
+    )
+    assert observations[0] == observations[1]
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id="gen-replaced-source",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text("replacement\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    queue.reconcile(
+        grant,
+        (),
+        source_epoch=1,
+        policy_sha256=observations[0].policy_sha256,
+        source_observations=observations,
+        desired_watermark=1,
+        semantic_required=False,
+        monotonic_ns=10_002,
+    )
+    queue.bind_sealed_inputs(
+        grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", declared),
+        monotonic_ns=10_003,
+    )
+    original_resolve = harness.registry.resolve_active_source
+    replaced = False
+
+    def resolve_then_replace(repo_uuid: str):
+        nonlocal replaced
+        source = original_resolve(repo_uuid)
+        if not replaced:
+            replaced = True
+            harness.repo.rename(tmp_path / "original-repo")
+            replacement.rename(harness.repo)
+        return source
+
+    monkeypatch.setattr(harness.registry, "resolve_active_source", resolve_then_replace)
+
+    with pytest.raises(
+        SemanticCertificationBlocked,
+        match="trusted source identity changed",
+    ):
+        store.certify(
+            grant,
+            allocation,
+            CertificationRequest(
+                source_commit=observations[0].source_commit,
+                source_epoch=1,
+                policy_sha256=observations[0].policy_sha256,
+                observation_manifest_sha256=observations[0].inventory_sha256,
+                queue_watermark=1,
+                semantic_completeness="not_required",
+                compatibility_sha256=COMPATIBILITY_SHA256,
+                validations=("payload_manifest", "coordination_lock_precreated"),
+            ),
+            source_observations=observations,
+            declared_entries=declared,
+            occurred_at=START,
+            monotonic_ns=10_004,
+        )
+
+    assert replaced
+    binding = queue._certification_binding_path(REPO_UUID, allocation.generation_id)
+    assert not queue.state.path(binding).exists()
+
+
+@pytest.mark.parametrize("damage", ("missing", "corrupt"))
+def test_positive_watermark_generation_requires_its_durable_semantic_binding(
+    tmp_path: Path,
+    damage: str,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    queue = _queue(harness)
+    store = RuntimeGenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue=queue,
+        capabilities=harness.leases.state.capabilities,
+    )
+    allocation = store.allocate(
+        grant,
+        expected_payload_bytes=4096,
+        capacity_policy=POLICY,
+        generation_id=f"gen-binding-{damage}",
+        occurred_at=START,
+        monotonic_ns=10_001,
+    )
+    payload = allocation.staging_path / "graphify-out"
+    payload.mkdir()
+    (payload / "graph.json").write_text(f"{damage}\n", encoding="utf-8")
+    declared = store.inspect_staged_payload(allocation)
+    request, observations = _bind_certification(
+        harness,
+        store,
+        queue,
+        grant,
+        declared,
+        monotonic_ns=10_002,
+    )
+    receipt = store.certify(
+        grant,
+        allocation,
+        request,
+        source_observations=observations,
+        declared_entries=declared,
+        occurred_at=START,
+        monotonic_ns=10_003,
+    )
+    assert receipt.to_dict()["queue_watermark"] > 0
+    binding_path = queue.state.path(
+        queue._certification_binding_path(REPO_UUID, allocation.generation_id)
+    )
+    if damage == "missing":
+        binding_path.unlink()
+    else:
+        binding_path.write_bytes(b"{}\n")
+
+    with pytest.raises(GenerationError, match="semantic certification binding"):
+        store.verify_generation(REPO_UUID, allocation.generation_id)
+
+
 def test_invalid_request_does_not_poison_certification_binding_retry(
     tmp_path: Path,
 ) -> None:
@@ -2277,7 +2533,7 @@ def test_invalid_request_does_not_poison_certification_binding_retry(
     (payload / "graph.json").write_text("retryable request\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
     request, observations = _bind_certification(
-        harness, queue, grant, declared, monotonic_ns=10_002
+        harness, store, queue, grant, declared, monotonic_ns=10_002
     )
 
     with pytest.raises(ContractError, match="at least one validation"):
@@ -2335,7 +2591,7 @@ def test_preseeded_receipt_with_queue_cannot_create_certification_binding(
     (payload / "graph.json").write_text("queue cannot bless receipt\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
     request, observations = _bind_certification(
-        harness, queue, grant, declared, monotonic_ns=10_002
+        harness, store, queue, grant, declared, monotonic_ns=10_002
     )
     with harness.leases.current_operation(
         grant,
@@ -2406,7 +2662,7 @@ def test_completed_queue_watermark_cannot_bind_or_certify_different_payload(
     (first_payload / "graph.json").write_text("payload a\n", encoding="utf-8")
     first_entries = store.inspect_staged_payload(first)
     request, observations = _bind_certification(
-        harness, queue, grant, first_entries, monotonic_ns=10_002
+        harness, store, queue, grant, first_entries, monotonic_ns=10_002
     )
 
     second = store.allocate(
@@ -2488,7 +2744,7 @@ def test_durable_receipt_recovery_succeeds_after_queue_advances(
     (payload / "graph.json").write_text("recover me\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
     request, observations = _bind_certification(
-        harness, queue, grant, declared, monotonic_ns=10_002
+        harness, store, queue, grant, declared, monotonic_ns=10_002
     )
 
     with pytest.raises(InjectedFault):
@@ -2574,7 +2830,7 @@ def test_durable_certification_binding_recovers_before_receipt_after_queue_advan
     (payload / "graph.json").write_text("binding recovery\n", encoding="utf-8")
     declared = store.inspect_staged_payload(allocation)
     request, observations = _bind_certification(
-        harness, queue, grant, declared, monotonic_ns=10_002
+        harness, store, queue, grant, declared, monotonic_ns=10_002
     )
 
     with pytest.raises(CommitUnknown, match="semantic_certification:gen-binding-recovery"):

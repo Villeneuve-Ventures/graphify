@@ -42,6 +42,7 @@ from tests.workspace_p3_helpers import (
     acquire,
     create_harness,
     metadata_snapshot,
+    trust_source_observations,
     tree_snapshot,
 )
 
@@ -228,6 +229,7 @@ def _runtime(tmp_path: Path):
             compatibility_sha256=COMPATIBILITY_SHA256,
             validations=("payload_manifest", "coordination_lock_precreated"),
         )
+        trust_source_observations(generations, source_observations)
         receipts[generation_id] = generations.certify(
             build,
             allocation,
@@ -285,6 +287,16 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         pointers,
         capabilities=harness.leases.state.capabilities,
     )
+    queue = generations.semantic_queue
+    assert queue is not None
+    current_binding = queue.state.path(
+        queue._certification_binding_path(REPO_UUID, "gen-current")
+    )
+    unused_binding = queue.state.path(
+        queue._certification_binding_path(REPO_UUID, "gen-unused")
+    )
+    assert current_binding.is_file()
+    assert unused_binding.is_file()
     lock = generations.state.path(generations._lock(REPO_UUID, "gen-unused"))
     holder = subprocess.Popen(
         [
@@ -358,6 +370,8 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
         / f"gen-unused.{completion.operation_epoch}"
     )
     assert quarantine.is_dir()
+    assert current_binding.is_file()
+    assert unused_binding.is_file()
     assert not (harness.state_root / "workspaces" / REPO_UUID / "generations/gen-unused").exists()
     retained_lock = (
         harness.state_root / "workspaces" / REPO_UUID / "locks/generations/gen-unused.lock"
@@ -374,6 +388,8 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     )
     assert purge.purged == ("gen-unused",)
     assert not quarantine.exists()
+    assert current_binding.is_file()
+    assert not unused_binding.exists()
     assert retained_lock.stat().st_ino == inode
 
 
@@ -1242,13 +1258,22 @@ def test_gc_reconciles_every_durable_intent_quarantine_and_completion_boundary(
 
 @pytest.mark.parametrize(
     "phase",
-    ["gc:gen-unused:purged", "gc:purge:installed", "gc:purge_complete"],
+    [
+        "gc:gen-unused:purged",
+        "gc:gen-unused:semantic_binding:unlinked",
+        "gc:gen-unused:semantic_binding:parent_durable",
+        "gc:gen-unused:semantic_binding_removed",
+        "gc:purge:installed",
+        "gc:purge_complete",
+    ],
 )
 def test_gc_purge_retries_after_each_visibility_boundary(tmp_path: Path, phase: str) -> None:
     armed = False
+    events: list[str] = []
 
     def fail_at_phase(event: str) -> None:
         nonlocal armed
+        events.append(event)
         if armed and event == phase:
             armed = False
             raise InjectedFault(event)
@@ -1298,6 +1323,9 @@ def test_gc_purge_retries_after_each_visibility_boundary(tmp_path: Path, phase: 
     )
 
     assert purge.purged == ("gen-unused",)
+    assert "gc:gen-unused:semantic_binding_parent_durable" in events
+    binding = SemanticQueueStore._certification_binding_path(REPO_UUID, "gen-unused")
+    assert not gc.state.path(binding).exists()
     assert not (
         harness.state_root
         / "workspaces"

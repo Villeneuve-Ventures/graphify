@@ -6,12 +6,14 @@ import errno
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
 import sys
 from typing import Any, Iterator, TypedDict, cast
 
 import pytest
 
+import graphify.workspace.semantic_queue as semantic_queue_module
 from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
     CapacityPolicy,
@@ -63,6 +65,7 @@ from tests.workspace_p3_helpers import (
     authorization,
     create_harness,
     create_repo,
+    trust_source_observations,
     tree_snapshot,
 )
 
@@ -1626,11 +1629,11 @@ def test_capability_decision_never_selects_ambient_or_disallowed_backend(
 @pytest.mark.parametrize(
     ("backend", "network_egress", "allowlist", "reason"),
     [
-        ("bad/backend", True, ["bad/backend"], "explicit_backend_invalid"),
+        ("", True, ["gemini"], "explicit_backend_invalid"),
         ("gemini", True, ["local"], "explicit_backend_not_allowlisted"),
         ("gemini", False, ["gemini"], "network_egress_forbidden"),
     ],
-    ids=("invalid-syntax", "not-allowlisted", "egress-denied"),
+    ids=("empty", "not-allowlisted", "egress-denied"),
 )
 def test_explicit_backend_rejection_is_stable_and_contains_no_ambient_values(
     tmp_path: Path,
@@ -1675,6 +1678,40 @@ def test_explicit_backend_rejection_is_stable_and_contains_no_ambient_values(
     assert "ambient-model" not in repr(decision.to_dict())
 
 
+@pytest.mark.parametrize("backend", ("provider/model", "provider:model"))
+def test_explicit_backend_treats_schema_valid_allowlisted_ids_as_opaque(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    harness = create_harness(tmp_path)
+    base = WorkspaceConfig.from_toml((harness.repo / ".graphify/workspace.toml").read_bytes())
+    explicit = cast(
+        WorkspaceConfig,
+        WorkspaceConfig.from_mapping(
+            {
+                **base.to_dict(),
+                "policy": {
+                    **base.to_dict()["policy"],
+                    "semantic_mode": "explicit_backend",
+                    "network_egress": True,
+                    "headless_backends": [backend],
+                },
+            }
+        ),
+    )
+
+    decision = decide_semantic_capability(
+        explicit,
+        host_agent_active=False,
+        explicit_backend=backend,
+    )
+
+    assert decision.available
+    assert decision.executor == "explicit_backend"
+    assert decision.backend == backend
+    assert decision.reason == "explicit_backend_selected"
+
+
 def test_claim_accepts_only_an_explicit_backend_from_the_active_source_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1713,6 +1750,119 @@ def test_claim_accepts_only_an_explicit_backend_from_the_active_source_policy(
     assert claim is not None
     assert claim.work.path == "docs/a.md"
     assert tree_snapshot(harness.repo) == source_before
+
+
+def test_claim_rejects_source_path_replacement_before_reading_active_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    forged_bytes = (
+        'contract = "graphify.workspace.config"\n'
+        "schema_version = 1\n"
+        f'repo_uuid = "{REPO_UUID}"\n'
+        "\n"
+        "[policy]\n"
+        'freshness = "current_only"\n'
+        'semantic_mode = "explicit_backend"\n'
+        "network_egress = true\n"
+        'headless_backends = ["gemini"]\n'
+    ).encode()
+    forged = WorkspaceConfig.from_toml(forged_bytes)
+    original_resolve = harness.registry.resolve_active_source
+    swapped = False
+
+    def resolve_then_replace(repo_uuid: str) -> SourceIdentity:
+        nonlocal swapped
+        source = original_resolve(repo_uuid)
+        if not swapped:
+            swapped = True
+            harness.repo.rename(tmp_path / "original-repo")
+            (harness.repo / ".graphify").mkdir(parents=True)
+            (harness.repo / ".graphify/workspace.toml").write_bytes(forged_bytes)
+        return source
+
+    monkeypatch.setattr(harness.registry, "resolve_active_source", resolve_then_replace)
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_(mismatch|unavailable)",
+    ):
+        queue.claim(
+            semantic,
+            config=forged,
+            host_agent_active=False,
+            explicit_backend="gemini",
+            monotonic_ns=20_001,
+        )
+
+    assert swapped
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
+def test_claim_rejects_aba_policy_replacement_during_config_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    forged_bytes = (
+        'contract = "graphify.workspace.config"\n'
+        "schema_version = 1\n"
+        f'repo_uuid = "{REPO_UUID}"\n'
+        "\n"
+        "[policy]\n"
+        'freshness = "current_only"\n'
+        'semantic_mode = "explicit_backend"\n'
+        "network_egress = true\n"
+        'headless_backends = ["gemini"]\n'
+    ).encode()
+    forged = WorkspaceConfig.from_toml(forged_bytes)
+    original_read = semantic_queue_module.read_workspace_config_with_digest
+    read_calls = 0
+
+    def read_during_replacement(source_root: Path):
+        nonlocal read_calls
+        read_calls += 1
+        original_root = tmp_path / "original-repo"
+        harness.repo.rename(original_root)
+        (harness.repo / ".graphify").mkdir(parents=True)
+        (harness.repo / ".graphify/workspace.toml").write_bytes(forged_bytes)
+        try:
+            return original_read(source_root)
+        finally:
+            shutil.rmtree(harness.repo)
+            original_root.rename(harness.repo)
+
+    monkeypatch.setattr(
+        semantic_queue_module,
+        "read_workspace_config_with_digest",
+        read_during_replacement,
+    )
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_mismatch",
+    ):
+        queue.claim(
+            semantic,
+            config=forged,
+            host_agent_active=False,
+            explicit_backend="gemini",
+            monotonic_ns=20_001,
+        )
+
+    assert read_calls == 1
+    assert queue.inspect(REPO_UUID).canonical == before
 
 
 def test_claim_rejects_an_unavailable_capability_without_queue_mutation(
@@ -2045,6 +2195,7 @@ def test_generation_certification_revalidates_a_stable_queue_view(
         ),
         monotonic_ns=20_004,
     )
+    trust_source_observations(generations, observations)
 
     with pytest.raises(SemanticCertificationBlocked, match="queue view changed"):
         generations.certify(
@@ -2138,6 +2289,7 @@ def test_generation_receipt_uses_the_exact_durable_queue_watermark(
         ),
         monotonic_ns=20_004,
     )
+    trust_source_observations(generations, observations)
     receipt = generations.certify(
         build,
         allocation,

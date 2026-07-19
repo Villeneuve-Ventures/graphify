@@ -292,13 +292,27 @@ def read_workspace_config(
 ) -> WorkspaceConfig:
     """Safely read validated policy from an already selected source root."""
 
+    config, _digest = read_workspace_config_with_digest(
+        source_root,
+        deadline_ns=deadline_ns,
+    )
+    return config
+
+
+def read_workspace_config_with_digest(
+    source_root: Path,
+    *,
+    deadline_ns: int | None = None,
+) -> tuple[WorkspaceConfig, str]:
+    """Safely read policy plus the raw-byte digest used by source identity."""
+
     _check_deadline(deadline_ns)
     root = source_root.resolve(strict=True)
     _check_deadline(deadline_ns)
     if not root.is_dir():
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
-    config, _config_bytes = _read_workspace_config(root, deadline_ns=deadline_ns)
-    return config
+    config, config_bytes = _read_workspace_config(root, deadline_ns=deadline_ns)
+    return config, hashlib.sha256(config_bytes).hexdigest()
 
 
 def discover_source(
@@ -426,4 +440,5 @@ __all__ = [
     "discover_source",
     "identity_evidence",
     "read_workspace_config",
+    "read_workspace_config_with_digest",
 ]

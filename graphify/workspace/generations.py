@@ -12,11 +12,13 @@ import stat
 from typing import Any, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import (
+    AdapterError,
     AdapterIntent,
     CompatibilityTuple,
     UnsupportedCompatibility,
     select_adapter,
 )
+from graphify.workspace.identity import IdentityError
 from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
     CapacityPolicy,
@@ -177,7 +179,10 @@ class GenerationStore:
         syscalls: Syscalls | None = None,
     ) -> None:
         compatibility = CompatibilityTuple.from_manifest(compatibility_manifest)
-        select_adapter(compatibility, intent=AdapterIntent.STAGE).require_adapter()
+        self.adapter = select_adapter(
+            compatibility,
+            intent=AdapterIntent.STAGE,
+        ).require_adapter()
         self.compatibility_sha256 = compatibility_manifest.sha256
         self.leases = leases
         self.journal = journal
@@ -932,12 +937,56 @@ class GenerationStore:
         value = receipt.to_dict()
         if value["repo_uuid"] != repo_uuid or value["generation_id"] != generation_id:
             raise GenerationError("generation receipt identity does not match its path")
+        if value["compatibility_sha256"] != self.compatibility_sha256:
+            raise UnsupportedCompatibility(
+                "generation receipt does not match the selected compatibility manifest"
+            )
         payload = cast(dict[str, Any], value["sealed_query_payload"])
         declared = cast(list[dict[str, Any]], payload["entries"])
         if canonical_json_bytes(declared) != canonical_json_bytes(list(inventory.entries)):
             raise PayloadChanged("certified generation payload does not match its receipt")
         if payload["manifest_sha256"] != payload_manifest_sha256("graphify-out", declared):
             raise GenerationError("generation receipt manifest digest does not match")
+        queue_watermark = int(value["queue_watermark"])
+        if queue_watermark > 0:
+            request = CertificationRequest(
+                source_commit=str(value["source_commit"]),
+                source_epoch=int(value["source_epoch"]),
+                policy_sha256=str(value["policy_sha256"]),
+                observation_manifest_sha256=str(value["observation_manifest_sha256"]),
+                queue_watermark=queue_watermark,
+                semantic_completeness=str(value["semantic_completeness"]),
+                compatibility_sha256=str(value["compatibility_sha256"]),
+                validations=tuple(
+                    str(validation)
+                    for validation in cast(list[object], value["validations"])
+                ),
+            )
+            try:
+                queue_view = SemanticQueueStore.verify_certification_binding_at(
+                    self.state,
+                    repo_uuid,
+                    generation_id=generation_id,
+                    request_sha256=self._semantic_request_sha256(request),
+                    sealed_input_manifest_sha256=str(payload["manifest_sha256"]),
+                )
+            except SemanticCertificationBlocked as exc:
+                raise GenerationError(
+                    f"semantic certification binding is invalid: {exc}"
+                ) from exc
+            if (
+                queue_view.repo_uuid != repo_uuid
+                or queue_view.source_commit != request.source_commit
+                or queue_view.source_epoch != request.source_epoch
+                or queue_view.policy_sha256 != request.policy_sha256
+                or queue_view.observation_manifest_sha256
+                != request.observation_manifest_sha256
+                or queue_view.queue_watermark != request.queue_watermark
+                or queue_view.semantic_completeness != request.semantic_completeness
+            ):
+                raise GenerationError(
+                    "semantic certification binding differs from generation receipt"
+                )
         lock_relative = self._lock(repo_uuid, generation_id)
         try:
             lock_bytes = self.state.read_existing_bytes(lock_relative)
@@ -1180,6 +1229,36 @@ class GenerationStore:
             )
         ).hexdigest()
 
+    def _trusted_source_observations(
+        self,
+        repo_uuid: str,
+        expected: Sequence[SourceObservation],
+    ) -> tuple[SourceObservation, SourceObservation]:
+        try:
+            source = self.leases.registry.resolve_active_source(repo_uuid)
+            trusted = (
+                self.adapter.observe(source.root),
+                self.adapter.observe(source.root),
+            )
+            confirmed_source = self.leases.registry.resolve_active_source(repo_uuid)
+        except (AdapterError, IdentityError, OSError, StateCorrupt, StatePathError) as exc:
+            raise SemanticCertificationBlocked(
+                f"trusted source observations are unavailable: {exc}"
+            ) from exc
+        if confirmed_source != source:
+            raise SemanticCertificationBlocked(
+                "trusted source identity changed during observation"
+            )
+        if trusted[0] != trusted[1]:
+            raise SemanticCertificationBlocked(
+                "trusted source observations are not stable"
+            )
+        if tuple(expected) != trusted:
+            raise SemanticCertificationBlocked(
+                "caller evidence differs from trusted source observations"
+            )
+        return trusted
+
     def certify(
         self,
         grant: LeaseGrant,
@@ -1223,10 +1302,14 @@ class GenerationStore:
 
         binding_exists = queue_view is not None
         if queue_view is None:
+            trusted_observations = self._trusted_source_observations(
+                allocation.repo_uuid,
+                source_observations,
+            )
             queue_view = self.semantic_queue.certification_view(
                 grant,
                 source_epoch=request.source_epoch,
-                source_observations=source_observations,
+                source_observations=trusted_observations,
                 sealed_input_manifest_sha256=sealed_input_manifest_sha256,
                 monotonic_ns=monotonic_ns,
             )

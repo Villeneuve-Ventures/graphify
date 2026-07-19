@@ -27,6 +27,7 @@ from graphify.workspace.persistence import (
     Syscalls,
 )
 from graphify.workspace.pointers import PointerStore
+from graphify.workspace.semantic_queue import SemanticQueueStore
 
 
 _PURGE_ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
@@ -597,6 +598,20 @@ class GcStore:
                         self.fault_hook(f"gc:{generation_id}:purged")
                     else:
                         self.state.fsync_directory(quarantine.parent)
+                    binding = SemanticQueueStore._certification_binding_path(
+                        operation.repo_uuid,
+                        generation_id,
+                    )
+                    self.state.unlink_and_sync(
+                        binding,
+                        label=f"gc:{generation_id}:semantic_binding",
+                    )
+                    if self.state.private_directory_exists(binding.parent):
+                        self.state.fsync_directory(binding.parent)
+                        self.fault_hook(
+                            f"gc:{generation_id}:semantic_binding_parent_durable"
+                        )
+                    self.fault_hook(f"gc:{generation_id}:semantic_binding_removed")
             purge = GcPurgeState.from_mapping(
                 {
                     "contract": "graphify.workspace.gc_purge.internal",

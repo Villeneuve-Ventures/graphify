@@ -7,8 +7,9 @@ import os
 from pathlib import Path
 import stat
 import subprocess
-from typing import Any, cast
+from typing import Any, Sequence, cast
 
+from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import CompatibilityManifest
 from graphify.workspace.identity import IdentityAction, OperatorAuthorization, discover_source
 from graphify.workspace.leases import LeaseGrant, LeaseStore
@@ -28,6 +29,34 @@ COMPATIBILITY_MANIFEST = cast(
     ),
 )
 COMPATIBILITY_SHA256 = COMPATIBILITY_MANIFEST.sha256
+
+
+class StaticObservationAdapter:
+    """Test adapter that makes synthetic observation authority explicit."""
+
+    adapter_id = "test-static-observation"
+    engine_baseline = "test"
+    detector_id = "test-static-observation"
+
+    def __init__(self, observations: Sequence[SourceObservation]) -> None:
+        self.observations = tuple(observations)
+        if not self.observations:
+            raise ValueError("at least one source observation is required")
+        self.calls = 0
+
+    def observe(self, _source_root: Path, **_kwargs: Any) -> SourceObservation:
+        observation = self.observations[min(self.calls, len(self.observations) - 1)]
+        self.calls += 1
+        return observation
+
+
+def trust_source_observations(
+    store: Any,
+    observations: Sequence[SourceObservation],
+) -> StaticObservationAdapter:
+    adapter = StaticObservationAdapter(observations)
+    store.adapter = adapter
+    return adapter
 
 
 def _run(repo: Path, *arguments: str) -> str:
