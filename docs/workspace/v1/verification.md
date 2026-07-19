@@ -156,8 +156,9 @@ output remains ignored and must not widen the P1 product diff.
   decision from the registry-selected active-source policy and explicit live
   inputs, so a forged `available=True` report, foreign allowlist, or same-UUID
   relabeled policy cannot claim work; deterministic activation in the former
-  registry-snapshot/workspace-lock gap makes the old grant stale and leaves the
-  queue unchanged;
+  registry-snapshot/workspace-lock gap makes the old claim grant stale and
+  leaves the queue unchanged, while semantic-grant compaction serializes before
+  activation rather than mutating under a retired source revision;
 - `SEMANTIC_CLAIM` owner/fence/source/operation/migration evidence is exact;
   one lease owns at most one active item, stale workers cannot checkpoint,
   complete, fail, or overwrite newer desired work, and successor recovery is

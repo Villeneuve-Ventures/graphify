@@ -1795,6 +1795,7 @@ class SemanticQueueStore:
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=_COMPACTION_OPERATIONS,
+            registry_required=True,
         ) as operation:
             current = self._load_locked(operation.repo_uuid)
             items = current.items
