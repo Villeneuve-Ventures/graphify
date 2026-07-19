@@ -569,6 +569,35 @@ def test_same_path_preserves_revision_order_across_upsert_then_delete(
     assert (second.work.operation, second.work.desired_revision) == ("DELETE", 2)
 
 
+def test_reconcile_rejects_conflicting_operations_at_same_path_revision(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        ContractError,
+        match="path and desired revision must be unique",
+    ):
+        queue.reconcile(
+            build,
+            (
+                _work("docs/a.md", 1),
+                _work("docs/a.md", 1, operation="DELETE"),
+            ),
+            source_epoch=1,
+            policy_sha256="1" * 64,
+            source_observations=_source_observations(harness),
+            desired_watermark=1,
+            semantic_required=True,
+            monotonic_ns=10_001,
+        )
+
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
 def test_reconcile_revokes_newer_claim_when_older_predecessor_is_discovered(
     tmp_path: Path,
 ) -> None:
@@ -1050,6 +1079,36 @@ def test_nonretryable_failure_dead_letters_immediately_and_blocks_completion(
         queue.complete(semantic, claim, monotonic_ns=20_004)
     compacted = queue.compact(build, monotonic_ns=20_005)
     assert compacted.items[0].status == "dead_letter"
+
+
+@pytest.mark.parametrize("retryable", ["false", 1])
+def test_failure_rejects_non_boolean_retryability_without_queue_mutation(
+    tmp_path: Path,
+    retryable: object,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    claim = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert claim is not None
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(ContractError, match=r"\$\.retryable: expected boolean"):
+        queue.fail(
+            semantic,
+            claim,
+            error_code="invalid_payload",
+            retryable=cast(Any, retryable),
+            monotonic_ns=20_002,
+        )
+
+    assert queue.inspect(REPO_UUID).canonical == before
 
 
 def test_reconcile_preserves_newer_desired_work_and_revives_dead_letter(

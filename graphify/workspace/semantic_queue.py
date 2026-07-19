@@ -712,6 +712,9 @@ class _SemanticReconciliation:
         keys = [work.coalescing_key for work in desired]
         if len(set(keys)) != len(keys):
             raise ContractError("$.desired: coalescing keys must be unique")
+        path_revisions = [(work.path, work.desired_revision) for work in desired]
+        if len(set(path_revisions)) != len(path_revisions):
+            raise ContractError("$.desired: path and desired revision must be unique")
         for index, work in enumerate(desired):
             if work.source_epoch != source_epoch or work.policy_sha256 != policy_sha256:
                 raise ContractError(
@@ -1908,6 +1911,7 @@ class SemanticQueueStore:
     ) -> SemanticQueueSnapshot:
         if _ERROR_RE.fullmatch(error_code) is None:
             raise SemanticQueueError("error_code must be a stable lowercase classification")
+        retryable = _boolean(retryable, "$.retryable")
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
             current = self._load_locked(operation.repo_uuid)
             self._require_current_source(current, operation)

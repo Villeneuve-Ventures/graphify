@@ -150,7 +150,8 @@ Each desired-work identity binds a positive source epoch, policy SHA-256,
 `UPSERT` or `DELETE`, canonical contained relative path, content SHA-256, and
 positive desired revision. Coalescing is deterministic by source epoch, policy,
 operation, and path. A newer desired revision replaces older work for that key;
-an exact retry of the current item is idempotent, as is an exact retry of
+one exact desired set cannot assign both operations to the same path and desired
+revision. An exact retry of the current item is idempotent, as is an exact retry of
 compacted completed work retained by the reconciliation proof. Every mutation
 preflights both item and canonical-byte limits before committing, so capacity
 failure leaves the stable record unchanged.
@@ -181,8 +182,9 @@ ID. One
 semantic lease owns at most one active claim. Stale or expired claims cannot
 checkpoint, complete, fail, or overwrite a newer desired revision. Successor
 claim recovery increments the failure count and either retries or dead-letters
-according to the explicit budget. Non-retryable or exhausted work is durable
-dead-letter state and prevents completion of its reconciled watermark.
+according to the explicit budget. Retryability is accepted only as an actual
+Boolean. Non-retryable or exhausted work is durable dead-letter state and
+prevents completion of its reconciled watermark.
 
 The queue record uses the existing durable current/previous/pending commit and
 recovery protocol at `workspaces/<repo_uuid>/queue/semantic*.jsonl`. Malformed,
