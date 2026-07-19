@@ -912,6 +912,8 @@ class SemanticQueueSnapshot:
 
 @dataclass(frozen=True)
 class SemanticCapabilityDecision:
+    """Advisory capability report; queue mutation re-derives policy itself."""
+
     available: bool
     executor: str | None
     backend: str | None
@@ -1471,9 +1473,18 @@ class SemanticQueueStore:
         self,
         grant: LeaseGrant,
         *,
-        capability: SemanticCapabilityDecision,
+        config: WorkspaceConfig,
+        host_agent_active: bool,
+        explicit_backend: str | None,
         monotonic_ns: int,
     ) -> SemanticClaim | None:
+        """Claim work only after deriving authority at this mutation boundary."""
+
+        capability = decide_semantic_capability(
+            config,
+            host_agent_active=host_agent_active,
+            explicit_backend=explicit_backend,
+        )
         if not capability.available:
             raise SemanticCapabilityUnavailable(capability.reason)
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:

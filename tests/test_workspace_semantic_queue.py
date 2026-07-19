@@ -7,7 +7,7 @@ from pathlib import Path
 import random
 import subprocess
 import sys
-from typing import cast
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -32,6 +32,7 @@ from graphify.workspace.persistence import (
 )
 from graphify.workspace.semantic_queue import (
     SemanticCapabilityUnavailable,
+    SemanticCapabilityDecision,
     SemanticCertificationBlocked,
     SemanticDesiredWork,
     SemanticQueueCapacityExceeded,
@@ -108,13 +109,19 @@ def _queue(
     )
 
 
-def _host_capability(harness: RuntimeHarness):
+class _ClaimInputs(TypedDict):
+    config: WorkspaceConfig
+    host_agent_active: bool
+    explicit_backend: str | None
+
+
+def _host_claim_inputs(harness: RuntimeHarness) -> _ClaimInputs:
     config = WorkspaceConfig.from_toml((harness.repo / ".graphify/workspace.toml").read_bytes())
-    return decide_semantic_capability(
-        config,
-        host_agent_active=True,
-        explicit_backend=None,
-    )
+    return {
+        "config": config,
+        "host_agent_active": True,
+        "explicit_backend": None,
+    }
 
 
 def _source_commit(harness: RuntimeHarness) -> str:
@@ -250,9 +257,9 @@ def test_claim_selection_rotates_operations_before_retrying_one_class(
         monotonic_ns=10_001,
     )
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
-    capability = _host_capability(harness)
+    capability = _host_claim_inputs(harness)
 
-    first = queue.claim(semantic, capability=capability, monotonic_ns=20_001)
+    first = queue.claim(semantic, **capability, monotonic_ns=20_001)
     assert first is not None and first.work.operation == "DELETE"
     queue.fail(
         semantic,
@@ -261,10 +268,10 @@ def test_claim_selection_rotates_operations_before_retrying_one_class(
         retryable=True,
         monotonic_ns=20_002,
     )
-    second = queue.claim(semantic, capability=capability, monotonic_ns=20_003)
+    second = queue.claim(semantic, **capability, monotonic_ns=20_003)
     assert second is not None and second.work.operation == "UPSERT"
     queue.complete(semantic, second, monotonic_ns=20_004)
-    third = queue.claim(semantic, capability=capability, monotonic_ns=20_005)
+    third = queue.claim(semantic, **capability, monotonic_ns=20_005)
     assert third is not None and third.work.operation == "DELETE"
 
 
@@ -278,7 +285,7 @@ def test_checkpoint_and_completion_require_the_exact_fenced_claim(
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert claim is not None
@@ -308,7 +315,7 @@ def test_failed_claim_attempt_cannot_complete_after_reclaim_under_same_grant(
 
     failed_attempt = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert failed_attempt is not None
@@ -321,7 +328,7 @@ def test_failed_claim_attempt_cannot_complete_after_reclaim_under_same_grant(
     )
     retried_attempt = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_003,
     )
     assert retried_attempt is not None
@@ -340,7 +347,7 @@ def test_same_path_preserves_revision_order_across_upsert_then_delete(
     build = acquire(harness, "BUILD", tick=1)
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     queue = _queue(harness)
-    capability = _host_capability(harness)
+    capability = _host_claim_inputs(harness)
     queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
     queue.enqueue(
         build,
@@ -348,11 +355,11 @@ def test_same_path_preserves_revision_order_across_upsert_then_delete(
         monotonic_ns=10_002,
     )
 
-    first = queue.claim(semantic, capability=capability, monotonic_ns=20_001)
+    first = queue.claim(semantic, **capability, monotonic_ns=20_001)
     assert first is not None
     assert (first.work.operation, first.work.desired_revision) == ("UPSERT", 1)
     queue.complete(semantic, first, monotonic_ns=20_002)
-    second = queue.claim(semantic, capability=capability, monotonic_ns=20_003)
+    second = queue.claim(semantic, **capability, monotonic_ns=20_003)
     assert second is not None
     assert (second.work.operation, second.work.desired_revision) == ("DELETE", 2)
 
@@ -364,7 +371,7 @@ def test_mixed_arrivals_preserve_per_path_causality_without_starvation(
     build = acquire(harness, "BUILD", tick=1)
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     queue = _queue(harness)
-    capability = _host_capability(harness)
+    capability = _host_claim_inputs(harness)
     arrivals = (
         _work("docs/a.md", 1),
         _work("docs/b.md", 2, operation="DELETE"),
@@ -380,7 +387,7 @@ def test_mixed_arrivals_preserve_per_path_causality_without_starvation(
     for offset in range(len(arrivals)):
         claim = queue.claim(
             semantic,
-            capability=capability,
+            **capability,
             monotonic_ns=20_001 + 2 * offset,
         )
         assert claim is not None
@@ -406,7 +413,7 @@ def test_failure_or_completion_cannot_discard_newer_desired_work(
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert claim is not None
@@ -441,9 +448,9 @@ def test_retry_budget_dead_letters_poison_work_and_new_revision_revives_it(
     queue = _queue(harness)
     queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
-    capability = _host_capability(harness)
+    capability = _host_claim_inputs(harness)
 
-    first = queue.claim(semantic, capability=capability, monotonic_ns=20_001)
+    first = queue.claim(semantic, **capability, monotonic_ns=20_001)
     assert first is not None
     retried = queue.fail(
         semantic,
@@ -453,7 +460,7 @@ def test_retry_budget_dead_letters_poison_work_and_new_revision_revives_it(
         monotonic_ns=20_002,
     )
     assert retried.items[0].status == "pending"
-    second = queue.claim(semantic, capability=capability, monotonic_ns=20_003)
+    second = queue.claim(semantic, **capability, monotonic_ns=20_003)
     assert second is not None
     poisoned = queue.fail(
         semantic,
@@ -489,7 +496,7 @@ def test_nonretryable_failure_dead_letters_immediately_and_blocks_completion(
     )
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert claim is not None
@@ -508,7 +515,7 @@ def test_nonretryable_failure_dead_letters_immediately_and_blocks_completion(
     assert (
         queue.claim(
             semantic,
-            capability=_host_capability(harness),
+            **_host_claim_inputs(harness),
             monotonic_ns=20_003,
         )
         is None
@@ -530,7 +537,7 @@ def test_reconcile_preserves_newer_desired_work_and_revives_dead_letter(
     queue.enqueue(build, old, monotonic_ns=10_001)
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert claim is not None
@@ -571,7 +578,7 @@ def test_successor_recovers_an_expired_claim_under_a_higher_fence(
     first_grant = acquire(harness, "SEMANTIC_CLAIM", tick=2, ttl_ns=5)
     first_claim = queue.claim(
         first_grant,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert first_claim is not None
@@ -579,7 +586,7 @@ def test_successor_recovers_an_expired_claim_under_a_higher_fence(
     successor = acquire(harness, "SEMANTIC_CLAIM", tick=3)
     recovered = queue.claim(
         successor,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=30_001,
     )
 
@@ -681,7 +688,7 @@ def test_completion_and_compaction_preserve_the_stable_certification_watermark(
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert claim is not None
@@ -773,7 +780,7 @@ def test_seeded_queue_schedule_is_replayable_and_preserves_model_invariants(
         harness = create_harness(root)
         build = acquire(harness, "BUILD", tick=1)
         semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
-        capability = _host_capability(harness)
+        capability = _host_claim_inputs(harness)
         queue = _queue(harness)
         rng = random.Random(seed)
         desired: dict[tuple[str, str], SemanticDesiredWork] = {}
@@ -792,7 +799,7 @@ def test_seeded_queue_schedule_is_replayable_and_preserves_model_invariants(
             elif action == "claim":
                 claim = queue.claim(
                     semantic,
-                    capability=capability,
+                    **capability,
                     monotonic_ns=monotonic_ns,
                 )
                 if claim is not None:
@@ -870,7 +877,7 @@ def test_each_queue_transition_recovers_at_every_durable_commit_boundary(
 ) -> None:
     harness = create_harness(tmp_path)
     build = acquire(harness, "BUILD", tick=1)
-    capability = _host_capability(harness)
+    capability = _host_claim_inputs(harness)
     queue = _queue(harness)
     semantic = acquire(
         harness,
@@ -888,7 +895,7 @@ def test_each_queue_transition_recovers_at_every_durable_commit_boundary(
     if transition in {"checkpoint", "complete", "fail"}:
         claim = queue.claim(
             semantic,
-            capability=capability,
+            **capability,
             monotonic_ns=20_001,
         )
         assert claim is not None
@@ -896,7 +903,7 @@ def test_each_queue_transition_recovers_at_every_durable_commit_boundary(
         queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
         claim = queue.claim(
             semantic,
-            capability=capability,
+            **capability,
             monotonic_ns=20_001,
         )
         assert claim is not None
@@ -940,7 +947,7 @@ def test_each_queue_transition_recovers_at_every_durable_commit_boundary(
         if transition == "claim":
             return store.claim(
                 semantic,
-                capability=capability,
+                **capability,
                 monotonic_ns=40_001,
             )
         if transition == "checkpoint":
@@ -967,7 +974,7 @@ def test_each_queue_transition_recovers_at_every_durable_commit_boundary(
             assert successor is not None
             return store.claim(
                 successor,
-                capability=capability,
+                **capability,
                 monotonic_ns=40_001,
             )
         if transition == "bind_sealed_inputs":
@@ -1401,15 +1408,54 @@ def test_claim_rejects_an_unavailable_capability_without_queue_mutation(
     queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     config = WorkspaceConfig.from_toml((harness.repo / ".graphify/workspace.toml").read_bytes())
-    unavailable = decide_semantic_capability(
-        config,
-        host_agent_active=False,
-        explicit_backend=None,
-    )
     before = tree_snapshot(harness.state_root)
 
     with pytest.raises(SemanticCapabilityUnavailable):
-        queue.claim(semantic, capability=unavailable, monotonic_ns=20_001)
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=False,
+            explicit_backend=None,
+            monotonic_ns=20_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_claim_boundary_rejects_forged_or_policy_forbidden_capability(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    config = WorkspaceConfig.from_toml((harness.repo / ".graphify/workspace.toml").read_bytes())
+    forged = SemanticCapabilityDecision(
+        available=True,
+        executor="explicit_backend",
+        backend="not-allowlisted",
+        reason="forged",
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(TypeError, match="capability"):
+        cast(Any, queue.claim)(
+            semantic,
+            capability=forged,
+            monotonic_ns=20_001,
+        )
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="explicit_backend_forbidden",
+    ):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=False,
+            explicit_backend="not-allowlisted",
+            monotonic_ns=20_002,
+        )
 
     assert tree_snapshot(harness.state_root) == before
 
@@ -1432,7 +1478,7 @@ def test_queue_transitions_never_write_the_source_checkout(tmp_path: Path) -> No
     )
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_002,
     )
     assert claim is not None
@@ -1471,7 +1517,7 @@ def test_generation_certification_revalidates_a_stable_queue_view(
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert claim is not None
@@ -1574,7 +1620,7 @@ def test_generation_receipt_uses_the_exact_durable_queue_watermark(
     semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
     claim = queue.claim(
         semantic,
-        capability=_host_capability(harness),
+        **_host_claim_inputs(harness),
         monotonic_ns=20_001,
     )
     assert claim is not None
