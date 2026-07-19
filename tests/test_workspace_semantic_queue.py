@@ -1460,6 +1460,47 @@ def test_claim_boundary_rejects_forged_or_policy_forbidden_capability(
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_claim_rejects_cross_workspace_capability_policy_without_mutation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    config = WorkspaceConfig.from_toml((harness.repo / ".graphify/workspace.toml").read_bytes())
+    foreign = cast(
+        WorkspaceConfig,
+        WorkspaceConfig.from_mapping(
+            {
+                **config.to_dict(),
+                "repo_uuid": "22222222-2222-4222-8222-222222222222",
+                "policy": {
+                    **config.to_dict()["policy"],
+                    "semantic_mode": "explicit_backend",
+                    "network_egress": True,
+                    "headless_backends": ["gemini"],
+                },
+            }
+        ),
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_mismatch",
+    ):
+        queue.claim(
+            semantic,
+            config=foreign,
+            host_agent_active=False,
+            explicit_backend="gemini",
+            monotonic_ns=20_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_queue_transitions_never_write_the_source_checkout(tmp_path: Path) -> None:
     harness = create_harness(tmp_path)
     source_before = tree_snapshot(harness.repo)

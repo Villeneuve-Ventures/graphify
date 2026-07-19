@@ -1480,14 +1480,23 @@ class SemanticQueueStore:
     ) -> SemanticClaim | None:
         """Claim work only after deriving authority at this mutation boundary."""
 
-        capability = decide_semantic_capability(
-            config,
-            host_agent_active=host_agent_active,
-            explicit_backend=explicit_backend,
-        )
-        if not capability.available:
-            raise SemanticCapabilityUnavailable(capability.reason)
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
+            try:
+                validated_config = cast(
+                    WorkspaceConfig,
+                    WorkspaceConfig.from_mapping(config.to_dict()),
+                )
+            except ContractError as exc:
+                raise SemanticCapabilityUnavailable("workspace_config_invalid") from exc
+            if validated_config.to_dict()["repo_uuid"] != operation.repo_uuid:
+                raise SemanticCapabilityUnavailable("workspace_config_mismatch")
+            capability = decide_semantic_capability(
+                validated_config,
+                host_agent_active=host_agent_active,
+                explicit_backend=explicit_backend,
+            )
+            if not capability.available:
+                raise SemanticCapabilityUnavailable(capability.reason)
             current = self._load_locked(operation.repo_uuid)
             changed = False
             recovered: list[SemanticQueueItem] = []

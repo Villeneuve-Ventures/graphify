@@ -133,7 +133,9 @@ sorted queue items. The explicit policy has item, byte, and retry bounds; no
 capacity or provider default is inferred from the environment.
 Capability decisions are advisory reports, not claim authority. The claim
 mutation boundary derives availability again from one validated workspace
-configuration plus explicit live host-agent and named-backend inputs.
+configuration, canonically revalidates it, requires its repository UUID to match
+the locked lease operation, and then uses explicit live host-agent and named-
+backend inputs.
 
 Each desired-work identity binds a positive source epoch, policy SHA-256,
 `UPSERT` or `DELETE`, canonical contained relative path, content SHA-256, and
