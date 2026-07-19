@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import timedelta
 import errno
 import os
@@ -7,7 +8,7 @@ from pathlib import Path
 import random
 import subprocess
 import sys
-from typing import Any, TypedDict, cast
+from typing import Any, Iterator, TypedDict, cast
 
 import pytest
 
@@ -20,6 +21,11 @@ from graphify.workspace.contracts import (
 from graphify.workspace.generations import (
     CertificationRequest,
     GenerationStore,
+)
+from graphify.workspace.identity import (
+    IdentityAction,
+    OperatorAuthorization,
+    discover_source,
 )
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import LeaseGrant
@@ -1600,6 +1606,99 @@ def test_claim_rejects_substituted_capability_policy_without_mutation(
         )
 
     assert tree_snapshot(harness.state_root) == before
+
+
+def test_activation_between_registry_snapshot_and_queue_lock_rejects_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "--quiet", "-b", "linked-policy", str(linked)],
+        cwd=harness.repo,
+        check=True,
+    )
+    linked_config_path = linked / ".graphify/workspace.toml"
+    linked_config_path.write_text(
+        'contract = "graphify.workspace.config"\n'
+        "schema_version = 1\n"
+        f'repo_uuid = "{REPO_UUID}"\n'
+        "\n"
+        "[policy]\n"
+        'freshness = "current_only"\n'
+        'semantic_mode = "explicit_backend"\n'
+        "network_egress = true\n"
+        'headless_backends = ["gemini"]\n',
+        encoding="utf-8",
+    )
+    linked_source = discover_source(linked)
+    registry = harness.registry.rebind(
+        linked_source,
+        OperatorAuthorization(
+            action=IdentityAction.REBIND,
+            operator_id="operator:p5a-test",
+            reason="bind activation race fixture",
+            issued_at="2026-07-16T19:00:00Z",
+            nonce="bind-activation-race",
+        ),
+        expected_revision=1,
+    )
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    harness.leases.release(build)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    config = WorkspaceConfig.from_toml(
+        (harness.repo / ".graphify/workspace.toml").read_bytes()
+    )
+    queue_before = queue.inspect(REPO_UUID).canonical
+    state = harness.leases.inspect(REPO_UUID)
+    entry = registry.to_dict()["workspaces"][0]
+    original_snapshot = harness.registry.recovered_snapshot
+    activated = False
+
+    @contextmanager
+    def snapshot_then_activate() -> Iterator[Any]:
+        nonlocal activated
+        with original_snapshot() as document:
+            yield document
+        if activated:
+            return
+        activated = True
+        harness.registry.activate_source(
+            linked_source,
+            OperatorAuthorization(
+                action=IdentityAction.ACTIVATE,
+                operator_id="operator:p5a-test",
+                reason="activate between semantic claim locks",
+                issued_at="2026-07-16T19:00:01Z",
+                nonce="activate-claim-gap",
+            ),
+            leases=harness.leases,
+            owner=harness.leases.current_owner(),
+            expected_registry_revision=int(registry.to_dict()["revision"]),
+            expected_active_source_revision=int(entry["active_source_revision"]),
+            expected_operation_epoch=state.operation_epoch,
+            expected_migration_epoch=state.migration_epoch,
+            acquired_at=START + timedelta(seconds=3),
+            monotonic_ns=30_000,
+            ttl_ns=1_000_000,
+        )
+
+    monkeypatch.setattr(harness.registry, "recovered_snapshot", snapshot_then_activate)
+
+    with pytest.raises(StaleSemanticClaim, match="active source revision"):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=True,
+            explicit_backend=None,
+            monotonic_ns=20_001,
+        )
+
+    assert activated
+    assert queue.inspect(REPO_UUID).canonical == queue_before
 
 
 def test_queue_transitions_never_write_the_source_checkout(tmp_path: Path) -> None:

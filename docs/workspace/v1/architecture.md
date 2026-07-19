@@ -107,7 +107,11 @@ lease and create no coordination object.
 P5A queue mutation reuses the registry-before-workspace order through the
 existing lease authority. Desired-work reconciliation uses a lifecycle lease;
 claim, checkpoint, completion, and failure use the reserved `SEMANTIC_CLAIM`
-domain. After exact reconciliation and semantic completion, a lifecycle lease
+domain while retaining the current registry revision through the workspace
+mutation. Claim resolves the selected source before those locks, then compares
+that identity and a fresh safe config read against the still-locked registry
+entry, so activation cannot authorize work from a retired policy. After exact
+reconciliation and semantic completion, a lifecycle lease
 binds the queue watermark to the exact staged-payload manifest. Certification
 first captures that queue view from two equal typed source observations under
 the accepted build or migration lease, then revalidates the exact queue revision

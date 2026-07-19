@@ -69,7 +69,10 @@ agent/named-backend inputs. A foreign or same-UUID relabeled policy and an
 arbitrary decision object are never authority. Host-agent use must be stated by
 the caller; a headless backend must be explicitly named, policy-allowlisted, and
 permitted network egress. Ambient provider or credential environment variables
-are not capability or authority.
+are not capability or authority. Semantic mutations retain the current registry
+lock while nesting the workspace lock; an activation between source discovery
+and claim validation therefore makes the old lease stale instead of authorizing
+work from retired policy.
 
 Claim IDs bind desired work, owner, fence, source revision, and operation and
 migration epochs. This prevents a stale worker, expired claim, or replaced

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -114,7 +114,6 @@ class SourceIdentity:
 
     root: Path
     repo_uuid: str
-    config: WorkspaceConfig = field(repr=False, compare=False)
     registry_source: dict[str, Any]
     source_sha256: str
     head_commit: str
@@ -270,6 +269,38 @@ def _read_source_regular(
     return b"".join(chunks)
 
 
+def _read_workspace_config(
+    root: Path,
+    *,
+    deadline_ns: int | None = None,
+) -> tuple[WorkspaceConfig, bytes]:
+    config_bytes = _read_source_regular(
+        root / ".graphify" / "workspace.toml",
+        deadline_ns=deadline_ns,
+    )
+    try:
+        config = WorkspaceConfig.from_toml(config_bytes)
+    except ContractError as exc:
+        raise SourceDiscoveryError(f"invalid workspace config: {exc}") from exc
+    return config, config_bytes
+
+
+def read_workspace_config(
+    source_root: Path,
+    *,
+    deadline_ns: int | None = None,
+) -> WorkspaceConfig:
+    """Safely read validated policy from an already selected source root."""
+
+    _check_deadline(deadline_ns)
+    root = source_root.resolve(strict=True)
+    _check_deadline(deadline_ns)
+    if not root.is_dir():
+        raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    config, _config_bytes = _read_workspace_config(root, deadline_ns=deadline_ns)
+    return config
+
+
 def discover_source(
     source_root: Path,
     *,
@@ -289,12 +320,7 @@ def discover_source(
     if top_level != root:
         raise SourceDiscoveryError(f"source root must be the Git top level: {top_level}")
 
-    config_path = root / ".graphify" / "workspace.toml"
-    config_bytes = _read_source_regular(config_path, deadline_ns=deadline_ns)
-    try:
-        config = WorkspaceConfig.from_toml(config_bytes)
-    except ContractError as exc:
-        raise SourceDiscoveryError(f"invalid workspace config: {exc}") from exc
+    config, config_bytes = _read_workspace_config(root, deadline_ns=deadline_ns)
     repo_uuid = str(config.to_dict()["repo_uuid"])
 
     git_common_dir = _resolve_git_path(
@@ -363,7 +389,6 @@ def discover_source(
     return SourceIdentity(
         root=root,
         repo_uuid=repo_uuid,
-        config=config,
         registry_source=registry_source,
         source_sha256=canonical_sha256(registry_source),
         head_commit=head,
@@ -400,4 +425,5 @@ __all__ = [
     "UUIDCollisionError",
     "discover_source",
     "identity_evidence",
+    "read_workspace_config",
 ]

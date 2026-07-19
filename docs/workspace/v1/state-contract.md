@@ -136,7 +136,11 @@ mutation boundary resolves the registry-selected active source, safely reads
 and validates its workspace configuration, and requires the canonically
 revalidated caller configuration to match it exactly. Only then does it derive
 availability from explicit live host-agent and named-backend inputs; a matching
-repository UUID alone is not policy authority.
+repository UUID alone is not policy authority. Claim resolves source identity
+before locks, then retains the current registry lock through the workspace
+mutation and rechecks that identity plus a fresh safe config read. Checkpoint,
+completion, and failure retain the same registry-through-workspace boundary, so
+activation cannot advance the active source during any semantic mutation.
 
 Each desired-work identity binds a positive source epoch, policy SHA-256,
 `UPSERT` or `DELETE`, canonical contained relative path, content SHA-256, and

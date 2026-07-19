@@ -17,7 +17,11 @@ from graphify.workspace.contracts import (
     WorkspaceConfig,
     canonical_json_bytes,
 )
-from graphify.workspace.identity import IdentityError, discover_source
+from graphify.workspace.identity import (
+    IdentityError,
+    SourceIdentity,
+    read_workspace_config,
+)
 from graphify.workspace.leases import (
     LeaseExpired,
     LeaseGrant,
@@ -1292,13 +1296,17 @@ class SemanticQueueStore:
                 grant,
                 monotonic_ns=monotonic_ns,
                 allowed_operations=frozenset({"SEMANTIC_CLAIM"}),
+                registry_required=True,
             ) as operation:
                 yield operation
         except (LeaseExpired, StaleLease) as exc:
             raise StaleSemanticClaim(str(exc)) from exc
 
     @staticmethod
-    def _active_workspace_config(operation: LeaseOperation) -> WorkspaceConfig:
+    def _active_workspace_config(
+        operation: LeaseOperation,
+        source: SourceIdentity,
+    ) -> WorkspaceConfig:
         workspaces = cast(
             list[dict[str, Any]],
             operation.registry.to_dict()["workspaces"],
@@ -1309,13 +1317,12 @@ class SemanticQueueStore:
         if len(entries) != 1:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable")
         recorded = cast(dict[str, Any], entries[0]["active_source"])
-        try:
-            source = discover_source(Path(cast(str, recorded["path"])))
-        except (OSError, IdentityError) as exc:
-            raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
         if source.repo_uuid != operation.repo_uuid or source.registry_source != recorded:
             raise SemanticCapabilityUnavailable("workspace_config_mismatch")
-        return source.config
+        try:
+            return read_workspace_config(source.root)
+        except (OSError, IdentityError) as exc:
+            raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
 
     @staticmethod
     def _sorted_items(items: Sequence[SemanticQueueItem]) -> tuple[SemanticQueueItem, ...]:
@@ -1501,6 +1508,11 @@ class SemanticQueueStore:
     ) -> SemanticClaim | None:
         """Claim work only after deriving authority at this mutation boundary."""
 
+        repo_uuid = cast(str, grant.lease.to_dict()["repo_uuid"])
+        try:
+            active_source = self.leases.registry.resolve_active_source(repo_uuid)
+        except (OSError, IdentityError) as exc:
+            raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
         with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
             try:
                 validated_config = cast(
@@ -1511,7 +1523,7 @@ class SemanticQueueStore:
                 raise SemanticCapabilityUnavailable("workspace_config_invalid") from exc
             if validated_config.to_dict()["repo_uuid"] != operation.repo_uuid:
                 raise SemanticCapabilityUnavailable("workspace_config_mismatch")
-            active_config = self._active_workspace_config(operation)
+            active_config = self._active_workspace_config(operation, active_source)
             if validated_config.to_dict() != active_config.to_dict():
                 raise SemanticCapabilityUnavailable("workspace_config_mismatch")
             capability = decide_semantic_capability(
