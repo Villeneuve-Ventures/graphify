@@ -1798,11 +1798,15 @@ class SemanticQueueStore:
                 ),
             )
             match = next(
-                item.claim
-                for item in committed.items
-                if item.work.coalescing_key == selected.work.coalescing_key
+                (
+                    item.claim
+                    for item in committed.items
+                    if item.work.coalescing_key == selected.work.coalescing_key
+                ),
+                None,
             )
-            assert match is not None
+            if match is None:
+                raise SemanticQueueCorrupt("committed claim is missing")
             return match
 
     @staticmethod
@@ -1850,11 +1854,15 @@ class SemanticQueueStore:
                 replace(current, items=self._sorted_items(items)),
             )
             committed_item = next(
-                candidate
-                for candidate in committed.items
-                if candidate.work.coalescing_key == claim.work.coalescing_key
+                (
+                    candidate
+                    for candidate in committed.items
+                    if candidate.work.coalescing_key == claim.work.coalescing_key
+                ),
+                None,
             )
-            assert committed_item.claim is not None
+            if committed_item is None or committed_item.claim is None:
+                raise SemanticQueueCorrupt("committed checkpoint claim is missing")
             return committed_item.claim
 
     @staticmethod

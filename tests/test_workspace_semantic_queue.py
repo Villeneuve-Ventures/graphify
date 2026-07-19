@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 import errno
 import os
@@ -507,6 +508,82 @@ def test_checkpoint_and_completion_require_the_exact_fenced_claim(
     assert completed.items[0].status == "completed"
     with pytest.raises(StaleSemanticClaim):
         queue.complete(semantic, checkpointed, monotonic_ns=20_005)
+
+
+def test_claim_fails_closed_when_commit_omits_the_selected_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    original_commit = queue._commit_locked
+
+    def omit_selected_claim(
+        current: SemanticQueueSnapshot,
+        candidate: SemanticQueueSnapshot,
+    ) -> SemanticQueueSnapshot:
+        committed = original_commit(current, candidate)
+        if any(item.status == "claimed" for item in committed.items):
+            return replace(committed, items=())
+        return committed
+
+    monkeypatch.setattr(queue, "_commit_locked", omit_selected_claim)
+
+    with pytest.raises(SemanticQueueCorrupt, match="committed claim is missing"):
+        queue.claim(
+            semantic,
+            **_host_claim_inputs(harness),
+            monotonic_ns=20_001,
+        )
+
+
+def test_checkpoint_fails_closed_when_commit_omits_the_updated_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    claim = queue.claim(
+        semantic,
+        **_host_claim_inputs(harness),
+        monotonic_ns=20_001,
+    )
+    assert claim is not None
+    original_commit = queue._commit_locked
+
+    def omit_updated_claim(
+        current: SemanticQueueSnapshot,
+        candidate: SemanticQueueSnapshot,
+    ) -> SemanticQueueSnapshot:
+        committed = original_commit(current, candidate)
+        return replace(
+            committed,
+            items=tuple(
+                replace(item, claim=None)
+                if item.work.coalescing_key == claim.work.coalescing_key
+                else item
+                for item in committed.items
+            ),
+        )
+
+    monkeypatch.setattr(queue, "_commit_locked", omit_updated_claim)
+
+    with pytest.raises(
+        SemanticQueueCorrupt,
+        match="committed checkpoint claim is missing",
+    ):
+        queue.checkpoint(
+            semantic,
+            claim,
+            checkpoint="semantic-cache-written",
+            monotonic_ns=20_002,
+        )
 
 
 def test_failed_claim_attempt_cannot_complete_after_reclaim_under_same_grant(
