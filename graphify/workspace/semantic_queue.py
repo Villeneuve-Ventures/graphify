@@ -966,6 +966,13 @@ def decide_semantic_capability(
 ) -> SemanticCapabilityDecision:
     """Choose only a live host agent or a caller-named allowlisted backend."""
 
+    if type(host_agent_active) is not bool:
+        return SemanticCapabilityDecision(
+            available=False,
+            executor=None,
+            backend=None,
+            reason="host_agent_active_invalid",
+        )
     policy = cast(Mapping[str, object], config.to_dict()["policy"])
     mode = str(policy["semantic_mode"])
     allowlist = tuple(str(value) for value in cast(list[object], policy["headless_backends"]))
@@ -1353,6 +1360,10 @@ class SemanticQueueStore:
         if evidence.get("repo_uuid") != operation.repo_uuid or evidence.get("source") != recorded:
             raise SemanticCapabilityUnavailable("workspace_config_mismatch")
         try:
+            expected_config_sha256 = _digest(
+                evidence.get("config_sha256"),
+                "$.config_sha256",
+            )
             common_device = evidence.get("git_common_device")
             common_inode = evidence.get("git_common_inode")
             if any(
@@ -1366,10 +1377,13 @@ class SemanticQueueStore:
             verify_source_checkout(
                 source_root,
                 expected_git_common_dir=Path(cast(str, recorded["git_common_dir"])),
+                expected_worktree_id=cast(str, recorded["worktree_id"]),
                 expected_git_common_device=cast(int, common_device),
                 expected_git_common_inode=cast(int, common_inode),
                 expected_root_identity=root_identity,
             )
+            if config_sha256 != expected_config_sha256:
+                raise SemanticCapabilityUnavailable("workspace_config_mismatch")
         except (ContractError, OSError, IdentityError) as exc:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
         return config, config_sha256

@@ -1626,6 +1626,34 @@ def test_capability_decision_never_selects_ambient_or_disallowed_backend(
     assert set(selected.to_dict()) == {"available", "executor", "backend", "reason"}
 
 
+def test_claim_rejects_non_boolean_host_agent_flag_without_queue_mutation(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    config = WorkspaceConfig.from_toml(
+        (harness.repo / ".graphify/workspace.toml").read_bytes()
+    )
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="host_agent_active_invalid",
+    ):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=cast(Any, "false"),
+            explicit_backend=None,
+            monotonic_ns=20_001,
+        )
+
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
 @pytest.mark.parametrize(
     ("backend", "network_egress", "allowlist", "reason"),
     [
@@ -1731,10 +1759,20 @@ def test_claim_accepts_only_an_explicit_backend_from_the_active_source_policy(
         encoding="utf-8",
     )
     config = WorkspaceConfig.from_toml(config_path.read_bytes())
-    build = acquire(harness, "BUILD", tick=1)
+    registry = harness.registry.load()
+    entry = cast(dict[str, Any], registry.to_dict()["workspaces"][0])
+    _activate_linked_policy_source(
+        harness,
+        discover_source(harness.repo),
+        registry_revision=int(registry.to_dict()["revision"]),
+        active_source_revision=int(entry["active_source_revision"]),
+        nonce="activate-explicit-policy",
+        monotonic_ns=30_000,
+    )
+    build = acquire(harness, "BUILD", tick=4)
     queue = _queue(harness)
-    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
-    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=40_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=5)
     source_before = tree_snapshot(harness.repo)
     monkeypatch.setenv("GEMINI_API_KEY", "ambient-secret")
     monkeypatch.setenv("GRAPHIFY_GEMINI_MODEL", "ambient-model")
@@ -1749,12 +1787,51 @@ def test_claim_accepts_only_an_explicit_backend_from_the_active_source_policy(
         config=config,
         host_agent_active=False,
         explicit_backend="gemini",
-        monotonic_ns=20_001,
+        monotonic_ns=50_001,
     )
 
     assert claim is not None
     assert claim.work.path == "docs/a.md"
     assert tree_snapshot(harness.repo) == source_before
+
+
+def test_claim_rejects_policy_changed_without_registry_rebind(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=2)
+    config_path = harness.repo / ".graphify/workspace.toml"
+    config_path.write_text(
+        'contract = "graphify.workspace.config"\n'
+        "schema_version = 1\n"
+        f'repo_uuid = "{REPO_UUID}"\n'
+        "\n"
+        "[policy]\n"
+        'freshness = "current_only"\n'
+        'semantic_mode = "explicit_backend"\n'
+        "network_egress = true\n"
+        'headless_backends = ["gemini"]\n',
+        encoding="utf-8",
+    )
+    changed = WorkspaceConfig.from_toml(config_path.read_bytes())
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_mismatch",
+    ):
+        queue.claim(
+            semantic,
+            config=changed,
+            host_agent_active=False,
+            explicit_backend="gemini",
+            monotonic_ns=20_001,
+        )
+
+    assert queue.inspect(REPO_UUID).canonical == before
 
 
 def test_claim_rejects_source_path_replacement_before_reading_active_policy(
@@ -1866,6 +1943,62 @@ def test_claim_rejects_same_policy_source_replacement_during_locked_read(
 
     assert swapped
     assert read_calls == 2
+    assert queue.inspect(REPO_UUID).canonical == before
+
+
+def test_claim_rejects_registered_linked_worktree_swap(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    linked_source, registry_revision, active_source_revision = (
+        _rebind_linked_policy_source(harness, tmp_path)
+    )
+    build = acquire(harness, "BUILD", tick=1)
+    queue = _queue(harness)
+    queue.enqueue(build, _work("docs/a.md", 1), monotonic_ns=10_001)
+    harness.leases.release(build)
+    _activate_linked_policy_source(
+        harness,
+        linked_source,
+        registry_revision=registry_revision,
+        active_source_revision=active_source_revision,
+        nonce="activate-worktree-swap",
+        monotonic_ns=30_000,
+    )
+    semantic = acquire(harness, "SEMANTIC_CLAIM", tick=4)
+    config_bytes = (linked_source.root / ".graphify/workspace.toml").read_bytes()
+    config = WorkspaceConfig.from_toml(config_bytes)
+    replacement = tmp_path / "replacement-linked"
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "replacement-policy",
+            str(replacement),
+        ],
+        cwd=harness.repo,
+        check=True,
+    )
+    (replacement / ".graphify/workspace.toml").write_bytes(config_bytes)
+    linked_source.root.rename(tmp_path / "registered-linked-original")
+    replacement.rename(linked_source.root)
+    before = queue.inspect(REPO_UUID).canonical
+
+    with pytest.raises(
+        SemanticCapabilityUnavailable,
+        match="workspace_config_unavailable",
+    ):
+        queue.claim(
+            semantic,
+            config=config,
+            host_agent_active=False,
+            explicit_backend="gemini",
+            monotonic_ns=40_001,
+        )
+
     assert queue.inspect(REPO_UUID).canonical == before
 
 

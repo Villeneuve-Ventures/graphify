@@ -319,6 +319,7 @@ def verify_source_checkout(
     source_root: Path,
     *,
     expected_git_common_dir: Path,
+    expected_worktree_id: str,
     expected_git_common_device: int,
     expected_git_common_inode: int,
     expected_root_identity: tuple[int, int],
@@ -340,14 +341,19 @@ def verify_source_checkout(
         "rev-parse",
         "--show-toplevel",
         "--git-common-dir",
+        "--git-dir",
         deadline_ns=deadline_ns,
     ).splitlines()
-    if len(resolved) != 2:
+    if len(resolved) != 3:
         raise SourceDiscoveryError("Git source identity response is malformed")
     top_level = _resolve_git_path(root, resolved[0], deadline_ns=deadline_ns)
     git_common_dir = _resolve_git_path(root, resolved[1], deadline_ns=deadline_ns)
+    git_dir = _resolve_git_path(root, resolved[2], deadline_ns=deadline_ns)
     if top_level != root or git_common_dir != expected_common:
         raise SourceDiscoveryError("source root no longer matches registry Git identity")
+    worktree_id = "main" if git_dir == git_common_dir else git_dir.name
+    if worktree_id != expected_worktree_id:
+        raise SourceDiscoveryError("source worktree no longer matches registry Git identity")
     common_details = git_common_dir.stat()
     if (
         common_details.st_dev != expected_git_common_device
