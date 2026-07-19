@@ -193,8 +193,8 @@ prevents completion of its reconciled watermark.
 The queue record uses the existing durable current/previous/pending commit and
 recovery protocol at `workspaces/<repo_uuid>/queue/semantic*.jsonl`. Malformed,
 noncanonical, cross-workspace, policy-mismatched, or ambiguous state fails
-closed. Read-only inspection takes shared registry and workspace locks and does
-not create missing queue paths.
+closed. Read-only inspection takes the shared registry lock and the pre-existing
+exclusive workspace lock; it does not create missing queue paths.
 
 Each new certification additionally installs one canonical immutable internal
 record at
