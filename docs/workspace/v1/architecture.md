@@ -29,6 +29,10 @@ certification binding to one stable queue watermark. Pre-workspace state has no
 import or promotion lane. P5B1 adds the production composition root and the
 versioned read-only `graphify workspace status --json` and
 `graphify workspace doctor` surface without repair or durable-state mutation.
+The executable surface discovers only the standard external state root and
+reads one bounded, canonical `runtime-manifest.json`; it never searches a
+checkout, synthesizes a compatibility tuple or queue policy, or derives policy
+from durable queue content. Missing or unusable authority fails closed.
 Mutation/query commands, repair, watch/service, installation, performance
 certification, candidate publication, and live-cutover work remain deferred;
 retained production query/service authority remains P5C work.
@@ -67,6 +71,14 @@ P2 writes only this external lifecycle state:
     workspace.pending.json
     workspace.lock
 ```
+
+P5B1 additionally reserves `runtime-manifest.json` at the root above as an
+internal format-version-1 read authority containing the complete frozen
+compatibility manifest and explicit semantic-queue policy. Status and doctor
+only read it through the same private-directory, singular-regular-file, 0600,
+no-follow, bounded-read rules used for durable state. P5C owns creating and
+atomically installing the candidate-backed file; P5B1 does not create it or
+guess its contents.
 
 P3 now owns generations, lifecycle journals, coordination locks, pointers,
 capacity reservations, and explicit offline-GC records. None of those paths is

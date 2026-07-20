@@ -8,9 +8,16 @@ import pytest
 
 from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.composition import (
+    RUNTIME_AUTHORITY_CONTRACT,
+    RUNTIME_AUTHORITY_FILENAME,
+    RUNTIME_AUTHORITY_FORMAT_VERSION,
+    WorkspaceAuthorityInvalid,
+    WorkspaceAuthorityUnsupported,
     WorkspaceRuntime,
+    WorkspaceRuntimeAuthority,
     WorkspaceRuntimeInputs,
     compose_workspace_runtime,
+    load_workspace_runtime_inputs,
 )
 from graphify.workspace.contracts import CompatibilityManifest, canonical_json_bytes
 from graphify.workspace.persistence import StatePathError
@@ -38,6 +45,31 @@ def _inputs(state_root: Path) -> WorkspaceRuntimeInputs:
         semantic_queue_policy=SEMANTIC_QUEUE_POLICY,
         capabilities=SUPPORTED,
     )
+
+
+def _authority_bytes(*, format_version: int = RUNTIME_AUTHORITY_FORMAT_VERSION) -> bytes:
+    if format_version == RUNTIME_AUTHORITY_FORMAT_VERSION:
+        return WorkspaceRuntimeAuthority(
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=SEMANTIC_QUEUE_POLICY,
+        ).canonical
+    return canonical_json_bytes(
+        {
+            "contract": RUNTIME_AUTHORITY_CONTRACT,
+            "format_version": format_version,
+            "compatibility_manifest": COMPATIBILITY_MANIFEST.to_dict(),
+            "semantic_queue_policy": SEMANTIC_QUEUE_POLICY.to_dict(),
+        }
+    )
+
+
+def _write_authority(state_root: Path, payload: bytes | None = None) -> Path:
+    state_root.mkdir(parents=True, mode=0o700)
+    state_root.chmod(0o700)
+    authority = state_root / RUNTIME_AUTHORITY_FILENAME
+    authority.write_bytes(_authority_bytes() if payload is None else payload)
+    authority.chmod(0o600)
+    return authority
 
 
 def _unsupported_manifest() -> CompatibilityManifest:
@@ -148,3 +180,135 @@ def test_compose_performs_no_writes_to_existing_state_tree(tmp_path: Path) -> No
 
     assert tree_snapshot(state_root) == before_tree
     assert metadata_snapshot(state_root) == before_metadata
+
+
+def test_load_workspace_runtime_inputs_reads_versioned_external_authority_without_writes(
+    tmp_path: Path,
+) -> None:
+    state_home = tmp_path / "state-home"
+    state_root = state_home / "graphify"
+    _write_authority(state_root)
+    before_tree = tree_snapshot(state_home)
+    before_metadata = metadata_snapshot(state_home)
+
+    inputs = load_workspace_runtime_inputs(
+        environ={"XDG_STATE_HOME": str(state_home)},
+        capabilities=SUPPORTED,
+    )
+
+    assert inputs is not None
+    assert inputs.state_root == state_root.resolve()
+    assert inputs.compatibility_manifest == COMPATIBILITY_MANIFEST
+    assert inputs.semantic_queue_policy == SEMANTIC_QUEUE_POLICY
+    assert inputs.capabilities == SUPPORTED
+    assert tree_snapshot(state_home) == before_tree
+    assert metadata_snapshot(state_home) == before_metadata
+
+
+def test_load_workspace_runtime_inputs_uses_home_fallback_without_creation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    inputs = load_workspace_runtime_inputs(
+        environ={"HOME": str(home)},
+        capabilities=SUPPORTED,
+    )
+
+    assert inputs is None
+    assert list(home.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"{not-json}\n",
+        b"[" * 2_000 + b"]" * 2_000,
+        canonical_json_bytes(
+            {
+                "contract": RUNTIME_AUTHORITY_CONTRACT,
+                "format_version": RUNTIME_AUTHORITY_FORMAT_VERSION,
+                "compatibility_manifest": COMPATIBILITY_MANIFEST.to_dict(),
+            }
+        ),
+    ],
+)
+def test_load_workspace_runtime_inputs_rejects_malformed_authority_without_writes(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    state_home = tmp_path / "state-home"
+    _write_authority(state_home / "graphify", payload)
+    before_tree = tree_snapshot(state_home)
+    before_metadata = metadata_snapshot(state_home)
+
+    with pytest.raises(WorkspaceAuthorityInvalid):
+        load_workspace_runtime_inputs(
+            environ={"XDG_STATE_HOME": str(state_home)},
+            capabilities=SUPPORTED,
+        )
+
+    assert tree_snapshot(state_home) == before_tree
+    assert metadata_snapshot(state_home) == before_metadata
+
+
+def test_load_workspace_runtime_inputs_rejects_unsupported_authority_version(
+    tmp_path: Path,
+) -> None:
+    state_home = tmp_path / "state-home"
+    _write_authority(state_home / "graphify", _authority_bytes(format_version=2))
+
+    with pytest.raises(WorkspaceAuthorityUnsupported):
+        load_workspace_runtime_inputs(
+            environ={"XDG_STATE_HOME": str(state_home)},
+            capabilities=SUPPORTED,
+        )
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "oversized"])
+def test_load_workspace_runtime_inputs_rejects_unsafe_or_unbounded_authority(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    state_home = tmp_path / "state-home"
+    state_root = state_home / "graphify"
+    state_root.mkdir(parents=True, mode=0o700)
+    state_root.chmod(0o700)
+    authority = state_root / RUNTIME_AUTHORITY_FILENAME
+    if unsafe_kind == "symlink":
+        target = tmp_path / "outside-secret"
+        target.write_bytes(_authority_bytes())
+        authority.symlink_to(target)
+    elif unsafe_kind == "mode":
+        authority.write_bytes(_authority_bytes())
+        authority.chmod(0o644)
+    else:
+        authority.write_bytes(b"x" * (64 * 1024 + 1))
+        authority.chmod(0o600)
+    before_tree = tree_snapshot(tmp_path)
+    before_metadata = metadata_snapshot(tmp_path)
+
+    with pytest.raises(WorkspaceAuthorityInvalid):
+        load_workspace_runtime_inputs(
+            environ={"XDG_STATE_HOME": str(state_home)},
+            capabilities=SUPPORTED,
+        )
+
+    assert tree_snapshot(tmp_path) == before_tree
+    assert metadata_snapshot(tmp_path) == before_metadata
+
+
+@pytest.mark.parametrize(
+    "environ",
+    [
+        {"XDG_STATE_HOME": "relative-state"},
+        {"HOME": "relative-home"},
+        {},
+    ],
+)
+def test_load_workspace_runtime_inputs_rejects_unsafe_environment_roots(
+    environ: dict[str, str],
+) -> None:
+    with pytest.raises(StatePathError):
+        load_workspace_runtime_inputs(environ=environ, capabilities=SUPPORTED)

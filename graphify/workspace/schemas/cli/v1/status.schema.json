@@ -135,6 +135,8 @@
         "registry_lock_invalid",
         "registry_lock_missing",
         "resource_accounting_deferred_p5c",
+        "runtime_authority_invalid",
+        "runtime_authority_unsupported",
         "semantic_queue_dead_letter",
         "semantic_queue_invalid",
         "semantic_queue_pending",

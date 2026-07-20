@@ -77,6 +77,8 @@ REASON_CODES = frozenset(
         "registry_lock_invalid",
         "registry_lock_missing",
         "resource_accounting_deferred_p5c",
+        "runtime_authority_invalid",
+        "runtime_authority_unsupported",
         "semantic_queue_dead_letter",
         "semantic_queue_invalid",
         "semantic_queue_pending",
@@ -590,6 +592,27 @@ def missing_workspace_authority_report() -> WorkspaceStatusReport:
                 "invalid",
                 "compatibility_manifest_missing",
                 "install_candidate_authority",
+            )
+        ],
+    )
+
+
+def invalid_workspace_authority_report(
+    *,
+    reason_code: str,
+    action_code: str,
+) -> WorkspaceStatusReport:
+    """Return a redacted fail-closed result for an unusable installed authority."""
+
+    return _finalize(
+        runtime=_runtime_summary(None),
+        workspaces=[],
+        checks=[
+            _check(
+                "runtime_authority",
+                "invalid",
+                reason_code,
+                action_code,
             )
         ],
     )
@@ -1680,6 +1703,7 @@ __all__ = [
     "STATUS_SCHEMA_VERSION",
     "WorkspaceStatusReport",
     "inspect_workspace_status",
+    "invalid_workspace_authority_report",
     "load_status_schema",
     "missing_workspace_authority_report",
 ]

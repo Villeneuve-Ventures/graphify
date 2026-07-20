@@ -232,6 +232,7 @@ class DurableStateRoot:
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
+        _require_supported_runtime: bool = True,
     ) -> None:
         if not root.is_absolute():
             raise StatePathError("state root must be an absolute path")
@@ -239,9 +240,32 @@ class DurableStateRoot:
             raise StatePathError(f"state root must not be a symbolic link: {root}")
         self.root = root.resolve(strict=False)
         self.capabilities = capabilities or RuntimeCapabilities.detect(self.root)
-        self.capabilities.require_supported()
+        if _require_supported_runtime:
+            self.capabilities.require_supported()
         self.fault_hook = fault_hook or (lambda _event: None)
         self.syscalls = syscalls or PosixSyscalls()
+
+    @classmethod
+    def read_optional_bytes_for_inspection(
+        cls,
+        root: Path,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        capabilities: RuntimeCapabilities | None = None,
+        fault_hook: FaultHook | None = None,
+        syscalls: Syscalls | None = None,
+    ) -> bytes | None:
+        """Read existing bytes safely before the runtime-support verdict."""
+
+        state = cls(
+            root,
+            capabilities=capabilities,
+            fault_hook=fault_hook,
+            syscalls=syscalls,
+            _require_supported_runtime=False,
+        )
+        return state.read_optional_existing_bytes(relative, max_bytes=max_bytes)
 
     @contextmanager
     def _root_directory(

@@ -67,3 +67,21 @@ second complete candidate and require identical digests for every output file.
 The trusted manifest is the local trust anchor for P1 tamper tests. V1 detects
 artifact mismatch relative to that frozen manifest; it does not claim safety if
 both the artifact and trust anchor are maliciously replaced.
+
+## Installed read authority
+
+The P5B1 production composition root consumes
+`$XDG_STATE_HOME/graphify/runtime-manifest.json`, falling back to
+`$HOME/.local/state/graphify/runtime-manifest.json` when `XDG_STATE_HOME` is
+unset or empty. The canonical internal format-version-1 document contains the
+complete `graphify.workspace.compatibility_manifest` and the explicit
+`graphify.workspace.semantic_queue_policy.internal` document. It has no
+defaults: neither package constants nor existing queue state may supply a
+missing authority field.
+
+Status and doctor accept only an owned, singular regular 0600 file beneath an
+owned private 0700 state root, cap the read at 64 KiB, reject duplicate or
+noncanonical JSON and unknown versions, redact diagnostic details, and never
+create directories, files, locks, or recovery artifacts. P5C installation will
+bind and atomically install this authority from the reviewed candidate;
+publication and installation are not part of P5B1.

@@ -5,11 +5,17 @@ from __future__ import annotations
 import sys
 from typing import Sequence, TextIO
 
-from graphify.workspace.composition import WorkspaceRuntimeInputs
+from graphify.workspace.composition import (
+    WorkspaceAuthorityError,
+    WorkspaceRuntimeInputs,
+    load_workspace_runtime_inputs,
+)
+from graphify.workspace.persistence import StatePathError
 from graphify.workspace.status import (
     EXIT_USAGE,
     WorkspaceStatusReport,
     inspect_workspace_status,
+    invalid_workspace_authority_report,
     missing_workspace_authority_report,
 )
 
@@ -50,9 +56,23 @@ def run_workspace_command(
         errors.write(_USAGE + "\n")
         return EXIT_USAGE
 
-    report = (
-        missing_workspace_authority_report() if inputs is None else inspect_workspace_status(inputs)
-    )
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        report = (
+            missing_workspace_authority_report()
+            if resolved_inputs is None
+            else inspect_workspace_status(resolved_inputs)
+        )
+    except WorkspaceAuthorityError as exc:
+        report = invalid_workspace_authority_report(
+            reason_code=exc.reason_code,
+            action_code=exc.action_code,
+        )
+    except StatePathError:
+        report = invalid_workspace_authority_report(
+            reason_code="unsafe_state_path",
+            action_code="configure_safe_state_root",
+        )
     if command == ("status", "--json"):
         output.write(report.canonical.decode("utf-8"))
     else:

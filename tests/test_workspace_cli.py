@@ -13,7 +13,27 @@ from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
 import graphify.__main__ as mainmod
+from graphify.workspace.composition import (
+    RUNTIME_AUTHORITY_FILENAME,
+    WorkspaceAuthorityInvalid,
+    WorkspaceAuthorityUnsupported,
+    WorkspaceRuntimeAuthority,
+)
+from graphify.workspace.semantic_queue import SemanticQueuePolicy
 from graphify.workspace.status import WorkspaceStatusReport, load_status_schema
+from tests.workspace_p3_helpers import (
+    COMPATIBILITY_MANIFEST,
+    COMPATIBILITY_SHA256,
+    metadata_snapshot,
+    tree_snapshot,
+)
+
+
+SEMANTIC_QUEUE_POLICY = SemanticQueuePolicy(
+    max_items=8,
+    max_bytes=16 * 1024,
+    retry_budget=1,
+)
 
 
 def _cli() -> Any:
@@ -230,6 +250,78 @@ def test_invalid_workspace_arguments_return_usage_without_inspecting_state(
     assert "usage" in stderr.getvalue().lower()
 
 
+def test_status_without_explicit_inputs_loads_production_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    loaded_inputs = object()
+    report = _report(10)
+    monkeypatch.setattr(
+        workspace_cli,
+        "load_workspace_runtime_inputs",
+        lambda: loaded_inputs,
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "inspect_workspace_status",
+        lambda inputs: report if inputs is loaded_inputs else None,
+    )
+    stdout = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        ["status", "--json"],
+        inputs=None,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 10
+    assert json.loads(stdout.getvalue()) == report.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("error", "reason_code", "action_code"),
+    [
+        (
+            WorkspaceAuthorityInvalid("operator-secret-invalid-authority"),
+            "runtime_authority_invalid",
+            "install_candidate_authority",
+        ),
+        (
+            WorkspaceAuthorityUnsupported("operator-secret-unsupported-authority"),
+            "runtime_authority_unsupported",
+            "install_supported_candidate",
+        ),
+    ],
+)
+def test_authority_load_failures_are_stable_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    reason_code: str,
+    action_code: str,
+) -> None:
+    workspace_cli = _cli()
+
+    def fail_load() -> None:
+        raise error
+
+    monkeypatch.setattr(workspace_cli, "load_workspace_runtime_inputs", fail_load)
+    stdout = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        ["status", "--json"],
+        inputs=None,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    payload = json.loads(stdout.getvalue())
+    assert result == 20
+    assert payload["reason_code"] == reason_code
+    assert payload["action_code"] == action_code
+    assert "operator-secret" not in stdout.getvalue()
+
+
 def test_status_without_production_authority_fails_closed_without_creating_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -375,3 +467,57 @@ def test_real_module_cli_preserves_exit_and_no_write_contract(
     else:
         assert result.stdout == ""
         assert "usage" in result.stderr.lower()
+
+
+@pytest.mark.parametrize("arguments", [("status", "--json"), ("doctor",)])
+def test_real_module_cli_loads_external_authority_without_writing_state(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+) -> None:
+    home = tmp_path / "home"
+    checkout = tmp_path / "checkout"
+    state_home = tmp_path / "state-home"
+    state_root = state_home / "graphify"
+    home.mkdir()
+    checkout.mkdir()
+    state_root.mkdir(parents=True, mode=0o700)
+    state_root.chmod(0o700)
+    authority = state_root / RUNTIME_AUTHORITY_FILENAME
+    authority.write_bytes(
+        WorkspaceRuntimeAuthority(
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=SEMANTIC_QUEUE_POLICY,
+        ).canonical
+    )
+    authority.chmod(0o600)
+    before_tree = tree_snapshot(state_home)
+    before_metadata = metadata_snapshot(state_home)
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(state_home),
+            "PYTHONPATH": str(Path(__file__).parents[1]),
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "graphify", "workspace", *arguments],
+        cwd=checkout,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 20
+    assert tree_snapshot(state_home) == before_tree
+    assert metadata_snapshot(state_home) == before_metadata
+    assert list(home.iterdir()) == []
+    assert list(checkout.iterdir()) == []
+    assert "compatibility_manifest_missing" not in result.stdout
+    if arguments == ("status", "--json"):
+        payload = json.loads(result.stdout)
+        assert payload["runtime"]["compatibility_sha256"] == COMPATIBILITY_SHA256
+    else:
+        assert "workspace doctor: invalid (exit 20)" in result.stdout
