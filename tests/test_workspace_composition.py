@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import errno
+import os
 from pathlib import Path
 from typing import cast
 
@@ -218,6 +220,36 @@ def test_load_workspace_runtime_inputs_uses_home_fallback_without_creation(
 
     assert inputs is None
     assert list(home.iterdir()) == []
+
+
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.ELOOP])
+def test_load_workspace_runtime_inputs_rejects_uninspectable_state_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    state_home = tmp_path / "operator-secret-state-home"
+    state_home.mkdir()
+    original_stat = Path.stat
+
+    def fail_state_home_stat(
+        path: Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if path == state_home:
+            raise OSError(error_number, "operator-secret-state-home")
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "stat", fail_state_home_stat)
+        with pytest.raises(StatePathError):
+            load_workspace_runtime_inputs(
+                environ={"XDG_STATE_HOME": str(state_home)},
+                capabilities=SUPPORTED,
+            )
+
+    assert list(state_home.iterdir()) == []
 
 
 @pytest.mark.parametrize(

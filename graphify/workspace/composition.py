@@ -163,8 +163,12 @@ def load_workspace_runtime_inputs(
     """Load installed composition authorities without creating or repairing state."""
 
     state_root = _workspace_state_root(os.environ if environ is None else environ)
-    if not state_root.parent.exists():
+    try:
+        state_root.parent.lstat()
+    except FileNotFoundError:
         return None
+    except OSError as exc:
+        raise StatePathError("workspace state home cannot be inspected safely") from exc
     try:
         payload = DurableStateRoot.read_optional_bytes_for_inspection(
             state_root,
