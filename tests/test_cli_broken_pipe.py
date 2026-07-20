@@ -8,6 +8,8 @@ as a failure. An early-closing reader is now treated as success (exit 0).
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -47,3 +49,41 @@ def test_small_buffered_output_survives_reader_that_reads_nothing():
     reader.wait()
     rc = producer.wait()
     assert rc == 0, f"expected clean exit when reader reads nothing, got {rc}"
+
+
+def test_workspace_nonzero_exit_flushes_inside_broken_pipe_guard(tmp_path: Path):
+    """A workspace result must flush before its nonzero SystemExit escapes main()."""
+    home = tmp_path / "home"
+    checkout = tmp_path / "checkout"
+    state_home = tmp_path / "state-home"
+    home.mkdir()
+    checkout.mkdir()
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(state_home),
+            "PYTHONPATH": str(Path(__file__).parents[1]),
+        }
+    )
+    producer = subprocess.Popen(
+        [PYTHON, "-m", "graphify", "workspace", "status", "--json"],
+        cwd=checkout,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    reader = subprocess.Popen(
+        [PYTHON, "-c", "pass"],
+        stdin=producer.stdout,
+        stdout=subprocess.DEVNULL,
+    )
+    assert producer.stdout is not None
+    producer.stdout.close()
+    reader.wait()
+    assert producer.stderr is not None
+    stderr = producer.stderr.read().decode("utf-8", errors="replace")
+    rc = producer.wait()
+
+    assert rc == 0, f"expected guarded broken-pipe exit, got {rc}: {stderr}"
+    assert "Exception ignored while flushing sys.stdout" not in stderr
