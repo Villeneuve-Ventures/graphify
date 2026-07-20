@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -45,7 +46,7 @@ def _unsupported_manifest() -> CompatibilityManifest:
         "engine_baseline": "0.9.15",
     }
     return CompatibilityManifest(
-        contract=CompatibilityManifest.CONTRACT,
+        contract=cast(str, CompatibilityManifest.CONTRACT),
         schema_version=1,
         canonical=canonical_json_bytes(value),
     )

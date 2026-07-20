@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 from jsonschema import Draft202012Validator, FormatChecker
 import pytest
@@ -23,7 +23,11 @@ from graphify.workspace.contracts import (
 )
 from graphify.workspace.freshness import FreshnessAuthority
 from graphify.workspace.identity import discover_source
-from graphify.workspace.persistence import DurableStateRoot, RuntimeCapabilities
+from graphify.workspace.persistence import (
+    DurableStateRoot,
+    RuntimeCapabilities,
+    StatePathError,
+)
 from graphify.workspace.registry import RegistryStore
 from graphify.workspace.semantic_queue import (
     SemanticDesiredWork,
@@ -89,7 +93,7 @@ def _unsupported_manifest() -> CompatibilityManifest:
         "engine_baseline": "0.9.15",
     }
     return CompatibilityManifest(
-        contract=CompatibilityManifest.CONTRACT,
+        contract=cast(str, CompatibilityManifest.CONTRACT),
         schema_version=1,
         canonical=canonical_json_bytes(value),
     )
@@ -131,8 +135,10 @@ def _xattr_snapshot(root: Path) -> dict[str, tuple[tuple[str, bytes], ...]]:
     for path in (root, *sorted(root.rglob("*"))):
         relative = "." if path == root else path.relative_to(root).as_posix()
         try:
-            names = sorted(os.listxattr(path, follow_symlinks=False))
-            values = tuple((name, os.getxattr(path, name, follow_symlinks=False)) for name in names)
+            listxattr = getattr(os, "listxattr")
+            getxattr = getattr(os, "getxattr")
+            names = sorted(listxattr(path, follow_symlinks=False))
+            values = tuple((name, getxattr(path, name, follow_symlinks=False)) for name in names)
         except (AttributeError, OSError):
             values = ()
         result[relative] = values
@@ -600,6 +606,67 @@ def test_status_rejects_freshness_release_for_a_different_generation_snapshot(
     assert "status_snapshot_changed" in _reason_codes(report)
 
 
+def test_status_revalidates_workspace_state_after_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    harness = RuntimeHarness(
+        repo=runtime.repo,
+        state_root=runtime.state_root,
+        registry=runtime.registry,
+        leases=runtime.pointers.generations.leases,
+    )
+    queue = runtime.pointers.generations.semantic_queue
+    assert queue is not None
+    original_probe = FreshnessAuthority.probe
+    mutated = False
+
+    def mutate_after_probe(
+        authority: FreshnessAuthority,
+        repo_uuid: str,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal mutated
+        result = original_probe(authority, repo_uuid, **kwargs)
+        if not mutated:
+            build = acquire(harness, "BUILD", tick=3)
+            queue.enqueue(
+                build,
+                SemanticDesiredWork(
+                    source_epoch=1,
+                    policy_sha256="1" * 64,
+                    operation="UPSERT",
+                    path="docs/status-race.md",
+                    content_sha256="2" * 64,
+                    desired_revision=2,
+                ),
+                monotonic_ns=30_001,
+            )
+            harness.leases.release(build)
+            mutated = True
+        return result
+
+    monkeypatch.setattr(FreshnessAuthority, "probe", mutate_after_probe)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert mutated is True
+    assert report.exit_code == 10
+    assert report.to_dict()["safe_to_query"] is False
+    assert "status_snapshot_changed" in _reason_codes(report)
+
+
 @pytest.mark.parametrize(
     ("queue_state", "expected_reason"),
     [
@@ -624,6 +691,7 @@ def test_status_reports_valid_unhealthy_semantic_queue_as_degraded(
         leases=runtime.pointers.generations.leases,
     )
     queue = runtime.pointers.generations.semantic_queue
+    assert queue is not None
     build = acquire(harness, "BUILD", tick=3)
     queue.enqueue(
         build,
@@ -813,6 +881,39 @@ def test_status_classifies_post_lock_deadline_without_claiming_contention(
     assert report.exit_code == 10
     assert "inspection_deadline_exceeded" in _reason_codes(report)
     assert "workspace_lock_contended" not in _reason_codes(report)
+
+
+def test_status_classifies_unsafe_lease_snapshot_at_its_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    before_tree = tree_snapshot(harness.state_root)
+    before_metadata = metadata_snapshot(harness.state_root)
+    before_xattrs = _xattr_snapshot(harness.state_root)
+
+    def unsafe_lease_snapshot(*_args: object, **_kwargs: object) -> object:
+        raise StatePathError("injected unsafe lease record path")
+
+    monkeypatch.setattr(
+        type(harness.leases),
+        "read_only_snapshot_locked",
+        unsafe_lease_snapshot,
+    )
+
+    report = inspect_workspace_status(_inputs(harness.state_root))
+    value = report.to_dict()
+    lease_check = next(
+        check for check in value["checks"] if check["component"] == f"workspace:{REPO_UUID}:leases"
+    )
+
+    assert report.exit_code == 20
+    assert lease_check["reason_code"] == "workspace_state_invalid"
+    assert lease_check["action_code"] == "run_workspace_repair"
+    assert "workspace_lock_invalid" not in _reason_codes(report)
+    assert tree_snapshot(harness.state_root) == before_tree
+    assert metadata_snapshot(harness.state_root) == before_metadata
+    assert _xattr_snapshot(harness.state_root) == before_xattrs
 
 
 def test_status_uses_no_recovery_or_mutating_persistence_primitive(

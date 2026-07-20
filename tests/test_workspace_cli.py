@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from io import StringIO
 import importlib
 import json
@@ -10,53 +9,139 @@ import subprocess
 import sys
 from typing import Any
 
+from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
 import graphify.__main__ as mainmod
-from graphify.workspace.contracts import canonical_json_bytes
-
-
-@dataclass(frozen=True)
-class _Report:
-    exit_code: int
-    payload: dict[str, Any]
-
-    @property
-    def canonical(self) -> bytes:
-        return canonical_json_bytes(self.payload)
-
-    def to_dict(self) -> dict[str, Any]:
-        return self.payload
+from graphify.workspace.status import WorkspaceStatusReport, load_status_schema
 
 
 def _cli() -> Any:
     return importlib.import_module("graphify.workspace.cli")
 
 
-def _report(exit_code: int) -> _Report:
-    state = {0: "healthy", 10: "degraded", 20: "invalid"}[exit_code]
-    return _Report(
-        exit_code=exit_code,
-        payload={
+def _ready_workspace() -> dict[str, Any]:
+    receipt_sha256 = "3" * 64
+    absent_lease = {
+        "present": False,
+        "operation": None,
+        "fence_token": None,
+        "liveness": "not_evaluated",
+    }
+    return {
+        "repo_uuid": "11111111-1111-4111-8111-111111111111",
+        "state": "ready",
+        "safe_to_query": True,
+        "reason_code": "ready",
+        "action_code": "none",
+        "source_identity_sha256": "1" * 64,
+        "active_source_revision": 1,
+        "source_epoch": 1,
+        "policy_sha256": "2" * 64,
+        "generations": {
+            "pointer_revision": 1,
+            "current": {
+                "generation_id": "gen-current",
+                "receipt_sha256": receipt_sha256,
+            },
+            "last_good": None,
+            "pending": [],
+            "pending_reason_code": "ready",
+        },
+        "queue": {
+            "revision": 0,
+            "desired_watermark": 0,
+            "completed_watermark": 0,
+            "depth": 0,
+            "pending": 0,
+            "claimed": 0,
+            "retrying": 0,
+            "dead_letter": 0,
+            "oldest_age_seconds": None,
+            "age_reason_code": "not_recorded_v1",
+        },
+        "leases": {
+            "migration_epoch": 0,
+            "workspace": absent_lease,
+            "semantic": absent_lease,
+        },
+        "journal": {
+            "sequence": 0,
+            "last_successful_transition": None,
+            "last_failure_classification": None,
+        },
+        "freshness": {
+            "state": "observed_current",
+            "duration_ms": 0,
+            "observation_boundary": "two_sided",
+            "binding": {
+                "active_source_revision": 1,
+                "pointer_revision": 1,
+                "receipt_sha256": receipt_sha256,
+            },
+        },
+        "watcher": {
+            "state": "not_evaluated",
+            "heartbeat": None,
+            "boot_id": None,
+            "process_id": None,
+            "reason_code": "service_deferred_p5c",
+        },
+        "resources": {
+            "state": "not_evaluated",
+            "pressure": None,
+            "reason_code": "resource_accounting_deferred_p5c",
+        },
+        "repair": {"required": False, "count": 0},
+    }
+
+
+def _report(exit_code: int) -> WorkspaceStatusReport:
+    state, reason_code, action_code = {
+        0: ("ready", "ready", "none"),
+        10: ("degraded", "no_registered_workspaces", "register_workspace"),
+        20: ("invalid", "registry_invalid", "run_workspace_repair"),
+    }[exit_code]
+    return WorkspaceStatusReport(
+        {
             "contract": "graphify.workspace.status",
             "schema_version": 1,
             "cli_contract_version": 1,
             "state": state,
             "exit_code": exit_code,
-            "reason_code": f"fixture_{state}",
-            "action_code": "none" if exit_code == 0 else "inspect_fixture",
+            "reason_code": reason_code,
+            "action_code": action_code,
             "safe_to_query": exit_code == 0,
-            "workspaces": [],
+            "correlation_id": "status-000000000000000000000000",
+            "runtime": {
+                "distribution_version": "test",
+                "engine_baseline": "test",
+                "adapter_contract_version": 1,
+                "state_schema_version": 1,
+                "compatibility_sha256": None,
+            },
+            "workspaces": [_ready_workspace()] if exit_code == 0 else [],
             "checks": [
                 {
                     "component": "runtime_authority",
                     "state": state,
-                    "reason_code": f"fixture_{state}",
-                    "action_code": "none" if exit_code == 0 else "inspect_fixture",
+                    "reason_code": reason_code,
+                    "action_code": action_code,
                 }
             ],
-        },
+        }
     )
+
+
+@pytest.mark.parametrize("exit_code", [0, 10, 20])
+def test_cli_report_fixtures_follow_the_versioned_status_contract(exit_code: int) -> None:
+    value = _report(exit_code).to_dict()
+
+    Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    ).validate(value)
+    WorkspaceStatusReport(value)
 
 
 @pytest.mark.parametrize("exit_code", [0, 10, 20])
@@ -101,11 +186,12 @@ def test_doctor_renders_the_same_checks_and_returns_report_exit_code(
     )
 
     rendered = stdout.getvalue()
+    value = report.to_dict()
     assert result == exit_code
-    assert report.payload["state"] in rendered
-    assert report.payload["checks"][0]["component"] in rendered
-    assert report.payload["checks"][0]["reason_code"] in rendered
-    assert report.payload["checks"][0]["action_code"] in rendered
+    assert value["state"] in rendered
+    assert value["checks"][0]["component"] in rendered
+    assert value["checks"][0]["reason_code"] in rendered
+    assert value["checks"][0]["action_code"] in rendered
 
 
 @pytest.mark.parametrize(
@@ -125,7 +211,7 @@ def test_invalid_workspace_arguments_return_usage_without_inspecting_state(
 ) -> None:
     workspace_cli = _cli()
 
-    def unexpected_inspection(_inputs: object) -> _Report:
+    def unexpected_inspection(_inputs: object) -> WorkspaceStatusReport:
         raise AssertionError("invalid arguments must not inspect workspace state")
 
     monkeypatch.setattr(workspace_cli, "inspect_workspace_status", unexpected_inspection)

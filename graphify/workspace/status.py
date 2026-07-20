@@ -555,12 +555,14 @@ def _inspect_workspace(
     entry: Mapping[str, object],
     *,
     deadline_ns: int,
+    queue_tokens: dict[str, tuple[int, str]],
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
     repo_uuid = str(entry["repo_uuid"])
     prefix = f"workspace:{repo_uuid}"
     workspace = _workspace_shell(entry)
     checks: list[dict[str, str]] = []
     workspace_lock_acquired = False
+    state_path_component = f"{prefix}:lock"
     try:
         with runtime.leases.read_only_workspace_lock(
             repo_uuid,
@@ -568,6 +570,7 @@ def _inspect_workspace(
         ):
             workspace_lock_acquired = True
             checks.append(_check(f"{prefix}:lock", "ready", "ready", "none"))
+            state_path_component = f"{prefix}:leases"
             try:
                 lease_state = runtime.leases.read_only_snapshot_locked(
                     registry,
@@ -602,6 +605,7 @@ def _inspect_workspace(
             }
             checks.append(_check(f"{prefix}:leases", "ready", "ready", "none"))
 
+            state_path_component = f"{prefix}:semantic_queue"
             try:
                 queue = runtime.semantic_queue.read_only_snapshot_locked(
                     repo_uuid,
@@ -624,6 +628,7 @@ def _inspect_workspace(
                     repair_required=True,
                 )
             queue_summary = _queue_summary(queue)
+            queue_tokens[repo_uuid] = (queue.revision, queue.sha256)
             workspace["queue"] = queue_summary
             queue_issue = _queue_issue(queue_summary)
             if queue_issue is None:
@@ -642,6 +647,7 @@ def _inspect_workspace(
                     )
                 )
 
+            state_path_component = f"{prefix}:pointer"
             try:
                 require_before_deadline(
                     deadline_ns,
@@ -678,6 +684,7 @@ def _inspect_workspace(
                     action_code="run_workspace_repair",
                     repair_required=True,
                 )
+            state_path_component = f"{prefix}:journal"
             try:
                 require_before_deadline(
                     deadline_ns,
@@ -731,6 +738,7 @@ def _inspect_workspace(
                     repair_required=False,
                 )
 
+            state_path_component = f"{prefix}:generation"
             try:
                 with runtime.pointers.read_current(
                     repo_uuid,
@@ -801,9 +809,11 @@ def _inspect_workspace(
         return _workspace_failure(
             workspace,
             checks,
-            component=f"{prefix}:lock",
+            component=state_path_component,
             state="invalid",
-            reason_code="workspace_lock_invalid",
+            reason_code=(
+                "workspace_state_invalid" if workspace_lock_acquired else "workspace_lock_invalid"
+            ),
             action_code="run_workspace_repair",
             repair_required=True,
         )
@@ -817,6 +827,53 @@ def _inspect_workspace(
             action_code="run_workspace_repair",
             repair_required=True,
         )
+
+
+def _mark_snapshot_changed(
+    workspace: dict[str, object],
+    checks: list[dict[str, str]],
+    *,
+    component: str,
+) -> None:
+    cast(dict[str, object], workspace["freshness"])["state"] = "drift"
+    workspace["state"] = "degraded"
+    workspace["safe_to_query"] = False
+    workspace["reason_code"] = "status_snapshot_changed"
+    workspace["action_code"] = "retry_status"
+    checks.append(
+        _check(
+            component,
+            "degraded",
+            "status_snapshot_changed",
+            "retry_status",
+        )
+    )
+
+
+def _queue_snapshot_is_current(
+    runtime: WorkspaceRuntime,
+    repo_uuid: str,
+    expected: tuple[int, str] | None,
+    *,
+    deadline_ns: int,
+) -> bool:
+    if expected is None:
+        return False
+    try:
+        observed = runtime.semantic_queue.inspect(
+            repo_uuid,
+            deadline_ns=deadline_ns,
+        )
+    except (
+        LockTimeout,
+        StateCorrupt,
+        StatePathError,
+        ContractError,
+        LeaseError,
+        SemanticQueueError,
+    ):
+        return False
+    return (observed.revision, observed.sha256) == expected
 
 
 def _apply_freshness(
@@ -861,18 +918,10 @@ def _apply_freshness(
             "receipt_sha256": current["receipt_sha256"],
         }
         if binding != expected_binding:
-            freshness["state"] = "drift"
-            workspace["state"] = "degraded"
-            workspace["safe_to_query"] = False
-            workspace["reason_code"] = "status_snapshot_changed"
-            workspace["action_code"] = "retry_status"
-            checks.append(
-                _check(
-                    component,
-                    "degraded",
-                    "status_snapshot_changed",
-                    "retry_status",
-                )
+            _mark_snapshot_changed(
+                workspace,
+                checks,
+                component=component,
             )
             return
         freshness["state"] = "observed_current"
@@ -1012,6 +1061,7 @@ def inspect_workspace_status(
         time.monotonic_ns() + _DEFAULT_INSPECTION_TIMEOUT_NS if deadline_ns is None else deadline_ns
     )
     workspaces: list[dict[str, object]] = []
+    queue_tokens: dict[str, tuple[int, str]] = {}
     registry_lock_acquired = False
     try:
         with runtime.registry.read_only_snapshot(deadline_ns=absolute_deadline) as registry:
@@ -1027,6 +1077,7 @@ def inspect_workspace_status(
                     registry,
                     entry,
                     deadline_ns=absolute_deadline,
+                    queue_tokens=queue_tokens,
                 )
                 workspaces.append(workspace)
                 checks.extend(workspace_checks)
@@ -1079,6 +1130,18 @@ def inspect_workspace_status(
                     checks,
                     deadline_ns=absolute_deadline,
                 )
+                repo_uuid = str(workspace["repo_uuid"])
+                if bool(workspace["safe_to_query"]) and not _queue_snapshot_is_current(
+                    runtime,
+                    repo_uuid,
+                    queue_tokens.get(repo_uuid),
+                    deadline_ns=absolute_deadline,
+                ):
+                    _mark_snapshot_changed(
+                        workspace,
+                        checks,
+                        component=f"workspace:{workspace['repo_uuid']}:snapshot",
+                    )
     return _finalize(
         runtime=_runtime_summary(compatibility_sha256),
         workspaces=workspaces,
