@@ -1522,16 +1522,36 @@ class DurableStateRoot:
                 )
             yield
 
-    def read_bytes(self, relative: str | Path) -> bytes:
+    def read_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
         """Read one contained regular state file without following its final path."""
 
         self._ensure_root()
-        return self._read_regular(self.path(relative))
+        return self._read_regular(
+            self.path(relative),
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
-    def read_existing_bytes(self, relative: str | Path) -> bytes:
+    def read_existing_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
         """Read existing state without mkdir, chmod, replacement, or cleanup."""
 
-        return self._read_regular(self.path(relative))
+        return self._read_regular(
+            self.path(relative),
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
     def read_optional_existing_bytes(self, relative: str | Path) -> bytes | None:
         """Read optional existing state while still validating its private parent chain."""
@@ -1749,31 +1769,67 @@ class DurableStateRoot:
             raise
         return record
 
-    def _read_regular(self, path: Path) -> bytes:
+    def _read_regular(
+        self,
+        path: Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
         try:
             descriptor = self._open_existing_file(path)
         except OSError as exc:
             raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
         if descriptor is None:  # pragma: no cover - allow_missing_parent is false
             raise StateCorrupt(f"state record parent is missing: {path.parent}")
-        return self._read_regular_descriptor(descriptor, path)
+        return self._read_regular_descriptor(
+            descriptor,
+            path,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
-    def _read_regular_descriptor(self, descriptor: int, path: Path) -> bytes:
+    def _read_regular_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
         try:
+            require_before_deadline(deadline_ns, "state record read exceeded its deadline")
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
                 raise StateCorrupt(f"state record is not a regular file: {path}")
             self._require_owner(details, path)
             if stat.S_IMODE(details.st_mode) != 0o600:
                 raise StateCorrupt(f"state record mode is not 0600: {path}")
+            if max_bytes is not None and details.st_size > max_bytes:
+                raise StateCorrupt(
+                    f"state record exceeds its read limit of {max_bytes} bytes: {path}"
+                )
             chunks: list[bytes] = []
+            total = 0
             while True:
+                require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+                read_size = 1024 * 1024
+                if max_bytes is not None:
+                    read_size = min(read_size, (max_bytes - total) + 1)
                 try:
-                    chunk = os.read(descriptor, 1024 * 1024)
+                    chunk = os.read(descriptor, read_size)
                 except InterruptedError:
                     continue
+                require_before_deadline(deadline_ns, "state record read exceeded its deadline")
                 if not chunk:
                     return b"".join(chunks)
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise StateCorrupt(
+                        f"state record exceeds its read limit of {max_bytes} bytes: {path}"
+                    )
                 chunks.append(chunk)
         finally:
             os.close(descriptor)

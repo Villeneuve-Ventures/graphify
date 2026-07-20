@@ -214,6 +214,64 @@ def test_read_stable_honors_deadline_during_segment_traversal(
     assert decoded < 20
 
 
+def test_decode_segment_rejects_oversized_frame_before_reading_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    _append_allocated(store, grant)
+    segment = _segment(harness.state_root, 1)
+    with segment.open("r+b") as stream:
+        stream.truncate((1024 * 1024) + 1)
+
+    def unexpected_read(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("oversized journal payload was read")
+
+    monkeypatch.setattr("graphify.workspace.persistence.os.read", unexpected_read)
+
+    with pytest.raises(JournalCorrupt, match="exceeds its read limit"):
+        store._decode_segment(store._segment_path(REPO_UUID, 1), existing_only=True)
+
+
+def test_decode_segment_checks_deadline_while_reading_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    _append_allocated(store, grant)
+    segment = _segment(harness.state_root, 1)
+    with segment.open("ab") as stream:
+        stream.write(b"x" * (128 * 1024))
+
+    monotonic_tick = 0
+
+    def monotonic_ns() -> int:
+        nonlocal monotonic_tick
+        monotonic_tick += 1
+        return monotonic_tick
+
+    monkeypatch.setattr("graphify.workspace.persistence.time.monotonic_ns", monotonic_ns)
+
+    with pytest.raises(LockTimeout, match="state record read exceeded its deadline"):
+        store._decode_segment(
+            store._segment_path(REPO_UUID, 1),
+            existing_only=True,
+            deadline_ns=4,
+        )
+
+
 def test_successor_cleans_real_process_death_atomic_segment_temp(tmp_path: Path) -> None:
     harness = create_harness(tmp_path)
     script = (

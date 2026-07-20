@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any, Mapping, cast
+import uuid
 
 from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.composition import (
@@ -165,6 +167,194 @@ def _runtime_summary(compatibility_sha256: str | None) -> dict[str, object]:
     }
 
 
+def _schema_equal(left: object, right: object) -> bool:
+    return canonical_json_bytes(left) == canonical_json_bytes(right)
+
+
+def _schema_accepts(
+    value: object,
+    schema: Mapping[str, object],
+    root: Mapping[str, object],
+    path: str,
+) -> bool:
+    try:
+        _validate_schema_node(value, schema, root, path)
+    except ValueError:
+        return False
+    return True
+
+
+def _schema_type_matches(value: object, expected: str) -> bool:
+    if expected == "object":
+        return isinstance(value, Mapping)
+    if expected == "array":
+        return isinstance(value, list)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "null":
+        return value is None
+    return False
+
+
+def _schema_error(path: str, detail: str) -> ValueError:
+    return ValueError(f"workspace status schema violation at {path}: {detail}")
+
+
+def _resolve_schema_reference(
+    reference: str,
+    root: Mapping[str, object],
+    path: str,
+) -> Mapping[str, object]:
+    if not reference.startswith("#/"):
+        raise _schema_error(path, f"unsupported schema reference {reference!r}")
+    resolved: object = root
+    for part in reference[2:].split("/"):
+        if not isinstance(resolved, Mapping) or part not in resolved:
+            raise _schema_error(path, f"unresolved schema reference {reference!r}")
+        resolved = resolved[part]
+    if not isinstance(resolved, Mapping):
+        raise _schema_error(path, f"invalid schema reference {reference!r}")
+    return cast(Mapping[str, object], resolved)
+
+
+def _validate_schema_node(
+    value: object,
+    schema: Mapping[str, object],
+    root: Mapping[str, object],
+    path: str,
+) -> None:
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        _validate_schema_node(value, _resolve_schema_reference(reference, root, path), root, path)
+
+    alternatives = schema.get("oneOf")
+    if isinstance(alternatives, list):
+        matches = sum(
+            _schema_accepts(value, cast(Mapping[str, object], option), root, path)
+            for option in alternatives
+            if isinstance(option, Mapping)
+        )
+        if matches != 1:
+            raise _schema_error(path, "value must match exactly one schema alternative")
+
+    expected_types = schema.get("type")
+    if isinstance(expected_types, str):
+        allowed_types = (expected_types,)
+    elif isinstance(expected_types, list) and all(isinstance(item, str) for item in expected_types):
+        allowed_types = tuple(cast(list[str], expected_types))
+    else:
+        allowed_types = ()
+    if allowed_types and not any(
+        _schema_type_matches(value, expected) for expected in allowed_types
+    ):
+        raise _schema_error(path, f"expected type {' or '.join(allowed_types)}")
+
+    if "const" in schema and not _schema_equal(value, schema["const"]):
+        raise _schema_error(path, "value does not match the required constant")
+    enum = schema.get("enum")
+    if isinstance(enum, list) and not any(_schema_equal(value, item) for item in enum):
+        raise _schema_error(path, "value is outside the versioned enum")
+
+    if isinstance(value, str):
+        minimum_length = schema.get("minLength")
+        if isinstance(minimum_length, int) and len(value) < minimum_length:
+            raise _schema_error(path, f"string must contain at least {minimum_length} characters")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            raise _schema_error(path, "string does not match the required pattern")
+        if schema.get("format") == "uuid":
+            try:
+                parsed_uuid = uuid.UUID(value)
+            except (AttributeError, ValueError) as exc:
+                raise _schema_error(path, "string is not a UUID") from exc
+            if str(parsed_uuid) != value.lower():
+                raise _schema_error(path, "string is not a canonical UUID")
+
+    minimum = schema.get("minimum")
+    if (
+        isinstance(minimum, int)
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and value < minimum
+    ):
+        raise _schema_error(path, f"integer must be at least {minimum}")
+
+    if isinstance(value, Mapping):
+        required = schema.get("required")
+        if isinstance(required, list):
+            missing = [key for key in required if isinstance(key, str) and key not in value]
+            if missing:
+                raise _schema_error(path, f"missing required fields: {', '.join(missing)}")
+        properties = schema.get("properties")
+        if isinstance(properties, Mapping):
+            if schema.get("additionalProperties") is False:
+                unexpected = sorted(str(key) for key in value if key not in properties)
+                if unexpected:
+                    raise _schema_error(path, f"unexpected fields: {', '.join(unexpected)}")
+            for key, child_schema in properties.items():
+                if key in value and isinstance(key, str) and isinstance(child_schema, Mapping):
+                    _validate_schema_node(
+                        value[key],
+                        cast(Mapping[str, object], child_schema),
+                        root,
+                        f"{path}.{key}",
+                    )
+
+    if isinstance(value, list):
+        minimum_items = schema.get("minItems")
+        if isinstance(minimum_items, int) and len(value) < minimum_items:
+            raise _schema_error(path, f"array must contain at least {minimum_items} items")
+        items = schema.get("items")
+        if isinstance(items, Mapping):
+            for index, item in enumerate(value):
+                _validate_schema_node(
+                    item,
+                    cast(Mapping[str, object], items),
+                    root,
+                    f"{path}[{index}]",
+                )
+        contains = schema.get("contains")
+        if isinstance(contains, Mapping):
+            matches = sum(
+                _schema_accepts(
+                    item,
+                    cast(Mapping[str, object], contains),
+                    root,
+                    f"{path}[{index}]",
+                )
+                for index, item in enumerate(value)
+            )
+            minimum_contains = schema.get("minContains", 1)
+            if isinstance(minimum_contains, int) and matches < minimum_contains:
+                raise _schema_error(path, "array does not contain enough matching items")
+
+    clauses = schema.get("allOf")
+    if isinstance(clauses, list):
+        for clause in clauses:
+            if isinstance(clause, Mapping):
+                _validate_schema_node(value, cast(Mapping[str, object], clause), root, path)
+
+    condition = schema.get("if")
+    if isinstance(condition, Mapping):
+        branch_name = "then" if _schema_accepts(value, condition, root, path) else "else"
+        branch = schema.get(branch_name)
+        if isinstance(branch, Mapping):
+            _validate_schema_node(value, cast(Mapping[str, object], branch), root, path)
+
+    excluded = schema.get("not")
+    if isinstance(excluded, Mapping) and _schema_accepts(value, excluded, root, path):
+        raise _schema_error(path, "value matches an excluded schema")
+
+
+def _validate_status_schema_document(value: Mapping[str, object]) -> None:
+    schema = load_status_schema()
+    _validate_schema_node(value, schema, schema, "$")
+
+
 @dataclass(frozen=True)
 class WorkspaceStatusReport:
     """Immutable canonical representation of one CLI status document."""
@@ -249,6 +439,7 @@ class WorkspaceStatusReport:
         if expected_safe and not workspaces:
             raise ValueError("workspace status query safety contradicts its workspaces")
         _validate_codes(value)
+        _validate_status_schema_document(value)
         object.__setattr__(self, "_value", value)
         object.__setattr__(self, "_canonical", canonical)
 
@@ -938,18 +1129,18 @@ def _pointer_snapshot_is_current(
 
 def _registry_snapshot_is_current(
     runtime: WorkspaceRuntime,
-    expected_revision: int | None,
+    expected: tuple[int, str] | None,
     *,
     deadline_ns: int,
 ) -> bool:
-    if expected_revision is None:
+    if expected is None:
         return False
     try:
         with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns) as observed:
-            revision = int(observed.to_dict()["revision"])
+            token = (int(observed.to_dict()["revision"]), observed.sha256)
     except (WorkspaceRuntimeError, ContractError):
         return False
-    return revision == expected_revision
+    return token == expected
 
 
 def _apply_freshness(
@@ -1138,14 +1329,14 @@ def inspect_workspace_status(
     )
     workspaces: list[dict[str, object]] = []
     queue_tokens: dict[str, tuple[int, str]] = {}
-    registry_revision: int | None = None
+    registry_token: tuple[int, str] | None = None
     registry_lock_acquired = False
     try:
         with runtime.registry.read_only_snapshot(deadline_ns=absolute_deadline) as registry:
             registry_lock_acquired = True
             checks.append(_check("registry", "ready", "ready", "none"))
             registry_value = registry.to_dict()
-            registry_revision = int(registry_value["revision"])
+            registry_token = (int(registry_value["revision"]), registry.sha256)
             entries = cast(
                 list[dict[str, object]],
                 registry_value["workspaces"],
@@ -1250,7 +1441,7 @@ def inspect_workspace_status(
                 if any(bool(workspace["safe_to_query"]) for workspace in workspaces) and not (
                     _registry_snapshot_is_current(
                         runtime,
-                        registry_revision,
+                        registry_token,
                         deadline_ns=absolute_deadline,
                     )
                 ):

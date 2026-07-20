@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
 import os
@@ -7,7 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from typing import Any, cast
+from typing import Any, cast, Iterator
 
 from jsonschema import Draft202012Validator, FormatChecker
 import pytest
@@ -332,6 +334,60 @@ def test_status_schema_code_catalog_matches_runtime_catalog() -> None:
     assert set(schema["$defs"]["action_code"]["enum"]) == ACTION_CODES
 
 
+def test_status_runtime_validator_covers_every_schema_keyword() -> None:
+    schema = load_status_schema()
+    schema_keywords: set[str] = set()
+
+    def collect(node: dict[str, Any]) -> None:
+        schema_keywords.update(node)
+        for keyword in ("$defs", "properties"):
+            children = node.get(keyword)
+            if isinstance(children, dict):
+                for child in children.values():
+                    if isinstance(child, dict):
+                        collect(child)
+        for keyword in ("contains", "if", "items", "not", "then"):
+            child = node.get(keyword)
+            if isinstance(child, dict):
+                collect(child)
+        for keyword in ("allOf", "oneOf"):
+            children = node.get(keyword)
+            if isinstance(children, list):
+                for child in children:
+                    if isinstance(child, dict):
+                        collect(child)
+
+    collect(schema)
+
+    assert schema_keywords == {
+        "$defs",
+        "$id",
+        "$ref",
+        "$schema",
+        "additionalProperties",
+        "allOf",
+        "const",
+        "contains",
+        "description",
+        "enum",
+        "format",
+        "if",
+        "items",
+        "minContains",
+        "minItems",
+        "minLength",
+        "minimum",
+        "not",
+        "oneOf",
+        "pattern",
+        "properties",
+        "required",
+        "then",
+        "title",
+        "type",
+    }
+
+
 def test_status_report_rejects_unknown_codes_and_contradictory_exit_state(
     tmp_path: Path,
 ) -> None:
@@ -349,6 +405,80 @@ def test_status_report_rejects_unknown_codes_and_contradictory_exit_state(
                 "safe_to_query": True,
             }
         )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("reason_code",),
+        ("action_code",),
+        ("correlation_id",),
+        ("runtime",),
+        ("runtime", "distribution_version"),
+        ("checks", 0, "component"),
+        ("workspaces", 0, "source_identity_sha256"),
+        ("workspaces", 0, "generations", "current"),
+        ("workspaces", 0, "queue", "revision"),
+        ("workspaces", 0, "leases", "workspace", "present"),
+        ("workspaces", 0, "journal", "sequence"),
+        ("workspaces", 0, "freshness", "state"),
+        ("workspaces", 0, "watcher", "heartbeat"),
+        ("workspaces", 0, "resources", "pressure"),
+        ("workspaces", 0, "repair", "required"),
+    ],
+)
+def test_status_report_enforces_required_schema_fields(
+    tmp_path: Path,
+    path: tuple[str | int, ...],
+) -> None:
+    harness = create_harness(tmp_path)
+    document = deepcopy(inspect_workspace_status(_inputs(harness.state_root)).to_dict())
+    parent: Any = document
+    for part in path[:-1]:
+        parent = parent[part]
+    del parent[path[-1]]
+
+    validator = Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    )
+    assert not validator.is_valid(document)
+    with pytest.raises(ValueError, match="schema"):
+        WorkspaceStatusReport(document)
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("correlation_id",), "status-not-a-correlation-id"),
+        (("runtime", "compatibility_sha256"), "not-a-digest"),
+        (("checks", 0, "unexpected"), True),
+        (("workspaces", 0, "repo_uuid"), "not-a-uuid"),
+        (("workspaces", 0, "repo_uuid"), "11111111111141118111111111111111"),
+        (("workspaces", 0, "active_source_revision"), 0),
+        (("workspaces", 0, "queue", "depth"), -1),
+        (("workspaces", 0, "freshness", "duration_ms"), -1),
+    ],
+)
+def test_status_report_enforces_structural_schema_constraints(
+    tmp_path: Path,
+    path: tuple[str | int, ...],
+    replacement: object,
+) -> None:
+    harness = create_harness(tmp_path)
+    document = deepcopy(inspect_workspace_status(_inputs(harness.state_root)).to_dict())
+    parent: Any = document
+    for part in path[:-1]:
+        parent = parent[part]
+    parent[path[-1]] = replacement
+
+    validator = Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    )
+    assert not validator.is_valid(document)
+    with pytest.raises(ValueError, match="schema"):
+        WorkspaceStatusReport(document)
 
 
 def test_status_report_rejects_nested_reason_codes_outside_schema_constraints(
@@ -716,6 +846,53 @@ def test_status_revalidates_registry_after_freshness(
     assert value["safe_to_query"] is False
     assert value["workspaces"][0]["safe_to_query"] is False
     assert [workspace["repo_uuid"] for workspace in value["workspaces"]] == [REPO_UUID]
+    assert "status_snapshot_changed" in _reason_codes(report)
+
+
+def test_status_revalidates_complete_registry_bytes_after_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path / "primary")
+    alternate = create_harness(tmp_path / "alternate").registry.load()
+    original_snapshot = RegistryStore.read_only_snapshot
+    snapshot_count = 0
+
+    @contextmanager
+    def replace_final_snapshot(
+        store: RegistryStore,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[Any]:
+        nonlocal snapshot_count
+        if store.state.root == runtime.state_root:
+            snapshot_count += 1
+            if snapshot_count == 4:
+                yield alternate
+                return
+        with original_snapshot(store, deadline_ns=deadline_ns) as document:
+            yield document
+
+    initial = runtime.registry.load()
+    assert initial.to_dict()["revision"] == alternate.to_dict()["revision"]
+    assert initial.sha256 != alternate.sha256
+    monkeypatch.setattr(RegistryStore, "read_only_snapshot", replace_final_snapshot)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert snapshot_count == 4
+    assert report.exit_code == 10
+    assert report.to_dict()["safe_to_query"] is False
     assert "status_snapshot_changed" in _reason_codes(report)
 
 

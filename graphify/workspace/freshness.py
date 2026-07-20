@@ -56,7 +56,7 @@ class FreshnessResult(Generic[OutputT]):
     output: OutputT | None
     release: FreshnessRelease | None
     query_executed: bool
-    observation_boundary: str
+    observation_boundary: str = "not_observed"
 
 
 @dataclass(frozen=True)

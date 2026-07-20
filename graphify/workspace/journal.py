@@ -34,6 +34,7 @@ from graphify.workspace.persistence import (
 
 
 _SEGMENT_RE = re.compile(r"^(?P<sequence>[0-9]{20})\.gwf$", re.ASCII)
+_MAX_JOURNAL_FRAME_BYTES = 1024 * 1024
 _EVENT_NAMESPACE = uuid.UUID("3924cb61-439f-49d0-8a8c-b3753d140d5e")
 _PRECERTIFICATION = frozenset({"ALLOCATED", "STAGING", "BUILT", "VALIDATING", "FAILED"})
 _PRECERTIFICATION_NEXT = {
@@ -260,11 +261,24 @@ class JournalStore:
         deadline_ns: int | None = None,
     ) -> tuple[bytes, JournalEvent]:
         _require_stable_read_deadline(deadline_ns)
-        frame = (
-            self.state.read_existing_bytes(relative)
-            if existing_only
-            else self.state.read_bytes(relative)
-        )
+        try:
+            frame = (
+                self.state.read_existing_bytes(
+                    relative,
+                    max_bytes=_MAX_JOURNAL_FRAME_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+                if existing_only
+                else self.state.read_bytes(
+                    relative,
+                    max_bytes=_MAX_JOURNAL_FRAME_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+            )
+        except StateCorrupt as exc:
+            raise JournalCorrupt(
+                f"journal segment cannot be read safely: {relative}: {exc}"
+            ) from exc
         try:
             event = decode_journal_frame(frame)
         except JournalFrameTruncated:

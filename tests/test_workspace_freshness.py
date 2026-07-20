@@ -24,7 +24,7 @@ from graphify.workspace.contracts import (
     PointerSet,
     payload_manifest_sha256,
 )
-from graphify.workspace.freshness import FreshnessAuthority
+from graphify.workspace.freshness import FreshnessAuthority, FreshnessResult
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.pointers import PointerCAS, PointerStore
@@ -64,6 +64,18 @@ QUEUE_POLICY = SemanticQueuePolicy(
     max_bytes=64 * 1024,
     retry_budget=1,
 )
+
+
+def test_freshness_result_preserves_the_exported_five_field_constructor() -> None:
+    result: FreshnessResult[str] = FreshnessResult(
+        "withhold",
+        "not_observed",
+        None,
+        None,
+        False,
+    )
+
+    assert result.observation_boundary == "not_observed"
 
 
 @dataclass(frozen=True)
