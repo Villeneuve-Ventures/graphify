@@ -1125,6 +1125,30 @@ def _queue_snapshot_is_current(
     return (observed.revision, observed.sha256) == expected
 
 
+def _gc_intent_is_absent(
+    runtime: WorkspaceRuntime,
+    repo_uuid: str,
+    *,
+    deadline_ns: int,
+) -> bool:
+    try:
+        with runtime.leases.read_only_workspace_lock(
+            repo_uuid,
+            deadline_ns=deadline_ns,
+        ):
+            return (
+                runtime.gc.read_only_intent_locked(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+                is None
+            )
+    except LockTimeout:
+        raise
+    except (WorkspaceRuntimeError, ContractError, GcError, LeaseError):
+        return False
+
+
 def _journal_snapshot_token(snapshot: JournalSnapshot) -> tuple[int, str]:
     if snapshot.head is None:
         return (0, canonical_sha256(None))
@@ -1488,6 +1512,20 @@ def inspect_workspace_status(
                         deadline_ns=absolute_deadline,
                     )
                     repo_uuid = str(workspace["repo_uuid"])
+                    if bool(workspace["safe_to_query"]) and not _gc_intent_is_absent(
+                        runtime,
+                        repo_uuid,
+                        deadline_ns=absolute_deadline,
+                    ):
+                        _workspace_failure(
+                            workspace,
+                            checks,
+                            component=f"workspace:{repo_uuid}:gc",
+                            state="invalid",
+                            reason_code="workspace_state_invalid",
+                            action_code="run_workspace_repair",
+                            repair_required=True,
+                        )
                     if bool(workspace["safe_to_query"]) and not _queue_snapshot_is_current(
                         runtime,
                         repo_uuid,

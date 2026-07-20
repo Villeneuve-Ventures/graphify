@@ -95,6 +95,26 @@ def _reason_codes(report: Any) -> set[str]:
     }
 
 
+def _gc_intent(pointer: PointerSet, *, capacity_policy_sha256: str) -> GcIntentState:
+    pointer_value = pointer.to_dict()
+    return GcIntentState.from_mapping(
+        {
+            "contract": "graphify.workspace.gc_intent.internal",
+            "format_version": 1,
+            "repo_uuid": REPO_UUID,
+            "operation_epoch": 3,
+            "fence_token": 3,
+            "active_source_revision": 1,
+            "migration_epoch": 0,
+            "pointer_revision": pointer_value["pointer_revision"],
+            "capacity_policy_sha256": capacity_policy_sha256,
+            "plan_sha256": "a" * 64,
+            "candidates": [],
+            "occurred_at": "2026-07-16T19:00:00Z",
+        }
+    )
+
+
 def _unsupported_manifest() -> CompatibilityManifest:
     value = {
         **COMPATIBILITY_MANIFEST.to_dict(),
@@ -728,23 +748,7 @@ def test_status_reports_unresolved_gc_intent_as_repair_required(tmp_path: Path) 
     runtime = certified_runtime(tmp_path)
     pointer = runtime.pointers.load(REPO_UUID, allow_missing=False)
     assert pointer is not None
-    pointer_value = pointer.to_dict()
-    intent = GcIntentState.from_mapping(
-        {
-            "contract": "graphify.workspace.gc_intent.internal",
-            "format_version": 1,
-            "repo_uuid": REPO_UUID,
-            "operation_epoch": 3,
-            "fence_token": 3,
-            "active_source_revision": 1,
-            "migration_epoch": 0,
-            "pointer_revision": pointer_value["pointer_revision"],
-            "capacity_policy_sha256": POLICY.sha256,
-            "plan_sha256": "a" * 64,
-            "candidates": [],
-            "occurred_at": "2026-07-16T19:00:00Z",
-        }
-    )
+    intent = _gc_intent(pointer, capacity_policy_sha256=POLICY.sha256)
     gc_directory = runtime.state_root / "workspaces" / REPO_UUID / "gc"
     gc_directory.mkdir(mode=0o700)
     intent_path = gc_directory / "intent.json"
@@ -1007,6 +1011,65 @@ def test_status_revalidates_journal_after_freshness(
     assert report.exit_code == 10
     assert report.to_dict()["safe_to_query"] is False
     assert "status_snapshot_changed" in _reason_codes(report)
+
+
+def test_status_revalidates_gc_intent_after_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import POLICY
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    pointer = runtime.pointers.load(REPO_UUID, allow_missing=False)
+    assert pointer is not None
+    intent = _gc_intent(pointer, capacity_policy_sha256=POLICY.sha256)
+    original_probe = FreshnessAuthority.probe
+    injected_snapshot: Any = None
+
+    def install_after_probe(
+        authority: FreshnessAuthority,
+        repo_uuid: str,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal injected_snapshot
+        result = original_probe(authority, repo_uuid, **kwargs)
+        if injected_snapshot is None:
+            gc_directory = runtime.state_root / "workspaces" / REPO_UUID / "gc"
+            gc_directory.mkdir(mode=0o700)
+            intent_path = gc_directory / "intent.json"
+            intent_path.write_bytes(intent.canonical)
+            intent_path.chmod(0o600)
+            injected_snapshot = tree_snapshot(runtime.state_root)
+        return result
+
+    monkeypatch.setattr(FreshnessAuthority, "probe", install_after_probe)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+
+    assert injected_snapshot is not None
+    assert report.exit_code == 20
+    assert value["safe_to_query"] is False
+    assert value["workspaces"][0]["repair"]["required"] is True
+    assert any(
+        check == {
+            "component": f"workspace:{REPO_UUID}:gc",
+            "state": "invalid",
+            "reason_code": "workspace_state_invalid",
+            "action_code": "run_workspace_repair",
+        }
+        for check in value["checks"]
+    )
+    assert tree_snapshot(runtime.state_root) == injected_snapshot
 
 
 def test_status_revalidates_registry_after_freshness(
