@@ -596,6 +596,30 @@ def test_status_reports_missing_workspace_record_as_invalid(tmp_path: Path) -> N
     assert "workspace_record_missing" in _reason_codes(report)
 
 
+def test_status_classifies_missing_workspace_record_from_structured_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.persistence import StateRecordMissing
+
+    harness = create_harness(tmp_path)
+
+    def missing_workspace_record(*_args: object, **_kwargs: object) -> object:
+        raise StateRecordMissing("wording deliberately omits the old message marker")
+
+    monkeypatch.setattr(
+        LeaseStore,
+        "read_only_snapshot_locked",
+        missing_workspace_record,
+    )
+
+    report = inspect_workspace_status(_inputs(harness.state_root))
+
+    assert report.exit_code == 20
+    assert "workspace_record_missing" in _reason_codes(report)
+    assert "workspace_record_invalid" not in _reason_codes(report)
+
+
 def test_status_reports_malformed_workspace_record_without_leaking_it(
     tmp_path: Path,
 ) -> None:
@@ -1634,6 +1658,38 @@ def test_status_bounds_existing_lock_contention_without_writes(
     assert tree_snapshot(harness.state_root) == before_tree
     assert metadata_snapshot(harness.state_root) == before_metadata
     assert _xattr_snapshot(harness.state_root) == before_xattrs
+
+
+@pytest.mark.parametrize("lock_name", ["registry", "workspace"])
+def test_read_only_lock_contention_preserves_structured_kind(
+    tmp_path: Path,
+    lock_name: str,
+) -> None:
+    harness = create_harness(tmp_path)
+    lock = (
+        harness.state_root / RegistryStore.LOCK
+        if lock_name == "registry"
+        else harness.state_root / "workspaces" / REPO_UUID / "workspace.lock"
+    )
+    holder = _hold_exclusive_lock(lock)
+    try:
+        with pytest.raises(LockTimeout) as captured:
+            context = (
+                harness.registry.read_only_snapshot(deadline_ns=time.monotonic_ns() + 10_000_000)
+                if lock_name == "registry"
+                else harness.leases.read_only_workspace_lock(
+                    REPO_UUID,
+                    deadline_ns=time.monotonic_ns() + 10_000_000,
+                )
+            )
+            with context:
+                pass
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+    assert captured.value.phase == "acquire"
+    assert captured.value.kind == lock_name
 
 
 def test_status_classifies_generation_lock_contention_at_its_boundary(

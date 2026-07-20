@@ -328,6 +328,7 @@ class LeaseStore:
             name="workspace",
             exclusive=True,
             deadline_ns=deadline_ns,
+            kind="workspace",
         ):
             yield
 

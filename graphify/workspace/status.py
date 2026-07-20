@@ -36,6 +36,7 @@ from graphify.workspace.persistence import (
     LockTimeout,
     StateCorrupt,
     StatePathError,
+    StateRecordMissing,
     UnsupportedRuntime,
     WorkspaceRuntimeError,
     require_before_deadline,
@@ -849,18 +850,23 @@ def _inspect_workspace(
                     checks,
                     component=f"{prefix}:leases",
                 )
-            except StateCorrupt as exc:
-                reason = (
-                    "workspace_record_missing"
-                    if "workspace current record is missing" in str(exc)
-                    else "workspace_record_invalid"
-                )
+            except StateRecordMissing:
                 return _workspace_failure(
                     workspace,
                     checks,
                     component=f"{prefix}:leases",
                     state="invalid",
-                    reason_code=reason,
+                    reason_code="workspace_record_missing",
+                    action_code="run_workspace_repair",
+                    repair_required=True,
+                )
+            except StateCorrupt:
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:leases",
+                    state="invalid",
+                    reason_code="workspace_record_invalid",
                     action_code="run_workspace_repair",
                     repair_required=True,
                 )

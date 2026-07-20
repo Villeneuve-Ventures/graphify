@@ -156,6 +156,7 @@ class RegistryStore:
             name="registry",
             exclusive=False,
             deadline_ns=deadline_ns,
+            kind="registry",
         ):
             require_before_deadline(
                 deadline_ns,

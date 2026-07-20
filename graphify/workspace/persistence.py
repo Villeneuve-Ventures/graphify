@@ -54,6 +54,10 @@ class StateCorrupt(WorkspaceRuntimeError):
     code = "state_corrupt"
 
 
+class StateRecordMissing(StateCorrupt):
+    """A required current durable record is absent."""
+
+
 class CommitUnknown(WorkspaceRuntimeError):
     code = "commit_unknown"
 
@@ -1593,7 +1597,7 @@ class DurableStateRoot:
         if data is None:
             if allow_missing:
                 return None
-            raise StateCorrupt(f"{label} current record is missing")
+            raise StateRecordMissing(f"{label} current record is missing")
         try:
             return decoder(data)
         except Exception as exc:
@@ -1658,7 +1662,7 @@ class DurableStateRoot:
         if current_candidate is None:
             if allow_missing and previous_candidate is None:
                 return None
-            raise StateCorrupt(f"{label} current record is missing")
+            raise StateRecordMissing(f"{label} current record is missing")
         current_bytes, current_record, current_revision = current_candidate
         if previous_candidate is None:
             return current_record
