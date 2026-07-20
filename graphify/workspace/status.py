@@ -696,7 +696,10 @@ def _inspect_workspace(
                 journal = (
                     JournalSnapshot(head=None, events=())
                     if pointer is None and not journal_directory_exists
-                    else runtime.journal.read_stable(repo_uuid)
+                    else runtime.journal.read_stable(
+                        repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
                 )
                 require_before_deadline(
                     deadline_ns,
@@ -874,6 +877,22 @@ def _queue_snapshot_is_current(
     ):
         return False
     return (observed.revision, observed.sha256) == expected
+
+
+def _registry_snapshot_is_current(
+    runtime: WorkspaceRuntime,
+    expected_revision: int | None,
+    *,
+    deadline_ns: int,
+) -> bool:
+    if expected_revision is None:
+        return False
+    try:
+        with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns) as observed:
+            revision = int(observed.to_dict()["revision"])
+    except (WorkspaceRuntimeError, ContractError):
+        return False
+    return revision == expected_revision
 
 
 def _apply_freshness(
@@ -1062,14 +1081,17 @@ def inspect_workspace_status(
     )
     workspaces: list[dict[str, object]] = []
     queue_tokens: dict[str, tuple[int, str]] = {}
+    registry_revision: int | None = None
     registry_lock_acquired = False
     try:
         with runtime.registry.read_only_snapshot(deadline_ns=absolute_deadline) as registry:
             registry_lock_acquired = True
             checks.append(_check("registry", "ready", "ready", "none"))
+            registry_value = registry.to_dict()
+            registry_revision = int(registry_value["revision"])
             entries = cast(
                 list[dict[str, object]],
-                registry.to_dict()["workspaces"],
+                registry_value["workspaces"],
             )
             for entry in sorted(entries, key=lambda item: str(item["repo_uuid"])):
                 workspace, workspace_checks = _inspect_workspace(
@@ -1142,6 +1164,20 @@ def inspect_workspace_status(
                         checks,
                         component=f"workspace:{workspace['repo_uuid']}:snapshot",
                     )
+            if any(bool(workspace["safe_to_query"]) for workspace in workspaces) and not (
+                _registry_snapshot_is_current(
+                    runtime,
+                    registry_revision,
+                    deadline_ns=absolute_deadline,
+                )
+            ):
+                for workspace in workspaces:
+                    if bool(workspace["safe_to_query"]):
+                        _mark_snapshot_changed(
+                            workspace,
+                            checks,
+                            component=f"workspace:{workspace['repo_uuid']}:registry",
+                        )
     return _finalize(
         runtime=_runtime_summary(compatibility_sha256),
         workspaces=workspaces,

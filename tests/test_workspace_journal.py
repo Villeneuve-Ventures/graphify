@@ -12,7 +12,12 @@ import pytest
 from graphify.workspace.contracts import JournalEvent, encode_journal_frame
 from graphify.workspace.journal import JournalConflict, JournalCorrupt, JournalStore
 from graphify.workspace.leases import LeaseGrant
-from graphify.workspace.persistence import CommitUnknown, InjectedFault, PosixSyscalls
+from graphify.workspace.persistence import (
+    CommitUnknown,
+    InjectedFault,
+    LockTimeout,
+    PosixSyscalls,
+)
 
 from tests.workspace_p3_helpers import REPO_UUID, START, acquire, create_harness
 
@@ -152,6 +157,61 @@ def test_journal_rejects_transition_owned_by_another_operation(tmp_path: Path) -
             occurred_at=START,
             monotonic_ns=10_002,
         )
+
+
+def test_read_stable_honors_deadline_during_segment_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    for sequence in range(1, 21):
+        store.append(
+            grant,
+            transition="ALLOCATED",
+            generation_id=f"gen-deadline-{sequence}",
+            receipt_sha256=None,
+            pointer_revision=None,
+            occurred_at=START,
+            monotonic_ns=10_000 + sequence,
+        )
+
+    decoded = 0
+    original_decode = store._decode_segment
+
+    def count_decode(
+        relative: Path,
+        *,
+        existing_only: bool = False,
+        deadline_ns: int | None = None,
+    ) -> tuple[bytes, JournalEvent]:
+        nonlocal decoded
+        decoded += 1
+        return original_decode(
+            relative,
+            existing_only=existing_only,
+            deadline_ns=deadline_ns,
+        )
+
+    monotonic_tick = 0
+
+    def monotonic_ns() -> int:
+        nonlocal monotonic_tick
+        monotonic_tick += 1
+        return monotonic_tick
+
+    monkeypatch.setattr(store, "_decode_segment", count_decode)
+    monkeypatch.setattr("graphify.workspace.persistence.time.monotonic_ns", monotonic_ns)
+
+    with pytest.raises(LockTimeout, match="journal stable read exceeded its deadline"):
+        store.read_stable(REPO_UUID, deadline_ns=8)
+
+    assert decoded < 20
 
 
 def test_successor_cleans_real_process_death_atomic_segment_temp(tmp_path: Path) -> None:

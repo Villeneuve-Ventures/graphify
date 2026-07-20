@@ -667,6 +667,55 @@ def test_status_revalidates_workspace_state_after_freshness(
     assert "status_snapshot_changed" in _reason_codes(report)
 
 
+def test_status_revalidates_registry_after_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    late_repo = create_repo(tmp_path / "repo-late", SECOND_UUID)
+    _set_remote(late_repo, "https://github.com/example/status-late.git")
+    original_probe = FreshnessAuthority.probe
+    mutated = False
+
+    def enroll_after_probe(
+        authority: FreshnessAuthority,
+        repo_uuid: str,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal mutated
+        result = original_probe(authority, repo_uuid, **kwargs)
+        if not mutated:
+            runtime.registry.enroll(
+                discover_source(late_repo),
+                authorization("status-late"),
+                expected_revision=1,
+            )
+            mutated = True
+        return result
+
+    monkeypatch.setattr(FreshnessAuthority, "probe", enroll_after_probe)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+
+    assert mutated is True
+    assert report.exit_code == 10
+    assert value["safe_to_query"] is False
+    assert value["workspaces"][0]["safe_to_query"] is False
+    assert [workspace["repo_uuid"] for workspace in value["workspaces"]] == [REPO_UUID]
+    assert "status_snapshot_changed" in _reason_codes(report)
+
+
 @pytest.mark.parametrize(
     ("queue_state", "expected_reason"),
     [
