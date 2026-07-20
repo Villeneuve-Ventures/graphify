@@ -205,6 +205,63 @@ def _schema_error(path: str, detail: str) -> ValueError:
     return ValueError(f"workspace status schema violation at {path}: {detail}")
 
 
+_SUPPORTED_STATUS_SCHEMA_KEYWORDS = frozenset(
+    {
+        "$defs",
+        "$id",
+        "$ref",
+        "$schema",
+        "additionalProperties",
+        "allOf",
+        "const",
+        "contains",
+        "description",
+        "else",
+        "enum",
+        "format",
+        "if",
+        "items",
+        "minContains",
+        "minItems",
+        "minLength",
+        "minimum",
+        "not",
+        "oneOf",
+        "pattern",
+        "properties",
+        "required",
+        "then",
+        "title",
+        "type",
+    }
+)
+
+
+def _validate_schema_keywords(schema: Mapping[str, object], path: str) -> None:
+    unsupported = sorted(set(schema) - _SUPPORTED_STATUS_SCHEMA_KEYWORDS)
+    if unsupported:
+        raise _schema_error(path, f"unsupported schema keyword(s): {', '.join(unsupported)}")
+
+    for keyword in ("$defs", "properties"):
+        children = schema.get(keyword)
+        if isinstance(children, Mapping):
+            for name, child in children.items():
+                if isinstance(child, Mapping):
+                    _validate_schema_keywords(child, f"{path}.{keyword}.{name}")
+
+    for keyword in ("contains", "else", "if", "items", "not", "then"):
+        child = schema.get(keyword)
+        if isinstance(child, Mapping):
+            _validate_schema_keywords(child, f"{path}.{keyword}")
+
+    for keyword in ("allOf", "oneOf"):
+        children = schema.get(keyword)
+        if isinstance(children, list):
+            for index, child in enumerate(children):
+                if isinstance(child, Mapping):
+                    _validate_schema_keywords(child, f"{path}.{keyword}[{index}]")
+
+
 def _resolve_schema_reference(
     reference: str,
     root: Mapping[str, object],
@@ -353,6 +410,7 @@ def _validate_schema_node(
 
 def _validate_status_schema_document(value: Mapping[str, object]) -> None:
     schema = load_status_schema()
+    _validate_schema_keywords(schema, "$schema")
     _validate_schema_node(value, schema, schema, "$")
 
 

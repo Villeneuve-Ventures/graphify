@@ -357,58 +357,18 @@ def test_status_schema_code_catalog_matches_runtime_catalog() -> None:
     assert set(schema["$defs"]["action_code"]["enum"]) == ACTION_CODES
 
 
-def test_status_runtime_validator_covers_every_schema_keyword() -> None:
-    schema = load_status_schema()
-    schema_keywords: set[str] = set()
+def test_status_runtime_validator_fails_closed_on_unknown_schema_keyword(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    document = inspect_workspace_status(_inputs(harness.state_root)).to_dict()
+    schema = deepcopy(load_status_schema())
+    schema["properties"]["checks"]["maxItems"] = 0
+    monkeypatch.setattr("graphify.workspace.status.load_status_schema", lambda: schema)
 
-    def collect(node: dict[str, Any]) -> None:
-        schema_keywords.update(node)
-        for keyword in ("$defs", "properties"):
-            children = node.get(keyword)
-            if isinstance(children, dict):
-                for child in children.values():
-                    if isinstance(child, dict):
-                        collect(child)
-        for keyword in ("contains", "if", "items", "not", "then"):
-            child = node.get(keyword)
-            if isinstance(child, dict):
-                collect(child)
-        for keyword in ("allOf", "oneOf"):
-            children = node.get(keyword)
-            if isinstance(children, list):
-                for child in children:
-                    if isinstance(child, dict):
-                        collect(child)
-
-    collect(schema)
-
-    assert schema_keywords == {
-        "$defs",
-        "$id",
-        "$ref",
-        "$schema",
-        "additionalProperties",
-        "allOf",
-        "const",
-        "contains",
-        "description",
-        "enum",
-        "format",
-        "if",
-        "items",
-        "minContains",
-        "minItems",
-        "minLength",
-        "minimum",
-        "not",
-        "oneOf",
-        "pattern",
-        "properties",
-        "required",
-        "then",
-        "title",
-        "type",
-    }
+    with pytest.raises(ValueError, match="unsupported schema keyword.*maxItems"):
+        WorkspaceStatusReport(document)
 
 
 def test_status_report_rejects_unknown_codes_and_contradictory_exit_state(
