@@ -29,6 +29,7 @@ from graphify.workspace.persistence import (
     StatePathError,
     Syscalls,
     WORKSPACE_LOCK_RANK,
+    require_before_deadline,
 )
 from graphify.workspace.registry import RegistryStore, RevisionConflict
 
@@ -314,14 +315,41 @@ class LeaseStore:
             yield
 
     @contextmanager
-    def read_only_workspace_lock(self, repo_uuid: str) -> Iterator[None]:
+    def read_only_workspace_lock(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[None]:
         directory = self._directory(repo_uuid)
         with self.state.existing_lock(
             directory / "workspace.lock",
             rank=WORKSPACE_LOCK_RANK,
             name="workspace",
+            exclusive=True,
+            deadline_ns=deadline_ns,
         ):
             yield
+
+    def read_only_snapshot_locked(
+        self,
+        document: Registry,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> WorkspaceLeaseState:
+        """Read stable lease/fence state while the caller owns both read locks."""
+
+        require_before_deadline(
+            deadline_ns,
+            "workspace lease snapshot read exceeded its deadline",
+        )
+        state = self._load_state_locked(document, repo_uuid, recover=False)
+        require_before_deadline(
+            deadline_ns,
+            "workspace lease snapshot read exceeded its deadline",
+        )
+        return state
 
     def _paths(self, repo_uuid: str) -> tuple[Path, Path, Path]:
         directory = self._directory(repo_uuid)

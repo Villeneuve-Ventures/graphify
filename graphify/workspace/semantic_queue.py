@@ -39,6 +39,7 @@ from graphify.workspace.persistence import (
     StateCorrupt,
     StatePathError,
     Syscalls,
+    require_before_deadline,
 )
 
 
@@ -2053,11 +2054,41 @@ class SemanticQueueStore:
             )
             return self._commit_locked(current, candidate)
 
-    def inspect(self, repo_uuid: str) -> SemanticQueueSnapshot:
+    def read_only_snapshot_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> SemanticQueueSnapshot:
+        """Read stable queue state while registry and workspace locks are held."""
+
+        require_before_deadline(
+            deadline_ns,
+            "semantic queue snapshot read exceeded its deadline",
+        )
+        snapshot = self._load_locked(repo_uuid, recover=False)
+        require_before_deadline(
+            deadline_ns,
+            "semantic queue snapshot read exceeded its deadline",
+        )
+        return snapshot
+
+    def inspect(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> SemanticQueueSnapshot:
         canonical = str(LeaseStore._directory(repo_uuid).parts[-1])
-        with self.leases.registry.read_only_snapshot():
-            with self.leases.read_only_workspace_lock(canonical):
-                return self._load_locked(canonical, recover=False)
+        with self.leases.registry.read_only_snapshot(deadline_ns=deadline_ns):
+            with self.leases.read_only_workspace_lock(
+                canonical,
+                deadline_ns=deadline_ns,
+            ):
+                return self.read_only_snapshot_locked(
+                    canonical,
+                    deadline_ns=deadline_ns,
+                )
 
     @staticmethod
     def _certification_binding_path(repo_uuid: str, generation_id: str) -> Path:

@@ -47,6 +47,8 @@ from graphify.workspace.registry import RegistryStore
 
 OutputT = TypeVar("OutputT")
 FreshnessHook = Callable[[str, Mapping[str, object]], None]
+
+
 @dataclass(frozen=True)
 class FreshnessResult(Generic[OutputT]):
     decision: str
@@ -54,6 +56,7 @@ class FreshnessResult(Generic[OutputT]):
     output: OutputT | None
     release: FreshnessRelease | None
     query_executed: bool
+    observation_boundary: str
 
 
 @dataclass(frozen=True)
@@ -231,6 +234,7 @@ class FreshnessAuthority:
         reason: str,
         *,
         query_executed: bool = False,
+        observation_boundary: str = "not_observed",
     ) -> FreshnessResult[Any]:
         return FreshnessResult(
             decision="withhold",
@@ -238,6 +242,7 @@ class FreshnessAuthority:
             output=None,
             release=None,
             query_executed=query_executed,
+            observation_boundary=observation_boundary,
         )
 
     def _run(
@@ -252,6 +257,7 @@ class FreshnessAuthority:
             return cast(FreshnessResult[OutputT], self._without_observation("timeout"))
         deadline_ns = None if timeout_ns is None else time.monotonic_ns() + timeout_ns
         query_executed = False
+        observation_boundary = "not_observed"
         try:
             # Registry rank precedes generation rank. Keeping this existing
             # shared lock open makes active-source selection stable for the
@@ -274,6 +280,7 @@ class FreshnessAuthority:
                     )
                     pre_value = self._observation_value(authority_pre, reading, pre)
                     _emit(hook, "freshness:pre_observed")
+                    observation_boundary = "pre_observed"
                     mismatch = self._sealed_mismatch(authority_pre, reading, pre)
                     if mismatch is not None:
                         release = self._release_document(
@@ -288,6 +295,7 @@ class FreshnessAuthority:
                             output=None,
                             release=release,
                             query_executed=False,
+                            observation_boundary=observation_boundary,
                         )
                     _emit(hook, "freshness:before_query")
                     if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
@@ -303,6 +311,7 @@ class FreshnessAuthority:
                             output=None,
                             release=release,
                             query_executed=False,
+                            observation_boundary=observation_boundary,
                         )
                     query_executed = True
                     output = query(reading.generation_path / "graphify-out")
@@ -320,6 +329,7 @@ class FreshnessAuthority:
                             output=None,
                             release=release,
                             query_executed=True,
+                            observation_boundary=observation_boundary,
                         )
                     authority_post = self._authority_snapshot(
                         document,
@@ -333,6 +343,7 @@ class FreshnessAuthority:
                         hook=hook,
                     )
                     _emit(hook, "freshness:post_observed")
+                    observation_boundary = "two_sided"
                     authority_release = self._authority_snapshot(
                         document,
                         repo_uuid,
@@ -358,6 +369,7 @@ class FreshnessAuthority:
                             output=None,
                             release=release,
                             query_executed=True,
+                            observation_boundary=observation_boundary,
                         )
                     if (
                         mismatch is None
@@ -378,6 +390,7 @@ class FreshnessAuthority:
                             output=output,
                             release=release,
                             query_executed=True,
+                            observation_boundary=observation_boundary,
                         )
                     reason = mismatch or "drift"
                     release = self._release_document(
@@ -392,16 +405,25 @@ class FreshnessAuthority:
                         output=None,
                         release=release,
                         query_executed=True,
+                        observation_boundary=observation_boundary,
                     )
         except ObservationUnstable:
             return cast(
                 FreshnessResult[OutputT],
-                self._without_observation("unstable", query_executed=query_executed),
+                self._without_observation(
+                    "unstable",
+                    query_executed=query_executed,
+                    observation_boundary=observation_boundary,
+                ),
             )
         except (LockTimeout, ObservationTimeout, SourceDiscoveryTimeout):
             return cast(
                 FreshnessResult[OutputT],
-                self._without_observation("timeout", query_executed=query_executed),
+                self._without_observation(
+                    "timeout",
+                    query_executed=query_executed,
+                    observation_boundary=observation_boundary,
+                ),
             )
         except (ObservationUnavailable, SourceAmbiguousError, SourceDiscoveryError, IdentityError):
             return cast(
@@ -409,6 +431,7 @@ class FreshnessAuthority:
                 self._without_observation(
                     "source_unavailable",
                     query_executed=query_executed,
+                    observation_boundary=observation_boundary,
                 ),
             )
         except (
@@ -420,12 +443,20 @@ class FreshnessAuthority:
         ):
             return cast(
                 FreshnessResult[OutputT],
-                self._without_observation("unsupported", query_executed=query_executed),
+                self._without_observation(
+                    "unsupported",
+                    query_executed=query_executed,
+                    observation_boundary=observation_boundary,
+                ),
             )
         except (GenerationError, PointerConflict, PointerError):
             return cast(
                 FreshnessResult[OutputT],
-                self._without_observation("drift", query_executed=query_executed),
+                self._without_observation(
+                    "drift",
+                    query_executed=query_executed,
+                    observation_boundary=observation_boundary,
+                ),
             )
 
     def query(
@@ -441,6 +472,22 @@ class FreshnessAuthority:
         return self._run(
             repo_uuid,
             lambda payload_root: self.adapter.query_structural(payload_root, request),
+            timeout_ns=timeout_ns,
+            hook=hook,
+        )
+
+    def probe(
+        self,
+        repo_uuid: str,
+        *,
+        timeout_ns: int | None = None,
+        hook: FreshnessHook | None = None,
+    ) -> FreshnessResult[None]:
+        """Verify observed-current query authority without reading query payloads."""
+
+        return self._run(
+            repo_uuid,
+            lambda _payload_root: None,
             timeout_ns=timeout_ns,
             hook=hook,
         )
