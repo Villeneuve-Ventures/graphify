@@ -1,7 +1,8 @@
 # Graphify workspace contract v1
 
-Status: P5A semantic queue, P4 adapter, and observed-current library runtime for
-`graphifyy 0.9.16+workspace.1`; the public v1 contract fields remain frozen.
+Status: P5B1 read-only workspace status/doctor, P5A semantic queue, P4 adapter,
+and observed-current library runtime for `graphifyy 0.9.16+workspace.1`; the
+public v1 contract fields remain frozen.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -13,8 +14,11 @@ adds the sole `0.9.16` engine adapter, the no-write comparison seam, and
 two-sided observed-current release. P5A adds only the durable semantic desired-
 work queue, fenced worker claims, exact reconciliation evidence, and the
 generation-certification binding to one stable queue watermark. It does not
-provide a retained-state import path or a `graphify workspace` command.
-Services and commands remain later P5 work.
+provide a retained-state import path. P5B1 adds only the production composition
+root plus versioned read-only `graphify workspace status --json` and
+`graphify workspace doctor` inspection. Mutation/query, repair, watch/service,
+installation, performance certification, and candidate publication remain later
+P5 work; retained production query/service authority remains deferred to P5C.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build

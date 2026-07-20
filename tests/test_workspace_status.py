@@ -26,8 +26,10 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
 )
 from graphify.workspace.freshness import FreshnessAuthority
+from graphify.workspace.gc import GcStore
 from graphify.workspace.identity import discover_source
 from graphify.workspace.journal import JournalStore
+from graphify.workspace.leases import LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
     LockTimeout,
@@ -35,6 +37,7 @@ from graphify.workspace.persistence import (
     StatePathError,
 )
 from graphify.workspace.registry import RegistryStore
+from graphify.workspace.pointers import PointerStore
 from graphify.workspace.semantic_queue import (
     SemanticDesiredWork,
     SemanticQueueItem,
@@ -1102,7 +1105,7 @@ def test_status_revalidates_complete_registry_bytes_after_freshness(
         nonlocal snapshot_count
         if store.state.root == runtime.state_root:
             snapshot_count += 1
-            if snapshot_count == 4:
+            if snapshot_count == 3:
                 yield alternate
                 return
         with original_snapshot(store, deadline_ns=deadline_ns) as document:
@@ -1122,10 +1125,169 @@ def test_status_revalidates_complete_registry_bytes_after_freshness(
         )
     )
 
-    assert snapshot_count == 4
+    assert snapshot_count == 3
     assert report.exit_code == 10
     assert report.to_dict()["safe_to_query"] is False
     assert "status_snapshot_changed" in _reason_codes(report)
+
+
+def test_status_revalidates_all_workspace_authority_under_one_final_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    original_workspace_lock = LeaseStore.read_only_workspace_lock
+    original_gc_intent = GcStore.read_only_intent_locked
+    original_queue_snapshot = SemanticQueueStore.read_only_snapshot_locked
+    original_journal_snapshot = JournalStore.read_stable
+    original_pointer_snapshot = PointerStore.read_current
+    lock_epoch = 0
+    active_epoch: int | None = None
+    observed: dict[str, list[int | None]] = {
+        "gc": [],
+        "queue": [],
+        "journal": [],
+        "pointer": [],
+    }
+
+    @contextmanager
+    def tracked_workspace_lock(
+        store: LeaseStore,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[None]:
+        nonlocal active_epoch, lock_epoch
+        with original_workspace_lock(store, repo_uuid, deadline_ns=deadline_ns):
+            lock_epoch += 1
+            active_epoch = lock_epoch
+            try:
+                yield
+            finally:
+                active_epoch = None
+
+    def tracked_gc_intent(
+        store: GcStore,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        observed["gc"].append(active_epoch)
+        return original_gc_intent(store, repo_uuid, deadline_ns=deadline_ns)
+
+    def tracked_queue_snapshot(
+        store: SemanticQueueStore,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        observed["queue"].append(active_epoch)
+        return original_queue_snapshot(store, repo_uuid, deadline_ns=deadline_ns)
+
+    def tracked_journal_snapshot(
+        store: JournalStore,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        observed["journal"].append(active_epoch)
+        return original_journal_snapshot(store, repo_uuid, deadline_ns=deadline_ns)
+
+    @contextmanager
+    def tracked_pointer_snapshot(
+        store: PointerStore,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[Any]:
+        observed["pointer"].append(active_epoch)
+        with original_pointer_snapshot(store, repo_uuid, deadline_ns=deadline_ns) as reading:
+            yield reading
+
+    monkeypatch.setattr(LeaseStore, "read_only_workspace_lock", tracked_workspace_lock)
+    monkeypatch.setattr(GcStore, "read_only_intent_locked", tracked_gc_intent)
+    monkeypatch.setattr(
+        SemanticQueueStore,
+        "read_only_snapshot_locked",
+        tracked_queue_snapshot,
+    )
+    monkeypatch.setattr(JournalStore, "read_stable", tracked_journal_snapshot)
+    monkeypatch.setattr(PointerStore, "read_current", tracked_pointer_snapshot)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert report.exit_code == 0
+    final_epochs = {name: epochs[-1] for name, epochs in observed.items()}
+    assert None not in final_epochs.values()
+    assert len(set(final_epochs.values())) == 1
+
+
+def test_status_propagates_deadline_into_stable_record_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    original_read_stable_record = DurableStateRoot.read_stable_record
+    observed: list[tuple[str, int | None]] = []
+
+    def capture_deadline(
+        state: DurableStateRoot,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Any,
+        revision: Any,
+        allow_missing: bool = False,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        observed.append((label, deadline_ns))
+        kwargs = {
+            "label": label,
+            "current": current,
+            "previous": previous,
+            "pending": pending,
+            "decoder": decoder,
+            "revision": revision,
+            "allow_missing": allow_missing,
+        }
+        if deadline_ns is not None:
+            kwargs["deadline_ns"] = deadline_ns
+        return original_read_stable_record(state, **kwargs)
+
+    monkeypatch.setattr(DurableStateRoot, "read_stable_record", capture_deadline)
+    absolute_deadline = time.monotonic_ns() + 5_000_000_000
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        ),
+        deadline_ns=absolute_deadline,
+    )
+
+    assert report.exit_code == 0
+    for label in ("registry", "workspace", "semantic_queue", "journal_head"):
+        deadlines = [deadline for observed_label, deadline in observed if observed_label == label]
+        assert deadlines
+        assert None not in deadlines
+        assert absolute_deadline in deadlines
 
 
 def test_status_revalidates_pointer_after_freshness(

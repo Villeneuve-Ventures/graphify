@@ -25,6 +25,7 @@ from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
+    LockTimeout,
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
@@ -415,8 +416,11 @@ class JournalStore:
                 decoder=JournalHeadState.from_json,
                 revision=lambda value: value.revision,
                 allow_missing=True,
+                deadline_ns=deadline_ns,
             )
             _require_stable_read_deadline(deadline_ns)
+        except LockTimeout as exc:
+            raise LockTimeout("journal stable read exceeded its deadline") from exc
         except (StateCorrupt, StatePathError) as exc:
             raise JournalCorrupt(str(exc)) from exc
         if head is not None and head.repo_uuid != repo_uuid:

@@ -26,8 +26,12 @@ implements the sole `0.9.16` adapter, no-write comparison seam, and
 observed-current release authority. P5A adds only the durable semantic desired-
 work queue, fenced worker claims, reconciliation evidence, and the generation-
 certification binding to one stable queue watermark. Pre-workspace state has no
-import or promotion lane. Watch, service, workspace CLI, installation,
-performance, candidate publication, and live-cutover work remain deferred.
+import or promotion lane. P5B1 adds the production composition root and the
+versioned read-only `graphify workspace status --json` and
+`graphify workspace doctor` surface without repair or durable-state mutation.
+Mutation/query commands, repair, watch/service, installation, performance
+certification, candidate publication, and live-cutover work remain deferred;
+retained production query/service authority remains P5C work.
 
 ## Authority split
 

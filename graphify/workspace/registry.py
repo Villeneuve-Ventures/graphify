@@ -112,17 +112,24 @@ class RegistryStore:
         *,
         allow_missing: bool = False,
         recover: bool = True,
+        deadline_ns: int | None = None,
     ) -> Registry | None:
-        loader = self.state.recover_record if recover else self.state.read_stable_record
-        result = loader(
-            label="registry",
-            current=self.CURRENT,
-            previous=self.PREVIOUS,
-            pending=self.PENDING,
-            decoder=self._decode_registry,
-            revision=lambda document: int(document.to_dict()["revision"]),
-            allow_missing=allow_missing,
-        )
+        kwargs = {
+            "label": "registry",
+            "current": self.CURRENT,
+            "previous": self.PREVIOUS,
+            "pending": self.PENDING,
+            "decoder": self._decode_registry,
+            "revision": lambda document: int(document.to_dict()["revision"]),
+            "allow_missing": allow_missing,
+        }
+        if recover:
+            result = self.state.recover_record(**kwargs)
+        else:
+            result = self.state.read_stable_record(
+                **kwargs,
+                deadline_ns=deadline_ns,
+            )
         return cast(Registry | None, result)
 
     @contextmanager
@@ -154,7 +161,10 @@ class RegistryStore:
                 deadline_ns,
                 "registry snapshot read exceeded its deadline",
             )
-            document = self._load_locked(recover=False)
+            document = self._load_locked(
+                recover=False,
+                deadline_ns=deadline_ns,
+            )
             require_before_deadline(
                 deadline_ns,
                 "registry snapshot read exceeded its deadline",

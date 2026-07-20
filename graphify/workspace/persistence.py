@@ -1611,6 +1611,8 @@ class DurableStateRoot:
         decoder: Callable[[bytes], RecordT],
         revision: Callable[[RecordT], int],
         allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
     ) -> RecordT | None:
         """Read current authority only when no durable recovery is required."""
 
@@ -1632,11 +1634,15 @@ class DurableStateRoot:
             except FileNotFoundError:
                 return None
             try:
-                data = self._read_regular(path)
+                data = self._read_regular(
+                    path,
+                    max_bytes=max_bytes,
+                    deadline_ns=deadline_ns,
+                )
                 record = decoder(data)
                 return data, record, revision(record)
             except Exception as exc:
-                if isinstance(exc, StateCorrupt):
+                if isinstance(exc, (LockTimeout, StateCorrupt)):
                     raise
                 raise StateCorrupt(f"{label} {name} record is invalid: {exc}") from exc
 

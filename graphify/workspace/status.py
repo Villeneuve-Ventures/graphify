@@ -1157,7 +1157,7 @@ def _mark_snapshot_changed(
     )
 
 
-def _queue_snapshot_is_current(
+def _queue_snapshot_is_current_locked(
     runtime: WorkspaceRuntime,
     repo_uuid: str,
     expected: tuple[int, str] | None,
@@ -1167,40 +1167,31 @@ def _queue_snapshot_is_current(
     if expected is None:
         return False
     try:
-        observed = runtime.semantic_queue.inspect(
+        observed = runtime.semantic_queue.read_only_snapshot_locked(
             repo_uuid,
             deadline_ns=deadline_ns,
         )
-    except (
-        LockTimeout,
-        StateCorrupt,
-        StatePathError,
-        ContractError,
-        LeaseError,
-        SemanticQueueError,
-    ):
+    except LockTimeout:
+        raise
+    except (StateCorrupt, StatePathError, ContractError, LeaseError, SemanticQueueError):
         return False
     return (observed.revision, observed.sha256) == expected
 
 
-def _gc_intent_is_absent(
+def _gc_intent_is_absent_locked(
     runtime: WorkspaceRuntime,
     repo_uuid: str,
     *,
     deadline_ns: int,
 ) -> bool:
     try:
-        with runtime.leases.read_only_workspace_lock(
-            repo_uuid,
-            deadline_ns=deadline_ns,
-        ):
-            return (
-                runtime.gc.read_only_intent_locked(
-                    repo_uuid,
-                    deadline_ns=deadline_ns,
-                )
-                is None
+        return (
+            runtime.gc.read_only_intent_locked(
+                repo_uuid,
+                deadline_ns=deadline_ns,
             )
+            is None
+        )
     except LockTimeout:
         raise
     except (WorkspaceRuntimeError, ContractError, GcError, LeaseError):
@@ -1216,7 +1207,7 @@ def _journal_snapshot_token(snapshot: JournalSnapshot) -> tuple[int, str]:
     )
 
 
-def _journal_snapshot_is_current(
+def _journal_snapshot_is_current_locked(
     runtime: WorkspaceRuntime,
     repo_uuid: str,
     expected: tuple[int, str] | None,
@@ -1226,20 +1217,18 @@ def _journal_snapshot_is_current(
     if expected is None:
         return False
     try:
-        with runtime.leases.read_only_workspace_lock(
+        observed = runtime.journal.read_stable(
             repo_uuid,
             deadline_ns=deadline_ns,
-        ):
-            observed = runtime.journal.read_stable(
-                repo_uuid,
-                deadline_ns=deadline_ns,
-            )
+        )
+    except LockTimeout:
+        raise
     except (WorkspaceRuntimeError, ContractError, JournalError, LeaseError):
         return False
     return _journal_snapshot_token(observed) == expected
 
 
-def _pointer_snapshot_is_current(
+def _pointer_snapshot_is_current_locked(
     runtime: WorkspaceRuntime,
     workspace: Mapping[str, object],
     *,
@@ -1267,29 +1256,9 @@ def _pointer_snapshot_is_current(
                 str(observed_current["generation_id"]),
                 str(observed_current["receipt_sha256"]),
             )
-    except (
-        WorkspaceRuntimeError,
-        ContractError,
-        GenerationError,
-        PointerError,
-        UnsupportedCompatibility,
-    ):
-        return False
-    return token == expected
-
-
-def _registry_snapshot_is_current(
-    runtime: WorkspaceRuntime,
-    expected: tuple[int, str] | None,
-    *,
-    deadline_ns: int,
-) -> bool:
-    if expected is None:
-        return False
-    try:
-        with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns) as observed:
-            token = (int(observed.to_dict()["revision"]), observed.sha256)
-    except (WorkspaceRuntimeError, ContractError):
+    except LockTimeout:
+        raise
+    except (ContractError, GenerationError, PointerError, UnsupportedCompatibility):
         return False
     return token == expected
 
@@ -1569,67 +1538,100 @@ def inspect_workspace_status(
                         checks,
                         deadline_ns=absolute_deadline,
                     )
-                    repo_uuid = str(workspace["repo_uuid"])
-                    if bool(workspace["safe_to_query"]) and not _gc_intent_is_absent(
-                        runtime,
-                        repo_uuid,
+                if any(bool(workspace["safe_to_query"]) for workspace in workspaces):
+                    with runtime.registry.read_only_snapshot(
                         deadline_ns=absolute_deadline,
-                    ):
-                        _workspace_failure(
-                            workspace,
-                            checks,
-                            component=f"workspace:{repo_uuid}:gc",
-                            state="invalid",
-                            reason_code="workspace_state_invalid",
-                            action_code="run_workspace_repair",
-                            repair_required=True,
+                    ) as observed_registry:
+                        observed_registry_token = (
+                            int(observed_registry.to_dict()["revision"]),
+                            observed_registry.sha256,
                         )
-                    if bool(workspace["safe_to_query"]) and not _queue_snapshot_is_current(
-                        runtime,
-                        repo_uuid,
-                        queue_tokens.get(repo_uuid),
-                        deadline_ns=absolute_deadline,
-                    ):
-                        _mark_snapshot_changed(
-                            workspace,
-                            checks,
-                            component=f"workspace:{workspace['repo_uuid']}:snapshot",
-                        )
-                    if bool(workspace["safe_to_query"]) and not _journal_snapshot_is_current(
-                        runtime,
-                        repo_uuid,
-                        journal_tokens.get(repo_uuid),
-                        deadline_ns=absolute_deadline,
-                    ):
-                        _mark_snapshot_changed(
-                            workspace,
-                            checks,
-                            component=f"workspace:{workspace['repo_uuid']}:journal_snapshot",
-                        )
-                    if bool(workspace["safe_to_query"]) and not _pointer_snapshot_is_current(
-                        runtime,
-                        workspace,
-                        deadline_ns=absolute_deadline,
-                    ):
-                        _mark_snapshot_changed(
-                            workspace,
-                            checks,
-                            component=f"workspace:{workspace['repo_uuid']}:pointer_snapshot",
-                        )
-                if any(bool(workspace["safe_to_query"]) for workspace in workspaces) and not (
-                    _registry_snapshot_is_current(
-                        runtime,
-                        registry_token,
-                        deadline_ns=absolute_deadline,
-                    )
-                ):
-                    for workspace in workspaces:
-                        if bool(workspace["safe_to_query"]):
-                            _mark_snapshot_changed(
-                                workspace,
-                                checks,
-                                component=f"workspace:{workspace['repo_uuid']}:registry",
-                            )
+                        if registry_token is None or observed_registry_token != registry_token:
+                            for workspace in workspaces:
+                                if bool(workspace["safe_to_query"]):
+                                    _mark_snapshot_changed(
+                                        workspace,
+                                        checks,
+                                        component=(
+                                            f"workspace:{workspace['repo_uuid']}:registry"
+                                        ),
+                                    )
+                        else:
+                            for workspace in workspaces:
+                                if not bool(workspace["safe_to_query"]):
+                                    continue
+                                require_before_deadline(
+                                    absolute_deadline,
+                                    "workspace final snapshot exceeded its deadline",
+                                )
+                                repo_uuid = str(workspace["repo_uuid"])
+                                try:
+                                    with runtime.leases.read_only_workspace_lock(
+                                        repo_uuid,
+                                        deadline_ns=absolute_deadline,
+                                    ):
+                                        if not _gc_intent_is_absent_locked(
+                                            runtime,
+                                            repo_uuid,
+                                            deadline_ns=absolute_deadline,
+                                        ):
+                                            _workspace_failure(
+                                                workspace,
+                                                checks,
+                                                component=f"workspace:{repo_uuid}:gc",
+                                                state="invalid",
+                                                reason_code="workspace_state_invalid",
+                                                action_code="run_workspace_repair",
+                                                repair_required=True,
+                                            )
+                                        elif not _queue_snapshot_is_current_locked(
+                                            runtime,
+                                            repo_uuid,
+                                            queue_tokens.get(repo_uuid),
+                                            deadline_ns=absolute_deadline,
+                                        ):
+                                            _mark_snapshot_changed(
+                                                workspace,
+                                                checks,
+                                                component=f"workspace:{repo_uuid}:snapshot",
+                                            )
+                                        elif not _journal_snapshot_is_current_locked(
+                                            runtime,
+                                            repo_uuid,
+                                            journal_tokens.get(repo_uuid),
+                                            deadline_ns=absolute_deadline,
+                                        ):
+                                            _mark_snapshot_changed(
+                                                workspace,
+                                                checks,
+                                                component=(
+                                                    f"workspace:{repo_uuid}:journal_snapshot"
+                                                ),
+                                            )
+                                        elif not _pointer_snapshot_is_current_locked(
+                                            runtime,
+                                            workspace,
+                                            deadline_ns=absolute_deadline,
+                                        ):
+                                            _mark_snapshot_changed(
+                                                workspace,
+                                                checks,
+                                                component=(
+                                                    f"workspace:{repo_uuid}:pointer_snapshot"
+                                                ),
+                                            )
+                                except LockTimeout:
+                                    raise
+                                except (WorkspaceRuntimeError, ContractError):
+                                    _workspace_failure(
+                                        workspace,
+                                        checks,
+                                        component=f"workspace:{repo_uuid}:state",
+                                        state="invalid",
+                                        reason_code="workspace_state_invalid",
+                                        action_code="run_workspace_repair",
+                                        repair_required=True,
+                                    )
             except LockTimeout:
                 for workspace in workspaces:
                     if workspace["state"] == "ready":
@@ -1646,6 +1648,14 @@ def inspect_workspace_status(
                         "retry_status",
                     )
                 )
+            except (WorkspaceRuntimeError, ContractError):
+                for workspace in workspaces:
+                    if bool(workspace["safe_to_query"]):
+                        _mark_snapshot_changed(
+                            workspace,
+                            checks,
+                            component=f"workspace:{workspace['repo_uuid']}:registry",
+                        )
     return _finalize(
         runtime=_runtime_summary(compatibility_sha256),
         workspaces=workspaces,

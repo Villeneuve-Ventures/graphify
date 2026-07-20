@@ -344,7 +344,12 @@ class LeaseStore:
             deadline_ns,
             "workspace lease snapshot read exceeded its deadline",
         )
-        state = self._load_state_locked(document, repo_uuid, recover=False)
+        state = self._load_state_locked(
+            document,
+            repo_uuid,
+            recover=False,
+            deadline_ns=deadline_ns,
+        )
         require_before_deadline(
             deadline_ns,
             "workspace lease snapshot read exceeded its deadline",
@@ -416,19 +421,26 @@ class LeaseStore:
         repo_uuid: str,
         *,
         recover: bool = True,
+        deadline_ns: int | None = None,
     ) -> WorkspaceLeaseState:
         entry = _registry_entry(document, repo_uuid)
         current, previous, pending = self._paths(repo_uuid)
-        loader = self.state.recover_record if recover else self.state.read_stable_record
-        recovered = loader(
-            label="workspace",
-            current=current,
-            previous=previous,
-            pending=pending,
-            decoder=WorkspaceLeaseState.from_json,
-            revision=lambda state: state.revision,
-            allow_missing=False,
-        )
+        kwargs = {
+            "label": "workspace",
+            "current": current,
+            "previous": previous,
+            "pending": pending,
+            "decoder": WorkspaceLeaseState.from_json,
+            "revision": lambda state: state.revision,
+            "allow_missing": False,
+        }
+        if recover:
+            recovered = self.state.recover_record(**kwargs)
+        else:
+            recovered = self.state.read_stable_record(
+                **kwargs,
+                deadline_ns=deadline_ns,
+            )
         active_evidence = entry["active_source_evidence"]
         fence_floor = int(active_evidence["fence_token"])
         operation_floor = int(active_evidence["operation_epoch"])

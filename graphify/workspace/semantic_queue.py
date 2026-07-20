@@ -1291,21 +1291,28 @@ class SemanticQueueStore:
         repo_uuid: str,
         *,
         recover: bool = True,
+        deadline_ns: int | None = None,
     ) -> SemanticQueueSnapshot:
         current, previous, pending = self._paths(repo_uuid)
         if not recover and not self.state.private_directory_exists(current.parent):
             return SemanticQueueSnapshot.initial(repo_uuid, self.policy)
-        loader = self.state.recover_record if recover else self.state.read_stable_record
         try:
-            snapshot = loader(
-                label="semantic_queue",
-                current=current,
-                previous=previous,
-                pending=pending,
-                decoder=SemanticQueueSnapshot.from_json,
-                revision=lambda value: value.revision,
-                allow_missing=True,
-            )
+            kwargs = {
+                "label": "semantic_queue",
+                "current": current,
+                "previous": previous,
+                "pending": pending,
+                "decoder": SemanticQueueSnapshot.from_json,
+                "revision": lambda value: value.revision,
+                "allow_missing": True,
+            }
+            if recover:
+                snapshot = self.state.recover_record(**kwargs)
+            else:
+                snapshot = self.state.read_stable_record(
+                    **kwargs,
+                    deadline_ns=deadline_ns,
+                )
         except (ContractError, StateCorrupt, StatePathError) as exc:
             raise SemanticQueueCorrupt(str(exc)) from exc
         if snapshot is None:
@@ -2066,7 +2073,11 @@ class SemanticQueueStore:
             deadline_ns,
             "semantic queue snapshot read exceeded its deadline",
         )
-        snapshot = self._load_locked(repo_uuid, recover=False)
+        snapshot = self._load_locked(
+            repo_uuid,
+            recover=False,
+            deadline_ns=deadline_ns,
+        )
         require_before_deadline(
             deadline_ns,
             "semantic queue snapshot read exceeded its deadline",
