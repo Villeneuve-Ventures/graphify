@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 import os
 from pathlib import Path
 import subprocess
@@ -23,8 +24,10 @@ from graphify.workspace.contracts import (
 )
 from graphify.workspace.freshness import FreshnessAuthority
 from graphify.workspace.identity import discover_source
+from graphify.workspace.journal import JournalStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
+    LockTimeout,
     RuntimeCapabilities,
     StatePathError,
 )
@@ -714,6 +717,226 @@ def test_status_revalidates_registry_after_freshness(
     assert value["workspaces"][0]["safe_to_query"] is False
     assert [workspace["repo_uuid"] for workspace in value["workspaces"]] == [REPO_UUID]
     assert "status_snapshot_changed" in _reason_codes(report)
+
+
+def test_status_revalidates_pointer_after_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+    from tests.test_workspace_pointers import _cas, _certify
+
+    runtime = certified_runtime(tmp_path)
+    harness = RuntimeHarness(
+        repo=runtime.repo,
+        state_root=runtime.state_root,
+        registry=runtime.registry,
+        leases=runtime.pointers.generations.leases,
+    )
+    build = acquire(harness, "BUILD", tick=3)
+    next_receipt = _certify(
+        runtime.pointers.generations,
+        build,
+        "gen-next",
+        '{"nodes": [], "edges": []}\n',
+        monotonic_ns=30_001,
+    )
+    harness.leases.release(build)
+    original_pointer = runtime.pointers.load(REPO_UUID, allow_missing=False)
+    assert original_pointer is not None
+    original_current = cast(dict[str, Any], original_pointer.to_dict()["current"])
+    original_probe = FreshnessAuthority.probe
+    promoted = False
+
+    def promote_after_probe(
+        authority: FreshnessAuthority,
+        repo_uuid: str,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal promoted
+        result = original_probe(authority, repo_uuid, **kwargs)
+        if not promoted:
+            promote = acquire(harness, "PROMOTE", tick=4)
+            runtime.pointers.promote(
+                promote,
+                _cas(
+                    promote,
+                    next_receipt,
+                    revision=1,
+                    current_sha256=str(original_current["receipt_sha256"]),
+                ),
+                occurred_at=START + timedelta(seconds=4),
+                monotonic_ns=40_001,
+            )
+            harness.leases.release(promote)
+            promoted = True
+        return result
+
+    monkeypatch.setattr(FreshnessAuthority, "probe", promote_after_probe)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+
+    assert promoted is True
+    assert report.exit_code == 10
+    assert value["safe_to_query"] is False
+    assert value["workspaces"][0]["safe_to_query"] is False
+    assert value["workspaces"][0]["generations"]["pointer_revision"] == 1
+    assert "status_snapshot_changed" in _reason_codes(report)
+
+
+def test_status_bounds_pointer_journal_verification_by_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    original_read_stable = JournalStore.read_stable
+    observed_deadlines: list[int | None] = []
+
+    def expire_on_pointer_verification(
+        store: JournalStore,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        observed_deadlines.append(deadline_ns)
+        if len(observed_deadlines) == 2 and deadline_ns is not None:
+            raise LockTimeout("pointer journal verification exceeded its deadline")
+        return original_read_stable(store, repo_uuid, deadline_ns=deadline_ns)
+
+    monkeypatch.setattr(JournalStore, "read_stable", expire_on_pointer_verification)
+    absolute_deadline = time.monotonic_ns() + 5_000_000_000
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        ),
+        deadline_ns=absolute_deadline,
+    )
+
+    assert observed_deadlines[:2] == [absolute_deadline, absolute_deadline]
+    assert report.exit_code == 10
+    assert report.to_dict()["safe_to_query"] is False
+    assert "inspection_deadline_exceeded" in _reason_codes(report)
+
+
+def test_journal_summary_honors_deadline_during_event_traversal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.status import _journal_summary
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    snapshot = runtime.pointers.journal.read_stable(REPO_UUID)
+    monotonic_tick = 0
+
+    def monotonic_ns() -> int:
+        nonlocal monotonic_tick
+        monotonic_tick += 1
+        return monotonic_tick
+
+    monkeypatch.setattr("graphify.workspace.persistence.time.monotonic_ns", monotonic_ns)
+
+    with pytest.raises(LockTimeout, match="journal summary exceeded its deadline"):
+        _journal_summary(snapshot, deadline_ns=2)
+
+
+def test_status_classifies_journal_summary_deadline_at_journal_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+
+    def expired_summary(*_args: object, **_kwargs: object) -> object:
+        raise LockTimeout("journal summary exceeded its deadline")
+
+    monkeypatch.setattr("graphify.workspace.status._journal_summary", expired_summary)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+    journal_check = next(
+        check
+        for check in value["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:journal" and check["state"] == "degraded"
+    )
+
+    assert report.exit_code == 10
+    assert journal_check["reason_code"] == "inspection_deadline_exceeded"
+    assert journal_check["action_code"] == "retry_status"
+
+
+def test_status_stops_registry_traversal_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphify.workspace.status as status_module
+
+    harness = create_harness(tmp_path)
+    second_repo = create_repo(tmp_path / "repo-second", SECOND_UUID)
+    _set_remote(second_repo, "https://github.com/example/status-second.git")
+    harness.registry.enroll(
+        discover_source(second_repo),
+        authorization("status-second"),
+        expected_revision=1,
+    )
+    expired = False
+    inspected: list[str] = []
+
+    def inspect_once(
+        _runtime: object,
+        _registry: object,
+        entry: dict[str, object],
+        **_kwargs: object,
+    ) -> tuple[dict[str, object], list[dict[str, str]]]:
+        nonlocal expired
+        inspected.append(str(entry["repo_uuid"]))
+        workspace = status_module._workspace_shell(entry)
+        workspace_checks: list[dict[str, str]] = []
+        status_module._deadline_failure(
+            workspace,
+            workspace_checks,
+            component=f"workspace:{entry['repo_uuid']}:inspection",
+        )
+        expired = True
+        return workspace, workspace_checks
+
+    monkeypatch.setattr(status_module, "_inspect_workspace", inspect_once)
+    monkeypatch.setattr(
+        "graphify.workspace.persistence.time.monotonic_ns",
+        lambda: 1 if expired else 0,
+    )
+
+    report = inspect_workspace_status(_inputs(harness.state_root), deadline_ns=1)
+
+    assert inspected == [REPO_UUID]
+    assert report.exit_code == 10
+    assert report.to_dict()["safe_to_query"] is False
+    assert "inspection_deadline_exceeded" in _reason_codes(report)
 
 
 @pytest.mark.parametrize(

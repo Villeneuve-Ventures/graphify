@@ -368,51 +368,65 @@ class PointerStore:
         pointer: PointerSet,
         *,
         transition: str,
+        deadline_ns: int | None = None,
     ) -> bool:
         value = pointer.to_dict()
         current = cast(dict[str, Any], value["current"])
-        return any(
-            event.to_dict()["transition"] == transition
-            and event.to_dict()["generation_id"] == current["generation_id"]
-            and event.to_dict()["receipt_sha256"] == current["receipt_sha256"]
-            and event.to_dict()["pointer_revision"] == value["pointer_revision"]
-            and event.to_dict()["operation_epoch"] == value["operation_epoch"]
-            and event.to_dict()["fence_token"] == value["fence_token"]
-            for event in snapshot.events
-        )
+        for event in snapshot.events:
+            require_before_deadline(
+                deadline_ns,
+                "visible pointer journal verification exceeded its deadline",
+            )
+            event_value = event.to_dict()
+            if (
+                event_value["transition"] == transition
+                and event_value["generation_id"] == current["generation_id"]
+                and event_value["receipt_sha256"] == current["receipt_sha256"]
+                and event_value["pointer_revision"] == value["pointer_revision"]
+                and event_value["operation_epoch"] == value["operation_epoch"]
+                and event_value["fence_token"] == value["fence_token"]
+            ):
+                return True
+        return False
 
     def _verify_visible_pointer_journal(
         self,
         repo_uuid: str,
         pointer: PointerSet,
+        *,
+        deadline_ns: int | None = None,
     ) -> None:
         try:
-            snapshot = self.journal.read_stable(repo_uuid)
+            snapshot = self.journal.read_stable(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
         except JournalError as exc:
             raise PointerCorrupt(
                 f"visible pointer journal authority is unavailable: {exc}"
             ) from exc
         pointer_revision = int(pointer.to_dict()["pointer_revision"])
-        durable_pointer_revisions = [
-            int(value["pointer_revision"])
-            for event in snapshot.events
-            if (value := event.to_dict())["pointer_revision"] is not None
-        ]
-        if durable_pointer_revisions and max(durable_pointer_revisions) > pointer_revision:
-            raise PointerCorrupt(
-                "visible pointer is stale relative to durable journal history"
+        durable_pointer_revisions: list[int] = []
+        for event in snapshot.events:
+            require_before_deadline(
+                deadline_ns,
+                "visible pointer journal verification exceeded its deadline",
             )
+            value = event.to_dict()
+            if value["pointer_revision"] is not None:
+                durable_pointer_revisions.append(int(value["pointer_revision"]))
+        if durable_pointer_revisions and max(durable_pointer_revisions) > pointer_revision:
+            raise PointerCorrupt("visible pointer is stale relative to durable journal history")
         if not any(
             self._journal_records_pointer(
                 snapshot,
                 pointer,
                 transition=transition,
+                deadline_ns=deadline_ns,
             )
             for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")
         ):
-            raise PointerCorrupt(
-                "visible pointer has no matching durable journal event"
-            )
+            raise PointerCorrupt("visible pointer has no matching durable journal event")
 
     def _preliminary_pointer(self, repo_uuid: str) -> PointerSet | None:
         if self._exists(self._pending(repo_uuid)):
@@ -1118,7 +1132,11 @@ class PointerStore:
                 )
                 if receipt.sha256 != current["receipt_sha256"]:
                     raise PointerCorrupt("current pointer receipt hash does not match generation")
-                self._verify_visible_pointer_journal(repo_uuid, pointer)
+                self._verify_visible_pointer_journal(
+                    repo_uuid,
+                    pointer,
+                    deadline_ns=deadline_ns,
+                )
                 require_before_deadline(
                     deadline_ns,
                     "current pointer read exceeded its deadline",
@@ -1166,7 +1184,11 @@ class PointerStore:
             deadline_ns,
             "current pointer revalidation exceeded its deadline",
         )
-        self._verify_visible_pointer_journal(repo_uuid, pointer)
+        self._verify_visible_pointer_journal(
+            repo_uuid,
+            pointer,
+            deadline_ns=deadline_ns,
+        )
         require_before_deadline(
             deadline_ns,
             "current pointer revalidation exceeded its deadline",

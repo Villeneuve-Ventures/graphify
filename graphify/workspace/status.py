@@ -405,12 +405,18 @@ def _queue_issue(summary: Mapping[str, object]) -> tuple[str, str] | None:
 
 def _journal_summary(
     snapshot: JournalSnapshot,
+    *,
+    deadline_ns: int | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]], int]:
     latest: dict[str, Mapping[str, object]] = {}
     repair_count = 0
     last_successful_transition: str | None = None
     last_failure_classification: str | None = None
     for event in snapshot.events:
+        require_before_deadline(
+            deadline_ns,
+            "journal summary exceeded its deadline",
+        )
         value = event.to_dict()
         latest[str(value["generation_id"])] = value
         if value["transition"] == "REPAIRED":
@@ -420,15 +426,24 @@ def _journal_summary(
         else:
             last_successful_transition = str(value["transition"])
     pending_states = frozenset({"ALLOCATED", "STAGING", "BUILT", "VALIDATING", "CERTIFIED"})
-    pending = [
-        {
-            "generation_id": generation_id,
-            "lifecycle_state": str(value["transition"]),
-            "receipt_sha256": value["receipt_sha256"],
-        }
-        for generation_id, value in sorted(latest.items())
-        if value["transition"] in pending_states
-    ]
+    pending: list[dict[str, object]] = []
+    for generation_id, value in sorted(latest.items()):
+        require_before_deadline(
+            deadline_ns,
+            "journal summary exceeded its deadline",
+        )
+        if value["transition"] in pending_states:
+            pending.append(
+                {
+                    "generation_id": generation_id,
+                    "lifecycle_state": str(value["transition"]),
+                    "receipt_sha256": value["receipt_sha256"],
+                }
+            )
+    require_before_deadline(
+        deadline_ns,
+        "journal summary exceeded its deadline",
+    )
     return (
         {
             "sequence": 0 if snapshot.head is None else snapshot.head.sequence,
@@ -705,6 +720,10 @@ def _inspect_workspace(
                     deadline_ns,
                     "journal inspection exceeded its deadline",
                 )
+                journal_summary, pending_generations, repair_count = _journal_summary(
+                    journal,
+                    deadline_ns=deadline_ns,
+                )
             except LockTimeout:
                 return _deadline_failure(
                     workspace,
@@ -721,7 +740,6 @@ def _inspect_workspace(
                     action_code="run_workspace_repair",
                     repair_required=True,
                 )
-            journal_summary, pending_generations, repair_count = _journal_summary(journal)
             workspace["journal"] = journal_summary
             generations = cast(dict[str, object], workspace["generations"])
             generations["pending"] = pending_generations
@@ -877,6 +895,45 @@ def _queue_snapshot_is_current(
     ):
         return False
     return (observed.revision, observed.sha256) == expected
+
+
+def _pointer_snapshot_is_current(
+    runtime: WorkspaceRuntime,
+    workspace: Mapping[str, object],
+    *,
+    deadline_ns: int,
+) -> bool:
+    generations = cast(Mapping[str, object], workspace["generations"])
+    current = generations["current"]
+    pointer_revision = generations["pointer_revision"]
+    if not isinstance(current, Mapping) or not isinstance(pointer_revision, int):
+        return False
+    expected = (
+        pointer_revision,
+        str(current["generation_id"]),
+        str(current["receipt_sha256"]),
+    )
+    try:
+        with runtime.pointers.read_current(
+            str(workspace["repo_uuid"]),
+            deadline_ns=deadline_ns,
+        ) as reading:
+            observed = reading.pointer.to_dict()
+            observed_current = cast(Mapping[str, object], observed["current"])
+            token = (
+                int(observed["pointer_revision"]),
+                str(observed_current["generation_id"]),
+                str(observed_current["receipt_sha256"]),
+            )
+    except (
+        WorkspaceRuntimeError,
+        ContractError,
+        GenerationError,
+        PointerError,
+        UnsupportedCompatibility,
+    ):
+        return False
+    return token == expected
 
 
 def _registry_snapshot_is_current(
@@ -1093,7 +1150,11 @@ def inspect_workspace_status(
                 list[dict[str, object]],
                 registry_value["workspaces"],
             )
-            for entry in sorted(entries, key=lambda item: str(item["repo_uuid"])):
+            for entry in entries:
+                require_before_deadline(
+                    absolute_deadline,
+                    "workspace registry traversal exceeded its deadline",
+                )
                 workspace, workspace_checks = _inspect_workspace(
                     runtime,
                     registry,
@@ -1104,6 +1165,13 @@ def inspect_workspace_status(
                 workspaces.append(workspace)
                 checks.extend(workspace_checks)
     except LockTimeout:
+        for workspace in workspaces:
+            if workspace["state"] == "ready":
+                _deadline_failure(
+                    workspace,
+                    checks,
+                    component=f"workspace:{workspace['repo_uuid']}:inspection",
+                )
         checks.append(
             _check(
                 "registry",
@@ -1145,39 +1213,70 @@ def inspect_workspace_status(
                 )
             )
         else:
-            for workspace in workspaces:
-                _apply_freshness(
-                    runtime,
-                    workspace,
-                    checks,
-                    deadline_ns=absolute_deadline,
-                )
-                repo_uuid = str(workspace["repo_uuid"])
-                if bool(workspace["safe_to_query"]) and not _queue_snapshot_is_current(
-                    runtime,
-                    repo_uuid,
-                    queue_tokens.get(repo_uuid),
-                    deadline_ns=absolute_deadline,
-                ):
-                    _mark_snapshot_changed(
+            try:
+                for workspace in workspaces:
+                    require_before_deadline(
+                        absolute_deadline,
+                        "workspace status finalization exceeded its deadline",
+                    )
+                    _apply_freshness(
+                        runtime,
                         workspace,
                         checks,
-                        component=f"workspace:{workspace['repo_uuid']}:snapshot",
+                        deadline_ns=absolute_deadline,
                     )
-            if any(bool(workspace["safe_to_query"]) for workspace in workspaces) and not (
-                _registry_snapshot_is_current(
-                    runtime,
-                    registry_revision,
-                    deadline_ns=absolute_deadline,
-                )
-            ):
-                for workspace in workspaces:
-                    if bool(workspace["safe_to_query"]):
+                    repo_uuid = str(workspace["repo_uuid"])
+                    if bool(workspace["safe_to_query"]) and not _queue_snapshot_is_current(
+                        runtime,
+                        repo_uuid,
+                        queue_tokens.get(repo_uuid),
+                        deadline_ns=absolute_deadline,
+                    ):
                         _mark_snapshot_changed(
                             workspace,
                             checks,
-                            component=f"workspace:{workspace['repo_uuid']}:registry",
+                            component=f"workspace:{workspace['repo_uuid']}:snapshot",
                         )
+                    if bool(workspace["safe_to_query"]) and not _pointer_snapshot_is_current(
+                        runtime,
+                        workspace,
+                        deadline_ns=absolute_deadline,
+                    ):
+                        _mark_snapshot_changed(
+                            workspace,
+                            checks,
+                            component=f"workspace:{workspace['repo_uuid']}:pointer_snapshot",
+                        )
+                if any(bool(workspace["safe_to_query"]) for workspace in workspaces) and not (
+                    _registry_snapshot_is_current(
+                        runtime,
+                        registry_revision,
+                        deadline_ns=absolute_deadline,
+                    )
+                ):
+                    for workspace in workspaces:
+                        if bool(workspace["safe_to_query"]):
+                            _mark_snapshot_changed(
+                                workspace,
+                                checks,
+                                component=f"workspace:{workspace['repo_uuid']}:registry",
+                            )
+            except LockTimeout:
+                for workspace in workspaces:
+                    if workspace["state"] == "ready":
+                        _deadline_failure(
+                            workspace,
+                            checks,
+                            component=f"workspace:{workspace['repo_uuid']}:inspection",
+                        )
+                checks.append(
+                    _check(
+                        "status",
+                        "degraded",
+                        "inspection_deadline_exceeded",
+                        "retry_status",
+                    )
+                )
     return _finalize(
         runtime=_runtime_summary(compatibility_sha256),
         workspaces=workspaces,

@@ -641,12 +641,22 @@ def test_freshness_deadline_expires_before_release_revalidation(
         if event == "freshness:post_observed":
             now = timeout_ns
 
-    def count_journal_verification(repo_uuid: str, pointer: PointerSet) -> None:
+    def count_journal_verification(
+        repo_uuid: str,
+        pointer: PointerSet,
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
         nonlocal journal_checks
         journal_checks += 1
         if journal_checks > 1:
             raise AssertionError("expired release reached journal revalidation")
-        original_journal_verification(repo_uuid, pointer)
+        assert deadline_ns == timeout_ns
+        original_journal_verification(
+            repo_uuid,
+            pointer,
+            deadline_ns=deadline_ns,
+        )
 
     monkeypatch.setattr(time, "monotonic_ns", monotonic_ns)
     monkeypatch.setattr(
