@@ -65,6 +65,17 @@ class LockOrderError(WorkspaceRuntimeError):
 class LockTimeout(WorkspaceRuntimeError):
     code = "lock_timeout"
 
+    def __init__(
+        self,
+        detail: str,
+        *,
+        phase: str = "deadline",
+        kind: str | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.phase = phase
+        self.kind = kind
+
 
 def require_before_deadline(deadline_ns: int | None, detail: str) -> None:
     """Raise the stable timeout error after an absolute monotonic deadline."""
@@ -1180,7 +1191,11 @@ class DurableStateRoot:
                 operation |= fcntl.LOCK_NB
             while True:
                 if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
-                    raise LockTimeout(f"{kind} lock acquisition timed out: {path}")
+                    raise LockTimeout(
+                        f"{kind} lock acquisition timed out: {path}",
+                        phase="acquire",
+                        kind=kind,
+                    )
                 try:
                     fcntl.flock(descriptor, operation)
                 except InterruptedError:
@@ -1191,12 +1206,18 @@ class DurableStateRoot:
                     remaining_ns = deadline_ns - time.monotonic_ns()
                     if remaining_ns <= 0:
                         raise LockTimeout(
-                            f"{kind} lock acquisition timed out: {path}"
+                            f"{kind} lock acquisition timed out: {path}",
+                            phase="acquire",
+                            kind=kind,
                         ) from None
                     time.sleep(min(0.001, remaining_ns / 1_000_000_000))
                     continue
                 if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
-                    raise LockTimeout(f"{kind} lock acquisition timed out: {path}")
+                    raise LockTimeout(
+                        f"{kind} lock acquisition timed out: {path}",
+                        phase="acquire",
+                        kind=kind,
+                    )
                 break
             token = _LOCK_STACK.set((*stack, (rank, name)))
             self.fault_hook(f"lock:{name}:acquired")

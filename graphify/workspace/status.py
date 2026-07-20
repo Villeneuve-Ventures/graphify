@@ -117,10 +117,18 @@ ACTION_CODES = frozenset(
 def _validate_codes(value: object) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            if key == "reason_code" and (not isinstance(item, str) or item not in REASON_CODES):
+            is_reason_code = isinstance(key, str) and (
+                key == "reason_code" or key.endswith("_reason_code")
+            )
+            is_action_code = isinstance(key, str) and (
+                key == "action_code" or key.endswith("_action_code")
+            )
+            if is_reason_code and (not isinstance(item, str) or item not in REASON_CODES):
                 raise ValueError(f"unsupported workspace status reason code: {item!r}")
-            if key == "action_code" and (not isinstance(item, str) or item not in ACTION_CODES):
+            if is_action_code and (not isinstance(item, str) or item not in ACTION_CODES):
                 raise ValueError(f"unsupported workspace status action code: {item!r}")
+            if key == "age_reason_code" and item != "not_recorded_v1":
+                raise ValueError(f"unsupported workspace status age reason code: {item!r}")
             _validate_codes(item)
     elif isinstance(value, list):
         for item in value:
@@ -536,8 +544,9 @@ def _deadline_failure(
 
 
 def _lock_timeout_reason(exc: LockTimeout, kind: str) -> str:
-    marker = f"{kind} lock acquisition timed out"
-    return f"{kind}_lock_contended" if marker in str(exc) else "inspection_deadline_exceeded"
+    if exc.phase == "acquire" and exc.kind == kind:
+        return f"{kind}_lock_contended"
+    return "inspection_deadline_exceeded"
 
 
 def _inspect_workspace(

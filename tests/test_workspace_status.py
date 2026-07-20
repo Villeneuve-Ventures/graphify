@@ -342,6 +342,24 @@ def test_status_report_rejects_unknown_codes_and_contradictory_exit_state(
         )
 
 
+def test_status_report_rejects_nested_reason_codes_outside_schema_constraints(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+
+    unknown_pending = inspect_workspace_status(_inputs(harness.state_root)).to_dict()
+    unknown_pending["workspaces"][0]["generations"]["pending_reason_code"] = (
+        "future_unversioned_reason"
+    )
+    with pytest.raises(ValueError, match="reason code"):
+        WorkspaceStatusReport(unknown_pending)
+
+    unsupported_age = inspect_workspace_status(_inputs(harness.state_root)).to_dict()
+    unsupported_age["workspaces"][0]["queue"]["age_reason_code"] = "ready"
+    with pytest.raises(ValueError, match="age reason code"):
+        WorkspaceStatusReport(unsupported_age)
+
+
 def test_status_serialization_is_byte_stable_and_sorted(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     registry = RegistryStore(state_root, capabilities=SUPPORTED)
@@ -737,6 +755,40 @@ def test_status_classifies_generation_lock_contention_at_its_boundary(
     assert report.exit_code == 10
     assert "generation_lock_contended" in _reason_codes(report)
     assert "workspace_lock_contended" not in _reason_codes(report)
+
+
+def test_status_classifies_generation_lock_timeout_from_structured_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.persistence import LockTimeout
+    from graphify.workspace.pointers import PointerStore
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+
+    def acquisition_timeout(*_args: object, **_kwargs: object) -> object:
+        raise LockTimeout(
+            "message intentionally omits the old contention marker",
+            phase="acquire",
+            kind="generation",
+        )
+
+    monkeypatch.setattr(PointerStore, "read_current", acquisition_timeout)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert report.exit_code == 10
+    assert "generation_lock_contended" in _reason_codes(report)
+    assert "inspection_deadline_exceeded" not in _reason_codes(report)
 
 
 def test_status_classifies_post_lock_deadline_without_claiming_contention(
