@@ -1553,9 +1553,18 @@ class DurableStateRoot:
             deadline_ns=deadline_ns,
         )
 
-    def read_optional_existing_bytes(self, relative: str | Path) -> bytes | None:
+    def read_optional_existing_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
         """Read optional existing state while still validating its private parent chain."""
 
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(deadline_ns, "state record read exceeded its deadline")
         path = self.path(relative)
         try:
             descriptor = self._open_existing_file(path, allow_missing_parent=True)
@@ -1565,7 +1574,12 @@ class DurableStateRoot:
             raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
         if descriptor is None:
             return None
-        return self._read_regular_descriptor(descriptor, path)
+        return self._read_regular_descriptor(
+            descriptor,
+            path,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
     def read_current(
         self,

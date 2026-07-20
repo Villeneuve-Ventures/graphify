@@ -29,6 +29,7 @@ from graphify.workspace.contracts import (
     canonical_sha256,
 )
 from graphify.workspace.generations import GenerationError
+from graphify.workspace.gc import GcError
 from graphify.workspace.journal import JournalError, JournalSnapshot
 from graphify.workspace.leases import LeaseError
 from graphify.workspace.persistence import (
@@ -761,6 +762,7 @@ def _inspect_workspace(
     entry: Mapping[str, object],
     *,
     deadline_ns: int,
+    journal_tokens: dict[str, tuple[int, str]],
     queue_tokens: dict[str, tuple[int, str]],
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
     repo_uuid = str(entry["repo_uuid"])
@@ -810,6 +812,40 @@ def _inspect_workspace(
                 "semantic": _lease_summary(lease_state.leases.get("semantic")),
             }
             checks.append(_check(f"{prefix}:leases", "ready", "ready", "none"))
+
+            state_path_component = f"{prefix}:gc"
+            try:
+                gc_intent = runtime.gc.read_only_intent_locked(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            except LockTimeout:
+                return _deadline_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:gc",
+                )
+            except (GcError, StateCorrupt):
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:gc",
+                    state="invalid",
+                    reason_code="workspace_state_invalid",
+                    action_code="run_workspace_repair",
+                    repair_required=True,
+                )
+            if gc_intent is not None:
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:gc",
+                    state="invalid",
+                    reason_code="workspace_state_invalid",
+                    action_code="run_workspace_repair",
+                    repair_required=True,
+                )
+            checks.append(_check(f"{prefix}:gc", "ready", "ready", "none"))
 
             state_path_component = f"{prefix}:semantic_queue"
             try:
@@ -932,6 +968,7 @@ def _inspect_workspace(
                     repair_required=True,
                 )
             workspace["journal"] = journal_summary
+            journal_tokens[repo_uuid] = _journal_snapshot_token(journal)
             generations = cast(dict[str, object], workspace["generations"])
             generations["pending"] = pending_generations
             generations["pending_reason_code"] = (
@@ -1086,6 +1123,38 @@ def _queue_snapshot_is_current(
     ):
         return False
     return (observed.revision, observed.sha256) == expected
+
+
+def _journal_snapshot_token(snapshot: JournalSnapshot) -> tuple[int, str]:
+    if snapshot.head is None:
+        return (0, canonical_sha256(None))
+    return (
+        snapshot.head.revision,
+        canonical_sha256(snapshot.head.to_dict()),
+    )
+
+
+def _journal_snapshot_is_current(
+    runtime: WorkspaceRuntime,
+    repo_uuid: str,
+    expected: tuple[int, str] | None,
+    *,
+    deadline_ns: int,
+) -> bool:
+    if expected is None:
+        return False
+    try:
+        with runtime.leases.read_only_workspace_lock(
+            repo_uuid,
+            deadline_ns=deadline_ns,
+        ):
+            observed = runtime.journal.read_stable(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+    except (WorkspaceRuntimeError, ContractError, JournalError, LeaseError):
+        return False
+    return _journal_snapshot_token(observed) == expected
 
 
 def _pointer_snapshot_is_current(
@@ -1328,6 +1397,7 @@ def inspect_workspace_status(
         time.monotonic_ns() + _DEFAULT_INSPECTION_TIMEOUT_NS if deadline_ns is None else deadline_ns
     )
     workspaces: list[dict[str, object]] = []
+    journal_tokens: dict[str, tuple[int, str]] = {}
     queue_tokens: dict[str, tuple[int, str]] = {}
     registry_token: tuple[int, str] | None = None
     registry_lock_acquired = False
@@ -1351,6 +1421,7 @@ def inspect_workspace_status(
                     registry,
                     entry,
                     deadline_ns=absolute_deadline,
+                    journal_tokens=journal_tokens,
                     queue_tokens=queue_tokens,
                 )
                 workspaces.append(workspace)
@@ -1427,6 +1498,17 @@ def inspect_workspace_status(
                             workspace,
                             checks,
                             component=f"workspace:{workspace['repo_uuid']}:snapshot",
+                        )
+                    if bool(workspace["safe_to_query"]) and not _journal_snapshot_is_current(
+                        runtime,
+                        repo_uuid,
+                        journal_tokens.get(repo_uuid),
+                        deadline_ns=absolute_deadline,
+                    ):
+                        _mark_snapshot_changed(
+                            workspace,
+                            checks,
+                            component=f"workspace:{workspace['repo_uuid']}:journal_snapshot",
                         )
                     if bool(workspace["safe_to_query"]) and not _pointer_snapshot_is_current(
                         runtime,

@@ -286,6 +286,24 @@ def test_read_only_inspect_of_missing_queue_is_empty_and_performs_no_writes(
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_read_only_inspect_enforces_active_byte_capacity_without_writes(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    queue = SemanticQueueStore(
+        harness.state_root,
+        harness.leases,
+        policy=SemanticQueuePolicy(max_items=16, max_bytes=1, retry_budget=1),
+        capabilities=harness.leases.state.capabilities,
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticQueueCapacityExceeded, match="byte capacity"):
+        queue.inspect(REPO_UUID)
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_capacity_is_checked_after_coalescing_and_before_durable_mutation(
     tmp_path: Path,
 ) -> None:

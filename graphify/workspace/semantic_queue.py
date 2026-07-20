@@ -2071,6 +2071,11 @@ class SemanticQueueStore:
             deadline_ns,
             "semantic queue snapshot read exceeded its deadline",
         )
+        self._bounded(snapshot)
+        require_before_deadline(
+            deadline_ns,
+            "semantic queue snapshot validation exceeded its deadline",
+        )
         return snapshot
 
     def inspect(

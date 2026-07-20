@@ -21,6 +21,7 @@ from graphify.workspace.composition import (
 from graphify.workspace.contracts import (
     CompatibilityManifest,
     FreshnessRelease,
+    GcIntentState,
     PointerSet,
     canonical_json_bytes,
 )
@@ -36,7 +37,9 @@ from graphify.workspace.persistence import (
 from graphify.workspace.registry import RegistryStore
 from graphify.workspace.semantic_queue import (
     SemanticDesiredWork,
+    SemanticQueueItem,
     SemanticQueuePolicy,
+    SemanticQueueSnapshot,
     SemanticQueueStore,
 )
 from graphify.workspace.status import (
@@ -640,6 +643,70 @@ def test_status_reports_malformed_semantic_queue_as_invalid(tmp_path: Path) -> N
     assert "semantic_queue_invalid" in _reason_codes(report)
 
 
+def test_status_rejects_policy_matching_semantic_queue_over_item_capacity(
+    tmp_path: Path,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    queue = runtime.pointers.generations.semantic_queue
+    assert queue is not None
+    snapshot = queue.inspect(REPO_UUID)
+    items = tuple(
+        SemanticQueueItem(
+            work=SemanticDesiredWork(
+                source_epoch=1,
+                policy_sha256="1" * 64,
+                operation="UPSERT",
+                path=f"docs/capacity-{index:02}.md",
+                content_sha256=f"{index:064x}",
+                desired_revision=index,
+            ),
+            status="completed",
+            failure_count=0,
+            last_error=None,
+            claim=None,
+        )
+        for index in range(1, CERTIFIED_QUEUE_POLICY.max_items + 2)
+    )
+    oversized = SemanticQueueSnapshot.from_mapping(
+        replace(
+            snapshot,
+            revision=snapshot.revision + 1,
+            desired_watermark=len(items),
+            completed_watermark=len(items),
+            reconciliation=None,
+            items=items,
+        ).to_dict()
+    )
+    assert len(oversized.items) > CERTIFIED_QUEUE_POLICY.max_items
+    current, _previous, _pending = queue._paths(REPO_UUID)
+    current_path = queue.state.path(current)
+    current_path.write_bytes(oversized.canonical)
+    current_path.chmod(0o600)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+    queue_check = next(
+        check
+        for check in value["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:semantic_queue"
+    )
+
+    assert report.exit_code == 20
+    assert queue_check["state"] == "invalid"
+    assert queue_check["reason_code"] == "semantic_queue_invalid"
+    assert value["workspaces"][0]["repair"]["required"] is True
+
+
 def test_status_reports_pointer_pending_recovery_as_invalid(tmp_path: Path) -> None:
     harness = create_harness(tmp_path)
     pointer = PointerSet.from_json((FIXTURES / "positive" / "pointer-set.json").read_bytes())
@@ -651,6 +718,92 @@ def test_status_reports_pointer_pending_recovery_as_invalid(tmp_path: Path) -> N
 
     assert report.exit_code == 20
     assert "pointer_recovery_required" in _reason_codes(report)
+
+
+def test_status_reports_unresolved_gc_intent_as_repair_required(tmp_path: Path) -> None:
+    from tests.test_workspace_freshness import POLICY
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    pointer = runtime.pointers.load(REPO_UUID, allow_missing=False)
+    assert pointer is not None
+    pointer_value = pointer.to_dict()
+    intent = GcIntentState.from_mapping(
+        {
+            "contract": "graphify.workspace.gc_intent.internal",
+            "format_version": 1,
+            "repo_uuid": REPO_UUID,
+            "operation_epoch": 3,
+            "fence_token": 3,
+            "active_source_revision": 1,
+            "migration_epoch": 0,
+            "pointer_revision": pointer_value["pointer_revision"],
+            "capacity_policy_sha256": POLICY.sha256,
+            "plan_sha256": "a" * 64,
+            "candidates": [],
+            "occurred_at": "2026-07-16T19:00:00Z",
+        }
+    )
+    gc_directory = runtime.state_root / "workspaces" / REPO_UUID / "gc"
+    gc_directory.mkdir(mode=0o700)
+    intent_path = gc_directory / "intent.json"
+    intent_path.write_bytes(intent.canonical)
+    intent_path.chmod(0o600)
+    before = tree_snapshot(runtime.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+    gc_check = next(
+        check
+        for check in value["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:gc"
+    )
+
+    assert report.exit_code == 20
+    assert gc_check["state"] == "invalid"
+    assert gc_check["reason_code"] == "workspace_state_invalid"
+    assert gc_check["action_code"] == "run_workspace_repair"
+    assert value["workspaces"][0]["repair"]["required"] is True
+    assert tree_snapshot(runtime.state_root) == before
+
+
+def test_status_bounds_oversized_gc_intent_without_leaking_or_writing(
+    tmp_path: Path,
+) -> None:
+    from graphify.workspace.gc import _MAX_GC_INTENT_BYTES
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    secret = b"gc-intent-secret"
+    gc_directory = runtime.state_root / "workspaces" / REPO_UUID / "gc"
+    gc_directory.mkdir(mode=0o700)
+    intent_path = gc_directory / "intent.json"
+    intent_path.write_bytes(secret + b"x" * _MAX_GC_INTENT_BYTES)
+    intent_path.chmod(0o600)
+    before = tree_snapshot(runtime.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert report.exit_code == 20
+    assert "workspace_state_invalid" in _reason_codes(report)
+    assert secret not in report.canonical
+    assert tree_snapshot(runtime.state_root) == before
 
 
 def test_status_derives_pending_generations_and_repair_count_from_journal(
@@ -795,6 +948,62 @@ def test_status_revalidates_workspace_state_after_freshness(
     )
 
     assert mutated is True
+    assert report.exit_code == 10
+    assert report.to_dict()["safe_to_query"] is False
+    assert "status_snapshot_changed" in _reason_codes(report)
+
+
+def test_status_revalidates_journal_after_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_freshness import POLICY
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    harness = RuntimeHarness(
+        repo=runtime.repo,
+        state_root=runtime.state_root,
+        registry=runtime.registry,
+        leases=runtime.pointers.generations.leases,
+    )
+    original_probe = FreshnessAuthority.probe
+    appended = False
+
+    def append_after_probe(
+        authority: FreshnessAuthority,
+        repo_uuid: str,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal appended
+        result = original_probe(authority, repo_uuid, **kwargs)
+        if not appended:
+            build = acquire(harness, "BUILD", tick=3)
+            runtime.pointers.generations.allocate(
+                build,
+                expected_payload_bytes=4096,
+                capacity_policy=POLICY,
+                generation_id="gen-late",
+                occurred_at=START + timedelta(seconds=3),
+                monotonic_ns=30_001,
+            )
+            harness.leases.release(build)
+            appended = True
+        return result
+
+    monkeypatch.setattr(FreshnessAuthority, "probe", append_after_probe)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert appended is True
     assert report.exit_code == 10
     assert report.to_dict()["safe_to_query"] is False
     assert "status_snapshot_changed" in _reason_codes(report)
