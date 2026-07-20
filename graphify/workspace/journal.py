@@ -420,7 +420,11 @@ class JournalStore:
             )
             _require_stable_read_deadline(deadline_ns)
         except LockTimeout as exc:
-            raise LockTimeout("journal stable read exceeded its deadline") from exc
+            raise LockTimeout(
+                "journal stable read exceeded its deadline",
+                phase=exc.phase,
+                kind=exc.kind,
+            ) from exc
         except (StateCorrupt, StatePathError) as exc:
             raise JournalCorrupt(str(exc)) from exc
         if head is not None and head.repo_uuid != repo_uuid:

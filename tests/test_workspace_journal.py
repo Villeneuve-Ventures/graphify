@@ -214,6 +214,36 @@ def test_read_stable_honors_deadline_during_segment_traversal(
     assert decoded < 20
 
 
+def test_read_stable_preserves_lock_timeout_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+
+    def acquisition_timeout(*_args: object, **_kwargs: object) -> object:
+        raise LockTimeout(
+            "message intentionally omits the journal context",
+            phase="acquire",
+            kind="journal",
+        )
+
+    monkeypatch.setattr(type(store.state), "read_stable_record", acquisition_timeout)
+
+    with pytest.raises(
+        LockTimeout,
+        match="journal stable read exceeded its deadline",
+    ) as captured:
+        store.read_stable(REPO_UUID)
+
+    assert captured.value.phase == "acquire"
+    assert captured.value.kind == "journal"
+
+
 def test_decode_segment_rejects_oversized_frame_before_reading_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
