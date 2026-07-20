@@ -726,7 +726,9 @@ def test_status_classifies_generation_lock_contention_at_its_boundary(
                 semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
                 capabilities=SUPPORTED,
             ),
-            deadline_ns=time.monotonic_ns() + 10_000_000,
+            # Leave enough budget to traverse the earlier read-only stores on a
+            # loaded runner before the held generation lock consumes the deadline.
+            deadline_ns=time.monotonic_ns() + 1_000_000_000,
         )
     finally:
         holder.terminate()
