@@ -530,6 +530,10 @@ def discover_source(
 ) -> SourceIdentity:
     """Discover source identity without mutating the checkout or Git metadata."""
 
+    if not {os.open, os.stat}.issubset(os.supports_dir_fd):
+        raise SourceDiscoveryError(
+            "source discovery requires descriptor-relative file access"
+        )
     _check_deadline(deadline_ns)
     root = source_root.resolve(strict=True)
     _check_deadline(deadline_ns)

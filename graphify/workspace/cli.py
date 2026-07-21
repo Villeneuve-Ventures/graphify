@@ -313,7 +313,6 @@ def _run_registration(
     errors: TextIO,
 ) -> int:
     try:
-        authorization = _read_operator_authorization(request)
         resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
         if resolved_inputs is None:
             failure = _RegistrationFailure(
@@ -325,6 +324,7 @@ def _run_registration(
             errors.write(_registration_failure(request, failure))
             return failure.exit_code
         runtime = compose_workspace_runtime(resolved_inputs)
+        authorization = _read_operator_authorization(request)
         source = discover_source(Path.cwd())
         if source.repo_uuid != request.repo_uuid:
             raise UUIDCollisionError(

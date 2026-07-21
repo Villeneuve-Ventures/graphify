@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 
+from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.composition import (
     RUNTIME_AUTHORITY_FILENAME,
     WorkspaceRuntimeInputs,
@@ -27,7 +28,7 @@ from graphify.workspace.identity import (
     OperatorAuthorization,
     UUIDCollisionError,
 )
-from graphify.workspace.persistence import InjectedFault, RuntimeCapabilities
+from graphify.workspace.persistence import InjectedFault, RuntimeCapabilities, UnsupportedRuntime
 from graphify.workspace.registry import RegistryStore, RevisionConflict
 from graphify.workspace.semantic_queue import SemanticQueuePolicy
 from tests.workspace_p3_helpers import (
@@ -99,14 +100,16 @@ def _run_register(
     inputs: WorkspaceRuntimeInputs | None,
     repo_uuid: str = REPO_UUID,
     authorization: str | None = None,
+    stdin: Any | None = None,
 ) -> tuple[int, StringIO, StringIO]:
     workspace_cli = _cli()
     monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
-    monkeypatch.setattr(
-        sys,
-        "stdin",
-        StringIO(authorization or _authorization_payload(action.upper())),
+    authorization_input = (
+        stdin
+        if stdin is not None
+        else StringIO(authorization or _authorization_payload(action.upper()))
     )
+    monkeypatch.setattr(sys, "stdin", authorization_input)
     stdout = StringIO()
     stderr = StringIO()
     exit_code = workspace_cli.run_workspace_command(
@@ -394,6 +397,7 @@ def test_register_rejects_malformed_or_mismatched_stdin_authority_before_mutatio
     authorization: str,
 ) -> None:
     workspace_cli = _cli()
+    runtime_calls: list[str] = []
     monkeypatch.setattr(
         workspace_cli,
         "discover_source",
@@ -403,7 +407,14 @@ def test_register_rejects_malformed_or_mismatched_stdin_authority_before_mutatio
     monkeypatch.setattr(
         workspace_cli,
         "load_workspace_runtime_inputs",
-        lambda: pytest.fail("invalid authority must not load runtime"),
+        lambda: runtime_calls.append("load") or object(),
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: runtime_calls.append("compose")
+        or SimpleNamespace(registry=object()),
+        raising=False,
     )
     monkeypatch.setattr(sys, "stdin", StringIO(authorization))
     stdout = StringIO()
@@ -428,6 +439,89 @@ def test_register_rejects_malformed_or_mismatched_stdin_authority_before_mutatio
     assert stdout.getvalue() == ""
     assert payload["state"] == "invalid"
     assert payload["exit_code"] == 20
+    assert runtime_calls == ["load", "compose"]
+
+
+def test_register_real_composition_rejects_malformed_authorization_without_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    inputs = _inputs(tmp_path / "external-state")
+    before_checkout = tree_snapshot(checkout)
+    before_checkout_metadata = metadata_snapshot(checkout)
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+        authorization="{not-json",
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "authorization_invalid"
+    assert not inputs.state_root.exists()
+    assert tree_snapshot(checkout) == before_checkout
+    assert metadata_snapshot(checkout) == before_checkout_metadata
+
+
+@pytest.mark.parametrize(
+    ("error", "reason_code"),
+    [
+        (UnsupportedRuntime("private unsupported runtime"), "unsupported_runtime"),
+        (
+            UnsupportedCompatibility("private unsupported compatibility"),
+            "unsupported_compatibility",
+        ),
+    ],
+)
+def test_register_composition_failures_do_not_read_authorization_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    reason_code: str,
+) -> None:
+    workspace_cli = _cli()
+    monkeypatch.setattr(workspace_cli, "load_workspace_runtime_inputs", lambda: object())
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: (_ for _ in ()).throw(error),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda _root: pytest.fail("invalid runtime must not discover source"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        SimpleNamespace(read=lambda _size=-1: pytest.fail("invalid runtime must not read stdin")),
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        [
+            "register",
+            "enroll",
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "0",
+            "--authorization-stdin",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert result == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == reason_code
 
 
 def test_register_real_enroll_then_clone_adopt_preserves_active_source(
@@ -555,7 +649,14 @@ def test_register_loader_authority_failures_are_redacted_and_write_nothing(
     monkeypatch.setenv("HOME", str(tmp_path / "private-home"))
 
     exit_code, stdout, stderr = _run_register(
-        monkeypatch, cwd=checkout, action="enroll", expected_revision=0, inputs=None
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=None,
+        stdin=SimpleNamespace(
+            read=lambda _size=-1: pytest.fail("invalid authority must not read stdin")
+        ),
     )
 
     payload = _registration_payload(stderr)

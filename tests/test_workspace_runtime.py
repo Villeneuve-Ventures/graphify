@@ -17,6 +17,7 @@ from typing import Any, cast
 
 import pytest
 
+import graphify.workspace.identity as identity_module
 import graphify.workspace.leases as lease_module
 
 from graphify.workspace.contracts import FencedLease, canonical_json_bytes
@@ -295,6 +296,21 @@ def test_runtime_rejects_unsupported_platform_without_test_capability(tmp_path: 
 
     with pytest.raises(UnsupportedRuntime, match="macOS.*APFS"):
         RegistryStore(tmp_path / "state", capabilities=unsupported)
+
+
+def test_source_discovery_rejects_missing_descriptor_relative_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(identity_module.os, "supports_dir_fd", {identity_module.os.open})
+    monkeypatch.setattr(
+        identity_module,
+        "_git",
+        lambda *_args, **_kwargs: pytest.fail("unsupported runtime must fail before Git"),
+    )
+
+    with pytest.raises(SourceDiscoveryError, match="descriptor-relative file access"):
+        discover_source(tmp_path)
 
 
 def test_darwin_identity_probe_preserves_subsecond_process_start() -> None:

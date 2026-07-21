@@ -153,6 +153,8 @@ output remains ignored and must not widen the P1 product diff.
   only the current Git top level, scrubs ambient Git routing overrides, rejects
   linked or hardlinked policy paths, and cross-checks the discovered UUID before
   mutation;
+- missing, malformed, unsupported, or uncomposable runtime authority fails
+  before the command reads operator authorization from standard input;
 - duplicate enrollment, UUID collision, unrelated history, stale CAS,
   malformed or unsupported authority, corrupt state, unsafe paths, and
   deterministic contention fail closed without a new registry revision;
