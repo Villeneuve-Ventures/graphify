@@ -165,8 +165,10 @@ def load_workspace_runtime_inputs(
 
     state_root = _workspace_state_root(os.environ if environ is None else environ)
     resolved_capabilities = capabilities or RuntimeCapabilities.detect(state_root)
-    if resolved_capabilities.system != "Darwin":
-        raise UnsupportedRuntime("workspace inspection requires macOS")
+    if not {os.open, os.stat}.issubset(os.supports_dir_fd):
+        raise UnsupportedRuntime(
+            "workspace inspection requires descriptor-relative file access"
+        )
     try:
         state_root.parent.lstat()
     except FileNotFoundError:

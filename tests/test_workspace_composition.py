@@ -248,7 +248,7 @@ def test_load_workspace_runtime_inputs_rejects_uninspectable_state_home(
     assert list(state_home.iterdir()) == []
 
 
-def test_load_workspace_runtime_inputs_rejects_unsupported_runtime_before_authority_read(
+def test_load_workspace_runtime_inputs_rejects_host_without_dir_fd_before_authority_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -271,6 +271,7 @@ def test_load_workspace_runtime_inputs_rejects_unsupported_runtime_before_author
         "graphify.workspace.composition.DurableStateRoot.read_optional_bytes_for_inspection",
         unexpected_authority_read,
     )
+    monkeypatch.setattr(os, "supports_dir_fd", set())
 
     with pytest.raises(UnsupportedRuntime):
         load_workspace_runtime_inputs(
@@ -278,6 +279,33 @@ def test_load_workspace_runtime_inputs_rejects_unsupported_runtime_before_author
             capabilities=unsupported,
         )
 
+    assert tree_snapshot(state_home) == before_tree
+    assert metadata_snapshot(state_home) == before_metadata
+
+
+def test_load_workspace_runtime_inputs_reads_authority_on_unsupported_posix_runtime(
+    tmp_path: Path,
+) -> None:
+    state_home = tmp_path / "state-home"
+    state_root = state_home / "graphify"
+    _write_authority(state_root)
+    unsupported = RuntimeCapabilities(
+        system="Linux",
+        filesystem="ext4",
+        elevated=False,
+        local=True,
+    )
+    before_tree = tree_snapshot(state_home)
+    before_metadata = metadata_snapshot(state_home)
+
+    inputs = load_workspace_runtime_inputs(
+        environ={"XDG_STATE_HOME": str(state_home)},
+        capabilities=unsupported,
+    )
+
+    assert inputs is not None
+    assert inputs.compatibility_manifest == COMPATIBILITY_MANIFEST
+    assert inputs.capabilities == unsupported
     assert tree_snapshot(state_home) == before_tree
     assert metadata_snapshot(state_home) == before_metadata
 
