@@ -27,10 +27,11 @@ authority. P5B2a adds only `graphify workspace register enroll` for initial
 enrollment and `graphify workspace register adopt` for an already-enrolled
 verified clone or fork. Both forms require the repo UUID, expected registry
 revision, and a matching `OperatorAuthorization` JSON object on standard input.
-The command discovers only the current Git top level, cross-checks its bounded
-no-follow `.graphify/workspace.toml`, and never infers adoption. It emits one
-canonical redacted receipt and writes only the existing P2 registry, workspace,
-lock, and evidence records beneath the configured external state root. Rebind,
+The command requires the current working directory itself to be the Git top
+level, cross-checks its bounded no-follow `.graphify/workspace.toml`, and never
+infers adoption. It emits one canonical redacted receipt and writes only the
+existing P2 registry, workspace, lock, and evidence records beneath the
+configured external state root. Rebind,
 rotation, activation, remaining mutation/query commands, repair, watch/service,
 performance certification, and candidate publication remain later P5 work.
 

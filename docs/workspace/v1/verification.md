@@ -146,13 +146,15 @@ output remains ignored and must not widen the P1 product diff.
 - `enroll` and `adopt` require distinct, matching operator authorization on
   standard input, an explicit canonical repo UUID, and an expected registry
   revision; no invocation may infer adoption or select rebind/activation;
-- success and failure receipts are canonical, versioned, deterministic,
-  redacted, and separated between stdout and stderr with exit codes 0, 10, 20,
-  and 64 for success, conflict, invalid state, and usage respectively;
-- the command reuses production authority loading and composition, discovers
-  only the current Git top level, scrubs ambient Git routing overrides, rejects
-  linked or hardlinked policy paths, and cross-checks the discovered UUID before
-  mutation;
+- parsed-operation success and failure receipts are canonical, versioned,
+  deterministic, redacted, and separated between stdout and stderr with exit
+  codes 0, 10, and 20 for success, conflict, and invalid state respectively;
+- malformed invocations emit the exact deterministic, redacted plain-text usage
+  contract on stderr with exit code 64 before authority, source, or stdin reads;
+- the command reuses production authority loading and composition, requires the
+  current working directory itself to be the Git top level, scrubs ambient Git
+  routing overrides, rejects linked or hardlinked policy paths, and cross-checks
+  the discovered UUID before mutation;
 - missing, malformed, unsupported, or uncomposable runtime authority fails
   before the command reads operator authorization from standard input;
 - duplicate enrollment, UUID collision, unrelated history, stale CAS,

@@ -228,6 +228,7 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     assert calls[0][0] == method
     assert calls[0][1] is source
     assert calls[0][3] == 3
+    assert isinstance(calls[0][2], OperatorAuthorization)
     assert calls[0][2].to_dict() == json.loads(_authorization_payload(action.upper()))
     expected = {
         "contract": "graphify.workspace.registration",
@@ -304,7 +305,12 @@ def test_register_usage_errors_do_not_read_stdin_or_discover_state(
 
     assert result == 64
     assert stdout.getvalue() == ""
-    assert "usage" in stderr.getvalue().lower()
+    assert stderr.getvalue() == (
+        "Usage: graphify workspace status --json\n"
+        "       graphify workspace doctor\n"
+        "       graphify workspace register <enroll|adopt> --repo-uuid UUID "
+        "--expected-registry-revision N --authorization-stdin\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -696,6 +702,33 @@ def test_register_rejects_oversized_workspace_policy_before_external_mutation(
     assert tree_snapshot(checkout) == before_checkout
 
 
+def test_register_requires_cwd_to_be_the_git_top_level(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = create_repo(tmp_path / "private-checkout", REPO_UUID)
+    nested = checkout / "nested"
+    nested.mkdir()
+    before_checkout = tree_snapshot(checkout)
+    inputs = _inputs(tmp_path / "external-state")
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=nested,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+    )
+
+    payload = _registration_payload(stderr)
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert payload["reason_code"] == "source_discovery_error"
+    assert str(nested) not in stderr.getvalue()
+    assert not inputs.state_root.exists()
+    assert tree_snapshot(checkout) == before_checkout
+
+
 def test_register_corrupt_registry_and_unsafe_state_path_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -750,6 +783,10 @@ def test_registration_subprocess_uses_cwd_stdin_and_production_authority(
     state_root = state_home / "graphify"
     home.mkdir()
     codex_home.mkdir()
+    stale_skill = home / ".codex/skills/graphify/SKILL.md"
+    stale_skill.parent.mkdir(parents=True)
+    stale_skill.write_text("stale test skill\n", encoding="utf-8")
+    (stale_skill.parent / ".graphify_version").write_text("0.0.0\n", encoding="utf-8")
     state_root.mkdir(parents=True, mode=0o700)
     authority_path = state_root / RUNTIME_AUTHORITY_FILENAME
     authority_path.write_bytes(
@@ -807,9 +844,39 @@ def test_registration_subprocess_uses_cwd_stdin_and_production_authority(
 
     enrolled = invoke(checkout, "enroll", 0)
     adopted = invoke(clone, "adopt", 1)
+    usage = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _SUBPROCESS_LAUNCHER,
+            "workspace",
+            "register",
+            "enroll",
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "2",
+            "--authorization-stdin",
+            "--unexpected",
+        ],
+        cwd=checkout,
+        env=environment,
+        input="must-not-be-read",
+        check=False,
+        capture_output=True,
+        text=True,
+    )
 
     assert enrolled.returncode == adopted.returncode == 0
     assert enrolled.stderr == adopted.stderr == ""
+    assert usage.returncode == 64
+    assert usage.stdout == ""
+    assert usage.stderr == (
+        "Usage: graphify workspace status --json\n"
+        "       graphify workspace doctor\n"
+        "       graphify workspace register <enroll|adopt> --repo-uuid UUID "
+        "--expected-registry-revision N --authorization-stdin\n"
+    )
     assert json.loads(enrolled.stdout)["registry_revision"] == 1
     assert json.loads(adopted.stdout)["registry_revision"] == 2
     document = RegistryStore(state_root, capabilities=SUPPORTED).load().to_dict()

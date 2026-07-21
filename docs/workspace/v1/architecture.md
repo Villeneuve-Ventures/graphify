@@ -36,7 +36,8 @@ from durable queue content. Missing or unusable authority fails closed.
 P5B2a adds only explicit initial enrollment and explicit adoption through
 `graphify workspace register`. The command composes that installed authority,
 requires matching stdin authorization and an expected registry revision,
-discovers the current Git top level, then delegates to the P2 registry CAS.
+requires the current working directory itself to be the Git top level, then
+delegates to the P2 registry CAS.
 Adoption is never inferred: the operator must select `adopt`, and the existing
 registry must verify shared history for the same UUID. Rebind, rotation, activation,
 remaining mutation/query commands, repair, watch/service, installation,
