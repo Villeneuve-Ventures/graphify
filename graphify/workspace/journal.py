@@ -25,14 +25,17 @@ from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
+    LockTimeout,
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
     Syscalls,
+    require_before_deadline,
 )
 
 
 _SEGMENT_RE = re.compile(r"^(?P<sequence>[0-9]{20})\.gwf$", re.ASCII)
+_MAX_JOURNAL_FRAME_BYTES = 1024 * 1024
 _EVENT_NAMESPACE = uuid.UUID("3924cb61-439f-49d0-8a8c-b3753d140d5e")
 _PRECERTIFICATION = frozenset({"ALLOCATED", "STAGING", "BUILT", "VALIDATING", "FAILED"})
 _PRECERTIFICATION_NEXT = {
@@ -55,6 +58,10 @@ _TRANSITION_OPERATIONS = {
     "SUPERSEDED": frozenset({"PROMOTE", "ROLLBACK"}),
 }
 _VISIBLE_POINTER_TRANSITIONS = frozenset({"PROMOTED", "ROLLED_BACK", "REPAIRED"})
+
+
+def _require_stable_read_deadline(deadline_ns: int | None) -> None:
+    require_before_deadline(deadline_ns, "journal stable read exceeded its deadline")
 
 
 class JournalError(RuntimeError):
@@ -141,17 +148,28 @@ class JournalStore:
     def _segment_path(cls, repo_uuid: str, sequence: int) -> Path:
         return cls._segments_directory(repo_uuid) / f"{sequence:020d}.gwf"
 
-    def _segment_names(self, repo_uuid: str) -> list[tuple[int, Path]]:
+    def _segment_names(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> list[tuple[int, Path]]:
         relative = self._segments_directory(repo_uuid)
         directory = self.state.path(relative)
         result: list[tuple[int, Path]] = []
         try:
+            _require_stable_read_deadline(deadline_ns)
             if not self.state.private_directory_exists(relative):
                 return []
             with self.state.existing_private_directory(relative) as descriptor:
                 with os.scandir(descriptor) as entries:
-                    names = sorted(entry.name for entry in entries)
+                    names = []
+                    for entry in entries:
+                        _require_stable_read_deadline(deadline_ns)
+                        names.append(entry.name)
+                    names.sort()
                 for name in names:
+                    _require_stable_read_deadline(deadline_ns)
                     match = _SEGMENT_RE.fullmatch(name)
                     entry_details = os.stat(
                         name,
@@ -181,13 +199,18 @@ class JournalStore:
         return result
 
     @staticmethod
-    def _validate_lifecycle(events: list[JournalEvent]) -> None:
+    def _validate_lifecycle(
+        events: list[JournalEvent],
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
         latest: dict[str, str] = {}
         latest_event: dict[str, JournalEvent] = {}
         certified: set[str] = set()
         logical: dict[tuple[str, str, int, int], bytes] = {}
         event_ids: dict[str, bytes] = {}
         for event in events:
+            _require_stable_read_deadline(deadline_ns)
             value = event.to_dict()
             generation_id = str(value["generation_id"])
             transition = str(value["transition"])
@@ -236,18 +259,34 @@ class JournalStore:
         relative: Path,
         *,
         existing_only: bool = False,
+        deadline_ns: int | None = None,
     ) -> tuple[bytes, JournalEvent]:
-        frame = (
-            self.state.read_existing_bytes(relative)
-            if existing_only
-            else self.state.read_bytes(relative)
-        )
+        _require_stable_read_deadline(deadline_ns)
+        try:
+            frame = (
+                self.state.read_existing_bytes(
+                    relative,
+                    max_bytes=_MAX_JOURNAL_FRAME_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+                if existing_only
+                else self.state.read_bytes(
+                    relative,
+                    max_bytes=_MAX_JOURNAL_FRAME_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+            )
+        except StateCorrupt as exc:
+            raise JournalCorrupt(
+                f"journal segment cannot be read safely: {relative}: {exc}"
+            ) from exc
         try:
             event = decode_journal_frame(frame)
         except JournalFrameTruncated:
             raise
         except Exception as exc:
             raise JournalCorrupt(f"journal segment is corrupt: {relative}: {exc}") from exc
+        _require_stable_read_deadline(deadline_ns)
         return frame, event
 
     @staticmethod
@@ -358,11 +397,17 @@ class JournalStore:
         self._validate_lifecycle(events)
         return JournalSnapshot(head=head, events=tuple(events))
 
-    def read_stable(self, repo_uuid: str) -> JournalSnapshot:
+    def read_stable(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> JournalSnapshot:
         """Read only fully committed journal authority without recovery writes."""
 
         current, previous, pending = self._head_paths(repo_uuid)
         try:
+            _require_stable_read_deadline(deadline_ns)
             head = self.state.read_stable_record(
                 label="journal_head",
                 current=current,
@@ -371,13 +416,21 @@ class JournalStore:
                 decoder=JournalHeadState.from_json,
                 revision=lambda value: value.revision,
                 allow_missing=True,
+                deadline_ns=deadline_ns,
             )
+            _require_stable_read_deadline(deadline_ns)
+        except LockTimeout as exc:
+            raise LockTimeout(
+                "journal stable read exceeded its deadline",
+                phase=exc.phase,
+                kind=exc.kind,
+            ) from exc
         except (StateCorrupt, StatePathError) as exc:
             raise JournalCorrupt(str(exc)) from exc
         if head is not None and head.repo_uuid != repo_uuid:
             raise JournalCorrupt("journal head is installed under the wrong workspace")
 
-        segments = self._segment_names(repo_uuid)
+        segments = self._segment_names(repo_uuid, deadline_ns=deadline_ns)
         committed = 0 if head is None else head.sequence
         if len(segments) != committed:
             raise JournalConflict("journal requires recovery before stable read")
@@ -388,7 +441,11 @@ class JournalStore:
         for sequence, _path in segments:
             relative = self._segment_path(repo_uuid, sequence)
             try:
-                frame, event = self._decode_segment(relative, existing_only=True)
+                frame, event = self._decode_segment(
+                    relative,
+                    existing_only=True,
+                    deadline_ns=deadline_ns,
+                )
             except JournalFrameTruncated as exc:
                 raise JournalCorrupt("committed journal segment is truncated") from exc
             value = event.to_dict()
@@ -402,10 +459,12 @@ class JournalStore:
             events.append(event)
 
         if head is not None:
+            _require_stable_read_deadline(deadline_ns)
             expected = self._head_for(repo_uuid, events[-1], frames[-1])
             if expected.canonical != head.canonical:
                 raise JournalCorrupt("journal head does not bind the committed segment")
-        self._validate_lifecycle(events)
+        self._validate_lifecycle(events, deadline_ns=deadline_ns)
+        _require_stable_read_deadline(deadline_ns)
         return JournalSnapshot(head=head, events=tuple(events))
 
     def recover(self, grant: LeaseGrant, *, monotonic_ns: int) -> JournalSnapshot:

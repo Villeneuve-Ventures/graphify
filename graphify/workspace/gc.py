@@ -25,6 +25,7 @@ from graphify.workspace.persistence import (
     RuntimeCapabilities,
     StatePathError,
     Syscalls,
+    require_before_deadline,
 )
 from graphify.workspace.pointers import PointerStore
 from graphify.workspace.semantic_queue import SemanticQueueStore
@@ -32,6 +33,7 @@ from graphify.workspace.semantic_queue import SemanticQueueStore
 
 _PURGE_ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
 _PURGE_ALLOWED_FILE_MODES = frozenset({0o600, 0o644, 0o755})
+_MAX_GC_INTENT_BYTES = 1024 * 1024
 
 
 class GcError(RuntimeError):
@@ -181,9 +183,19 @@ class GcStore:
             cls._workspace(repo_uuid) / "quarantine" / "gc" / f"{generation_id}.{operation_epoch}"
         )
 
-    def _read_intent(self, repo_uuid: str) -> GcIntentState | None:
+    def _read_intent(
+        self,
+        repo_uuid: str,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> GcIntentState | None:
         relative = self._intent_path(repo_uuid)
-        payload = self.state.read_optional_existing_bytes(relative)
+        payload = self.state.read_optional_existing_bytes(
+            relative,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
         if payload is None:
             return None
         try:
@@ -192,6 +204,29 @@ class GcStore:
             raise GcRecoveryRequired(f"GC intent is invalid: {exc}") from exc
         if intent.repo_uuid != repo_uuid:
             raise GcRecoveryRequired("GC intent belongs to another workspace")
+        return intent
+
+    def read_only_intent_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GcIntentState | None:
+        """Read and validate the optional GC recovery barrier without writes."""
+
+        require_before_deadline(
+            deadline_ns,
+            "GC intent inspection exceeded its deadline",
+        )
+        intent = self._read_intent(
+            repo_uuid,
+            max_bytes=_MAX_GC_INTENT_BYTES,
+            deadline_ns=deadline_ns,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "GC intent inspection exceeded its deadline",
+        )
         return intent
 
     def _generation_ids(self, repo_uuid: str) -> tuple[str, ...]:

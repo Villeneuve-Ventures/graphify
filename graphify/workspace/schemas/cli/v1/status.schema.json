@@ -1,0 +1,484 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/status.schema.json",
+  "title": "Graphify workspace status v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "cli_contract_version",
+    "state",
+    "exit_code",
+    "safe_to_query",
+    "reason_code",
+    "action_code",
+    "correlation_id",
+    "runtime",
+    "workspaces",
+    "checks"
+  ],
+  "properties": {
+    "contract": {"const": "graphify.workspace.status"},
+    "schema_version": {"const": 1},
+    "cli_contract_version": {"const": 1},
+    "state": {"enum": ["ready", "degraded", "invalid"]},
+    "exit_code": {"enum": [0, 10, 20]},
+    "safe_to_query": {
+      "type": "boolean",
+      "description": "True only when every workspace passed two-sided observed-current freshness authority."
+    },
+    "reason_code": {"$ref": "#/$defs/reason_code"},
+    "action_code": {"$ref": "#/$defs/action_code"},
+    "correlation_id": {
+      "type": "string",
+      "pattern": "^status-[0-9a-f]{24}$"
+    },
+    "runtime": {"$ref": "#/$defs/runtime"},
+    "workspaces": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/workspace"}
+    },
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/check"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "ready"}}, "required": ["state"]},
+      "then": {
+        "properties": {
+          "exit_code": {"const": 0},
+          "safe_to_query": {"const": true},
+          "workspaces": {
+            "minItems": 1,
+            "items": {"properties": {"state": {"const": "ready"}}}
+          },
+          "checks": {
+            "items": {
+              "properties": {"state": {"enum": ["ready", "not_evaluated"]}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "degraded"}}, "required": ["state"]},
+      "then": {
+        "properties": {
+          "exit_code": {"const": 10},
+          "safe_to_query": {"const": false},
+          "checks": {
+            "contains": {
+              "properties": {"state": {"const": "degraded"}},
+              "required": ["state"]
+            },
+            "minContains": 1,
+            "not": {
+              "contains": {
+                "properties": {"state": {"const": "invalid"}},
+                "required": ["state"]
+              }
+            }
+          },
+          "workspaces": {
+            "not": {
+              "contains": {
+                "properties": {"state": {"const": "invalid"}},
+                "required": ["state"]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "invalid"}}, "required": ["state"]},
+      "then": {
+        "properties": {
+          "exit_code": {"const": 20},
+          "safe_to_query": {"const": false},
+          "checks": {
+            "contains": {
+              "properties": {"state": {"const": "invalid"}},
+              "required": ["state"]
+            },
+            "minContains": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "reason_code": {
+      "enum": [
+        "compatibility_manifest_missing",
+        "freshness_not_observed",
+        "freshness_timeout",
+        "freshness_unsupported",
+        "generation_lock_contended",
+        "generation_or_pointer_invalid",
+        "generation_pending",
+        "inspection_deadline_exceeded",
+        "journal_invalid",
+        "no_current_generation",
+        "no_registered_workspaces",
+        "not_evaluated_p5b1",
+        "not_recorded_v1",
+        "pointer_invalid",
+        "pointer_recovery_required",
+        "ready",
+        "registry_invalid",
+        "registry_lock_contended",
+        "registry_lock_invalid",
+        "registry_lock_missing",
+        "resource_accounting_deferred_p5c",
+        "runtime_authority_invalid",
+        "runtime_authority_unsupported",
+        "semantic_queue_dead_letter",
+        "semantic_queue_invalid",
+        "semantic_queue_pending",
+        "service_deferred_p5c",
+        "source_drift",
+        "source_unavailable",
+        "source_unstable",
+        "state_root_missing",
+        "status_snapshot_changed",
+        "unsafe_state_path",
+        "unsupported_compatibility",
+        "unsupported_runtime",
+        "workspace_lock_contended",
+        "workspace_lock_invalid",
+        "workspace_not_inspected",
+        "workspace_record_invalid",
+        "workspace_record_missing",
+        "workspace_state_invalid"
+      ]
+    },
+    "action_code": {
+      "enum": [
+        "configure_safe_state_root",
+        "drain_semantic_queue",
+        "inspect_semantic_queue",
+        "inspect_source",
+        "inspect_workspace_state",
+        "install_candidate_authority",
+        "install_supported_candidate",
+        "none",
+        "register_workspace",
+        "restore_source",
+        "retry_status",
+        "run_workspace_repair",
+        "run_workspace_sync",
+        "use_supported_runtime",
+        "verify_freshness"
+      ]
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullable_digest": {
+      "oneOf": [
+        {"$ref": "#/$defs/digest"},
+        {"type": "null"}
+      ]
+    },
+    "nullable_nonnegative_integer": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "state", "reason_code", "action_code"],
+      "properties": {
+        "component": {"type": "string", "minLength": 1},
+        "state": {"enum": ["ready", "degraded", "invalid", "not_evaluated"]},
+        "reason_code": {"$ref": "#/$defs/reason_code"},
+        "action_code": {"$ref": "#/$defs/action_code"}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distribution_version",
+        "engine_baseline",
+        "adapter_contract_version",
+        "state_schema_version",
+        "compatibility_sha256"
+      ],
+      "properties": {
+        "distribution_version": {"type": "string", "minLength": 1},
+        "engine_baseline": {"type": "string", "minLength": 1},
+        "adapter_contract_version": {"const": 1},
+        "state_schema_version": {"const": 1},
+        "compatibility_sha256": {"$ref": "#/$defs/nullable_digest"}
+      }
+    },
+    "generation_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "receipt_sha256"],
+      "properties": {
+        "generation_id": {
+          "type": "string",
+          "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+        },
+        "receipt_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "nullable_generation_reference": {
+      "oneOf": [
+        {"$ref": "#/$defs/generation_reference"},
+        {"type": "null"}
+      ]
+    },
+    "pending_generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "lifecycle_state", "receipt_sha256"],
+      "properties": {
+        "generation_id": {
+          "type": "string",
+          "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+        },
+        "lifecycle_state": {
+          "enum": ["ALLOCATED", "STAGING", "BUILT", "VALIDATING", "CERTIFIED"]
+        },
+        "receipt_sha256": {"$ref": "#/$defs/nullable_digest"}
+      }
+    },
+    "freshness_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_source_revision",
+        "pointer_revision",
+        "receipt_sha256"
+      ],
+      "properties": {
+        "active_source_revision": {"type": "integer", "minimum": 1},
+        "pointer_revision": {"type": "integer", "minimum": 1},
+        "receipt_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "nullable_freshness_binding": {
+      "oneOf": [
+        {"$ref": "#/$defs/freshness_binding"},
+        {"type": "null"}
+      ]
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "operation", "fence_token", "liveness"],
+      "properties": {
+        "present": {"type": "boolean"},
+        "operation": {"type": ["string", "null"]},
+        "fence_token": {"$ref": "#/$defs/nullable_nonnegative_integer"},
+        "liveness": {"enum": ["not_evaluated"]}
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo_uuid",
+        "state",
+        "safe_to_query",
+        "reason_code",
+        "action_code",
+        "source_identity_sha256",
+        "active_source_revision",
+        "source_epoch",
+        "policy_sha256",
+        "generations",
+        "queue",
+        "leases",
+        "journal",
+        "freshness",
+        "watcher",
+        "resources",
+        "repair"
+      ],
+      "properties": {
+        "repo_uuid": {"type": "string", "format": "uuid"},
+        "state": {"enum": ["ready", "degraded", "invalid"]},
+        "safe_to_query": {"type": "boolean"},
+        "reason_code": {"$ref": "#/$defs/reason_code"},
+        "action_code": {"$ref": "#/$defs/action_code"},
+        "source_identity_sha256": {"$ref": "#/$defs/digest"},
+        "active_source_revision": {"type": "integer", "minimum": 1},
+        "source_epoch": {"$ref": "#/$defs/nullable_nonnegative_integer"},
+        "policy_sha256": {"$ref": "#/$defs/nullable_digest"},
+        "generations": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pointer_revision",
+            "current",
+            "last_good",
+            "pending",
+            "pending_reason_code"
+          ],
+          "properties": {
+            "pointer_revision": {"$ref": "#/$defs/nullable_nonnegative_integer"},
+            "current": {"$ref": "#/$defs/nullable_generation_reference"},
+            "last_good": {"$ref": "#/$defs/nullable_generation_reference"},
+            "pending": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/pending_generation"}
+            },
+            "pending_reason_code": {"$ref": "#/$defs/reason_code"}
+          }
+        },
+        "queue": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "revision",
+            "desired_watermark",
+            "completed_watermark",
+            "depth",
+            "pending",
+            "claimed",
+            "retrying",
+            "dead_letter",
+            "oldest_age_seconds",
+            "age_reason_code"
+          ],
+          "properties": {
+            "revision": {"type": "integer", "minimum": 0},
+            "desired_watermark": {"type": "integer", "minimum": 0},
+            "completed_watermark": {"type": "integer", "minimum": 0},
+            "depth": {"type": "integer", "minimum": 0},
+            "pending": {"type": "integer", "minimum": 0},
+            "claimed": {"type": "integer", "minimum": 0},
+            "retrying": {"type": "integer", "minimum": 0},
+            "dead_letter": {"type": "integer", "minimum": 0},
+            "oldest_age_seconds": {"type": "null"},
+            "age_reason_code": {"const": "not_recorded_v1"}
+          }
+        },
+        "leases": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["migration_epoch", "workspace", "semantic"],
+          "properties": {
+            "migration_epoch": {"$ref": "#/$defs/nullable_nonnegative_integer"},
+            "workspace": {"$ref": "#/$defs/lease"},
+            "semantic": {"$ref": "#/$defs/lease"}
+          }
+        },
+        "journal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sequence",
+            "last_successful_transition",
+            "last_failure_classification"
+          ],
+          "properties": {
+            "sequence": {"type": "integer", "minimum": 0},
+            "last_successful_transition": {"type": ["string", "null"]},
+            "last_failure_classification": {
+              "enum": [null, "generation_failed"]
+            }
+          }
+        },
+        "freshness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "duration_ms", "observation_boundary", "binding"],
+          "properties": {
+            "state": {
+              "enum": [
+                "not_observed",
+                "observed_current",
+                "drift",
+                "unavailable",
+                "unstable",
+                "timeout",
+                "unsupported"
+              ]
+            },
+            "duration_ms": {"$ref": "#/$defs/nullable_nonnegative_integer"},
+            "observation_boundary": {
+              "enum": ["not_observed", "pre_observed", "two_sided"]
+            },
+            "binding": {"$ref": "#/$defs/nullable_freshness_binding"}
+          }
+        },
+        "watcher": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "heartbeat", "boot_id", "process_id", "reason_code"],
+          "properties": {
+            "state": {"const": "not_evaluated"},
+            "heartbeat": {"type": "null"},
+            "boot_id": {"type": "null"},
+            "process_id": {"type": "null"},
+            "reason_code": {"const": "service_deferred_p5c"}
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "pressure", "reason_code"],
+          "properties": {
+            "state": {"const": "not_evaluated"},
+            "pressure": {"type": "null"},
+            "reason_code": {"const": "resource_accounting_deferred_p5c"}
+          }
+        },
+        "repair": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "count"],
+          "properties": {
+            "required": {"type": "boolean"},
+            "count": {"$ref": "#/$defs/nullable_nonnegative_integer"}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "ready"}}, "required": ["state"]},
+          "then": {
+            "properties": {
+              "safe_to_query": {"const": true},
+              "generations": {
+                "properties": {
+                  "pointer_revision": {"type": "integer", "minimum": 1},
+                  "current": {"$ref": "#/$defs/generation_reference"}
+                }
+              },
+              "freshness": {
+                "properties": {
+                  "state": {"const": "observed_current"},
+                  "duration_ms": {"type": "integer", "minimum": 0},
+                  "observation_boundary": {"const": "two_sided"},
+                  "binding": {"$ref": "#/$defs/freshness_binding"}
+                }
+              },
+              "repair": {
+                "properties": {"count": {"type": "integer", "minimum": 0}}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"state": {"enum": ["degraded", "invalid"]}},
+            "required": ["state"]
+          },
+          "then": {"properties": {"safe_to_query": {"const": false}}}
+        }
+      ]
+    }
+  }
+}

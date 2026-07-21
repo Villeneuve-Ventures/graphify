@@ -1,7 +1,8 @@
 # Graphify workspace contract v1
 
-Status: P5A semantic queue, P4 adapter, and observed-current library runtime for
-`graphifyy 0.9.16+workspace.1`; the public v1 contract fields remain frozen.
+Status: P5B1 read-only workspace status/doctor, P5A semantic queue, P4 adapter,
+and observed-current library runtime for `graphifyy 0.9.16+workspace.1`; the
+public v1 contract fields remain frozen.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -13,8 +14,16 @@ adds the sole `0.9.16` engine adapter, the no-write comparison seam, and
 two-sided observed-current release. P5A adds only the durable semantic desired-
 work queue, fenced worker claims, exact reconciliation evidence, and the
 generation-certification binding to one stable queue watermark. It does not
-provide a retained-state import path or a `graphify workspace` command.
-Services and commands remain later P5 work.
+provide a retained-state import path. P5B1 adds only the production composition
+root plus versioned read-only `graphify workspace status --json` and
+`graphify workspace doctor` inspection. With no explicit library inputs, those
+commands read the canonical, versioned `runtime-manifest.json` authority from
+the external state root selected by `XDG_STATE_HOME` or `HOME`; missing,
+malformed, unsafe, or unsupported authority fails closed without creating or
+repairing state. P5B1 only consumes that file. Its candidate-backed atomic
+installation remains P5C work, alongside retained production query/service
+authority. Mutation/query, repair, watch/service, performance certification,
+and candidate publication remain later P5 work.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build
@@ -36,9 +45,11 @@ or fork engine logic inside the package.
   `.generations`, `.journal`, `.pointers`, and `.gc` implement the P2/P3
   runtime boundary. `.adapters` and `.freshness` implement the bounded P4
   read-only engine/query boundary. `.semantic_queue` implements the bounded
-  P5A durable queue and certification boundary. Lifecycle mutation fails closed
-  outside non-elevated macOS on local APFS; tests use an explicit injected
-  capability seam and disposable external state roots.
+  P5A durable queue and certification boundary. `.composition` owns the
+  bounded, no-follow read of installed runtime authority and wires the existing
+  stores without duplicating their persistence behavior. Lifecycle mutation
+  fails closed outside non-elevated macOS on local APFS; tests use an explicit
+  injected capability seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,
   canonicalization, version-rejection, compensation, and rollback examples.
 - Candidate artifacts are built by `python -m tools.workspace_artifacts build`

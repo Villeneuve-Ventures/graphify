@@ -27,11 +27,15 @@ from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
+    LockTimeout,
     RuntimeCapabilities,
     StatePathError,
     Syscalls,
     require_before_deadline,
 )
+
+
+_MAX_POINTER_RECORD_BYTES = 64 * 1024
 
 
 class PointerError(RuntimeError):
@@ -156,6 +160,7 @@ class PointerStore:
         *,
         allow_missing: bool,
         expected_repo_uuid: str | None = None,
+        deadline_ns: int | None = None,
     ) -> PointerSet | None:
         if not self._exists(relative):
             if allow_missing:
@@ -164,8 +169,16 @@ class PointerStore:
         try:
             pointer = cast(
                 PointerSet,
-                PointerSet.from_json(self.state.read_existing_bytes(relative)),
+                PointerSet.from_json(
+                    self.state.read_existing_bytes(
+                        relative,
+                        max_bytes=_MAX_POINTER_RECORD_BYTES,
+                        deadline_ns=deadline_ns,
+                    )
+                ),
             )
+        except LockTimeout:
+            raise
         except Exception as exc:
             raise PointerCorrupt(f"pointer record is invalid: {relative}: {exc}") from exc
         if (
@@ -242,7 +255,13 @@ class PointerStore:
             ):
                 raise PointerCorrupt("pending pointer is not based on visible current")
 
-    def load(self, repo_uuid: str, *, allow_missing: bool = False) -> PointerSet | None:
+    def load(
+        self,
+        repo_uuid: str,
+        *,
+        allow_missing: bool = False,
+        deadline_ns: int | None = None,
+    ) -> PointerSet | None:
         """Read one visible pointer without recovery or any mutating syscall."""
 
         if self._exists(self._pending(repo_uuid)):
@@ -251,6 +270,7 @@ class PointerStore:
             self._current(repo_uuid),
             allow_missing=allow_missing,
             expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
         )
 
     @staticmethod
@@ -268,18 +288,38 @@ class PointerStore:
             )
         return receipt
 
-    def _verify_generation(self, repo_uuid: str, generation_id: str) -> GenerationReceipt:
+    def _verify_generation(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GenerationReceipt:
         try:
-            receipt = self.generations.verify_generation(repo_uuid, generation_id)
+            receipt = self.generations.verify_generation(
+                repo_uuid,
+                generation_id,
+                deadline_ns=deadline_ns,
+            )
         except UnsupportedCompatibility as exc:
             raise UnsupportedCompatibility(
                 "pointer receipt does not match the selected compatibility manifest"
             ) from exc
         return self._require_compatible(receipt)
 
-    def _verify_ref(self, repo_uuid: str, reference: dict[str, Any]) -> GenerationReceipt:
+    def _verify_ref(
+        self,
+        repo_uuid: str,
+        reference: dict[str, Any],
+        *,
+        deadline_ns: int | None = None,
+    ) -> GenerationReceipt:
         generation_id = str(reference["generation_id"])
-        receipt = self._verify_generation(repo_uuid, generation_id)
+        receipt = self._verify_generation(
+            repo_uuid,
+            generation_id,
+            deadline_ns=deadline_ns,
+        )
         if receipt.sha256 != reference["receipt_sha256"]:
             raise PointerCorrupt(f"pointer receipt hash is stale for {generation_id}")
         return receipt
@@ -289,16 +329,24 @@ class PointerStore:
         pointer: PointerSet,
         *,
         expected_repo_uuid: str | None = None,
+        deadline_ns: int | None = None,
     ) -> dict[str, GenerationReceipt]:
         value = pointer.to_dict()
         repo_uuid = str(value["repo_uuid"])
         if expected_repo_uuid is not None and repo_uuid != expected_repo_uuid:
             raise PointerCorrupt("pointer belongs to another workspace")
-        result = {"current": self._verify_ref(repo_uuid, cast(dict[str, Any], value["current"]))}
+        result = {
+            "current": self._verify_ref(
+                repo_uuid,
+                cast(dict[str, Any], value["current"]),
+                deadline_ns=deadline_ns,
+            )
+        }
         if value["last_good"] is not None:
             result["last_good"] = self._verify_ref(
                 repo_uuid,
                 cast(dict[str, Any], value["last_good"]),
+                deadline_ns=deadline_ns,
             )
         current_value = result["current"].to_dict()
         if (
@@ -368,51 +416,65 @@ class PointerStore:
         pointer: PointerSet,
         *,
         transition: str,
+        deadline_ns: int | None = None,
     ) -> bool:
         value = pointer.to_dict()
         current = cast(dict[str, Any], value["current"])
-        return any(
-            event.to_dict()["transition"] == transition
-            and event.to_dict()["generation_id"] == current["generation_id"]
-            and event.to_dict()["receipt_sha256"] == current["receipt_sha256"]
-            and event.to_dict()["pointer_revision"] == value["pointer_revision"]
-            and event.to_dict()["operation_epoch"] == value["operation_epoch"]
-            and event.to_dict()["fence_token"] == value["fence_token"]
-            for event in snapshot.events
-        )
+        for event in snapshot.events:
+            require_before_deadline(
+                deadline_ns,
+                "visible pointer journal verification exceeded its deadline",
+            )
+            event_value = event.to_dict()
+            if (
+                event_value["transition"] == transition
+                and event_value["generation_id"] == current["generation_id"]
+                and event_value["receipt_sha256"] == current["receipt_sha256"]
+                and event_value["pointer_revision"] == value["pointer_revision"]
+                and event_value["operation_epoch"] == value["operation_epoch"]
+                and event_value["fence_token"] == value["fence_token"]
+            ):
+                return True
+        return False
 
     def _verify_visible_pointer_journal(
         self,
         repo_uuid: str,
         pointer: PointerSet,
+        *,
+        deadline_ns: int | None = None,
     ) -> None:
         try:
-            snapshot = self.journal.read_stable(repo_uuid)
+            snapshot = self.journal.read_stable(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
         except JournalError as exc:
             raise PointerCorrupt(
                 f"visible pointer journal authority is unavailable: {exc}"
             ) from exc
         pointer_revision = int(pointer.to_dict()["pointer_revision"])
-        durable_pointer_revisions = [
-            int(value["pointer_revision"])
-            for event in snapshot.events
-            if (value := event.to_dict())["pointer_revision"] is not None
-        ]
-        if durable_pointer_revisions and max(durable_pointer_revisions) > pointer_revision:
-            raise PointerCorrupt(
-                "visible pointer is stale relative to durable journal history"
+        durable_pointer_revisions: list[int] = []
+        for event in snapshot.events:
+            require_before_deadline(
+                deadline_ns,
+                "visible pointer journal verification exceeded its deadline",
             )
+            value = event.to_dict()
+            if value["pointer_revision"] is not None:
+                durable_pointer_revisions.append(int(value["pointer_revision"]))
+        if durable_pointer_revisions and max(durable_pointer_revisions) > pointer_revision:
+            raise PointerCorrupt("visible pointer is stale relative to durable journal history")
         if not any(
             self._journal_records_pointer(
                 snapshot,
                 pointer,
                 transition=transition,
+                deadline_ns=deadline_ns,
             )
             for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")
         ):
-            raise PointerCorrupt(
-                "visible pointer has no matching durable journal event"
-            )
+            raise PointerCorrupt("visible pointer has no matching durable journal event")
 
     def _preliminary_pointer(self, repo_uuid: str) -> PointerSet | None:
         if self._exists(self._pending(repo_uuid)):
@@ -1080,6 +1142,7 @@ class PointerStore:
                 self._current(repo_uuid),
                 allow_missing=False,
                 expected_repo_uuid=repo_uuid,
+                deadline_ns=deadline_ns,
             )
             require_before_deadline(
                 deadline_ns,
@@ -1104,6 +1167,7 @@ class PointerStore:
                     self._current(repo_uuid),
                     allow_missing=False,
                     expected_repo_uuid=repo_uuid,
+                    deadline_ns=deadline_ns,
                 )
                 require_before_deadline(
                     deadline_ns,
@@ -1111,14 +1175,22 @@ class PointerStore:
                 )
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
-                receipt = self._verify_generation(repo_uuid, generation_id)
+                receipt = self._verify_generation(
+                    repo_uuid,
+                    generation_id,
+                    deadline_ns=deadline_ns,
+                )
                 require_before_deadline(
                     deadline_ns,
                     "current pointer read exceeded its deadline",
                 )
                 if receipt.sha256 != current["receipt_sha256"]:
                     raise PointerCorrupt("current pointer receipt hash does not match generation")
-                self._verify_visible_pointer_journal(repo_uuid, pointer)
+                self._verify_visible_pointer_journal(
+                    repo_uuid,
+                    pointer,
+                    deadline_ns=deadline_ns,
+                )
                 require_before_deadline(
                     deadline_ns,
                     "current pointer read exceeded its deadline",
@@ -1154,6 +1226,7 @@ class PointerStore:
             self._current(repo_uuid),
             allow_missing=False,
             expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
         )
         require_before_deadline(
             deadline_ns,
@@ -1161,12 +1234,20 @@ class PointerStore:
         )
         if pointer is None or pointer.canonical != reading.pointer.canonical:
             raise PointerConflict("current pointer changed during protected read")
-        receipts = self.verify_pointer(pointer, expected_repo_uuid=repo_uuid)
+        receipts = self.verify_pointer(
+            pointer,
+            expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
+        )
         require_before_deadline(
             deadline_ns,
             "current pointer revalidation exceeded its deadline",
         )
-        self._verify_visible_pointer_journal(repo_uuid, pointer)
+        self._verify_visible_pointer_journal(
+            repo_uuid,
+            pointer,
+            deadline_ns=deadline_ns,
+        )
         require_before_deadline(
             deadline_ns,
             "current pointer revalidation exceeded its deadline",

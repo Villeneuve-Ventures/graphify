@@ -1,4 +1,4 @@
-"""Versioned workspace contracts plus the bounded P2-P5A library runtime.
+"""Versioned workspace contracts plus the bounded P2-P5B1 runtime.
 
 P2 adds external registry persistence, operator-authorized UUID/source
 identity, explicit active-source CAS, and fenced leases. P3 adds immutable
@@ -6,7 +6,9 @@ generation certification, a framed lifecycle journal, atomic pointers and
 recovery, retained coordination locks, explicit capacity policy, and offline
 GC. P4 adds one 0.9.16 adapter and two-sided observed-current freshness. P5A
 adds the durable semantic queue and stable-watermark certification binding.
-Services, commands, installation, and candidate publication remain deferred.
+P5B1 adds production composition, versioned read-only status, and read-only
+doctor. Mutation/query commands, services, installation, and candidate
+publication remain deferred.
 """
 
 from graphify.workspace.adapters import (
@@ -161,6 +163,30 @@ from graphify.workspace.semantic_queue import (
     StaleSemanticClaim,
     decide_semantic_capability,
 )
+from graphify.workspace.composition import (
+    RUNTIME_AUTHORITY_CONTRACT,
+    RUNTIME_AUTHORITY_FILENAME,
+    RUNTIME_AUTHORITY_FORMAT_VERSION,
+    WorkspaceAuthorityError,
+    WorkspaceAuthorityInvalid,
+    WorkspaceAuthorityUnsupported,
+    WorkspaceRuntime,
+    WorkspaceRuntimeAuthority,
+    WorkspaceRuntimeInputs,
+    compose_workspace_runtime,
+    load_workspace_runtime_inputs,
+)
+from graphify.workspace.status import (
+    EXIT_DEGRADED,
+    EXIT_INVALID,
+    EXIT_READY,
+    EXIT_USAGE,
+    STATUS_CONTRACT,
+    STATUS_SCHEMA_VERSION,
+    WorkspaceStatusReport,
+    inspect_workspace_status,
+    load_status_schema,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -169,9 +195,18 @@ __all__ = [
     "CANDIDATE_DISTRIBUTION_VERSION",
     "CLI_CONTRACT_VERSION",
     "ENGINE_BASELINE",
+    "EXIT_DEGRADED",
+    "EXIT_INVALID",
+    "EXIT_READY",
+    "EXIT_USAGE",
     "EXTRACTOR_CACHE_ABI",
     "REQUIRED_COMPATIBILITY_ARTIFACTS",
+    "RUNTIME_AUTHORITY_CONTRACT",
+    "RUNTIME_AUTHORITY_FILENAME",
+    "RUNTIME_AUTHORITY_FORMAT_VERSION",
     "STATE_SCHEMA_VERSION",
+    "STATUS_CONTRACT",
+    "STATUS_SCHEMA_VERSION",
     "WORKSPACE_SCHEMA_VERSION",
     "UPSTREAM_BASELINE_COMMIT",
     "WORKSPACE_SCHEMA_FILES",
@@ -279,14 +314,25 @@ __all__ = [
     "UnsupportedRuntime",
     "UUIDCollisionError",
     "WorkspaceConfig",
+    "WorkspaceRuntime",
+    "WorkspaceRuntimeAuthority",
+    "WorkspaceAuthorityError",
+    "WorkspaceAuthorityInvalid",
+    "WorkspaceAuthorityUnsupported",
+    "WorkspaceRuntimeInputs",
     "WorkspaceRuntimeError",
+    "WorkspaceStatusReport",
     "canonical_json_bytes",
     "canonical_sha256",
+    "compose_workspace_runtime",
+    "load_workspace_runtime_inputs",
     "decide_semantic_capability",
     "decode_journal_frame",
     "discover_source",
     "encode_journal_frame",
+    "inspect_workspace_status",
     "load_schema",
+    "load_status_schema",
     "parse_contract",
     "select_adapter",
     "validate_installer_compensation",

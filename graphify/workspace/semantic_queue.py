@@ -39,6 +39,7 @@ from graphify.workspace.persistence import (
     StateCorrupt,
     StatePathError,
     Syscalls,
+    require_before_deadline,
 )
 
 
@@ -52,6 +53,7 @@ _GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
 _ERROR_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$", re.ASCII)
 _WORKSPACE_CONFIG_MAX_BYTES = 64 * 1024
 _WORKSPACE_CONFIG_READ_TIMEOUT_NS = 5_000_000_000
+_MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES = 64 * 1024
 
 
 class SemanticQueueError(RuntimeError):
@@ -1290,21 +1292,28 @@ class SemanticQueueStore:
         repo_uuid: str,
         *,
         recover: bool = True,
+        deadline_ns: int | None = None,
     ) -> SemanticQueueSnapshot:
         current, previous, pending = self._paths(repo_uuid)
         if not recover and not self.state.private_directory_exists(current.parent):
             return SemanticQueueSnapshot.initial(repo_uuid, self.policy)
-        loader = self.state.recover_record if recover else self.state.read_stable_record
         try:
-            snapshot = loader(
-                label="semantic_queue",
-                current=current,
-                previous=previous,
-                pending=pending,
-                decoder=SemanticQueueSnapshot.from_json,
-                revision=lambda value: value.revision,
-                allow_missing=True,
-            )
+            kwargs = {
+                "label": "semantic_queue",
+                "current": current,
+                "previous": previous,
+                "pending": pending,
+                "decoder": SemanticQueueSnapshot.from_json,
+                "revision": lambda value: value.revision,
+                "allow_missing": True,
+            }
+            if recover:
+                snapshot = self.state.recover_record(**kwargs)
+            else:
+                snapshot = self.state.read_stable_record(
+                    **kwargs,
+                    deadline_ns=deadline_ns,
+                )
         except (ContractError, StateCorrupt, StatePathError) as exc:
             raise SemanticQueueCorrupt(str(exc)) from exc
         if snapshot is None:
@@ -2053,11 +2062,50 @@ class SemanticQueueStore:
             )
             return self._commit_locked(current, candidate)
 
-    def inspect(self, repo_uuid: str) -> SemanticQueueSnapshot:
+    def read_only_snapshot_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> SemanticQueueSnapshot:
+        """Read stable queue state while registry and workspace locks are held."""
+
+        require_before_deadline(
+            deadline_ns,
+            "semantic queue snapshot read exceeded its deadline",
+        )
+        snapshot = self._load_locked(
+            repo_uuid,
+            recover=False,
+            deadline_ns=deadline_ns,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "semantic queue snapshot read exceeded its deadline",
+        )
+        self._bounded(snapshot)
+        require_before_deadline(
+            deadline_ns,
+            "semantic queue snapshot validation exceeded its deadline",
+        )
+        return snapshot
+
+    def inspect(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> SemanticQueueSnapshot:
         canonical = str(LeaseStore._directory(repo_uuid).parts[-1])
-        with self.leases.registry.read_only_snapshot():
-            with self.leases.read_only_workspace_lock(canonical):
-                return self._load_locked(canonical, recover=False)
+        with self.leases.registry.read_only_snapshot(deadline_ns=deadline_ns):
+            with self.leases.read_only_workspace_lock(
+                canonical,
+                deadline_ns=deadline_ns,
+            ):
+                return self.read_only_snapshot_locked(
+                    canonical,
+                    deadline_ns=deadline_ns,
+                )
 
     @staticmethod
     def _certification_binding_path(repo_uuid: str, generation_id: str) -> Path:
@@ -2076,6 +2124,7 @@ class SemanticQueueStore:
         generation_id: str,
         request_sha256: str,
         sealed_input_manifest_sha256: str,
+        deadline_ns: int | None = None,
     ) -> SemanticCertificationView | None:
         request_digest = _digest(request_sha256, "$.request_sha256")
         sealed_digest = _digest(
@@ -2084,7 +2133,11 @@ class SemanticQueueStore:
         )
         path = cls._certification_binding_path(repo_uuid, generation_id)
         try:
-            raw = state.read_optional_existing_bytes(path)
+            raw = state.read_optional_existing_bytes(
+                path,
+                max_bytes=_MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES,
+                deadline_ns=deadline_ns,
+            )
             if raw is None:
                 return None
             binding = _SemanticCertificationBinding.from_json(raw)
@@ -2092,6 +2145,10 @@ class SemanticQueueStore:
             raise SemanticCertificationBlocked(
                 f"durable semantic certification binding is invalid: {exc}"
             ) from exc
+        require_before_deadline(
+            deadline_ns,
+            "semantic certification binding verification exceeded its deadline",
+        )
         if (
             binding.repo_uuid != repo_uuid
             or binding.generation_id != generation_id
@@ -2130,6 +2187,7 @@ class SemanticQueueStore:
         generation_id: str,
         request_sha256: str,
         sealed_input_manifest_sha256: str,
+        deadline_ns: int | None = None,
     ) -> SemanticCertificationView:
         """Require immutable queue authority through a reopened durable state root."""
 
@@ -2139,6 +2197,7 @@ class SemanticQueueStore:
             generation_id=generation_id,
             request_sha256=request_sha256,
             sealed_input_manifest_sha256=sealed_input_manifest_sha256,
+            deadline_ns=deadline_ns,
         )
         if view is None:
             raise SemanticCertificationBlocked(

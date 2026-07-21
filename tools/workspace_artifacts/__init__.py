@@ -243,6 +243,14 @@ def build_static_bundles(
             "schemas/v1",
         )
     )
+    contract_members.extend(
+        _tree_members(
+            repo_root,
+            repo_root / "graphify" / "workspace" / "schemas" / "cli" / "v1",
+            "schemas/cli/v1",
+            allowed_suffixes=frozenset({".json"}),
+        )
+    )
     for module_name in (
         "__init__.py",
         "contracts.py",

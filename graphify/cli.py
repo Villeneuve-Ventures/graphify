@@ -213,7 +213,14 @@ def _reenter_main() -> None:
 
 
 def dispatch_command(cmd: str) -> None:
-    if cmd == "provider":
+    if cmd == "workspace":
+        from graphify.workspace.cli import run_workspace_command
+
+        exit_code = run_workspace_command(sys.argv[2:])
+        if exit_code:
+            sys.stdout.flush()
+            sys.exit(exit_code)
+    elif cmd == "provider":
         from graphify.llm import _custom_providers_path, BACKENDS
         import json as _json
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""

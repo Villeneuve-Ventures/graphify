@@ -24,7 +24,7 @@ from graphify.workspace.contracts import (
     PointerSet,
     payload_manifest_sha256,
 )
-from graphify.workspace.freshness import FreshnessAuthority
+from graphify.workspace.freshness import FreshnessAuthority, FreshnessResult
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.pointers import PointerCAS, PointerStore
@@ -64,6 +64,18 @@ QUEUE_POLICY = SemanticQueuePolicy(
     max_bytes=64 * 1024,
     retry_budget=1,
 )
+
+
+def test_freshness_result_preserves_the_exported_five_field_constructor() -> None:
+    result: FreshnessResult[str] = FreshnessResult(
+        "withhold",
+        "not_observed",
+        None,
+        None,
+        False,
+    )
+
+    assert result.observation_boundary == "not_observed"
 
 
 @dataclass(frozen=True)
@@ -586,9 +598,18 @@ def test_freshness_deadline_expires_during_pointer_verification(
     def monotonic_ns() -> int:
         return now
 
-    def verify_generation(repo_uuid: str, generation_id: str) -> GenerationReceipt:
+    def verify_generation(
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GenerationReceipt:
         nonlocal now
-        receipt = original_verify(repo_uuid, generation_id)
+        receipt = original_verify(
+            repo_uuid,
+            generation_id,
+            deadline_ns=deadline_ns,
+        )
         now = timeout_ns
         return receipt
 
@@ -641,12 +662,22 @@ def test_freshness_deadline_expires_before_release_revalidation(
         if event == "freshness:post_observed":
             now = timeout_ns
 
-    def count_journal_verification(repo_uuid: str, pointer: PointerSet) -> None:
+    def count_journal_verification(
+        repo_uuid: str,
+        pointer: PointerSet,
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
         nonlocal journal_checks
         journal_checks += 1
         if journal_checks > 1:
             raise AssertionError("expired release reached journal revalidation")
-        original_journal_verification(repo_uuid, pointer)
+        assert deadline_ns == timeout_ns
+        original_journal_verification(
+            repo_uuid,
+            pointer,
+            deadline_ns=deadline_ns,
+        )
 
     monkeypatch.setattr(time, "monotonic_ns", monotonic_ns)
     monkeypatch.setattr(

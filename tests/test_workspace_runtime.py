@@ -454,6 +454,59 @@ def test_state_root_rejects_links_overlap_and_split_registry_roots(tmp_path: Pat
         LeaseStore(tmp_path / "other-state", registry, capabilities=SUPPORTED)
 
 
+def test_state_root_inspection_probe_distinguishes_missing_existing_and_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing = DurableStateRoot(tmp_path / "missing-state", capabilities=SUPPORTED)
+    existing_root = tmp_path / "existing-state"
+    existing_root.mkdir(mode=0o700)
+    existing = DurableStateRoot(existing_root, capabilities=SUPPORTED)
+    before = _tree_snapshot(tmp_path)
+
+    assert missing.root_exists_for_inspection() is False
+    assert existing.root_exists_for_inspection() is True
+
+    original_open = os.open
+
+    def reject_parent(path: os.PathLike[str] | str, *args: Any, **kwargs: Any) -> int:
+        if path == existing.root.parent.name and kwargs.get("dir_fd") is not None:
+            raise OSError(errno.EACCES, "operator-secret-state-parent")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", reject_parent)
+
+    with pytest.raises(StatePathError):
+        existing.root_exists_for_inspection()
+    assert _tree_snapshot(tmp_path) == before
+
+
+def test_state_root_inspection_probe_normalizes_binding_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    state = DurableStateRoot(state_root, capabilities=SUPPORTED)
+    before = _tree_snapshot(tmp_path)
+    original_stat = os.stat
+
+    def reject_root_binding(
+        path: os.PathLike[str] | str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> os.stat_result:
+        if path == state.root.name and kwargs.get("dir_fd") is not None:
+            raise FileNotFoundError(errno.ENOENT, "operator-secret-binding")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", reject_root_binding)
+
+    with pytest.raises(StatePathError):
+        state.root_exists_for_inspection()
+    assert _tree_snapshot(tmp_path) == before
+
+
 def test_ensure_directory_holds_descriptor_across_binding_swap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

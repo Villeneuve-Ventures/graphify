@@ -54,6 +54,10 @@ class StateCorrupt(WorkspaceRuntimeError):
     code = "state_corrupt"
 
 
+class StateRecordMissing(StateCorrupt):
+    """A required current durable record is absent."""
+
+
 class CommitUnknown(WorkspaceRuntimeError):
     code = "commit_unknown"
 
@@ -64,6 +68,17 @@ class LockOrderError(WorkspaceRuntimeError):
 
 class LockTimeout(WorkspaceRuntimeError):
     code = "lock_timeout"
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        phase: str = "deadline",
+        kind: str | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.phase = phase
+        self.kind = kind
 
 
 def require_before_deadline(deadline_ns: int | None, detail: str) -> None:
@@ -217,16 +232,98 @@ class DurableStateRoot:
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
+        _require_supported_runtime: bool = True,
     ) -> None:
         if not root.is_absolute():
             raise StatePathError("state root must be an absolute path")
-        if root.is_symlink():
-            raise StatePathError(f"state root must not be a symbolic link: {root}")
-        self.root = root.resolve(strict=False)
+        lexical_root = Path(os.path.abspath(root))
+        if lexical_root.is_symlink():
+            raise StatePathError(f"state root must not be a symbolic link: {lexical_root}")
+        self.root = lexical_root
         self.capabilities = capabilities or RuntimeCapabilities.detect(self.root)
-        self.capabilities.require_supported()
+        if _require_supported_runtime:
+            self.capabilities.require_supported()
         self.fault_hook = fault_hook or (lambda _event: None)
         self.syscalls = syscalls or PosixSyscalls()
+
+    @classmethod
+    def read_optional_bytes_for_inspection(
+        cls,
+        root: Path,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        capabilities: RuntimeCapabilities | None = None,
+        fault_hook: FaultHook | None = None,
+        syscalls: Syscalls | None = None,
+    ) -> bytes | None:
+        """Read existing bytes safely before the runtime-support verdict."""
+
+        inspection_capabilities = capabilities or RuntimeCapabilities(
+            system="inspection",
+            filesystem="unknown",
+            elevated=False,
+            local=True,
+        )
+        state = cls(
+            root,
+            capabilities=inspection_capabilities,
+            fault_hook=fault_hook,
+            syscalls=syscalls,
+            _require_supported_runtime=False,
+        )
+        return state.read_optional_existing_bytes(relative, max_bytes=max_bytes)
+
+    def _open_root_parent(self, *, allow_missing: bool) -> int | None:
+        """Open the lexical root parent without following any ancestor link."""
+
+        parent = self.root.parent
+        anchor = Path(parent.anchor)
+        try:
+            descriptor = os.open(anchor, self._directory_open_flags())
+        except OSError as exc:
+            raise StatePathError("filesystem root cannot be inspected safely") from exc
+        current = anchor
+        for part in parent.relative_to(anchor).parts:
+            candidate = current / part
+            try:
+                child_descriptor = os.open(
+                    part,
+                    self._directory_open_flags(),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError as exc:
+                os.close(descriptor)
+                if allow_missing:
+                    return None
+                raise StatePathError(
+                    f"state root parent must already exist: {candidate}"
+                ) from exc
+            except OSError as exc:
+                os.close(descriptor)
+                raise StatePathError(
+                    "state root ancestor is a symbolic link or not a directory: "
+                    f"{candidate}"
+                ) from exc
+            try:
+                details = os.fstat(child_descriptor)
+                if not stat.S_ISDIR(details.st_mode):
+                    raise StatePathError(
+                        f"state root ancestor is not a directory: {candidate}"
+                    )
+            except BaseException:
+                os.close(child_descriptor)
+                os.close(descriptor)
+                raise
+            os.close(descriptor)
+            descriptor = child_descriptor
+            current = candidate
+        try:
+            self._require_owned_directory_descriptor(descriptor, parent)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
 
     @contextmanager
     def _root_directory(
@@ -240,17 +337,12 @@ class DurableStateRoot:
         parent = self.root.parent
         if parent == self.root:
             raise StatePathError("state root must not be the filesystem root")
+        parent_descriptor = self._open_root_parent(allow_missing=allow_missing)
+        if parent_descriptor is None:
+            yield None
+            return
         try:
-            parent_descriptor = os.open(parent, self._directory_open_flags())
-        except OSError as exc:
-            raise StatePathError(
-                f"state root parent must already be an owned directory: {parent}"
-            ) from exc
-        try:
-            opened_parent = self._require_owned_directory_descriptor(
-                parent_descriptor,
-                parent,
-            )
+            opened_parent = os.fstat(parent_descriptor)
 
             def require_parent_binding() -> None:
                 try:
@@ -303,11 +395,16 @@ class DurableStateRoot:
                     root_descriptor,
                     self.root,
                 )
-                bound = os.stat(
-                    self.root.name,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
+                try:
+                    bound = os.stat(
+                        self.root.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state root changed while opening: {self.root}"
+                    ) from exc
                 if (
                     not stat.S_ISDIR(bound.st_mode)
                     or (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino)
@@ -327,6 +424,12 @@ class DurableStateRoot:
     def _ensure_root(self) -> None:
         with self._root_directory(ensure=True):
             pass
+
+    def root_exists_for_inspection(self) -> bool:
+        """Probe the owned state root without creating it or suppressing unsafe paths."""
+
+        with self._root_directory(ensure=False, allow_missing=True) as descriptor:
+            return descriptor is not None
 
     @staticmethod
     def _require_owner(details: os.stat_result, path: Path) -> None:
@@ -1180,7 +1283,11 @@ class DurableStateRoot:
                 operation |= fcntl.LOCK_NB
             while True:
                 if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
-                    raise LockTimeout(f"{kind} lock acquisition timed out: {path}")
+                    raise LockTimeout(
+                        f"{kind} lock acquisition timed out: {path}",
+                        phase="acquire",
+                        kind=kind,
+                    )
                 try:
                     fcntl.flock(descriptor, operation)
                 except InterruptedError:
@@ -1191,12 +1298,18 @@ class DurableStateRoot:
                     remaining_ns = deadline_ns - time.monotonic_ns()
                     if remaining_ns <= 0:
                         raise LockTimeout(
-                            f"{kind} lock acquisition timed out: {path}"
+                            f"{kind} lock acquisition timed out: {path}",
+                            phase="acquire",
+                            kind=kind,
                         ) from None
                     time.sleep(min(0.001, remaining_ns / 1_000_000_000))
                     continue
                 if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
-                    raise LockTimeout(f"{kind} lock acquisition timed out: {path}")
+                    raise LockTimeout(
+                        f"{kind} lock acquisition timed out: {path}",
+                        phase="acquire",
+                        kind=kind,
+                    )
                 break
             token = _LOCK_STACK.set((*stack, (rank, name)))
             self.fault_hook(f"lock:{name}:acquired")
@@ -1501,20 +1614,49 @@ class DurableStateRoot:
                 )
             yield
 
-    def read_bytes(self, relative: str | Path) -> bytes:
+    def read_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
         """Read one contained regular state file without following its final path."""
 
         self._ensure_root()
-        return self._read_regular(self.path(relative))
+        return self._read_regular(
+            self.path(relative),
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
-    def read_existing_bytes(self, relative: str | Path) -> bytes:
+    def read_existing_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
         """Read existing state without mkdir, chmod, replacement, or cleanup."""
 
-        return self._read_regular(self.path(relative))
+        return self._read_regular(
+            self.path(relative),
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
-    def read_optional_existing_bytes(self, relative: str | Path) -> bytes | None:
+    def read_optional_existing_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
         """Read optional existing state while still validating its private parent chain."""
 
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(deadline_ns, "state record read exceeded its deadline")
         path = self.path(relative)
         try:
             descriptor = self._open_existing_file(path, allow_missing_parent=True)
@@ -1524,7 +1666,12 @@ class DurableStateRoot:
             raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
         if descriptor is None:
             return None
-        return self._read_regular_descriptor(descriptor, path)
+        return self._read_regular_descriptor(
+            descriptor,
+            path,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
     def read_current(
         self,
@@ -1538,7 +1685,7 @@ class DurableStateRoot:
         if data is None:
             if allow_missing:
                 return None
-            raise StateCorrupt(f"{label} current record is missing")
+            raise StateRecordMissing(f"{label} current record is missing")
         try:
             return decoder(data)
         except Exception as exc:
@@ -1556,6 +1703,8 @@ class DurableStateRoot:
         decoder: Callable[[bytes], RecordT],
         revision: Callable[[RecordT], int],
         allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
     ) -> RecordT | None:
         """Read current authority only when no durable recovery is required."""
 
@@ -1577,11 +1726,15 @@ class DurableStateRoot:
             except FileNotFoundError:
                 return None
             try:
-                data = self._read_regular(path)
+                data = self._read_regular(
+                    path,
+                    max_bytes=max_bytes,
+                    deadline_ns=deadline_ns,
+                )
                 record = decoder(data)
                 return data, record, revision(record)
             except Exception as exc:
-                if isinstance(exc, StateCorrupt):
+                if isinstance(exc, (LockTimeout, StateCorrupt)):
                     raise
                 raise StateCorrupt(f"{label} {name} record is invalid: {exc}") from exc
 
@@ -1597,7 +1750,7 @@ class DurableStateRoot:
         if current_candidate is None:
             if allow_missing and previous_candidate is None:
                 return None
-            raise StateCorrupt(f"{label} current record is missing")
+            raise StateRecordMissing(f"{label} current record is missing")
         current_bytes, current_record, current_revision = current_candidate
         if previous_candidate is None:
             return current_record
@@ -1728,31 +1881,67 @@ class DurableStateRoot:
             raise
         return record
 
-    def _read_regular(self, path: Path) -> bytes:
+    def _read_regular(
+        self,
+        path: Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
         try:
             descriptor = self._open_existing_file(path)
         except OSError as exc:
             raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
         if descriptor is None:  # pragma: no cover - allow_missing_parent is false
             raise StateCorrupt(f"state record parent is missing: {path.parent}")
-        return self._read_regular_descriptor(descriptor, path)
+        return self._read_regular_descriptor(
+            descriptor,
+            path,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
 
-    def _read_regular_descriptor(self, descriptor: int, path: Path) -> bytes:
+    def _read_regular_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
         try:
+            require_before_deadline(deadline_ns, "state record read exceeded its deadline")
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
                 raise StateCorrupt(f"state record is not a regular file: {path}")
             self._require_owner(details, path)
             if stat.S_IMODE(details.st_mode) != 0o600:
                 raise StateCorrupt(f"state record mode is not 0600: {path}")
+            if max_bytes is not None and details.st_size > max_bytes:
+                raise StateCorrupt(
+                    f"state record exceeds its read limit of {max_bytes} bytes: {path}"
+                )
             chunks: list[bytes] = []
+            total = 0
             while True:
+                require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+                read_size = 1024 * 1024
+                if max_bytes is not None:
+                    read_size = min(read_size, (max_bytes - total) + 1)
                 try:
-                    chunk = os.read(descriptor, 1024 * 1024)
+                    chunk = os.read(descriptor, read_size)
                 except InterruptedError:
                     continue
+                require_before_deadline(deadline_ns, "state record read exceeded its deadline")
                 if not chunk:
                     return b"".join(chunks)
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise StateCorrupt(
+                        f"state record exceeds its read limit of {max_bytes} bytes: {path}"
+                    )
                 chunks.append(chunk)
         finally:
             os.close(descriptor)
