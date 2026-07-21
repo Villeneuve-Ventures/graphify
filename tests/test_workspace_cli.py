@@ -19,7 +19,7 @@ from graphify.workspace.composition import (
     WorkspaceAuthorityUnsupported,
     WorkspaceRuntimeAuthority,
 )
-from graphify.workspace.persistence import StatePathError
+from graphify.workspace.persistence import StatePathError, UnsupportedRuntime
 from graphify.workspace.semantic_queue import SemanticQueuePolicy
 from graphify.workspace.status import WorkspaceStatusReport, load_status_schema
 from tests.workspace_p3_helpers import (
@@ -297,6 +297,11 @@ def test_status_without_explicit_inputs_loads_production_authority(
             StatePathError("operator-secret-unsafe-state-home"),
             "unsafe_state_path",
             "configure_safe_state_root",
+        ),
+        (
+            UnsupportedRuntime("operator-secret-unsupported-runtime"),
+            "unsupported_runtime",
+            "use_supported_runtime",
         ),
     ],
 )

@@ -1314,6 +1314,56 @@ def test_status_propagates_deadline_into_stable_record_reads(
         assert absolute_deadline in deadlines
 
 
+def test_status_bounds_visible_pointer_read_by_size_and_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.pointers import _MAX_POINTER_RECORD_BYTES
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    original_read_existing_bytes = DurableStateRoot.read_existing_bytes
+    observed: list[tuple[int | None, int | None]] = []
+    before = tree_snapshot(runtime.state_root)
+
+    def capture_pointer_read(
+        state: DurableStateRoot,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        if Path(relative).name == "pointers.json":
+            observed.append((max_bytes, deadline_ns))
+            raise LockTimeout("injected pointer record deadline")
+        return original_read_existing_bytes(
+            state,
+            relative,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(DurableStateRoot, "read_existing_bytes", capture_pointer_read)
+    absolute_deadline = time.monotonic_ns() + 5_000_000_000
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        ),
+        deadline_ns=absolute_deadline,
+    )
+
+    assert report.exit_code == 10
+    assert observed == [(_MAX_POINTER_RECORD_BYTES, absolute_deadline)]
+    assert "inspection_deadline_exceeded" in _reason_codes(report)
+    assert "pointer_invalid" not in _reason_codes(report)
+    assert tree_snapshot(runtime.state_root) == before
+
+
 def test_status_revalidates_pointer_after_freshness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

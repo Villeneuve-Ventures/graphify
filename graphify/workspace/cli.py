@@ -10,7 +10,7 @@ from graphify.workspace.composition import (
     WorkspaceRuntimeInputs,
     load_workspace_runtime_inputs,
 )
-from graphify.workspace.persistence import StatePathError
+from graphify.workspace.persistence import StatePathError, UnsupportedRuntime
 from graphify.workspace.status import (
     EXIT_USAGE,
     WorkspaceStatusReport,
@@ -72,6 +72,11 @@ def run_workspace_command(
         report = invalid_workspace_authority_report(
             reason_code="unsafe_state_path",
             action_code="configure_safe_state_root",
+        )
+    except UnsupportedRuntime:
+        report = invalid_workspace_authority_report(
+            reason_code="unsupported_runtime",
+            action_code="use_supported_runtime",
         )
     if command == ("status", "--json"):
         output.write(report.canonical.decode("utf-8"))

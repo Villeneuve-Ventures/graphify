@@ -22,7 +22,7 @@ from graphify.workspace.composition import (
     load_workspace_runtime_inputs,
 )
 from graphify.workspace.contracts import CompatibilityManifest, canonical_json_bytes
-from graphify.workspace.persistence import StatePathError
+from graphify.workspace.persistence import RuntimeCapabilities, StatePathError, UnsupportedRuntime
 from graphify.workspace.semantic_queue import SemanticQueuePolicy
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
@@ -230,19 +230,15 @@ def test_load_workspace_runtime_inputs_rejects_uninspectable_state_home(
 ) -> None:
     state_home = tmp_path / "operator-secret-state-home"
     state_home.mkdir()
-    original_stat = Path.stat
+    original_lstat = Path.lstat
 
-    def fail_state_home_stat(
-        path: Path,
-        *,
-        follow_symlinks: bool = True,
-    ) -> os.stat_result:
+    def fail_state_home_lstat(path: Path) -> os.stat_result:
         if path == state_home:
             raise OSError(error_number, "operator-secret-state-home")
-        return original_stat(path, follow_symlinks=follow_symlinks)
+        return original_lstat(path)
 
     with monkeypatch.context() as patch:
-        patch.setattr(Path, "stat", fail_state_home_stat)
+        patch.setattr(Path, "lstat", fail_state_home_lstat)
         with pytest.raises(StatePathError):
             load_workspace_runtime_inputs(
                 environ={"XDG_STATE_HOME": str(state_home)},
@@ -250,6 +246,40 @@ def test_load_workspace_runtime_inputs_rejects_uninspectable_state_home(
             )
 
     assert list(state_home.iterdir()) == []
+
+
+def test_load_workspace_runtime_inputs_rejects_unsupported_runtime_before_authority_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_home = tmp_path / "state-home"
+    state_root = state_home / "graphify"
+    _write_authority(state_root)
+    unsupported = RuntimeCapabilities(
+        system="Windows",
+        filesystem="ntfs",
+        elevated=False,
+        local=True,
+    )
+    before_tree = tree_snapshot(state_home)
+    before_metadata = metadata_snapshot(state_home)
+
+    def unexpected_authority_read(*_args: object, **_kwargs: object) -> bytes | None:
+        raise AssertionError("unsupported hosts must not enter POSIX authority inspection")
+
+    monkeypatch.setattr(
+        "graphify.workspace.composition.DurableStateRoot.read_optional_bytes_for_inspection",
+        unexpected_authority_read,
+    )
+
+    with pytest.raises(UnsupportedRuntime):
+        load_workspace_runtime_inputs(
+            environ={"XDG_STATE_HOME": str(state_home)},
+            capabilities=unsupported,
+        )
+
+    assert tree_snapshot(state_home) == before_tree
+    assert metadata_snapshot(state_home) == before_metadata
 
 
 @pytest.mark.parametrize(

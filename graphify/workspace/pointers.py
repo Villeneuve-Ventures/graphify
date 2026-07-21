@@ -27,11 +27,15 @@ from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
+    LockTimeout,
     RuntimeCapabilities,
     StatePathError,
     Syscalls,
     require_before_deadline,
 )
+
+
+_MAX_POINTER_RECORD_BYTES = 64 * 1024
 
 
 class PointerError(RuntimeError):
@@ -156,6 +160,7 @@ class PointerStore:
         *,
         allow_missing: bool,
         expected_repo_uuid: str | None = None,
+        deadline_ns: int | None = None,
     ) -> PointerSet | None:
         if not self._exists(relative):
             if allow_missing:
@@ -164,8 +169,16 @@ class PointerStore:
         try:
             pointer = cast(
                 PointerSet,
-                PointerSet.from_json(self.state.read_existing_bytes(relative)),
+                PointerSet.from_json(
+                    self.state.read_existing_bytes(
+                        relative,
+                        max_bytes=_MAX_POINTER_RECORD_BYTES,
+                        deadline_ns=deadline_ns,
+                    )
+                ),
             )
+        except LockTimeout:
+            raise
         except Exception as exc:
             raise PointerCorrupt(f"pointer record is invalid: {relative}: {exc}") from exc
         if (
@@ -242,7 +255,13 @@ class PointerStore:
             ):
                 raise PointerCorrupt("pending pointer is not based on visible current")
 
-    def load(self, repo_uuid: str, *, allow_missing: bool = False) -> PointerSet | None:
+    def load(
+        self,
+        repo_uuid: str,
+        *,
+        allow_missing: bool = False,
+        deadline_ns: int | None = None,
+    ) -> PointerSet | None:
         """Read one visible pointer without recovery or any mutating syscall."""
 
         if self._exists(self._pending(repo_uuid)):
@@ -251,6 +270,7 @@ class PointerStore:
             self._current(repo_uuid),
             allow_missing=allow_missing,
             expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
         )
 
     @staticmethod
@@ -1094,6 +1114,7 @@ class PointerStore:
                 self._current(repo_uuid),
                 allow_missing=False,
                 expected_repo_uuid=repo_uuid,
+                deadline_ns=deadline_ns,
             )
             require_before_deadline(
                 deadline_ns,
@@ -1118,6 +1139,7 @@ class PointerStore:
                     self._current(repo_uuid),
                     allow_missing=False,
                     expected_repo_uuid=repo_uuid,
+                    deadline_ns=deadline_ns,
                 )
                 require_before_deadline(
                     deadline_ns,
@@ -1172,6 +1194,7 @@ class PointerStore:
             self._current(repo_uuid),
             allow_missing=False,
             expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
         )
         require_before_deadline(
             deadline_ns,

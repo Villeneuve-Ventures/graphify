@@ -27,6 +27,7 @@ from graphify.workspace.persistence import (
     StateCorrupt,
     StatePathError,
     Syscalls,
+    UnsupportedRuntime,
 )
 from graphify.workspace.pointers import PointerStore
 from graphify.workspace.registry import RegistryStore
@@ -163,6 +164,9 @@ def load_workspace_runtime_inputs(
     """Load installed composition authorities without creating or repairing state."""
 
     state_root = _workspace_state_root(os.environ if environ is None else environ)
+    resolved_capabilities = capabilities or RuntimeCapabilities.detect(state_root)
+    if resolved_capabilities.system != "Darwin":
+        raise UnsupportedRuntime("workspace inspection requires macOS")
     try:
         state_root.parent.lstat()
     except FileNotFoundError:
@@ -174,7 +178,7 @@ def load_workspace_runtime_inputs(
             state_root,
             RUNTIME_AUTHORITY_FILENAME,
             max_bytes=_RUNTIME_AUTHORITY_MAX_BYTES,
-            capabilities=capabilities,
+            capabilities=resolved_capabilities,
             fault_hook=fault_hook,
             syscalls=syscalls,
         )
@@ -187,7 +191,7 @@ def load_workspace_runtime_inputs(
         state_root=state_root,
         compatibility_manifest=authority.compatibility_manifest,
         semantic_queue_policy=authority.semantic_queue_policy,
-        capabilities=capabilities,
+        capabilities=resolved_capabilities,
         fault_hook=fault_hook,
         syscalls=syscalls,
     )

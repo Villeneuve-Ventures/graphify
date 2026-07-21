@@ -982,7 +982,11 @@ def _inspect_workspace(
                     deadline_ns,
                     "pointer inspection exceeded its deadline",
                 )
-                pointer = runtime.pointers.load(repo_uuid, allow_missing=True)
+                pointer = runtime.pointers.load(
+                    repo_uuid,
+                    allow_missing=True,
+                    deadline_ns=deadline_ns,
+                )
                 require_before_deadline(
                     deadline_ns,
                     "pointer inspection exceeded its deadline",
