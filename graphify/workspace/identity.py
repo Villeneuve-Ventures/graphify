@@ -26,6 +26,7 @@ _RFC3339_UTC = re.compile(
     r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
     r"T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?Z$"
 )
+_WORKSPACE_CONFIG_MAX_BYTES = 64 * 1024
 
 
 class IdentityError(RuntimeError):
@@ -154,8 +155,17 @@ def _git(
     *arguments: str,
     deadline_ns: int | None = None,
 ) -> str:
-    environment = os.environ.copy()
-    environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
     command = ["git", *arguments]
     try:
         result = subprocess.run(
@@ -222,7 +232,8 @@ def _resolve_git_path(
 
 
 def _read_source_regular(
-    path: Path,
+    root: Path,
+    relative: Path,
     *,
     deadline_ns: int | None = None,
     max_bytes: int | None = None,
@@ -231,62 +242,163 @@ def _read_source_regular(
         isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0
     ):
         raise ValueError("max_bytes must be a positive integer")
+    if relative.is_absolute() or not relative.parts or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise ValueError("source identity path must be a contained relative path")
     _check_deadline(deadline_ns)
-    flags = (
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
+    path = root / relative
+    directory_descriptors: list[int] = []
+    directory_bindings: list[tuple[int, str, int, Path]] = []
     try:
-        descriptor = os.open(path, flags)
+        root_descriptor = os.open(root, directory_flags)
     except OSError as exc:
-        raise SourceDiscoveryError(f"cannot open source identity file {path}: {exc}") from exc
+        raise SourceDiscoveryError(
+            f"cannot open source identity directory {root}: {exc}"
+        ) from exc
+    directory_descriptors.append(root_descriptor)
     try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
-            raise SourceDiscoveryError(
-                f"source identity file is not a singular regular file: {path}"
-            )
-        if max_bytes is not None and before.st_size > max_bytes:
-            raise SourceDiscoveryError(
-                f"source identity file exceeds byte limit {max_bytes}: {path}"
-            )
-        chunks: list[bytes] = []
-        total_bytes = 0
-        while True:
+        current_descriptor = root_descriptor
+        current_path = root
+        for part in relative.parent.parts:
             _check_deadline(deadline_ns)
             try:
-                read_size = (
-                    1024 * 1024
-                    if max_bytes is None
-                    else min(1024 * 1024, max_bytes - total_bytes + 1)
+                child_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=current_descriptor,
                 )
-                chunk = os.read(descriptor, read_size)
-            except InterruptedError:
-                continue
-            if not chunk:
-                break
-            total_bytes += len(chunk)
-            if max_bytes is not None and total_bytes > max_bytes:
+            except OSError as exc:
+                raise SourceDiscoveryError(
+                    f"cannot open source identity directory {current_path / part}: {exc}"
+                ) from exc
+            directory_descriptors.append(child_descriptor)
+            try:
+                child = os.fstat(child_descriptor)
+            except OSError as exc:
+                raise SourceDiscoveryError(
+                    f"cannot inspect source identity directory {current_path / part}: {exc}"
+                ) from exc
+            if not stat.S_ISDIR(child.st_mode):
+                raise SourceDiscoveryError(
+                    f"source identity path is not a directory: {current_path / part}"
+                )
+            directory_bindings.append(
+                (current_descriptor, part, child_descriptor, current_path / part)
+            )
+            current_descriptor = child_descriptor
+            current_path /= part
+
+        try:
+            descriptor = os.open(relative.name, file_flags, dir_fd=current_descriptor)
+        except OSError as exc:
+            raise SourceDiscoveryError(
+                f"cannot open source identity file {path}: {exc}"
+            ) from exc
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise SourceDiscoveryError(
+                    f"source identity file is not a singular regular file: {path}"
+                )
+            if max_bytes is not None and before.st_size > max_bytes:
                 raise SourceDiscoveryError(
                     f"source identity file exceeds byte limit {max_bytes}: {path}"
                 )
-            chunks.append(chunk)
-        _check_deadline(deadline_ns)
-        after = os.fstat(descriptor)
+            chunks: list[bytes] = []
+            total_bytes = 0
+            while True:
+                _check_deadline(deadline_ns)
+                try:
+                    read_size = (
+                        1024 * 1024
+                        if max_bytes is None
+                        else min(1024 * 1024, max_bytes - total_bytes + 1)
+                    )
+                    chunk = os.read(descriptor, read_size)
+                except InterruptedError:
+                    continue
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if max_bytes is not None and total_bytes > max_bytes:
+                    raise SourceDiscoveryError(
+                        f"source identity file exceeds byte limit {max_bytes}: {path}"
+                    )
+                chunks.append(chunk)
+            _check_deadline(deadline_ns)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+            raise SourceDiscoveryError(f"source identity file changed while it was read: {path}")
+        try:
+            installed = os.stat(
+                relative.name,
+                dir_fd=current_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise SourceDiscoveryError(
+                f"source identity file disappeared after read: {path}"
+            ) from exc
+        if (
+            not stat.S_ISREG(installed.st_mode)
+            or installed.st_dev != after.st_dev
+            or installed.st_ino != after.st_ino
+        ):
+            raise SourceDiscoveryError(f"source identity file was replaced while it was read: {path}")
+        for parent_descriptor, name, child_descriptor, child_path in reversed(
+            directory_bindings
+        ):
+            opened = os.fstat(child_descriptor)
+            try:
+                bound = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise SourceDiscoveryError(
+                    f"source identity directory disappeared after read: {child_path}"
+                ) from exc
+            if (
+                not stat.S_ISDIR(bound.st_mode)
+                or (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino)
+            ):
+                raise SourceDiscoveryError(
+                    f"source identity directory changed while it was read: {child_path}"
+                )
+        root_opened = os.fstat(root_descriptor)
+        try:
+            root_bound = root.lstat()
+        except OSError as exc:
+            raise SourceDiscoveryError(
+                f"source identity root disappeared after read: {root}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(root_bound.st_mode)
+            or (root_opened.st_dev, root_opened.st_ino)
+            != (root_bound.st_dev, root_bound.st_ino)
+        ):
+            raise SourceDiscoveryError(f"source identity root changed while it was read: {root}")
+        return b"".join(chunks)
     finally:
-        os.close(descriptor)
-    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
-        raise SourceDiscoveryError(f"source identity file changed while it was read: {path}")
-    try:
-        installed = path.lstat()
-    except OSError as exc:
-        raise SourceDiscoveryError(f"source identity file disappeared after read: {path}") from exc
-    if installed.st_dev != after.st_dev or installed.st_ino != after.st_ino:
-        raise SourceDiscoveryError(f"source identity file was replaced while it was read: {path}")
-    return b"".join(chunks)
+        for directory_descriptor in reversed(directory_descriptors):
+            os.close(directory_descriptor)
 
 
 def _read_workspace_config(
@@ -296,7 +408,8 @@ def _read_workspace_config(
     max_bytes: int | None = None,
 ) -> tuple[WorkspaceConfig, bytes]:
     config_bytes = _read_source_regular(
-        root / ".graphify" / "workspace.toml",
+        root,
+        Path(".graphify") / "workspace.toml",
         deadline_ns=deadline_ns,
         max_bytes=max_bytes,
     )
@@ -429,7 +542,11 @@ def discover_source(
     if top_level != root:
         raise SourceDiscoveryError(f"source root must be the Git top level: {top_level}")
 
-    config, config_bytes = _read_workspace_config(root, deadline_ns=deadline_ns)
+    config, config_bytes = _read_workspace_config(
+        root,
+        deadline_ns=deadline_ns,
+        max_bytes=_WORKSPACE_CONFIG_MAX_BYTES,
+    )
     repo_uuid = str(config.to_dict()["repo_uuid"])
 
     git_common_dir = _resolve_git_path(

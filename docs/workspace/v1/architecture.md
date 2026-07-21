@@ -33,9 +33,15 @@ The executable surface discovers only the standard external state root and
 reads one bounded, canonical `runtime-manifest.json`; it never searches a
 checkout, synthesizes a compatibility tuple or queue policy, or derives policy
 from durable queue content. Missing or unusable authority fails closed.
-Mutation/query commands, repair, watch/service, installation, performance
-certification, candidate publication, and live-cutover work remain deferred;
-retained production query/service authority remains P5C work.
+P5B2a adds only explicit initial enrollment and explicit adoption through
+`graphify workspace register`. The command composes that installed authority,
+discovers the current Git top level, requires matching stdin authorization and
+an expected registry revision, then delegates to the P2 registry CAS. Adoption
+is never inferred: the operator must select `adopt`, and the existing registry
+must verify shared history for the same UUID. Rebind, rotation, activation,
+remaining mutation/query commands, repair, watch/service, installation,
+performance certification, candidate publication, and live-cutover work remain
+deferred; retained production query/service authority remains P5C work.
 
 ## Authority split
 
@@ -74,11 +80,12 @@ P2 writes only this external lifecycle state:
 
 P5B1 additionally reserves `runtime-manifest.json` at the root above as an
 internal format-version-1 read authority containing the complete frozen
-compatibility manifest and explicit semantic-queue policy. Status and doctor
-only read it through the same private-directory, singular-regular-file, 0600,
-no-follow, bounded-read rules used for durable state. P5C owns creating and
-atomically installing the candidate-backed file; P5B1 does not create it or
-guess its contents.
+compatibility manifest and explicit semantic-queue policy. Status, doctor, and
+P5B2a registration authority loading read it through the same private-directory,
+singular-regular-file, 0600, no-follow, bounded-read rules used for durable
+state. Registration then writes only the P2 paths already shown above. P5C owns
+creating and atomically installing the candidate-backed authority; P5B1/P5B2a
+do not create it or guess its contents.
 
 P3 now owns generations, lifecycle journals, coordination locks, pointers,
 capacity reservations, and explicit offline-GC records. None of those paths is

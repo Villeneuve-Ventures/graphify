@@ -32,8 +32,9 @@ P3 executes generation, journal, pointer, and explicit offline-GC transitions.
 P4 adds read-only adapter/freshness operations and external-output structural
 builds. P5A adds only durable semantic desired-work reconciliation, fenced
 claims, bounded retries/dead letters, and stable-watermark certification.
-Service, command, installation, route, publication, and live-cutover transitions
-remain absent.
+P5B2a adds only the initial enrollment and verified clone/fork adoption command.
+All other workspace commands, service, installation, route, publication, and
+live-cutover transitions remain absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -51,6 +52,14 @@ State-root policy requires expected ownership, `0700` directories, `0600`
 mutable records, exclusive creation, safe umask/ACL behavior, descriptor-relative
 no-follow traversal, regular-file-only payloads, path containment, and rejection
 of links and special files.
+
+Registration requires an explicit `enroll` or `adopt` verb, a canonical repo
+UUID, an expected registry revision, and action-matching operator authorization
+on standard input. Source discovery scrubs ambient `GIT_*` overrides and reads
+the repo policy through descriptor-relative no-follow traversal. The command
+cross-checks the requested UUID before registry mutation, exposes no source or
+state path, authorization detail, credential, or exception text, and maps stale
+CAS, collision, authority, corruption, and runtime failures to stable codes.
 
 Operational corpus processing will use a cleaned allowlisted environment,
 network denial by default, bounded CPU/memory/file/time resources, read-only

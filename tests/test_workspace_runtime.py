@@ -735,6 +735,31 @@ def test_source_identity_rejects_linked_or_hardlinked_workspace_config(tmp_path:
         discover_source(hardlink_repo)
 
 
+def test_source_discovery_scrubs_ambient_git_directory_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "private-git-dir"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "private-work-tree"))
+
+    source = discover_source(repo)
+
+    assert source.root == repo.resolve()
+    assert source.repo_uuid == REPO_UUID
+
+
+def test_source_identity_rejects_a_symlinked_graphify_directory(tmp_path: Path) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID)
+    graphify_directory = repo / ".graphify"
+    external = tmp_path / "private-graphify"
+    graphify_directory.rename(external)
+    graphify_directory.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(SourceDiscoveryError):
+        discover_source(repo)
+
+
 def test_uuid_collision_adoption_and_enrollment_evidence_rotation(tmp_path: Path) -> None:
     original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
     clone = _clone_repo(original, tmp_path / "clone")

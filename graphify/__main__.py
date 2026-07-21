@@ -542,6 +542,7 @@ def _run_cli() -> None:
         print("Usage: graphify <command>")
         print()
         print("Commands:")
+        print("  workspace register ...    explicitly enroll or adopt one workspace")
         print("  workspace status --json  emit versioned read-only workspace status JSON")
         print("  workspace doctor         run read-only workspace diagnostics")
         print("  install [--platform P]  copy skill to platform config dir (claude|windows|codebuddy|codex|opencode|aider|amp|agents|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro|pi|devin)")

@@ -391,7 +391,7 @@ def test_missing_authority_output_redacts_private_paths(
     assert str(private_state) not in rendered
 
 
-def test_top_level_help_lists_workspace_status_and_doctor(
+def test_top_level_help_lists_workspace_register_status_and_doctor(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -401,6 +401,7 @@ def test_top_level_help_lists_workspace_status_and_doctor(
     mainmod.main()
 
     output = capsys.readouterr().out
+    assert "workspace register" in output
     assert "workspace status --json" in output
     assert "workspace doctor" in output
 
