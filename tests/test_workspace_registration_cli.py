@@ -26,6 +26,7 @@ from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
     OperatorAuthorization,
+    SourceDiscoveryTimeout,
     UUIDCollisionError,
 )
 from graphify.workspace.persistence import InjectedFault, RuntimeCapabilities, UnsupportedRuntime
@@ -202,9 +203,12 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     monkeypatch.setattr(
         workspace_cli,
         "discover_source",
-        lambda root: source if root == cwd else None,
+        lambda root, *, deadline_ns: source
+        if root == cwd and deadline_ns == 5_000_000_123
+        else None,
         raising=False,
     )
+    monkeypatch.setattr(workspace_cli.time, "monotonic_ns", lambda: 123)
     monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
     monkeypatch.setattr(sys, "stdin", StringIO(_authorization_payload(action.upper())))
     stdout = StringIO()
@@ -319,6 +323,7 @@ def test_register_usage_errors_do_not_read_stdin_or_discover_state(
         (RevisionConflict("private current revision"), "conflict", 10),
         (UUIDCollisionError("private source path"), "conflict", 10),
         (AuthorizationError("private authorization reason"), "invalid", 20),
+        (TypeError("private runtime failure"), "invalid", 20),
     ],
 )
 def test_register_failures_are_canonical_opaque_and_redacted(
@@ -344,7 +349,12 @@ def test_register_failures_are_canonical_opaque_and_redacted(
         lambda _inputs: SimpleNamespace(registry=Registry()),
         raising=False,
     )
-    monkeypatch.setattr(workspace_cli, "discover_source", lambda _root: source, raising=False)
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda _root, *, deadline_ns: source,
+        raising=False,
+    )
     monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
     monkeypatch.setattr(sys, "stdin", StringIO(_authorization_payload("ENROLL")))
     stdout = StringIO()
@@ -375,6 +385,140 @@ def test_register_failures_are_canonical_opaque_and_redacted(
     assert payload["reason_code"] and payload["action_code"]
     assert "private" not in stderr.getvalue()
     assert str(cwd) not in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    "document_error",
+    [KeyError("revision"), TypeError("private malformed registry document")],
+)
+def test_register_normalizes_unexpected_registry_result_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    document_error: Exception,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "private-checkout", REPO_UUID)
+    state_root = tmp_path / "external-state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+
+    class Document:
+        def to_dict(self) -> dict[str, object]:
+            raise document_error
+
+    class Registry:
+        def enroll(
+            self,
+            source: object,
+            authorization: OperatorAuthorization,
+            *,
+            expected_revision: int,
+        ) -> Document:
+            store.enroll(
+                source,
+                authorization,
+                expected_revision=expected_revision,
+            )
+            return Document()
+
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(registry=Registry()),
+        raising=False,
+    )
+    result, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=_inputs(state_root),
+    )
+
+    assert result == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "commit_unknown"
+    assert "private" not in stderr.getvalue()
+    assert str(checkout) not in stderr.getvalue()
+    assert store.load().to_dict()["revision"] == 1
+
+
+def test_register_preserves_injected_fault_from_revision_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    state_root = tmp_path / "external-state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+
+    class Document:
+        def to_dict(self) -> dict[str, object]:
+            raise InjectedFault("revision-receipt")
+
+    class Registry:
+        def enroll(
+            self,
+            source: object,
+            authorization: OperatorAuthorization,
+            *,
+            expected_revision: int,
+        ) -> Document:
+            store.enroll(
+                source,
+                authorization,
+                expected_revision=expected_revision,
+            )
+            return Document()
+
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(registry=Registry()),
+        raising=False,
+    )
+
+    with pytest.raises(InjectedFault, match="revision-receipt"):
+        _run_register(
+            monkeypatch,
+            cwd=checkout,
+            action="enroll",
+            expected_revision=0,
+            inputs=_inputs(state_root),
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+
+
+def test_register_applies_a_deadline_to_source_discovery_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_cli = _cli()
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    state_root = tmp_path / "external-state"
+    observed_deadlines: list[int] = []
+
+    def time_out(_root: Path, *, deadline_ns: int) -> None:
+        observed_deadlines.append(deadline_ns)
+        raise SourceDiscoveryTimeout("private source command timed out")
+
+    monkeypatch.setattr(workspace_cli, "discover_source", time_out, raising=False)
+    monkeypatch.setattr(workspace_cli.time, "monotonic_ns", lambda: 456)
+
+    result, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=_inputs(state_root),
+    )
+
+    assert result == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "source_discovery_timeout"
+    assert observed_deadlines == [5_000_000_456]
+    assert not state_root.exists()
 
 
 @pytest.mark.parametrize(

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import json
+import os
 from pathlib import Path
 import re
 import sys
+import time
 from typing import cast, Sequence, TextIO
 
 from graphify.workspace.adapters import UnsupportedCompatibility
@@ -55,6 +58,7 @@ from graphify.workspace.status import (
 _REGISTRATION_CONTRACT = "graphify.workspace.registration"
 _REGISTRATION_SCHEMA_VERSION = 1
 _AUTHORIZATION_MAX_BYTES = 16 * 1024
+_REGISTRATION_SOURCE_TIMEOUT_NS = 5_000_000_000
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt> --repo-uuid UUID "
@@ -212,6 +216,24 @@ def _registration_failure(
     )
 
 
+def _emit_registration_receipt(stream: TextIO, payload: str, *, exit_code: int) -> int:
+    try:
+        stream.write(payload)
+    except (BrokenPipeError, OSError) as exc:
+        if (
+            (stream is not sys.stdout and stream is not sys.stderr)
+            or getattr(exc, "errno", None) not in {errno.EPIPE, errno.EINVAL}
+        ):
+            raise
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            for standard_stream in (sys.stdout, sys.stderr):
+                os.dup2(devnull, standard_stream.fileno())
+        finally:
+            os.close(devnull)
+    return exit_code
+
+
 def _classify_registration_error(error: Exception) -> _RegistrationFailure:
     if isinstance(error, RevisionConflict):
         return _RegistrationFailure(
@@ -321,36 +343,49 @@ def _run_registration(
                 "runtime_authority_missing",
                 "install_candidate_authority",
             )
-            errors.write(_registration_failure(request, failure))
-            return failure.exit_code
-        runtime = compose_workspace_runtime(resolved_inputs)
-        authorization = _read_operator_authorization(request)
-        source = discover_source(Path.cwd())
-        if source.repo_uuid != request.repo_uuid:
-            raise UUIDCollisionError(
-                "explicit registration UUID does not match the source configuration"
-            )
-        if request.action is IdentityAction.ENROLL:
-            document = runtime.registry.enroll(
-                source,
-                authorization,
-                expected_revision=request.expected_registry_revision,
-            )
+            receipt = _registration_failure(request, failure)
+            exit_code = failure.exit_code
         else:
-            document = runtime.registry.adopt(
-                source,
-                authorization,
-                expected_revision=request.expected_registry_revision,
+            runtime = compose_workspace_runtime(resolved_inputs)
+            authorization = _read_operator_authorization(request)
+            source = discover_source(
+                Path.cwd(),
+                deadline_ns=time.monotonic_ns() + _REGISTRATION_SOURCE_TIMEOUT_NS,
             )
+            if source.repo_uuid != request.repo_uuid:
+                raise UUIDCollisionError(
+                    "explicit registration UUID does not match the source configuration"
+                )
+            if request.action is IdentityAction.ENROLL:
+                document = runtime.registry.enroll(
+                    source,
+                    authorization,
+                    expected_revision=request.expected_registry_revision,
+                )
+            else:
+                document = runtime.registry.adopt(
+                    source,
+                    authorization,
+                    expected_revision=request.expected_registry_revision,
+                )
+            try:
+                revision = int(document.to_dict()["revision"])
+            except InjectedFault:
+                raise
+            except Exception as exc:
+                raise CommitUnknown(
+                    "registration completed without a valid revision receipt"
+                ) from exc
+            receipt = _registration_success(request, registry_revision=revision)
+            exit_code = EXIT_READY
     except InjectedFault:
         raise
-    except (OSError, RuntimeError, ValueError) as exc:
+    except Exception as exc:
         failure = _classify_registration_error(exc)
-        errors.write(_registration_failure(request, failure))
-        return failure.exit_code
-    revision = int(document.to_dict()["revision"])
-    output.write(_registration_success(request, registry_revision=revision))
-    return EXIT_READY
+        receipt = _registration_failure(request, failure)
+        exit_code = failure.exit_code
+    stream = output if exit_code == EXIT_READY else errors
+    return _emit_registration_receipt(stream, receipt, exit_code=exit_code)
 
 
 def _doctor_text(report: WorkspaceStatusReport) -> str:
@@ -385,8 +420,11 @@ def run_workspace_command(
     if command and command[0] == "register":
         request = _parse_register_request(command)
         if request is None:
-            errors.write(_USAGE + "\n")
-            return EXIT_USAGE
+            return _emit_registration_receipt(
+                errors,
+                _USAGE + "\n",
+                exit_code=EXIT_USAGE,
+            )
         return _run_registration(
             request,
             inputs=inputs,

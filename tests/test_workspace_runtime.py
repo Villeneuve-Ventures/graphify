@@ -765,6 +765,67 @@ def test_source_discovery_scrubs_ambient_git_directory_overrides(
     assert source.repo_uuid == REPO_UUID
 
 
+def test_source_discovery_ignores_replacement_refs_for_adoption_history(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    unrelated = _create_repo(tmp_path / "unrelated", REPO_UUID, marker="unrelated")
+    enrolled_root = _run(original, "rev-list", "--max-parents=0", "HEAD")
+    _run(unrelated, "fetch", "--quiet", str(original), enrolled_root)
+    _run(unrelated, "replace", "--graft", "HEAD", enrolled_root)
+    assert _run(unrelated, "rev-list", "--max-parents=0", "HEAD") == enrolled_root
+
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(original),
+        _authorization(IdentityAction.ENROLL, "enroll-original"),
+        expected_revision=0,
+    )
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            discover_source(unrelated),
+            _authorization(IdentityAction.ADOPT, "reject-replacement-ref"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+
+
+def test_shallow_history_without_enrollment_root_cannot_satisfy_adoption(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    _commit_change(original, "second-commit")
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--depth=1", original.resolve().as_uri(), str(shallow)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run(shallow, "remote", "set-url", "origin", REMOTE)
+    assert _run(shallow, "rev-parse", "--is-shallow-repository") == "true"
+
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(original),
+        _authorization(IdentityAction.ENROLL, "enroll-complete-history"),
+        expected_revision=0,
+    )
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            discover_source(shallow),
+            _authorization(IdentityAction.ADOPT, "reject-shallow-history"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+
+
 def test_source_identity_rejects_a_symlinked_graphify_directory(tmp_path: Path) -> None:
     repo = _create_repo(tmp_path / "source", REPO_UUID)
     graphify_directory = repo / ".graphify"

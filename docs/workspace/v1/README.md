@@ -25,13 +25,15 @@ repairing state. P5B1 only consumes that file. Its candidate-backed atomic
 installation remains P5C work, alongside retained production query/service
 authority. P5B2a adds only `graphify workspace register enroll` for initial
 enrollment and `graphify workspace register adopt` for an already-enrolled
-verified clone or fork. Both forms require the repo UUID, expected registry
-revision, and a matching `OperatorAuthorization` JSON object on standard input.
-The command requires the current working directory itself to be the Git top
-level, cross-checks its bounded no-follow `.graphify/workspace.toml`, and never
-infers adoption. It emits one canonical redacted receipt and writes only the
-existing P2 registry, workspace, lock, and evidence records beneath the
-configured external state root. Rebind,
+verified clone or fork whose retained history includes a root recorded at
+enrollment. A shallow clone that omits that root fails the shared-history proof
+until sufficient history is fetched. Both forms require the repo UUID, expected
+registry revision, and a matching `OperatorAuthorization` JSON object on
+standard input. The command requires the current working directory itself to be
+the Git top level, ignores local Git replacement refs, cross-checks its bounded
+no-follow `.graphify/workspace.toml`, and never infers adoption. It emits one
+canonical redacted receipt and writes only the existing P2 registry, workspace,
+lock, and evidence records beneath the configured external state root. Rebind,
 rotation, activation, remaining mutation/query commands, repair, watch/service,
 performance certification, and candidate publication remain later P5 work.
 
@@ -58,10 +60,11 @@ or fork engine logic inside the package.
   P5A durable queue and certification boundary. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
-  bounded P5B2a registration command and reuses `.identity` and `.registry`
-  without adding another persistence path. Lifecycle mutation fails closed
-  outside non-elevated macOS on local APFS; tests use an explicit injected
-  capability seam and disposable external state roots.
+  P5B2a registration command with bounded authority, authorization, policy, and
+  Git-discovery inputs; it reuses `.identity` and `.registry` without adding
+  another persistence path. Lifecycle mutation fails closed outside
+  non-elevated macOS on local APFS; tests use an explicit injected capability
+  seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,
   canonicalization, version-rejection, compensation, and rollback examples.
 - Candidate artifacts are built by `python -m tools.workspace_artifacts build`
