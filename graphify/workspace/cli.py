@@ -146,17 +146,36 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _read_authorization_bytes() -> bytes:
+    binary_input = getattr(sys.stdin, "buffer", None)
+    if binary_input is not None:
+        raw = binary_input.read(_AUTHORIZATION_MAX_BYTES + 1)
+        if not isinstance(raw, bytes):
+            raise TypeError("authorization input did not return bytes")
+        return raw
+
+    raw = bytearray()
+    while len(raw) <= _AUTHORIZATION_MAX_BYTES:
+        character = sys.stdin.read(1)
+        if not isinstance(character, str) or len(character) > 1:
+            raise TypeError("authorization input did not return text")
+        if character == "":
+            break
+        raw.extend(character.encode("utf-8"))
+    return bytes(raw)
+
+
 def _read_operator_authorization(request: _RegisterRequest) -> OperatorAuthorization:
     try:
-        raw = sys.stdin.read(_AUTHORIZATION_MAX_BYTES + 1)
-        payload_size = len(raw.encode("utf-8"))
-    except (OSError, UnicodeError) as exc:
+        raw_bytes = _read_authorization_bytes()
+    except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
         raise AuthorizationError("authorization input cannot be read") from exc
-    if payload_size > _AUTHORIZATION_MAX_BYTES:
+    if len(raw_bytes) > _AUTHORIZATION_MAX_BYTES:
         raise AuthorizationError("authorization input exceeds the byte limit")
     try:
+        raw = raw_bytes.decode("utf-8")
         value = json.loads(raw, object_pairs_hook=_unique_json_object)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, UnicodeError, ValueError) as exc:
         raise AuthorizationError("authorization input is not valid JSON") from exc
     required = {"action", "issued_at", "nonce", "operator_id", "reason"}
     if not isinstance(value, dict) or set(value) != required:

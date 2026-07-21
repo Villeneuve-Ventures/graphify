@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from io import StringIO
+from io import BytesIO, StringIO
 import importlib
 import json
 import os
@@ -519,6 +519,38 @@ def test_register_applies_a_deadline_to_source_discovery_without_mutation(
     assert _registration_payload(stderr)["reason_code"] == "source_discovery_timeout"
     assert observed_deadlines == [5_000_000_456]
     assert not state_root.exists()
+
+
+def test_register_authorization_input_is_bounded_in_bytes_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    read_sizes: list[int] = []
+
+    class RecordingBuffer(BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return super().read(size)
+
+    binary_input = RecordingBuffer("é".encode("utf-8") * (8 * 1024 + 1))
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        SimpleNamespace(
+            buffer=binary_input,
+            read=lambda _size=-1: pytest.fail("authorization must be byte-bounded"),
+        ),
+    )
+    request = workspace_cli._RegisterRequest(
+        action=IdentityAction.ENROLL,
+        repo_uuid=REPO_UUID,
+        expected_registry_revision=0,
+    )
+
+    with pytest.raises(AuthorizationError, match="exceeds the byte limit"):
+        workspace_cli._read_operator_authorization(request)
+
+    assert read_sizes == [16 * 1024 + 1]
 
 
 @pytest.mark.parametrize(
