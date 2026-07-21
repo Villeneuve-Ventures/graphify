@@ -427,6 +427,30 @@ def test_top_level_workspace_dispatch_propagates_arguments_and_exit_code(
     assert calls == [["status", "--json"]]
 
 
+def test_top_level_registration_failure_preserves_exit_with_broken_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+
+    class BrokenFlushStream(StringIO):
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+    def fake_run(arguments: list[str], **_kwargs: object) -> int:
+        assert arguments == ["register"]
+        return 64
+
+    monkeypatch.setattr(workspace_cli, "run_workspace_command", fake_run)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _path: None)
+    monkeypatch.setattr(sys, "argv", ["graphify", "workspace", "register"])
+    monkeypatch.setattr(sys, "stdout", BrokenFlushStream())
+
+    with pytest.raises(SystemExit) as raised:
+        mainmod.main()
+
+    assert raised.value.code == 64
+
+
 @pytest.mark.parametrize(
     ("arguments", "expected_exit"),
     [
