@@ -1442,7 +1442,23 @@ def inspect_workspace_status(
             _check("runtime", "ready", "ready", "none"),
         )
     )
-    if not runtime.registry.state.root.exists():
+    try:
+        state_root_exists = runtime.registry.state.root_exists_for_inspection()
+    except StatePathError:
+        checks.append(
+            _check(
+                "state_root",
+                "invalid",
+                "unsafe_state_path",
+                "configure_safe_state_root",
+            )
+        )
+        return _finalize(
+            runtime=_runtime_summary(compatibility_sha256),
+            workspaces=[],
+            checks=checks,
+        )
+    if not state_root_exists:
         checks.append(
             _check(
                 "state_root",

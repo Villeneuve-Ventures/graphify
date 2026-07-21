@@ -248,6 +248,50 @@ def test_load_workspace_runtime_inputs_rejects_uninspectable_state_home(
     assert list(state_home.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    "linked_component",
+    ["xdg", "xdg_parent", "home", "home_local"],
+)
+def test_load_workspace_runtime_inputs_rejects_symlinked_environment_path_components(
+    tmp_path: Path,
+    linked_component: str,
+) -> None:
+    if linked_component == "xdg":
+        target = tmp_path / "real-state-home"
+        _write_authority(target / "graphify")
+        state_home = tmp_path / "linked-state-home"
+        state_home.symlink_to(target, target_is_directory=True)
+        environ = {"XDG_STATE_HOME": str(state_home)}
+    elif linked_component == "xdg_parent":
+        target = tmp_path / "real-state-parent"
+        state_home = target / "state-home"
+        _write_authority(state_home / "graphify")
+        linked_parent = tmp_path / "linked-state-parent"
+        linked_parent.symlink_to(target, target_is_directory=True)
+        environ = {"XDG_STATE_HOME": str(linked_parent / state_home.name)}
+    elif linked_component == "home":
+        target = tmp_path / "real-home"
+        _write_authority(target / ".local" / "state" / "graphify")
+        home = tmp_path / "linked-home"
+        home.symlink_to(target, target_is_directory=True)
+        environ = {"HOME": str(home)}
+    else:
+        home = tmp_path / "home"
+        home.mkdir(mode=0o700)
+        target = tmp_path / "real-local"
+        _write_authority(target / "state" / "graphify")
+        (home / ".local").symlink_to(target, target_is_directory=True)
+        environ = {"HOME": str(home)}
+    before_tree = tree_snapshot(tmp_path)
+    before_metadata = metadata_snapshot(tmp_path)
+
+    with pytest.raises(StatePathError, match="symbolic link"):
+        load_workspace_runtime_inputs(environ=environ, capabilities=SUPPORTED)
+
+    assert tree_snapshot(tmp_path) == before_tree
+    assert metadata_snapshot(tmp_path) == before_metadata
+
+
 def test_load_workspace_runtime_inputs_rejects_host_without_dir_fd_before_authority_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -151,7 +151,7 @@ def _workspace_state_root(environ: Mapping[str, str]) -> Path:
         state_home = Path(home_value) / ".local" / "state"
     if not state_home.is_absolute():
         raise StatePathError("workspace state home must be an absolute path")
-    return state_home / "graphify"
+    return Path(os.path.abspath(state_home / "graphify"))
 
 
 def load_workspace_runtime_inputs(
@@ -164,23 +164,16 @@ def load_workspace_runtime_inputs(
     """Load installed composition authorities without creating or repairing state."""
 
     state_root = _workspace_state_root(os.environ if environ is None else environ)
-    resolved_capabilities = capabilities or RuntimeCapabilities.detect(state_root)
     if not {os.open, os.stat}.issubset(os.supports_dir_fd):
         raise UnsupportedRuntime(
             "workspace inspection requires descriptor-relative file access"
         )
     try:
-        state_root.parent.lstat()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise StatePathError("workspace state home cannot be inspected safely") from exc
-    try:
         payload = DurableStateRoot.read_optional_bytes_for_inspection(
             state_root,
             RUNTIME_AUTHORITY_FILENAME,
             max_bytes=_RUNTIME_AUTHORITY_MAX_BYTES,
-            capabilities=resolved_capabilities,
+            capabilities=capabilities,
             fault_hook=fault_hook,
             syscalls=syscalls,
         )
@@ -188,6 +181,7 @@ def load_workspace_runtime_inputs(
         raise WorkspaceAuthorityInvalid("runtime authority cannot be read safely") from exc
     if payload is None:
         return None
+    resolved_capabilities = capabilities or RuntimeCapabilities.detect(state_root)
     authority = WorkspaceRuntimeAuthority.from_json(payload)
     return WorkspaceRuntimeInputs(
         state_root=state_root,

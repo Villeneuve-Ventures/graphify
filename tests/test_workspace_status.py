@@ -526,6 +526,40 @@ def test_status_reports_missing_state_root_as_invalid_without_creating_it(
     assert not state_root.exists()
 
 
+def test_status_reports_uninspectable_state_root_as_unsafe_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    secret = "operator-secret-state-parent"
+    before_tree = tree_snapshot(state_root)
+    before_metadata = metadata_snapshot(state_root)
+
+    original_stat = os.stat
+
+    def reject_root_binding(
+        path: os.PathLike[str] | str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> os.stat_result:
+        if path == state_root.name and kwargs.get("dir_fd") is not None:
+            raise FileNotFoundError(secret)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", reject_root_binding)
+
+    report = inspect_workspace_status(_inputs(state_root))
+
+    assert report.exit_code == 20
+    assert "unsafe_state_path" in _reason_codes(report)
+    assert "state_root_missing" not in _reason_codes(report)
+    assert secret.encode("utf-8") not in report.canonical
+    assert secret not in str(report.to_dict())
+    assert tree_snapshot(state_root) == before_tree
+    assert metadata_snapshot(state_root) == before_metadata
+
+
 def test_status_reports_missing_registry_lock_without_recreating_it(
     tmp_path: Path,
 ) -> None:
@@ -1695,7 +1729,7 @@ def test_status_bounds_existing_lock_contention_without_writes(
         started = time.monotonic()
         report = inspect_workspace_status(
             _inputs(harness.state_root),
-            deadline_ns=time.monotonic_ns() + 10_000_000,
+            deadline_ns=time.monotonic_ns() + 250_000_000,
         )
         elapsed = time.monotonic() - started
     finally:

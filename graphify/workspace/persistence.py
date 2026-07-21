@@ -236,9 +236,10 @@ class DurableStateRoot:
     ) -> None:
         if not root.is_absolute():
             raise StatePathError("state root must be an absolute path")
-        if root.is_symlink():
-            raise StatePathError(f"state root must not be a symbolic link: {root}")
-        self.root = root.resolve(strict=False)
+        lexical_root = Path(os.path.abspath(root))
+        if lexical_root.is_symlink():
+            raise StatePathError(f"state root must not be a symbolic link: {lexical_root}")
+        self.root = lexical_root
         self.capabilities = capabilities or RuntimeCapabilities.detect(self.root)
         if _require_supported_runtime:
             self.capabilities.require_supported()
@@ -258,14 +259,71 @@ class DurableStateRoot:
     ) -> bytes | None:
         """Read existing bytes safely before the runtime-support verdict."""
 
+        inspection_capabilities = capabilities or RuntimeCapabilities(
+            system="inspection",
+            filesystem="unknown",
+            elevated=False,
+            local=True,
+        )
         state = cls(
             root,
-            capabilities=capabilities,
+            capabilities=inspection_capabilities,
             fault_hook=fault_hook,
             syscalls=syscalls,
             _require_supported_runtime=False,
         )
         return state.read_optional_existing_bytes(relative, max_bytes=max_bytes)
+
+    def _open_root_parent(self, *, allow_missing: bool) -> int | None:
+        """Open the lexical root parent without following any ancestor link."""
+
+        parent = self.root.parent
+        anchor = Path(parent.anchor)
+        try:
+            descriptor = os.open(anchor, self._directory_open_flags())
+        except OSError as exc:
+            raise StatePathError("filesystem root cannot be inspected safely") from exc
+        current = anchor
+        for part in parent.relative_to(anchor).parts:
+            candidate = current / part
+            try:
+                child_descriptor = os.open(
+                    part,
+                    self._directory_open_flags(),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError as exc:
+                os.close(descriptor)
+                if allow_missing:
+                    return None
+                raise StatePathError(
+                    f"state root parent must already exist: {candidate}"
+                ) from exc
+            except OSError as exc:
+                os.close(descriptor)
+                raise StatePathError(
+                    "state root ancestor is a symbolic link or not a directory: "
+                    f"{candidate}"
+                ) from exc
+            try:
+                details = os.fstat(child_descriptor)
+                if not stat.S_ISDIR(details.st_mode):
+                    raise StatePathError(
+                        f"state root ancestor is not a directory: {candidate}"
+                    )
+            except BaseException:
+                os.close(child_descriptor)
+                os.close(descriptor)
+                raise
+            os.close(descriptor)
+            descriptor = child_descriptor
+            current = candidate
+        try:
+            self._require_owned_directory_descriptor(descriptor, parent)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
 
     @contextmanager
     def _root_directory(
@@ -279,17 +337,12 @@ class DurableStateRoot:
         parent = self.root.parent
         if parent == self.root:
             raise StatePathError("state root must not be the filesystem root")
+        parent_descriptor = self._open_root_parent(allow_missing=allow_missing)
+        if parent_descriptor is None:
+            yield None
+            return
         try:
-            parent_descriptor = os.open(parent, self._directory_open_flags())
-        except OSError as exc:
-            raise StatePathError(
-                f"state root parent must already be an owned directory: {parent}"
-            ) from exc
-        try:
-            opened_parent = self._require_owned_directory_descriptor(
-                parent_descriptor,
-                parent,
-            )
+            opened_parent = os.fstat(parent_descriptor)
 
             def require_parent_binding() -> None:
                 try:
@@ -342,11 +395,16 @@ class DurableStateRoot:
                     root_descriptor,
                     self.root,
                 )
-                bound = os.stat(
-                    self.root.name,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
+                try:
+                    bound = os.stat(
+                        self.root.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state root changed while opening: {self.root}"
+                    ) from exc
                 if (
                     not stat.S_ISDIR(bound.st_mode)
                     or (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino)
@@ -366,6 +424,12 @@ class DurableStateRoot:
     def _ensure_root(self) -> None:
         with self._root_directory(ensure=True):
             pass
+
+    def root_exists_for_inspection(self) -> bool:
+        """Probe the owned state root without creating it or suppressing unsafe paths."""
+
+        with self._root_directory(ensure=False, allow_missing=True) as descriptor:
+            return descriptor is not None
 
     @staticmethod
     def _require_owner(details: os.stat_result, path: Path) -> None:
