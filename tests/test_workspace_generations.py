@@ -23,6 +23,7 @@ from graphify.workspace.contracts import (
     CapacityReservationState,
     CompatibilityManifest,
     ContractError,
+    GenerationReceipt,
     canonical_json_bytes,
     payload_manifest_sha256,
 )
@@ -37,7 +38,7 @@ from graphify.workspace.generations import (
     PayloadChanged,
 )
 from graphify.workspace.journal import JournalStore
-from graphify.workspace.persistence import CommitUnknown, InjectedFault, StatePathError
+from graphify.workspace.persistence import CommitUnknown, InjectedFault, LockTimeout, StatePathError
 from graphify.workspace.semantic_queue import (
     SemanticCertificationBlocked,
     SemanticQueueConflict,
@@ -1091,6 +1092,81 @@ def test_certification_seals_exact_payload_and_installs_lock_before_certified_ev
     )
     assert store.verify_generation(REPO_UUID, "gen-certified").canonical == receipt.canonical
     assert lock_path.stat().st_ino == lock_inode
+
+
+def test_generation_inventory_checks_deadline_between_payload_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import graphify.workspace.generations as generations_module
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    store = runtime.pointers.generations
+    payload = (
+        runtime.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "generations/gen-current/graphify-out"
+    )
+    descriptor = os.open(payload, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    original_read = os.read
+    chunks_read = 0
+
+    def expire_after_first_chunk(file_descriptor: int, size: int) -> bytes:
+        nonlocal chunks_read
+        chunk = original_read(file_descriptor, size)
+        if chunk:
+            chunks_read += 1
+        return chunk
+
+    def require_deadline(_deadline_ns: int | None, detail: str) -> None:
+        if chunks_read:
+            raise LockTimeout(detail)
+
+    monkeypatch.setattr(generations_module.os, "read", expire_after_first_chunk)
+    monkeypatch.setattr(
+        generations_module,
+        "require_before_deadline",
+        require_deadline,
+    )
+    try:
+        with pytest.raises(LockTimeout, match="generation inventory exceeded its deadline"):
+            store._scan_directory(
+                descriptor,
+                prefix="graphify-out",
+                entries=[],
+                directories=["graphify-out"],
+                deadline_ns=1,
+            )
+    finally:
+        os.close(descriptor)
+
+    assert chunks_read == 1
+
+
+def test_generation_verification_accepts_contract_valid_large_receipt_metadata(
+    tmp_path: Path,
+) -> None:
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    store = runtime.pointers.generations
+    receipt_path = (
+        runtime.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "generations/gen-current/receipt.json"
+    )
+    value = GenerationReceipt.from_json(receipt_path.read_bytes()).to_dict()
+    value["validations"] = ["v" * (64 * 1024)]
+    receipt = GenerationReceipt.from_mapping(value)
+    assert len(receipt.canonical) > 64 * 1024
+    receipt_path.write_bytes(receipt.canonical)
+
+    verified = store.verify_generation(REPO_UUID, "gen-current")
+
+    assert verified.canonical == receipt.canonical
 
 
 @pytest.mark.parametrize("mismatch", ["allocation", "request"])

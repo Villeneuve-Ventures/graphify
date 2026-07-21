@@ -288,18 +288,38 @@ class PointerStore:
             )
         return receipt
 
-    def _verify_generation(self, repo_uuid: str, generation_id: str) -> GenerationReceipt:
+    def _verify_generation(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GenerationReceipt:
         try:
-            receipt = self.generations.verify_generation(repo_uuid, generation_id)
+            receipt = self.generations.verify_generation(
+                repo_uuid,
+                generation_id,
+                deadline_ns=deadline_ns,
+            )
         except UnsupportedCompatibility as exc:
             raise UnsupportedCompatibility(
                 "pointer receipt does not match the selected compatibility manifest"
             ) from exc
         return self._require_compatible(receipt)
 
-    def _verify_ref(self, repo_uuid: str, reference: dict[str, Any]) -> GenerationReceipt:
+    def _verify_ref(
+        self,
+        repo_uuid: str,
+        reference: dict[str, Any],
+        *,
+        deadline_ns: int | None = None,
+    ) -> GenerationReceipt:
         generation_id = str(reference["generation_id"])
-        receipt = self._verify_generation(repo_uuid, generation_id)
+        receipt = self._verify_generation(
+            repo_uuid,
+            generation_id,
+            deadline_ns=deadline_ns,
+        )
         if receipt.sha256 != reference["receipt_sha256"]:
             raise PointerCorrupt(f"pointer receipt hash is stale for {generation_id}")
         return receipt
@@ -309,16 +329,24 @@ class PointerStore:
         pointer: PointerSet,
         *,
         expected_repo_uuid: str | None = None,
+        deadline_ns: int | None = None,
     ) -> dict[str, GenerationReceipt]:
         value = pointer.to_dict()
         repo_uuid = str(value["repo_uuid"])
         if expected_repo_uuid is not None and repo_uuid != expected_repo_uuid:
             raise PointerCorrupt("pointer belongs to another workspace")
-        result = {"current": self._verify_ref(repo_uuid, cast(dict[str, Any], value["current"]))}
+        result = {
+            "current": self._verify_ref(
+                repo_uuid,
+                cast(dict[str, Any], value["current"]),
+                deadline_ns=deadline_ns,
+            )
+        }
         if value["last_good"] is not None:
             result["last_good"] = self._verify_ref(
                 repo_uuid,
                 cast(dict[str, Any], value["last_good"]),
+                deadline_ns=deadline_ns,
             )
         current_value = result["current"].to_dict()
         if (
@@ -1147,7 +1175,11 @@ class PointerStore:
                 )
                 if reloaded is None or reloaded.canonical != pointer.canonical:
                     continue
-                receipt = self._verify_generation(repo_uuid, generation_id)
+                receipt = self._verify_generation(
+                    repo_uuid,
+                    generation_id,
+                    deadline_ns=deadline_ns,
+                )
                 require_before_deadline(
                     deadline_ns,
                     "current pointer read exceeded its deadline",
@@ -1202,7 +1234,11 @@ class PointerStore:
         )
         if pointer is None or pointer.canonical != reading.pointer.canonical:
             raise PointerConflict("current pointer changed during protected read")
-        receipts = self.verify_pointer(pointer, expected_repo_uuid=repo_uuid)
+        receipts = self.verify_pointer(
+            pointer,
+            expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
+        )
         require_before_deadline(
             deadline_ns,
             "current pointer revalidation exceeded its deadline",

@@ -598,9 +598,18 @@ def test_freshness_deadline_expires_during_pointer_verification(
     def monotonic_ns() -> int:
         return now
 
-    def verify_generation(repo_uuid: str, generation_id: str) -> GenerationReceipt:
+    def verify_generation(
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GenerationReceipt:
         nonlocal now
-        receipt = original_verify(repo_uuid, generation_id)
+        receipt = original_verify(
+            repo_uuid,
+            generation_id,
+            deadline_ns=deadline_ns,
+        )
         now = timeout_ns
         return receipt
 

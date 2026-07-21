@@ -36,10 +36,12 @@ from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
+    LockTimeout,
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
     Syscalls,
+    require_before_deadline,
 )
 from graphify.workspace.semantic_queue import (
     SemanticCertificationBlocked,
@@ -53,6 +55,7 @@ _ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
 _CAPACITY_CURRENT = Path("capacity.json")
 _CAPACITY_PREVIOUS = Path("capacity.previous.json")
 _CAPACITY_PENDING = Path("capacity.pending.json")
+_MAX_GENERATION_COORDINATION_LOCK_BYTES = 64 * 1024
 
 
 class GenerationError(RuntimeError):
@@ -70,6 +73,33 @@ class CapacityExceeded(GenerationError):
 
 class _CapacityScanChanged(RuntimeError):
     pass
+
+
+def _require_inventory_deadline(deadline_ns: int | None) -> None:
+    require_before_deadline(
+        deadline_ns,
+        "generation inventory exceeded its deadline",
+    )
+
+
+def _require_verification_deadline(deadline_ns: int | None) -> None:
+    require_before_deadline(
+        deadline_ns,
+        "generation verification exceeded its deadline",
+    )
+
+
+def _directory_names(descriptor: int, *, deadline_ns: int | None) -> list[str]:
+    names: list[str] = []
+    _require_inventory_deadline(deadline_ns)
+    with os.scandir(descriptor) as iterator:
+        for entry in iterator:
+            _require_inventory_deadline(deadline_ns)
+            names.append(entry.name)
+    _require_inventory_deadline(deadline_ns)
+    names.sort()
+    _require_inventory_deadline(deadline_ns)
+    return names
 
 
 class PayloadChanged(GenerationError):
@@ -624,12 +654,15 @@ class GenerationStore:
         prefix: str,
         entries: list[dict[str, str | int]],
         directories: list[str],
+        deadline_ns: int | None = None,
     ) -> None:
+        _require_inventory_deadline(deadline_ns)
         before = os.fstat(descriptor)
-        names = sorted(entry.name for entry in os.scandir(descriptor))
+        names = _directory_names(descriptor, deadline_ns=deadline_ns)
         if any(not name or "/" in name or name in {".", ".."} for name in names):
             raise GenerationError("payload contains a noncanonical directory entry")
         for name in names:
+            _require_inventory_deadline(deadline_ns)
             relative = f"{prefix}/{name}"
             details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISLNK(details.st_mode):
@@ -650,6 +683,7 @@ class GenerationStore:
                         prefix=relative,
                         entries=entries,
                         directories=directories,
+                        deadline_ns=deadline_ns,
                     )
                 finally:
                     os.close(child)
@@ -670,10 +704,12 @@ class GenerationStore:
                     raise PayloadChanged(f"payload file changed while opened: {relative}")
                 digest = hashlib.sha256()
                 while True:
+                    _require_inventory_deadline(deadline_ns)
                     try:
                         chunk = os.read(file_descriptor, 1024 * 1024)
                     except InterruptedError:
                         continue
+                    _require_inventory_deadline(deadline_ns)
                     if not chunk:
                         break
                     digest.update(chunk)
@@ -695,19 +731,27 @@ class GenerationStore:
                     "mode": f"{mode:04o}",
                 }
             )
-        after_names = sorted(entry.name for entry in os.scandir(descriptor))
+        _require_inventory_deadline(deadline_ns)
+        after_names = _directory_names(descriptor, deadline_ns=deadline_ns)
         after = os.fstat(descriptor)
         if names != after_names or _identity(before) != _identity(after):
             raise PayloadChanged(f"payload directory changed during inventory: {prefix}")
 
-    def _inventory(self, container: Path, *, allowed_root_entries: frozenset[str]) -> _PayloadInventory:
+    def _inventory(
+        self,
+        container: Path,
+        *,
+        allowed_root_entries: frozenset[str],
+        deadline_ns: int | None = None,
+    ) -> _PayloadInventory:
+        _require_inventory_deadline(deadline_ns)
         try:
             relative = container.relative_to(self.state.root)
         except ValueError as exc:
             raise StatePathError("generation path escapes state root") from exc
         with self.state.existing_private_directory(relative) as root_descriptor:
             root_before = os.fstat(root_descriptor)
-            root_names = sorted(entry.name for entry in os.scandir(root_descriptor))
+            root_names = _directory_names(root_descriptor, deadline_ns=deadline_ns)
             if set(root_names) != set(allowed_root_entries):
                 raise GenerationError(
                     "generation root must contain exactly "
@@ -735,10 +779,14 @@ class GenerationStore:
                     prefix="graphify-out",
                     entries=entries,
                     directories=directories,
+                    deadline_ns=deadline_ns,
                 )
             finally:
                 os.close(payload_descriptor)
-            after_root_names = sorted(entry.name for entry in os.scandir(root_descriptor))
+            after_root_names = _directory_names(
+                root_descriptor,
+                deadline_ns=deadline_ns,
+            )
             current_payload = os.stat(
                 "graphify-out",
                 dir_fd=root_descriptor,
@@ -750,7 +798,9 @@ class GenerationStore:
                 or _identity(current_payload) != _identity(payload_details)
             ):
                 raise PayloadChanged("generation root changed during inventory")
+        _require_inventory_deadline(deadline_ns)
         entries.sort(key=lambda item: str(item["path"]))
+        _require_inventory_deadline(deadline_ns)
         return _PayloadInventory(entries=tuple(entries), directories=tuple(directories))
 
     def inspect_staged_payload(
@@ -922,18 +972,35 @@ class GenerationStore:
         self.state.fsync_directory(staging)
         self.fault_hook(f"generation:{generation_id}:payload_durable")
 
-    def verify_generation(self, repo_uuid: str, generation_id: str) -> GenerationReceipt:
+    def verify_generation(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GenerationReceipt:
+        _require_verification_deadline(deadline_ns)
         relative = self._generation(repo_uuid, generation_id)
         generation = self.state.path(relative)
         inventory = self._inventory(
             generation,
             allowed_root_entries=frozenset({"graphify-out", "receipt.json"}),
+            deadline_ns=deadline_ns,
         )
-        receipt_bytes = self.state.read_existing_bytes(relative / "receipt.json")
+        inventory_entries_bytes = canonical_json_bytes(list(inventory.entries))
+        _require_verification_deadline(deadline_ns)
+        try:
+            receipt_bytes = self.state.read_existing_bytes(
+                relative / "receipt.json",
+                deadline_ns=deadline_ns,
+            )
+        except StateCorrupt as exc:
+            raise GenerationError(f"generation receipt is invalid: {exc}") from exc
         try:
             receipt = cast(GenerationReceipt, GenerationReceipt.from_json(receipt_bytes))
         except Exception as exc:
             raise GenerationError(f"generation receipt is invalid: {exc}") from exc
+        _require_verification_deadline(deadline_ns)
         value = receipt.to_dict()
         if value["repo_uuid"] != repo_uuid or value["generation_id"] != generation_id:
             raise GenerationError("generation receipt identity does not match its path")
@@ -943,10 +1010,11 @@ class GenerationStore:
             )
         payload = cast(dict[str, Any], value["sealed_query_payload"])
         declared = cast(list[dict[str, Any]], payload["entries"])
-        if canonical_json_bytes(declared) != canonical_json_bytes(list(inventory.entries)):
+        if canonical_json_bytes(declared) != inventory_entries_bytes:
             raise PayloadChanged("certified generation payload does not match its receipt")
         if payload["manifest_sha256"] != payload_manifest_sha256("graphify-out", declared):
             raise GenerationError("generation receipt manifest digest does not match")
+        _require_verification_deadline(deadline_ns)
         queue_watermark = int(value["queue_watermark"])
         validations = tuple(
             str(validation) for validation in cast(list[object], value["validations"])
@@ -969,6 +1037,7 @@ class GenerationStore:
                     generation_id=generation_id,
                     request_sha256=self._semantic_request_sha256(request),
                     sealed_input_manifest_sha256=str(payload["manifest_sha256"]),
+                    deadline_ns=deadline_ns,
                 )
             except SemanticCertificationBlocked as exc:
                 raise GenerationError(
@@ -987,17 +1056,25 @@ class GenerationStore:
                 raise GenerationError(
                     "semantic certification binding differs from generation receipt"
                 )
+            _require_verification_deadline(deadline_ns)
         lock_relative = self._lock(repo_uuid, generation_id)
         try:
-            lock_bytes = self.state.read_existing_bytes(lock_relative)
+            lock_bytes = self.state.read_existing_bytes(
+                lock_relative,
+                max_bytes=_MAX_GENERATION_COORDINATION_LOCK_BYTES,
+                deadline_ns=deadline_ns,
+            )
             lock_document = cast(
                 GenerationCoordinationLock,
                 GenerationCoordinationLock.from_json(lock_bytes),
             )
+        except LockTimeout:
+            raise
         except Exception as exc:
             raise GenerationError(f"generation coordination lock is invalid: {exc}") from exc
         if lock_document.canonical != self._lock_document(generation_id).canonical:
             raise GenerationError("generation coordination lock identity does not match")
+        _require_verification_deadline(deadline_ns)
         return receipt
 
     def _validate_recovery_receipt(

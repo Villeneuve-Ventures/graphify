@@ -53,6 +53,7 @@ _GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
 _ERROR_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,127}$", re.ASCII)
 _WORKSPACE_CONFIG_MAX_BYTES = 64 * 1024
 _WORKSPACE_CONFIG_READ_TIMEOUT_NS = 5_000_000_000
+_MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES = 64 * 1024
 
 
 class SemanticQueueError(RuntimeError):
@@ -2123,6 +2124,7 @@ class SemanticQueueStore:
         generation_id: str,
         request_sha256: str,
         sealed_input_manifest_sha256: str,
+        deadline_ns: int | None = None,
     ) -> SemanticCertificationView | None:
         request_digest = _digest(request_sha256, "$.request_sha256")
         sealed_digest = _digest(
@@ -2131,7 +2133,11 @@ class SemanticQueueStore:
         )
         path = cls._certification_binding_path(repo_uuid, generation_id)
         try:
-            raw = state.read_optional_existing_bytes(path)
+            raw = state.read_optional_existing_bytes(
+                path,
+                max_bytes=_MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES,
+                deadline_ns=deadline_ns,
+            )
             if raw is None:
                 return None
             binding = _SemanticCertificationBinding.from_json(raw)
@@ -2139,6 +2145,10 @@ class SemanticQueueStore:
             raise SemanticCertificationBlocked(
                 f"durable semantic certification binding is invalid: {exc}"
             ) from exc
+        require_before_deadline(
+            deadline_ns,
+            "semantic certification binding verification exceeded its deadline",
+        )
         if (
             binding.repo_uuid != repo_uuid
             or binding.generation_id != generation_id
@@ -2177,6 +2187,7 @@ class SemanticQueueStore:
         generation_id: str,
         request_sha256: str,
         sealed_input_manifest_sha256: str,
+        deadline_ns: int | None = None,
     ) -> SemanticCertificationView:
         """Require immutable queue authority through a reopened durable state root."""
 
@@ -2186,6 +2197,7 @@ class SemanticQueueStore:
             generation_id=generation_id,
             request_sha256=request_sha256,
             sealed_input_manifest_sha256=sealed_input_manifest_sha256,
+            deadline_ns=deadline_ns,
         )
         if view is None:
             raise SemanticCertificationBlocked(

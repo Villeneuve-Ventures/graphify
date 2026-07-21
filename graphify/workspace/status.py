@@ -1089,6 +1089,7 @@ def _inspect_workspace(
                     receipts = runtime.pointers.verify_pointer(
                         pointer,
                         expected_repo_uuid=repo_uuid,
+                        deadline_ns=deadline_ns,
                     )
             except LockTimeout as exc:
                 return _deadline_failure(

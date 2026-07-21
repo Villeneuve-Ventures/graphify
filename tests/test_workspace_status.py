@@ -1398,6 +1398,171 @@ def test_status_bounds_visible_pointer_read_by_size_and_deadline(
     assert tree_snapshot(runtime.state_root) == before
 
 
+def test_status_bounds_generation_verification_reads_and_propagates_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.generations import (
+        GenerationStore,
+        _MAX_GENERATION_COORDINATION_LOCK_BYTES,
+    )
+    from graphify.workspace.semantic_queue import (
+        _MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES,
+    )
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    absolute_deadline = time.monotonic_ns() + 5_000_000_000
+    original_inventory = GenerationStore._inventory
+    original_read_existing_bytes = DurableStateRoot.read_existing_bytes
+    original_read_optional_existing_bytes = DurableStateRoot.read_optional_existing_bytes
+    inventory_deadlines: list[int | None] = []
+    record_reads: dict[str, list[tuple[int | None, int | None]]] = {
+        "receipt": [],
+        "coordination_lock": [],
+        "semantic_binding": [],
+    }
+    before = tree_snapshot(runtime.state_root)
+
+    def capture_inventory(
+        store: GenerationStore,
+        container: Path,
+        *,
+        allowed_root_entries: frozenset[str],
+        deadline_ns: int | None = None,
+    ) -> Any:
+        if allowed_root_entries == frozenset({"graphify-out", "receipt.json"}):
+            inventory_deadlines.append(deadline_ns)
+        return original_inventory(
+            store,
+            container,
+            allowed_root_entries=allowed_root_entries,
+            deadline_ns=deadline_ns,
+        )
+
+    def capture_existing_read(
+        state: DurableStateRoot,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        path = Path(relative)
+        if path.name == "receipt.json" and "generations" in path.parts:
+            record_reads["receipt"].append((max_bytes, deadline_ns))
+        elif path.suffix == ".lock" and "generations" in path.parts:
+            record_reads["coordination_lock"].append((max_bytes, deadline_ns))
+        return original_read_existing_bytes(
+            state,
+            relative,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    def capture_optional_read(
+        state: DurableStateRoot,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
+        if "certifications" in Path(relative).parts:
+            record_reads["semantic_binding"].append((max_bytes, deadline_ns))
+        return original_read_optional_existing_bytes(
+            state,
+            relative,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(GenerationStore, "_inventory", capture_inventory)
+    monkeypatch.setattr(DurableStateRoot, "read_existing_bytes", capture_existing_read)
+    monkeypatch.setattr(
+        DurableStateRoot,
+        "read_optional_existing_bytes",
+        capture_optional_read,
+    )
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        ),
+        deadline_ns=absolute_deadline,
+    )
+
+    assert report.exit_code == 0
+    assert inventory_deadlines
+    assert None not in inventory_deadlines
+    assert absolute_deadline in inventory_deadlines
+    assert record_reads["receipt"]
+    assert all(
+        max_bytes is None and deadline_ns is not None
+        for max_bytes, deadline_ns in record_reads["receipt"]
+    )
+    assert absolute_deadline in {
+        deadline_ns for _max_bytes, deadline_ns in record_reads["receipt"]
+    }
+    assert record_reads["coordination_lock"]
+    assert all(
+        max_bytes == _MAX_GENERATION_COORDINATION_LOCK_BYTES
+        and deadline_ns is not None
+        for max_bytes, deadline_ns in record_reads["coordination_lock"]
+    )
+    assert absolute_deadline in {
+        deadline_ns for _max_bytes, deadline_ns in record_reads["coordination_lock"]
+    }
+    assert record_reads["semantic_binding"]
+    assert all(
+        max_bytes == _MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES
+        and deadline_ns is not None
+        for max_bytes, deadline_ns in record_reads["semantic_binding"]
+    )
+    assert absolute_deadline in {
+        deadline_ns for _max_bytes, deadline_ns in record_reads["semantic_binding"]
+    }
+    assert tree_snapshot(runtime.state_root) == before
+
+
+@pytest.mark.parametrize("record", ["coordination_lock", "semantic_binding"])
+def test_status_rejects_oversized_generation_verification_records_without_writing(
+    tmp_path: Path,
+    record: str,
+) -> None:
+    from graphify.workspace.generations import _MAX_GENERATION_COORDINATION_LOCK_BYTES
+    from graphify.workspace.semantic_queue import (
+        _MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES,
+    )
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    workspace = runtime.state_root / "workspaces" / REPO_UUID
+    if record == "coordination_lock":
+        target = workspace / "locks/generations/gen-current.lock"
+        target.write_bytes(b"x" * (_MAX_GENERATION_COORDINATION_LOCK_BYTES + 1))
+    else:
+        target = workspace / "queue/certifications/gen-current.json"
+        target.write_bytes(b"x" * (_MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES + 1))
+    before = tree_snapshot(runtime.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert report.exit_code == 20
+    assert "generation_or_pointer_invalid" in _reason_codes(report)
+    assert tree_snapshot(runtime.state_root) == before
+
+
 def test_status_revalidates_pointer_after_freshness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
