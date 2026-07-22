@@ -162,6 +162,7 @@ def _git(
         {
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_GRAFT_FILE": os.devnull,
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",

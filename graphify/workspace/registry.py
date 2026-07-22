@@ -601,6 +601,7 @@ class RegistryStore:
                 raise UUIDCollisionError(f"{source.repo_uuid} has no enrollment to adopt")
             if self._known_source(entry, source):
                 raise UUIDCollisionError("source is already bound")
+            self._assert_source_identity_available(entries, source)
             if not self._related_to_enrollment(entry, source):
                 raise UUIDCollisionError("adoption requires shared history evidence")
             active_evidence = entry["active_source_evidence"]

@@ -30,12 +30,26 @@ enrollment. A shallow clone that omits that root fails the shared-history proof
 until sufficient history is fetched. Both forms require the repo UUID, expected
 registry revision, and a matching `OperatorAuthorization` JSON object on
 standard input. The command requires the current working directory itself to be
-the Git top level, ignores local Git replacement refs, cross-checks its bounded
-no-follow `.graphify/workspace.toml`, and never infers adoption. It emits one
-canonical redacted receipt and writes only the existing P2 registry, workspace,
-lock, and evidence records beneath the configured external state root. Rebind,
-rotation, activation, remaining mutation/query commands, repair, watch/service,
-performance certification, and candidate publication remain later P5 work.
+the Git top level, ignores local Git replacement refs and legacy graft files,
+cross-checks its bounded no-follow `.graphify/workspace.toml`, and never infers
+adoption. It emits one canonical redacted receipt and writes only the existing
+P2 registry, workspace, lock, and evidence records beneath the configured
+external state root. Rebind, rotation, activation, remaining mutation/query
+commands, repair, watch/service, performance certification, and candidate
+publication remain later P5 work.
+
+Authorization standard input is one JSON object with exactly the five string
+fields shown here; `action` is the uppercase operator intent, not the lowercase
+CLI verb:
+
+```json
+{"action":"ENROLL","issued_at":"2026-07-16T15:00:00Z","nonce":"example-nonce","operator_id":"operator:example","reason":"initial workspace enrollment"}
+```
+
+For `register adopt`, replace `ENROLL` with `ADOPT`. `issued_at` must be a real
+RFC 3339 UTC timestamp ending in `Z`; the other values must be non-empty and
+trimmed. Extra fields, duplicate fields, non-string values, and an action that
+does not match the explicit CLI verb are rejected before mutation.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build

@@ -134,6 +134,36 @@ def _registration_payload(stream: StringIO) -> dict[str, Any]:
     return json.loads(stream.getvalue())
 
 
+class _AllowingState:
+    def assert_external_to(self, _source_root: Path) -> None:
+        pass
+
+
+def _source_stub(root: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        repo_uuid=REPO_UUID,
+        root=root,
+        registry_source={"git_common_dir": str(root / ".git")},
+    )
+
+
+def test_registration_docs_freeze_exact_authorization_stdin_contract() -> None:
+    readme = (
+        Path(__file__).parents[1] / "docs/workspace/v1/README.md"
+    ).read_text(encoding="utf-8")
+    match = re.search(
+        r"```json\n(?P<payload>\{\"action\":\"ENROLL\"[^\n]+\})\n```",
+        readme,
+    )
+
+    assert match is not None
+    payload = json.loads(match.group("payload"))
+    assert set(payload) == {"action", "issued_at", "nonce", "operator_id", "reason"}
+    assert all(isinstance(value, str) for value in payload.values())
+    assert payload["action"] == "ENROLL"
+    assert "replace `ENROLL` with `ADOPT`" in readme
+
+
 def _assert_external_state_allowlist(state_root: Path, *, includes_authority: bool) -> None:
     allowed = re.compile(
         r"(?:registry(?:\.(?:previous|pending))?\.json|registry\.lock|"
@@ -177,10 +207,12 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     workspace_cli = _cli()
     cwd = tmp_path / "checkout"
     cwd.mkdir()
-    source = SimpleNamespace(repo_uuid=REPO_UUID)
+    source = _source_stub(cwd)
     calls: list[tuple[str, object, object, int]] = []
 
     class Registry:
+        state = _AllowingState()
+
         def enroll(
             self, discovered: object, authorization: object, *, expected_revision: int
         ) -> Any:
@@ -336,9 +368,11 @@ def test_register_failures_are_canonical_opaque_and_redacted(
     workspace_cli = _cli()
     cwd = tmp_path / "private-checkout"
     cwd.mkdir()
-    source = SimpleNamespace(repo_uuid=REPO_UUID)
+    source = _source_stub(cwd)
 
     class Registry:
+        state = _AllowingState()
+
         def enroll(self, *_args: object, **_kwargs: object) -> None:
             raise error
 
@@ -406,6 +440,8 @@ def test_register_normalizes_unexpected_registry_result_failures(
             raise document_error
 
     class Registry:
+        state = store.state
+
         def enroll(
             self,
             source: object,
@@ -456,6 +492,8 @@ def test_register_preserves_injected_fault_from_revision_receipt(
             raise InjectedFault("revision-receipt")
 
     class Registry:
+        state = store.state
+
         def enroll(
             self,
             source: object,
@@ -946,6 +984,38 @@ def test_register_corrupt_registry_and_unsafe_state_path_fail_closed(
     assert unsafe_stdout.getvalue() == ""
     assert _registration_payload(unsafe_stderr)["reason_code"] == "unsafe_state_path"
     assert tree_snapshot(external) == before_external
+
+
+def test_register_rejects_state_root_inside_linked_worktree_git_common_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    primary = create_repo(tmp_path / "primary", REPO_UUID)
+    linked = tmp_path / "linked"
+    _git(primary, "worktree", "add", "--quiet", "--detach", str(linked), "HEAD")
+    common_dir = Path(_git(linked, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    state_root = common_dir / "graphify-state"
+    before_common = tree_snapshot(common_dir)
+    before_common_metadata = metadata_snapshot(common_dir)
+    before_linked = tree_snapshot(linked)
+    before_linked_metadata = metadata_snapshot(linked)
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=linked,
+        action="enroll",
+        expected_revision=0,
+        inputs=_inputs(state_root),
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "unsafe_state_path"
+    assert not state_root.exists()
+    assert tree_snapshot(common_dir) == before_common
+    assert metadata_snapshot(common_dir) == before_common_metadata
+    assert tree_snapshot(linked) == before_linked
+    assert metadata_snapshot(linked) == before_linked_metadata
 
 
 def test_registration_subprocess_uses_cwd_stdin_and_production_authority(

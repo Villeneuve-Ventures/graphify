@@ -782,6 +782,7 @@ def test_source_discovery_ignores_replacement_refs_for_adoption_history(
         _authorization(IdentityAction.ENROLL, "enroll-original"),
         expected_revision=0,
     )
+    before_state = _tree_snapshot(state_root)
 
     with pytest.raises(UUIDCollisionError, match="shared history"):
         store.adopt(
@@ -791,6 +792,39 @@ def test_source_discovery_ignores_replacement_refs_for_adoption_history(
         )
 
     assert store.load().to_dict()["revision"] == 1
+    assert _tree_snapshot(state_root) == before_state
+
+
+def test_source_discovery_ignores_graft_files_for_adoption_history(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    unrelated = _create_repo(tmp_path / "unrelated", REPO_UUID, marker="unrelated")
+    enrolled_root = _run(original, "rev-list", "--max-parents=0", "HEAD")
+    unrelated_head = _run(unrelated, "rev-parse", "HEAD")
+    _run(unrelated, "fetch", "--quiet", str(original), enrolled_root)
+    grafts = unrelated / ".git/info/grafts"
+    grafts.write_text(f"{unrelated_head} {enrolled_root}\n", encoding="utf-8")
+    assert _run(unrelated, "rev-list", "--max-parents=0", "HEAD") == enrolled_root
+
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(original),
+        _authorization(IdentityAction.ENROLL, "enroll-original"),
+        expected_revision=0,
+    )
+    before_state = _tree_snapshot(state_root)
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            discover_source(unrelated),
+            _authorization(IdentityAction.ADOPT, "reject-graft-file"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+    assert _tree_snapshot(state_root) == before_state
 
 
 def test_shallow_history_without_enrollment_root_cannot_satisfy_adoption(
@@ -937,6 +971,38 @@ def test_same_git_common_directory_cannot_be_reenrolled_under_a_new_uuid(
     document = store.load()
     assert document.to_dict()["revision"] == 1
     assert [entry["repo_uuid"] for entry in document.to_dict()["workspaces"]] == [REPO_UUID]
+
+
+def test_same_git_common_directory_cannot_be_adopted_after_remote_change(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    _run(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/example/changed-remote.git",
+    )
+    before_state = _tree_snapshot(store.state.root)
+
+    with pytest.raises(UUIDCollisionError, match="already enrolled|already bound"):
+        store.adopt(
+            discover_source(repo),
+            _authorization(IdentityAction.ADOPT, "reject-already-bound"),
+            expected_revision=1,
+        )
+
+    document = store.load().to_dict()
+    assert document["revision"] == 1
+    assert document["workspaces"][0]["aliases"] == []
+    assert _tree_snapshot(store.state.root) == before_state
 
 
 def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> None:

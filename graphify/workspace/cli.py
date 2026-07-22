@@ -375,6 +375,9 @@ def _run_registration(
                 raise UUIDCollisionError(
                     "explicit registration UUID does not match the source configuration"
                 )
+            runtime.registry.state.assert_external_to(
+                source.root / cast(str, source.registry_source["git_common_dir"])
+            )
             if request.action is IdentityAction.ENROLL:
                 document = runtime.registry.enroll(
                     source,
