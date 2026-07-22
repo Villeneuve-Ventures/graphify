@@ -31,6 +31,7 @@ from graphify.workspace.contracts import (
     PointerSet,
     StagedBuildAbandonmentEvidence,
     StagedBuildAbandonmentIntent,
+    StagedBuildAuthorityCurrent,
     StagedBuildState,
     StructuralBuildRequest,
     canonical_json_bytes,
@@ -845,8 +846,12 @@ class GenerationStore:
         )
         try:
             reason = evidence.reason_for(request)
-        except ContractError:
+        except StagedBuildAuthorityCurrent:
             return None
+        except ContractError as exc:
+            raise GenerationConflict(
+                f"staged abandonment evidence is invalid: {exc}"
+            ) from exc
         return reason, evidence, pointer
 
     def _staged_abandonment_proof_locked(

@@ -117,6 +117,10 @@ class JournalFrameTruncated(ContractError):
     """A journal frame ends before its declared boundary."""
 
 
+class StagedBuildAuthorityCurrent(ContractError):
+    """Abandonment evidence does not prove that staged authority is stale."""
+
+
 JsonValue = None | bool | int | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
@@ -1726,7 +1730,7 @@ class StagedBuildAbandonmentEvidence:
             request.observation_evidence_sha256,
         ):
             return "SOURCE_CHANGED"
-        raise ContractError(
+        raise StagedBuildAuthorityCurrent(
             "$.abandon_evidence: does not prove stale staged-build authority"
         )
 

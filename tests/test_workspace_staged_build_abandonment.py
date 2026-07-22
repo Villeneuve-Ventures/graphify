@@ -813,6 +813,55 @@ def test_unavailable_source_without_higher_authority_drift_fails_closed(
     assert staged.abandonment_intent is None
 
 
+def test_invalid_abandonment_evidence_is_not_treated_as_current_authority(
+    tmp_path: Path,
+) -> None:
+    harness, store, _pointers = _runtime(tmp_path)
+    observations = _observations(harness)
+    request = _request(harness, observations)
+    _requested(store, harness, request, observations)
+    recovery = store.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        acquired_at=START + timedelta(seconds=2),
+        monotonic_ns=20_000,
+        ttl_ns=1_000_000,
+    )
+
+    with store.leases.current_staged_recovery(
+        recovery.grant,
+        GENERATION_ID,
+        request,
+        monotonic_ns=20_001,
+    ) as operation:
+        assert (
+            store._staged_abandonment_proof_if_stale_locked(
+                operation,
+                recovery.state,
+                observations,
+            )
+            is None
+        )
+        invalid_request = replace(
+            request,
+            expected_registry_revision=int(operation.registry.to_dict()["revision"])
+            + 1,
+        )
+        invalid_state = replace(recovery.state, request=invalid_request)
+        with pytest.raises(
+            GenerationConflict,
+            match=r"staged abandonment evidence is invalid: .*registry_revision: predates",
+        ):
+            store._staged_abandonment_proof_if_stale_locked(
+                operation,
+                invalid_state,
+                observations,
+            )
+
+    store.leases.release(recovery.grant)
+
+
 def test_abandoned_terminal_commit_unknown_recovers_by_exact_request_replay(
     tmp_path: Path,
 ) -> None:
