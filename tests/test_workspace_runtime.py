@@ -1076,6 +1076,38 @@ def test_adopt_allows_a_distinct_clone_when_retained_inode_is_reused(
     assert [alias["path"] for alias in entry["aliases"]] == [str(clone.resolve())]
 
 
+def test_adopt_rejects_unrelated_history_when_retained_inode_is_reused(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    unrelated = _create_repo(tmp_path / "unrelated", REPO_UUID, marker="unrelated")
+    original_source = discover_source(original)
+    unrelated_source = discover_source(unrelated)
+    assert not set(original_source.history_roots).intersection(unrelated_source.history_roots)
+    simulated_reuse = replace(
+        unrelated_source,
+        git_common_device=original_source.git_common_device,
+        git_common_inode=original_source.git_common_inode,
+    )
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        original_source,
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    before_state = _tree_snapshot(store.state.root)
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            simulated_reuse,
+            _authorization(IdentityAction.ADOPT, "reject-reused-inode"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+    assert _tree_snapshot(store.state.root) == before_state
+
+
 def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> None:
     original = _create_repo(tmp_path / "original", REPO_UUID)
     linked = _linked_worktree(original, tmp_path / "linked", "linked-source")

@@ -574,12 +574,8 @@ class RegistryStore:
         source: SourceIdentity,
     ) -> bool:
         evidence = self.read_evidence(entry["uuid_enrollment"]["immutable_evidence_sha256"])
-        same_common_dir = (
-            evidence.get("git_common_device") == source.git_common_device
-            and evidence.get("git_common_inode") == source.git_common_inode
-        )
         prior_roots = set(evidence.get("history_roots", []))
-        return same_common_dir or bool(prior_roots.intersection(source.history_roots))
+        return bool(prior_roots.intersection(source.history_roots))
 
     @staticmethod
     def _known_source(entry: dict[str, Any], source: SourceIdentity) -> bool:
