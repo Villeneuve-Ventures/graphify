@@ -47,9 +47,8 @@ from graphify.workspace.persistence import (
     StateCorrupt,
     StatePathError,
     UnsupportedRuntime,
-    WorkspaceRuntimeError,
 )
-from graphify.workspace.registry import RegistryError, RevisionConflict
+from graphify.workspace.registry import RevisionConflict
 from graphify.workspace.status import (
     EXIT_DEGRADED,
     EXIT_INVALID,
@@ -393,13 +392,6 @@ def _classify_registration_error(error: Exception) -> _RegistrationFailure:
             "invalid",
             EXIT_INVALID,
             "commit_unknown",
-            "run_workspace_doctor",
-        )
-    if isinstance(error, (RegistryError, WorkspaceRuntimeError, ContractError)):
-        return _RegistrationFailure(
-            "invalid",
-            EXIT_INVALID,
-            "registration_failed",
             "run_workspace_doctor",
         )
     return _RegistrationFailure(
