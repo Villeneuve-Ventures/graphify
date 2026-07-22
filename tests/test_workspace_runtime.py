@@ -1120,6 +1120,57 @@ def test_adopt_rejects_unrelated_history_when_retained_inode_is_reused(
     assert _tree_snapshot(store.state.root) == before_state
 
 
+def test_rebind_allows_enrolled_common_directory_after_history_rewrite(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    enrolled_source = discover_source(repo)
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    enrolled = store.enroll(
+        enrolled_source,
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    enrolled_entry = _workspace_entry(enrolled)
+
+    rewritten_head = _run(
+        repo,
+        "commit-tree",
+        _run(repo, "write-tree"),
+        "-m",
+        "rewritten-root",
+    )
+    _run(repo, "update-ref", "HEAD", rewritten_head)
+    rewritten_source = discover_source(repo)
+    assert (
+        rewritten_source.git_common_device,
+        rewritten_source.git_common_inode,
+    ) == (
+        enrolled_source.git_common_device,
+        enrolled_source.git_common_inode,
+    )
+    assert not set(enrolled_source.history_roots).intersection(
+        rewritten_source.history_roots
+    )
+
+    rebound = store.rebind(
+        rewritten_source,
+        _authorization(IdentityAction.REBIND, "rebind-rewritten-history"),
+        expected_revision=1,
+    )
+
+    rebound_entry = _workspace_entry(rebound)
+    assert rebound.to_dict()["revision"] == 2
+    assert rebound_entry["uuid_enrollment"]["current_evidence_sha256"] != (
+        enrolled_entry["uuid_enrollment"]["current_evidence_sha256"]
+    )
+    evidence = store.read_evidence(
+        rebound_entry["uuid_enrollment"]["current_evidence_sha256"]
+    )
+    assert evidence["action"] == "REBIND"
+    assert evidence["history_roots"] == list(rewritten_source.history_roots)
+
+
 def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> None:
     original = _create_repo(tmp_path / "original", REPO_UUID)
     linked = _linked_worktree(original, tmp_path / "linked", "linked-source")

@@ -578,7 +578,7 @@ class RegistryStore:
             )
             return self._commit_locked(self._document_value(current, revision + 1, entries))
 
-    def _related_to_enrollment(
+    def _shares_enrollment_history(
         self,
         entry: dict[str, Any],
         source: SourceIdentity,
@@ -586,6 +586,17 @@ class RegistryStore:
         evidence = self.read_evidence(entry["uuid_enrollment"]["immutable_evidence_sha256"])
         prior_roots = set(evidence.get("history_roots", []))
         return bool(prior_roots.intersection(source.history_roots))
+
+    def _matches_enrolled_common_directory(
+        self,
+        entry: dict[str, Any],
+        source: SourceIdentity,
+    ) -> bool:
+        evidence = self.read_evidence(entry["uuid_enrollment"]["immutable_evidence_sha256"])
+        return (
+            evidence.get("git_common_device") == source.git_common_device
+            and evidence.get("git_common_inode") == source.git_common_inode
+        )
 
     @staticmethod
     def _known_source(entry: dict[str, Any], source: SourceIdentity) -> bool:
@@ -616,7 +627,7 @@ class RegistryStore:
             if self._known_source(entry, source):
                 raise UUIDCollisionError("source is already bound")
             self._assert_source_binding_available(entries, source)
-            if not self._related_to_enrollment(entry, source):
+            if not self._shares_enrollment_history(entry, source):
                 raise UUIDCollisionError("adoption requires shared history evidence")
             active_evidence = entry["active_source_evidence"]
             evidence_digest = self._authorized_evidence(
@@ -650,7 +661,10 @@ class RegistryStore:
                 (item for item in entries if item["repo_uuid"] == source.repo_uuid),
                 None,
             )
-            if entry is None or not self._related_to_enrollment(entry, source):
+            if entry is None or not (
+                self._shares_enrollment_history(entry, source)
+                or self._matches_enrolled_common_directory(entry, source)
+            ):
                 raise UUIDCollisionError(
                     "rebind requires the enrolled Git common directory or shared history evidence"
                 )
