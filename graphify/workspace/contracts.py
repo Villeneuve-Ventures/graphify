@@ -1302,6 +1302,7 @@ class WorkspaceLeaseState:
     migration_epoch: int
     leases: dict[str, FencedLease]
     lease_epochs: dict[str, int]
+    staged_attempt_sha256: str | None = None
 
     @staticmethod
     def canonical_repo_uuid(value: object) -> str:
@@ -1313,7 +1314,7 @@ class WorkspaceLeaseState:
         return "semantic" if name == "SEMANTIC_CLAIM" else "workspace"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "contract": "graphify.workspace.lease_state.internal",
             "format_version": 1,
             "repo_uuid": self.repo_uuid,
@@ -1324,6 +1325,9 @@ class WorkspaceLeaseState:
             "leases": {name: lease.to_dict() for name, lease in sorted(self.leases.items())},
             "lease_epochs": dict(sorted(self.lease_epochs.items())),
         }
+        if self.staged_attempt_sha256 is not None:
+            value["staged_attempt_sha256"] = self.staged_attempt_sha256
+        return value
 
     @property
     def canonical(self) -> bytes:
@@ -1346,6 +1350,7 @@ class WorkspaceLeaseState:
                 "leases",
                 "lease_epochs",
             },
+            {"staged_attempt_sha256"},
         )
         if data["contract"] != "graphify.workspace.lease_state.internal":
             raise ContractError("$.contract: unsupported internal lease-state contract")
@@ -1381,6 +1386,21 @@ class WorkspaceLeaseState:
             if int(lease_value["fence_token"]) > fence_high_watermark:
                 raise ContractError(f"$.leases.{domain}.fence_token: exceeds fence_high_watermark")
             leases[domain] = lease
+        staged_attempt_sha256 = data.get("staged_attempt_sha256")
+        if staged_attempt_sha256 is not None:
+            staged_attempt_sha256 = _digest(
+                staged_attempt_sha256,
+                "$.staged_attempt_sha256",
+            )
+            workspace_lease = leases.get("workspace")
+            if (
+                workspace_lease is None
+                or workspace_lease.to_dict()["operation"]
+                not in {"BUILD", "PROMOTE", "POINTER_RECOVERY"}
+            ):
+                raise ContractError(
+                    "$.staged_attempt_sha256: requires a staged workspace lease"
+                )
         return cls(
             repo_uuid=repo_uuid,
             revision=revision,
@@ -1389,6 +1409,7 @@ class WorkspaceLeaseState:
             migration_epoch=migration_epoch,
             leases=leases,
             lease_epochs=lease_epochs,
+            staged_attempt_sha256=staged_attempt_sha256,
         )
 
     @classmethod
@@ -1514,6 +1535,8 @@ class StructuralBuildRequest:
     policy_sha256: str
     observation_manifest_sha256: str
     observation_evidence_sha256: str
+    observation_detector_id: str
+    observation_entries_sha256: str
     expected_payload_bytes: int
     capacity_policy_sha256: str
     compatibility_sha256: str
@@ -1532,6 +1555,8 @@ class StructuralBuildRequest:
             "policy_sha256": self.policy_sha256,
             "observation_manifest_sha256": self.observation_manifest_sha256,
             "observation_evidence_sha256": self.observation_evidence_sha256,
+            "observation_detector_id": self.observation_detector_id,
+            "observation_entries_sha256": self.observation_entries_sha256,
             "expected_payload_bytes": self.expected_payload_bytes,
             "capacity_policy_sha256": self.capacity_policy_sha256,
             "compatibility_sha256": self.compatibility_sha256,
@@ -1544,6 +1569,16 @@ class StructuralBuildRequest:
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.canonical).hexdigest()
+
+    def source_observation_document(self) -> dict[str, object]:
+        return {
+            "source_commit": self.source_commit,
+            "inventory_sha256": self.observation_manifest_sha256,
+            "policy_sha256": self.policy_sha256,
+            "detector_id": self.observation_detector_id,
+            "stable_inventory_passes": 2,
+            "entries_sha256": self.observation_entries_sha256,
+        }
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "StructuralBuildRequest":
@@ -1564,6 +1599,8 @@ class StructuralBuildRequest:
                 "policy_sha256",
                 "observation_manifest_sha256",
                 "observation_evidence_sha256",
+                "observation_detector_id",
+                "observation_entries_sha256",
                 "expected_payload_bytes",
                 "capacity_policy_sha256",
                 "compatibility_sha256",
@@ -1581,7 +1618,15 @@ class StructuralBuildRequest:
                 "$.request.expected_current_receipt_sha256: "
                 "must be null exactly when expected_pointer_revision is zero"
             )
-        return cls(
+        detector_id = _string(
+            data["observation_detector_id"],
+            "$.request.observation_detector_id",
+        )
+        if len(detector_id.encode("utf-8")) > 256:
+            raise ContractError(
+                "$.request.observation_detector_id: exceeds 256 bytes"
+            )
+        document = cls(
             logical_request_sha256=_digest(data["logical_request_sha256"], "$.request.logical_request_sha256"),
             expected_registry_revision=_integer(
                 data["expected_registry_revision"], "$.request.expected_registry_revision", minimum=1
@@ -1608,6 +1653,11 @@ class StructuralBuildRequest:
             observation_evidence_sha256=_digest(
                 data["observation_evidence_sha256"], "$.request.observation_evidence_sha256"
             ),
+            observation_detector_id=detector_id,
+            observation_entries_sha256=_digest(
+                data["observation_entries_sha256"],
+                "$.request.observation_entries_sha256",
+            ),
             expected_payload_bytes=_integer(
                 data["expected_payload_bytes"], "$.request.expected_payload_bytes", minimum=1
             ),
@@ -1616,6 +1666,20 @@ class StructuralBuildRequest:
             ),
             compatibility_sha256=_digest(data["compatibility_sha256"], "$.request.compatibility_sha256"),
         )
+        expected_evidence_sha256 = hashlib.sha256(
+            canonical_json_bytes(
+                [
+                    document.source_observation_document(),
+                    document.source_observation_document(),
+                ]
+            )
+        ).hexdigest()
+        if document.observation_evidence_sha256 != expected_evidence_sha256:
+            raise ContractError(
+                "$.request.observation_evidence_sha256: "
+                "must match the repeated frozen observation"
+            )
+        return document
 
 
 @dataclass(frozen=True)

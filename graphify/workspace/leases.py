@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any, cast, Iterator, Protocol
@@ -38,6 +39,7 @@ from graphify.workspace.registry import RegistryStore, RevisionConflict
 
 _MAX_STAGED_BUILD_STATE_BYTES = 64 * 1024
 _STAGED_BUILD_TERMINAL_STATES = frozenset({"PROMOTED", "ABANDONED"})
+_STAGED_ATTEMPT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LeaseError(RuntimeError):
@@ -572,6 +574,7 @@ class LeaseStore:
             migration_epoch=recovered.migration_epoch,
             leases=dict(recovered.leases),
             lease_epochs=dict(recovered.lease_epochs),
+            staged_attempt_sha256=recovered.staged_attempt_sha256,
         )
 
     def _commit_state_locked(self, state: WorkspaceLeaseState) -> WorkspaceLeaseState:
@@ -657,6 +660,7 @@ class LeaseStore:
         owner: LeaseOwner,
         request: StructuralBuildRequest,
         *,
+        attempt_sha256: str,
         acquired_at: datetime,
         monotonic_ns: int,
         ttl_ns: int,
@@ -666,7 +670,8 @@ class LeaseStore:
         The durable REQUESTED record proves the caller's original CAS before
         an operation epoch advances. Only this narrow path may recover that
         request across expired BUILD/PROMOTE attempts; ordinary ``acquire``
-        remains strict and cannot adopt staged-build authority.
+        remains strict and cannot adopt staged-build authority. The caller
+        retains one unique attempt digest across a commit-unknown retry.
         """
 
         try:
@@ -692,6 +697,7 @@ class LeaseStore:
                 ttl_ns=ttl_ns,
                 verify_active=True,
                 staged_request=(generation_id, request),
+                staged_attempt_sha256=attempt_sha256,
             )
 
     def acquire_staged_recovery(
@@ -702,11 +708,12 @@ class LeaseStore:
         owner: LeaseOwner,
         request: StructuralBuildRequest,
         *,
+        attempt_sha256: str,
         acquired_at: datetime,
         monotonic_ns: int,
         ttl_ns: int,
     ) -> LeaseGrant:
-        """Acquire the exact fenced operation that may recover stale staged authority."""
+        """Acquire stale recovery under one caller-retained attempt digest."""
 
         try:
             request = StructuralBuildRequest.from_mapping(request.to_dict())
@@ -731,6 +738,7 @@ class LeaseStore:
                 ttl_ns=ttl_ns,
                 verify_active=True,
                 staged_request=(generation_id, request),
+                staged_attempt_sha256=attempt_sha256,
                 allow_stale_staged_authority=True,
             )
 
@@ -750,9 +758,18 @@ class LeaseStore:
         ttl_ns: int,
         verify_active: bool = False,
         staged_request: tuple[str, StructuralBuildRequest] | None = None,
+        staged_attempt_sha256: str | None = None,
         allow_stale_staged_authority: bool = False,
     ) -> LeaseGrant:
         owner = self._require_current_owner(owner)
+        if staged_request is None:
+            if staged_attempt_sha256 is not None:
+                raise LeaseError("staged attempt requires a staged request")
+        elif (
+            staged_attempt_sha256 is None
+            or _STAGED_ATTEMPT_SHA256_RE.fullmatch(staged_attempt_sha256) is None
+        ):
+            raise LeaseError("staged attempt must be lowercase SHA-256 hex")
         if ttl_ns <= 0 or monotonic_ns < 0:
             raise LeaseError("ttl_ns must be positive and monotonic_ns must be non-negative")
         entry = _registry_entry(document, repo_uuid)
@@ -810,6 +827,7 @@ class LeaseStore:
                 if not rebooted and not expired:
                     if (
                         staged_request is not None
+                        and state.staged_attempt_sha256 == staged_attempt_sha256
                         and existing_value["owner"] == owner.to_dict()
                         and existing_value["operation"] == operation
                     ):
@@ -848,6 +866,9 @@ class LeaseStore:
             leases[domain] = lease
             lease_epochs = dict(state.lease_epochs)
             lease_epochs[domain] = operation_epoch
+            committed_staged_attempt = state.staged_attempt_sha256
+            if domain == "workspace":
+                committed_staged_attempt = staged_attempt_sha256
             committed = self._commit_state_locked(
                 WorkspaceLeaseState(
                     repo_uuid=repo_uuid,
@@ -857,6 +878,7 @@ class LeaseStore:
                     migration_epoch=migration_epoch,
                     leases=leases,
                     lease_epochs=lease_epochs,
+                    staged_attempt_sha256=committed_staged_attempt,
                 )
             )
             return LeaseGrant(
@@ -1143,6 +1165,7 @@ class LeaseStore:
                         migration_epoch=state.migration_epoch,
                         leases=leases,
                         lease_epochs=dict(state.lease_epochs),
+                        staged_attempt_sha256=state.staged_attempt_sha256,
                     )
                 )
                 return LeaseGrant(
@@ -1179,6 +1202,9 @@ class LeaseStore:
             del leases[domain]
             lease_epochs = dict(state.lease_epochs)
             del lease_epochs[domain]
+            staged_attempt_sha256 = state.staged_attempt_sha256
+            if domain == "workspace":
+                staged_attempt_sha256 = None
             return self._commit_state_locked(
                 WorkspaceLeaseState(
                     repo_uuid=state.repo_uuid,
@@ -1188,6 +1214,7 @@ class LeaseStore:
                     migration_epoch=state.migration_epoch,
                     leases=leases,
                     lease_epochs=lease_epochs,
+                    staged_attempt_sha256=staged_attempt_sha256,
                 )
             )
 

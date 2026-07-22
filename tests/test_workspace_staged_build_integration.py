@@ -59,6 +59,7 @@ POLICY = CapacityPolicy.from_mapping(
 )
 QUEUE_POLICY = SemanticQueuePolicy(max_items=16, max_bytes=1024 * 1024, retry_budget=1)
 GENERATION_ID = "gen-staged-integration"
+ATTEMPT_SHA256 = "5" * 64
 
 
 def _alternate_manifest() -> CompatibilityManifest:
@@ -92,6 +93,7 @@ def _request(
     registry = harness.registry.load().to_dict()
     entry = registry["workspaces"][0]
     lease_state = harness.leases.inspect(REPO_UUID)
+    observation = GenerationStore._source_observation_document(observations[0])
     return StructuralBuildRequest.from_mapping(
         {
             "logical_request_sha256": "a" * 64,
@@ -108,6 +110,8 @@ def _request(
             "observation_evidence_sha256": GenerationStore.structural_observation_evidence_sha256(
                 observations
             ),
+            "observation_detector_id": observation["detector_id"],
+            "observation_entries_sha256": observation["entries_sha256"],
             "expected_payload_bytes": 4096,
             "capacity_policy_sha256": POLICY.sha256,
             "compatibility_sha256": COMPATIBILITY_MANIFEST.sha256,
@@ -164,6 +168,7 @@ def _completed_staged_build(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,
@@ -357,6 +362,7 @@ def test_request_bound_promote_acquisition_bypasses_generic_barrier_and_clears_c
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="PROMOTE",
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
@@ -381,6 +387,7 @@ def test_complete_staged_promotion_records_terminal_state_without_replaying_poin
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="PROMOTE",
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
@@ -421,6 +428,7 @@ def test_fresh_manifest_completes_pointer_visible_promotion(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="PROMOTE",
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
@@ -483,6 +491,7 @@ def test_successor_build_recovers_after_certification_journal_precedes_staged_st
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
@@ -530,6 +539,7 @@ def test_successor_request_bound_operation_acknowledges_already_current_pointer(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="PROMOTE",
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
@@ -546,6 +556,7 @@ def test_successor_request_bound_operation_acknowledges_already_current_pointer(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation=operation,
         acquired_at=START + timedelta(seconds=4),
         monotonic_ns=40_000,
@@ -574,6 +585,7 @@ def test_terminal_promotion_record_recovers_unknown_commit(tmp_path: Path) -> No
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="PROMOTE",
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,

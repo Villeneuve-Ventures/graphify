@@ -69,6 +69,7 @@ POLICY = CapacityPolicy.from_mapping(
 )
 QUEUE_POLICY = SemanticQueuePolicy(max_items=16, max_bytes=1024 * 1024, retry_budget=1)
 GENERATION_ID = "gen-staged-abandonment"
+ATTEMPT_SHA256 = "4" * 64
 
 
 def _observations(
@@ -167,6 +168,7 @@ def _request(
     registry = harness.registry.load().to_dict()
     entry = registry["workspaces"][0]
     lease_state = harness.leases.inspect(REPO_UUID)
+    observation = GenerationStore._source_observation_document(observations[0])
     return StructuralBuildRequest.from_mapping(
         {
             "logical_request_sha256": "a" * 64,
@@ -183,6 +185,8 @@ def _request(
             "observation_evidence_sha256": GenerationStore.structural_observation_evidence_sha256(
                 observations
             ),
+            "observation_detector_id": observation["detector_id"],
+            "observation_entries_sha256": observation["entries_sha256"],
             "expected_payload_bytes": 4096,
             "capacity_policy_sha256": POLICY.sha256,
             "compatibility_sha256": COMPATIBILITY_MANIFEST.sha256,
@@ -211,6 +215,7 @@ def _publishing(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,
@@ -361,6 +366,7 @@ def _abandon(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=tick),
         monotonic_ns=tick * 10_000,
         ttl_ns=1_000_000,
@@ -698,6 +704,7 @@ def test_fresh_manifest_drift_terminally_abandons_each_recoverable_staged_state(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
@@ -761,13 +768,14 @@ def test_compatibility_drift_abandons_when_selected_source_is_unavailable(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
     )
     abandoned = fresh_store.abandon_staged_build(
         recovery,
-        source_observations=observations,
+        source_observations=(),
         monotonic_ns=20_001,
     )
     fresh_store.leases.release(recovery.grant)
@@ -791,6 +799,7 @@ def test_unavailable_source_without_higher_authority_drift_fails_closed(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
@@ -824,6 +833,7 @@ def test_invalid_abandonment_evidence_is_not_treated_as_current_authority(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
@@ -839,7 +849,7 @@ def test_invalid_abandonment_evidence_is_not_treated_as_current_authority(
             store._staged_abandonment_proof_if_stale_locked(
                 operation,
                 recovery.state,
-                observations,
+                store._abandonment_source_document(observations),
             )
             is None
         )
@@ -856,7 +866,7 @@ def test_invalid_abandonment_evidence_is_not_treated_as_current_authority(
             store._staged_abandonment_proof_if_stale_locked(
                 operation,
                 invalid_state,
-                observations,
+                store._abandonment_source_document(observations),
             )
 
     store.leases.release(recovery.grant)
@@ -883,6 +893,7 @@ def test_abandoned_terminal_commit_unknown_recovers_by_exact_request_replay(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
@@ -966,6 +977,7 @@ def test_abandonment_crash_before_terminal_marker_keeps_prior_state_recoverable(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
@@ -1005,6 +1017,7 @@ def test_durable_abandonment_intent_survives_complete_cleanup_crash_and_source_a
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
@@ -1031,6 +1044,7 @@ def test_durable_abandonment_intent_survives_complete_cleanup_crash_and_source_a
             REPO_UUID,
             GENERATION_ID,
             request,
+            attempt_sha256=ATTEMPT_SHA256,
             operation="BUILD",
             acquired_at=START + timedelta(seconds=3),
             monotonic_ns=30_000,
@@ -1040,6 +1054,7 @@ def test_durable_abandonment_intent_survives_complete_cleanup_crash_and_source_a
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=4),
         monotonic_ns=40_000,
         ttl_ns=1_000_000,
@@ -1089,6 +1104,7 @@ def test_staged_abandonment_refuses_intent_from_a_newer_fence(tmp_path: Path) ->
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=20_000,
         ttl_ns=1_000_000,
@@ -1148,6 +1164,7 @@ def test_staged_abandonment_refuses_intent_from_a_newer_fence(tmp_path: Path) ->
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
@@ -1190,6 +1207,7 @@ def test_abandonment_refuses_unsafe_staging_cleanup_without_terminalizing(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
@@ -1222,6 +1240,7 @@ def test_certified_abandonment_refuses_pending_pointer_intent(tmp_path: Path) ->
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
@@ -1275,6 +1294,7 @@ def test_active_source_drift_recovers_durable_certification_before_abandonment(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
@@ -1297,6 +1317,7 @@ def test_active_source_drift_recovers_durable_certification_before_abandonment(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=4),
         monotonic_ns=40_000,
         ttl_ns=1_000_000,
@@ -1332,6 +1353,7 @@ def test_active_source_drift_recovers_durable_staging_receipt(tmp_path: Path) ->
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
@@ -1360,6 +1382,7 @@ def test_fresh_manifest_drift_recovers_durable_receipt_before_abandonment(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
@@ -1376,6 +1399,7 @@ def test_fresh_manifest_drift_recovers_durable_receipt_before_abandonment(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=4),
         monotonic_ns=40_000,
         ttl_ns=1_000_000,
@@ -1414,6 +1438,7 @@ def test_stale_certification_recovery_requires_immutable_semantic_binding(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
@@ -1445,6 +1470,7 @@ def test_certified_abandonment_refuses_pointer_already_visible(tmp_path: Path) -
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="PROMOTE",
         acquired_at=START + timedelta(seconds=3),
         monotonic_ns=30_000,
@@ -1474,6 +1500,7 @@ def test_certified_abandonment_refuses_pointer_already_visible(tmp_path: Path) -
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         acquired_at=START + timedelta(seconds=4),
         monotonic_ns=40_000,
         ttl_ns=1_000_000,

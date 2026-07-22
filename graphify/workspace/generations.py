@@ -626,6 +626,7 @@ class GenerationStore:
         generation_id: str,
         request: StructuralBuildRequest,
         *,
+        attempt_sha256: str,
         operation: str,
         acquired_at: datetime,
         monotonic_ns: int,
@@ -638,6 +639,7 @@ class GenerationStore:
             operation,
             self.leases.current_owner(),
             request,
+            attempt_sha256=attempt_sha256,
             acquired_at=acquired_at,
             monotonic_ns=monotonic_ns,
             ttl_ns=ttl_ns,
@@ -675,6 +677,7 @@ class GenerationStore:
         generation_id: str,
         request: StructuralBuildRequest,
         *,
+        attempt_sha256: str,
         acquired_at: datetime,
         monotonic_ns: int,
         ttl_ns: int,
@@ -717,6 +720,7 @@ class GenerationStore:
             operation,
             self.leases.current_owner(),
             request,
+            attempt_sha256=attempt_sha256,
             acquired_at=acquired_at,
             monotonic_ns=monotonic_ns,
             ttl_ns=ttl_ns,
@@ -752,31 +756,14 @@ class GenerationStore:
             ),
         }
 
-    @classmethod
-    def _observations_bind_staged_request(
-        cls,
+    @staticmethod
+    def _frozen_abandonment_source_document(
         request: StructuralBuildRequest,
-        source_observations: Sequence[SourceObservation],
-    ) -> bool:
-        observations = tuple(source_observations)
-        if len(observations) != 2:
-            return False
-        try:
-            evidence_sha256 = cls.structural_observation_evidence_sha256(observations)
-        except GenerationConflict:
-            return False
-        observation = observations[0]
-        return (
-            observation.source_commit,
-            observation.policy_sha256,
-            observation.inventory_sha256,
-            evidence_sha256,
-        ) == (
-            request.source_commit,
-            request.policy_sha256,
-            request.observation_manifest_sha256,
-            request.observation_evidence_sha256,
-        )
+    ) -> dict[str, object]:
+        return {
+            "observation": request.source_observation_document(),
+            "observation_evidence_sha256": request.observation_evidence_sha256,
+        }
 
     @staticmethod
     def _registry_workspace_entry(
@@ -796,7 +783,7 @@ class GenerationStore:
         self,
         operation: LeaseOperation,
         state: StagedBuildState,
-        trusted_observations: Sequence[SourceObservation],
+        source_document: Mapping[str, object],
     ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None] | None:
         registry_revision, entry = self._registry_workspace_entry(operation)
         active_source_revision = int(entry["active_source_revision"])
@@ -828,7 +815,6 @@ class GenerationStore:
                     "queue_watermark": queue_snapshot.desired_watermark,
                     "queue_state_sha256": queue_snapshot.sha256,
                 }
-        source_document = self._abandonment_source_document(trusted_observations)
         request = state.request
         evidence = StagedBuildAbandonmentEvidence.from_mapping(
             {
@@ -863,7 +849,7 @@ class GenerationStore:
         proof = self._staged_abandonment_proof_if_stale_locked(
             operation,
             state,
-            trusted_observations,
+            self._abandonment_source_document(trusted_observations),
         )
         if proof is None:
             raise GenerationConflict(
@@ -1382,21 +1368,20 @@ class GenerationStore:
                     state.abandonment_intent,
                     occurred_at=occurred_at,
                 )
-            if self._observations_bind_staged_request(request, source_observations):
-                proof = self._staged_abandonment_proof_if_stale_locked(
+            proof = self._staged_abandonment_proof_if_stale_locked(
+                operation,
+                state,
+                self._frozen_abandonment_source_document(request),
+            )
+            if proof is not None:
+                reason, evidence, _pointer = proof
+                return self._commit_new_staged_abandonment_locked(
                     operation,
                     state,
-                    source_observations,
+                    reason=reason,
+                    evidence=evidence,
+                    occurred_at=occurred_at,
                 )
-                if proof is not None:
-                    reason, evidence, _pointer = proof
-                    return self._commit_new_staged_abandonment_locked(
-                        operation,
-                        state,
-                        reason=reason,
-                        evidence=evidence,
-                        occurred_at=occurred_at,
-                    )
 
         trusted = self._trusted_structural_observations(
             attempt.state.repo_uuid,

@@ -1,9 +1,10 @@
 # Graphify workspace contract v1
 
-Status: P5B2a initial workspace registration, P5B1 read-only workspace
-status/doctor, P5A semantic queue, P4 adapter, and observed-current library
-runtime for `graphifyy 0.9.16+workspace.1`; the public v1 contract fields remain
-frozen.
+Status: P5B2b0 internal staged structural-build recovery, P5B2a initial
+workspace registration, P5B1 read-only workspace status/doctor, P5A semantic
+queue, P4 adapter, and observed-current library runtime for `graphifyy
+0.9.16+workspace.1`; the public v1 contract fields remain frozen. P5B2b0 does
+not expose `workspace sync` or revise the public inspection schemas.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -38,6 +39,10 @@ external state root. The receipt's normative machine-readable schema is
 `graphify/workspace/schemas/cli/v1/registration.schema.json`. Rebind, rotation,
 activation, remaining mutation/query commands, repair, watch/service,
 performance certification, and candidate publication remain later P5 work.
+P5B2b0 adds only the internal request-bound staged-build and stale-abandonment
+recovery contract described in [State contracts](state-contract.md). It closes
+the crash and drift barriers required before a public structural sync command;
+it does not add that command, provider selection, or new status/doctor output.
 
 ## Deferred work ownership
 

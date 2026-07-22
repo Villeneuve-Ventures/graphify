@@ -47,6 +47,7 @@ POLICY = CapacityPolicy.from_mapping(
 )
 QUEUE_POLICY = SemanticQueuePolicy(max_items=16, max_bytes=1024 * 1024, retry_budget=1)
 GENERATION_ID = "gen-staged-certification-recovery"
+ATTEMPT_SHA256 = "6" * 64
 
 
 def _observations(harness: RuntimeHarness) -> tuple[SourceObservation, SourceObservation]:
@@ -68,6 +69,7 @@ def _request(
     registry = harness.registry.load().to_dict()
     entry = registry["workspaces"][0]
     lease_state = harness.leases.inspect(REPO_UUID)
+    observation = GenerationStore._source_observation_document(observations[0])
     return StructuralBuildRequest.from_mapping(
         {
             "logical_request_sha256": "a" * 64,
@@ -84,6 +86,8 @@ def _request(
             "observation_evidence_sha256": GenerationStore.structural_observation_evidence_sha256(
                 observations
             ),
+            "observation_detector_id": observation["detector_id"],
+            "observation_entries_sha256": observation["entries_sha256"],
             "expected_payload_bytes": 4096,
             "capacity_policy_sha256": POLICY.sha256,
             "compatibility_sha256": COMPATIBILITY_MANIFEST.sha256,
@@ -212,6 +216,7 @@ def _complete(
         REPO_UUID,
         GENERATION_ID,
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,

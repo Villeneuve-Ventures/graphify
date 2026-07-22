@@ -28,7 +28,7 @@ from graphify.workspace.generations import (
 )
 from graphify.workspace.identity import discover_source
 from graphify.workspace.journal import JournalStore
-from graphify.workspace.leases import LeaseRecoveryRequired
+from graphify.workspace.leases import LeaseBusy, LeaseRecoveryRequired
 from graphify.workspace.persistence import CommitUnknown, FaultHook, InjectedFault
 
 from tests.workspace_p3_helpers import (
@@ -56,6 +56,7 @@ POLICY = CapacityPolicy.from_mapping(
         "reserve_bytes": 1024,
     }
 )
+ATTEMPT_SHA256 = "7" * 64
 
 
 def _store(harness: RuntimeHarness, *, fault_hook: FaultHook | None = None) -> GenerationStore:
@@ -93,6 +94,7 @@ def _request(
     registry = harness.registry.load().to_dict()
     entry = registry["workspaces"][0]
     lease_state = harness.leases.inspect(REPO_UUID)
+    observation = GenerationStore._source_observation_document(observations[0])
     values: dict[str, object] = {
         "logical_request_sha256": "a" * 64,
         "expected_registry_revision": int(registry["revision"]),
@@ -108,6 +110,8 @@ def _request(
         "observation_evidence_sha256": GenerationStore.structural_observation_evidence_sha256(
             observations
         ),
+        "observation_detector_id": observation["detector_id"],
+        "observation_entries_sha256": observation["entries_sha256"],
         "expected_payload_bytes": 1024,
         "capacity_policy_sha256": POLICY.sha256,
         "compatibility_sha256": COMPATIBILITY_MANIFEST.sha256,
@@ -143,6 +147,7 @@ def _request_and_acquire(
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256="1" * 64,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,
@@ -157,6 +162,72 @@ def _request_and_acquire(
         monotonic_ns=10_001,
     )
     return attempt, store.prepare_staged_build(attempt, allocation, monotonic_ns=10_002)
+
+
+def test_staged_lease_commit_unknown_reuses_only_the_exact_attempt(
+    tmp_path: Path,
+) -> None:
+    armed = False
+
+    def fail(event: str) -> None:
+        nonlocal armed
+        if armed and event == "workspace:pending_durable":
+            armed = False
+            raise InjectedFault(event)
+
+    harness = create_harness(tmp_path, fault_hook=fail)
+    store = _store(harness)
+    observations = _source_observations(harness)
+    request = _request(harness, observations)
+    _request_staged_build(store, harness, request, observations)
+    armed = True
+
+    with pytest.raises(CommitUnknown):
+        store.acquire_staged_operation(
+            REPO_UUID,
+            "gen-staged-recovery",
+            request,
+            attempt_sha256="2" * 64,
+            operation="BUILD",
+            acquired_at=START + timedelta(seconds=1),
+            monotonic_ns=10_000,
+            ttl_ns=1_000_000,
+        )
+
+    with pytest.raises(LeaseBusy):
+        store.acquire_staged_operation(
+            REPO_UUID,
+            "gen-staged-recovery",
+            request,
+            attempt_sha256="3" * 64,
+            operation="BUILD",
+            acquired_at=START + timedelta(seconds=1),
+            monotonic_ns=10_001,
+            ttl_ns=1_000_000,
+        )
+
+    recovered = store.acquire_staged_operation(
+        REPO_UUID,
+        "gen-staged-recovery",
+        request,
+        attempt_sha256="2" * 64,
+        operation="BUILD",
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_002,
+        ttl_ns=1_000_000,
+    )
+
+    assert recovered.grant.lease.to_dict()["fence_token"] == 2
+    assert harness.leases.inspect(REPO_UUID).staged_attempt_sha256 == "2" * 64
+    renewed = harness.leases.heartbeat(
+        recovered.grant,
+        heartbeat_at=START + timedelta(seconds=1),
+        monotonic_ns=10_003,
+        ttl_ns=1_000_000,
+    )
+    assert harness.leases.inspect(REPO_UUID).staged_attempt_sha256 == "2" * 64
+    harness.leases.release(renewed)
+    assert harness.leases.inspect(REPO_UUID).staged_attempt_sha256 is None
 
 
 def _write_payload(preparation: StagedBuildPreparation, content: str = "{}") -> None:
@@ -262,6 +333,7 @@ def test_bound_build_acquisition_retries_exactly_after_committed_lease_expires(
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,
@@ -271,6 +343,7 @@ def test_bound_build_acquisition_retries_exactly_after_committed_lease_expires(
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=10_001,
@@ -303,6 +376,7 @@ def test_bound_recovery_tolerates_unrelated_global_registry_revision(tmp_path: P
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,
@@ -343,6 +417,7 @@ def test_successor_fence_resets_interrupted_partial_stage(tmp_path: Path) -> Non
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=2_000_000,
@@ -376,6 +451,7 @@ def test_successor_reset_rejects_publishing_state_without_fence_authority(
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=2_000_000,
@@ -535,6 +611,7 @@ def test_staged_allocation_authority_fails_before_capacity_mutation(tmp_path: Pa
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,
@@ -568,6 +645,7 @@ def test_read_only_operation_does_not_recover_staged_pending_record(tmp_path: Pa
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=1),
         monotonic_ns=10_000,
@@ -614,6 +692,7 @@ def test_successor_reset_rejects_link_attacks_without_advancing_fence(
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=2_000_000,
@@ -704,6 +783,7 @@ def test_successor_reset_retries_after_empty_tree_precedes_fence_commit(
         REPO_UUID,
         "gen-staged-recovery",
         request,
+        attempt_sha256=ATTEMPT_SHA256,
         operation="BUILD",
         acquired_at=START + timedelta(seconds=2),
         monotonic_ns=2_000_000,

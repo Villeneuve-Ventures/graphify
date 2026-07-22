@@ -123,6 +123,41 @@ Release is cleanup rather than commit acceptance: the trusted current runtime
 may remove only the exact current owner/fence record even after a source,
 operation, or migration epoch invalidates that lease's commit authority.
 
+## Staged structural-build recovery
+
+`graphify.workspace.staged_build.internal` format version 1 is the bounded,
+crash-durable publication record at
+`workspaces/<repo_uuid>/staged-build.json`. Its stable current, previous, and
+pending files use the existing commit-and-recovery protocol, and every read or
+write is limited to 64 KiB. One record binds one generation to the exact
+structural request, including registry/source/operation/migration/pointer CAS,
+capacity and compatibility hashes, source epoch, and a frozen observation
+summary. The summary retains the detector identity and observed-entry digest
+needed to reconstruct the two-equal-observation evidence after restart; its
+stored evidence hash must match that reconstructed pair.
+
+The forward lifecycle is `REQUESTED` to `PUBLISHING` to `COMPLETE` to
+`CERTIFIED` to `PROMOTED`. Exact retries may recover a durable boundary without
+duplicating its revision. A nonterminal record is a recovery barrier: ordinary
+workspace mutations cannot acquire around it, while request-bound `BUILD`,
+`PROMOTE`, or `POINTER_RECOVERY` may resume only the operation allowed by the
+current lifecycle. Each live staged lease additionally stores the caller's
+attempt SHA-256 in the internal workspace lease envelope. Only that exact
+attempt may recover a commit-unknown live lease; process-owner equality alone
+does not let a second caller share the fence. Release removes the attempt
+binding.
+
+`ABANDONED` is the only terminal close that does not publish the staged bytes.
+It requires canonical evidence that the exact request is stale because the
+active source, migration epoch, pointer CAS, compatibility, semantic source
+epoch, or trusted source observation changed. A durable abandonment intent
+precedes cleanup so a crash can finish the same close under a successor fence.
+The frozen request observation is sufficient when an earlier-priority durable
+authority already proves staleness, including when the selected source is no
+longer available. Source-only abandonment still requires two fresh trusted
+observations and fails closed when they cannot be obtained. P5B2b0 exposes no
+public sync command and does not change the frozen status/doctor JSON schemas.
+
 ## Semantic desired-work queue
 
 `graphify.workspace.semantic_queue.internal` format version 1 is one canonical
