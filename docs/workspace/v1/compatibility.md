@@ -79,9 +79,11 @@ complete `graphify.workspace.compatibility_manifest` and the explicit
 defaults: neither package constants nor existing queue state may supply a
 missing authority field.
 
-Status and doctor accept only an owned, singular regular 0600 file beneath an
-owned private 0700 state root, cap the read at 64 KiB, reject duplicate or
-noncanonical JSON and unknown versions, redact diagnostic details, and never
-create directories, files, locks, or recovery artifacts. P5C installation will
-bind and atomically install this authority from the reviewed candidate;
-publication and installation are not part of P5B1.
+Status, doctor, and P5B2a registration authority loading accept only an owned,
+singular regular 0600 file beneath an owned private 0700 state root, cap the
+read at 64 KiB, reject duplicate or noncanonical JSON and unknown versions, and
+redact diagnostic details. The authority read itself never creates directories,
+files, locks, or recovery artifacts; registration writes only through the
+existing P2 registry stores after successful composition and source discovery.
+P5C installation will bind and atomically install this authority from the
+reviewed candidate; publication and installation are not part of P5B1/P5B2a.

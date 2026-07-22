@@ -418,6 +418,17 @@ def _validate_source(source: object, path: str) -> None:
         previous = url
 
 
+def canonical_registry_source(source: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Validate and normalize one frozen registry source record."""
+
+    _validate_source(source, "$")
+    normalized = _normalise_json(source)
+    if not isinstance(normalized, dict):  # pragma: no cover - Mapping guarantees this
+        raise ContractError("$: expected an object")
+    _validate_source(normalized, "$")
+    return normalized
+
+
 def _validate_registry(data: Mapping[str, object]) -> None:
     _exact_keys(data, "$", {"contract", "schema_version", "revision", "workspaces"})
     _integer(data["revision"], "$.revision", minimum=1)

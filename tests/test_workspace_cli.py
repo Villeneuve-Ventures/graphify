@@ -391,7 +391,7 @@ def test_missing_authority_output_redacts_private_paths(
     assert str(private_state) not in rendered
 
 
-def test_top_level_help_lists_workspace_status_and_doctor(
+def test_top_level_help_lists_workspace_register_status_and_doctor(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -401,6 +401,7 @@ def test_top_level_help_lists_workspace_status_and_doctor(
     mainmod.main()
 
     output = capsys.readouterr().out
+    assert "workspace register" in output
     assert "workspace status --json" in output
     assert "workspace doctor" in output
 
@@ -424,6 +425,30 @@ def test_top_level_workspace_dispatch_propagates_arguments_and_exit_code(
 
     assert raised.value.code == 10
     assert calls == [["status", "--json"]]
+
+
+def test_top_level_registration_failure_preserves_exit_with_broken_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+
+    class BrokenFlushStream(StringIO):
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+    def fake_run(arguments: list[str], **_kwargs: object) -> int:
+        assert arguments == ["register"]
+        return 64
+
+    monkeypatch.setattr(workspace_cli, "run_workspace_command", fake_run)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _path: None)
+    monkeypatch.setattr(sys, "argv", ["graphify", "workspace", "register"])
+    monkeypatch.setattr(sys, "stdout", BrokenFlushStream())
+
+    with pytest.raises(SystemExit) as raised:
+        mainmod.main()
+
+    assert raised.value.code == 64
 
 
 @pytest.mark.parametrize(

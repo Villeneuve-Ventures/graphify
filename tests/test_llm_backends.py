@@ -12,6 +12,7 @@ def _clear_backend_env(monkeypatch):
     for env_key in (
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
+        "GRAPHIFY_GEMINI_MODEL",
         "MOONSHOT_API_KEY",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -57,6 +58,7 @@ def test_openai_backend_detected(monkeypatch):
 
 
 def test_extract_files_direct_routes_gemini_through_openai_compat(tmp_path, monkeypatch):
+    monkeypatch.setenv("GRAPHIFY_GEMINI_MODEL", "ambient-model-override")
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
     source = tmp_path / "note.md"

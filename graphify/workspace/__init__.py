@@ -1,4 +1,4 @@
-"""Versioned workspace contracts plus the bounded P2-P5B1 runtime.
+"""Versioned workspace contracts plus the bounded P2-P5B2a runtime.
 
 P2 adds external registry persistence, operator-authorized UUID/source
 identity, explicit active-source CAS, and fenced leases. P3 adds immutable
@@ -7,8 +7,10 @@ recovery, retained coordination locks, explicit capacity policy, and offline
 GC. P4 adds one 0.9.16 adapter and two-sided observed-current freshness. P5A
 adds the durable semantic queue and stable-watermark certification binding.
 P5B1 adds production composition, versioned read-only status, and read-only
-doctor. Mutation/query commands, services, installation, and candidate
-publication remain deferred.
+doctor. P5B2a adds only explicit operator-authorized initial enrollment and
+verified clone/fork adoption through ``graphify workspace register``. All other
+mutation/query commands, services, installation, and candidate publication
+remain deferred.
 """
 
 from graphify.workspace.adapters import (

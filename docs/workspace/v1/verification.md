@@ -141,6 +141,33 @@ After code changes, run the absolute repo-local Graphify binary to update the
 repo graph. Because the release checkout has no committed graph, bootstrap
 output remains ignored and must not widen the P1 product diff.
 
+## P5B2a registration CLI gates
+
+- `enroll` and `adopt` require distinct, matching operator authorization on
+  standard input, an explicit canonical repo UUID, and an expected registry
+  revision; no invocation may infer adoption or select rebind/activation;
+- parsed-operation success and failure receipts are canonical, versioned,
+  deterministic, redacted, and separated between stdout and stderr with exit
+  codes 0, 10, and 20 for success, conflict, and invalid state respectively;
+- malformed invocations emit the exact deterministic, redacted plain-text usage
+  contract on stderr with exit code 64 before authority, source, or stdin reads;
+- the command reuses production authority loading and composition, requires the
+  current working directory itself to be the Git top level, scrubs ambient Git
+  routing overrides, rejects linked or hardlinked policy paths, and cross-checks
+  the discovered UUID before mutation;
+- missing, malformed, unsupported, or uncomposable runtime authority fails
+  before the command reads operator authorization from standard input;
+- duplicate enrollment, UUID collision, unrelated history, stale CAS,
+  malformed or unsupported authority, corrupt state, unsafe paths, and
+  deterministic contention fail closed without a new registry revision;
+- crash failpoints recover to one durable revision, while exact external-state
+  allowlists and recursive source, Git metadata, `HOME`, and `CODEX_HOME`
+  snapshots prove all durable writes stay beneath the configured state root;
+  and
+- focused registration, runtime, composition, and CLI tests run before Ruff,
+  focused Pyright and high-severity Bandit, graph refresh, the provider-neutral
+  full repository suite, exact-diff review, adversarial QA, and exact-head CI.
+
 ## P5A semantic queue gates
 
 - enqueue and exact reconciliation monotonically advance the desired watermark,
@@ -286,8 +313,8 @@ verification reviews.
 
 P5A verification satisfies only the durable semantic queue and stable-watermark
 certification slice. It does not satisfy the remaining P5 watch, service,
-workspace CLI, installation, performance, candidate-publication, or live-cutover
-gates, nor P6 or H3.
+workspace CLI commands beyond registration, installation, performance,
+candidate-publication, or live-cutover gates, nor P6 or H3.
 
 The P1 fixture bundle is deliberately limited to synthetic contract fixtures;
 it is not claimed as the representative repository corpus required by the

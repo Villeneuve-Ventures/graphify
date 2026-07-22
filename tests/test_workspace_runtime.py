@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
+from dataclasses import replace
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -17,6 +18,7 @@ from typing import Any, cast
 
 import pytest
 
+import graphify.workspace.identity as identity_module
 import graphify.workspace.leases as lease_module
 
 from graphify.workspace.contracts import FencedLease, canonical_json_bytes
@@ -295,6 +297,21 @@ def test_runtime_rejects_unsupported_platform_without_test_capability(tmp_path: 
 
     with pytest.raises(UnsupportedRuntime, match="macOS.*APFS"):
         RegistryStore(tmp_path / "state", capabilities=unsupported)
+
+
+def test_source_discovery_rejects_missing_descriptor_relative_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(identity_module.os, "supports_dir_fd", {identity_module.os.open})
+    monkeypatch.setattr(
+        identity_module,
+        "_git",
+        lambda *_args, **_kwargs: pytest.fail("unsupported runtime must fail before Git"),
+    )
+
+    with pytest.raises(SourceDiscoveryError, match="descriptor-relative file access"):
+        discover_source(tmp_path)
 
 
 def test_darwin_identity_probe_preserves_subsecond_process_start() -> None:
@@ -735,6 +752,173 @@ def test_source_identity_rejects_linked_or_hardlinked_workspace_config(tmp_path:
         discover_source(hardlink_repo)
 
 
+def test_source_discovery_scrubs_ambient_git_directory_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "private-git-dir"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "private-work-tree"))
+
+    source = discover_source(repo)
+
+    assert source.root == repo.resolve()
+    assert source.repo_uuid == REPO_UUID
+
+
+def test_source_discovery_resolves_roots_from_the_captured_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID, marker="source")
+    raced = _create_repo(tmp_path / "raced", REPO_UUID, marker="raced")
+    captured_head = _run(repo, "rev-parse", "HEAD")
+    captured_root = _run(repo, "rev-list", "--max-parents=0", captured_head)
+    raced_head = _run(raced, "rev-parse", "HEAD")
+    _run(repo, "fetch", "--quiet", str(raced), raced_head)
+    original_git = identity_module._git
+    switched = False
+
+    def switch_head_after_capture(
+        root: Path,
+        *arguments: str,
+        deadline_ns: int | None = None,
+    ) -> str:
+        nonlocal switched
+        result = original_git(root, *arguments, deadline_ns=deadline_ns)
+        if arguments == ("rev-parse", "HEAD") and not switched:
+            _run(repo, "update-ref", "HEAD", raced_head)
+            switched = True
+        return result
+
+    monkeypatch.setattr(identity_module, "_git", switch_head_after_capture)
+
+    source = discover_source(repo)
+
+    assert switched
+    assert source.head_commit == captured_head
+    assert source.history_roots == (captured_root,)
+    assert _run(repo, "rev-parse", "HEAD") == raced_head
+
+
+def test_source_discovery_ignores_replacement_refs_for_adoption_history(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    unrelated = _create_repo(tmp_path / "unrelated", REPO_UUID, marker="unrelated")
+    enrolled_root = _run(original, "rev-list", "--max-parents=0", "HEAD")
+    _run(unrelated, "fetch", "--quiet", str(original), enrolled_root)
+    _run(unrelated, "replace", "--graft", "HEAD", enrolled_root)
+    assert _run(unrelated, "rev-list", "--max-parents=0", "HEAD") == enrolled_root
+
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(original),
+        _authorization(IdentityAction.ENROLL, "enroll-original"),
+        expected_revision=0,
+    )
+    before_state = _tree_snapshot(state_root)
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            discover_source(unrelated),
+            _authorization(IdentityAction.ADOPT, "reject-replacement-ref"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+    assert _tree_snapshot(state_root) == before_state
+
+
+def test_source_discovery_ignores_graft_files_for_adoption_history(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    unrelated = _create_repo(tmp_path / "unrelated", REPO_UUID, marker="unrelated")
+    enrolled_root = _run(original, "rev-list", "--max-parents=0", "HEAD")
+    unrelated_head = _run(unrelated, "rev-parse", "HEAD")
+    _run(unrelated, "fetch", "--quiet", str(original), enrolled_root)
+    grafts = unrelated / ".git/info/grafts"
+    grafts.write_text(f"{unrelated_head} {enrolled_root}\n", encoding="utf-8")
+    assert _run(unrelated, "rev-list", "--max-parents=0", "HEAD") == enrolled_root
+
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(original),
+        _authorization(IdentityAction.ENROLL, "enroll-original"),
+        expected_revision=0,
+    )
+    before_state = _tree_snapshot(state_root)
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            discover_source(unrelated),
+            _authorization(IdentityAction.ADOPT, "reject-graft-file"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+    assert _tree_snapshot(state_root) == before_state
+
+
+def test_shallow_history_without_enrollment_root_cannot_satisfy_adoption(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    _commit_change(original, "second-commit")
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "--quiet", "--depth=1", original.resolve().as_uri(), str(shallow)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    _run(shallow, "remote", "set-url", "origin", REMOTE)
+    assert _run(shallow, "rev-parse", "--is-shallow-repository") == "true"
+
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(original),
+        _authorization(IdentityAction.ENROLL, "enroll-complete-history"),
+        expected_revision=0,
+    )
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            discover_source(shallow),
+            _authorization(IdentityAction.ADOPT, "reject-shallow-history"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+
+
+def test_source_identity_rejects_a_symlinked_graphify_directory(tmp_path: Path) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID)
+    graphify_directory = repo / ".graphify"
+    external = tmp_path / "private-graphify"
+    graphify_directory.rename(external)
+    graphify_directory.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(SourceDiscoveryError):
+        discover_source(repo)
+
+
+def test_source_discovery_config_byte_limit_is_explicit_per_caller(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID)
+    config = repo / ".graphify/workspace.toml"
+    config.write_bytes(config.read_bytes() + b"\n#" + b"x" * (64 * 1024))
+
+    assert discover_source(repo).repo_uuid == REPO_UUID
+    with pytest.raises(SourceDiscoveryError, match="exceeds byte limit"):
+        discover_source(repo, max_bytes=64 * 1024)
+
+
 def test_uuid_collision_adoption_and_enrollment_evidence_rotation(tmp_path: Path) -> None:
     original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
     clone = _clone_repo(original, tmp_path / "clone")
@@ -835,6 +1019,156 @@ def test_same_git_common_directory_cannot_be_reenrolled_under_a_new_uuid(
     document = store.load()
     assert document.to_dict()["revision"] == 1
     assert [entry["repo_uuid"] for entry in document.to_dict()["workspaces"]] == [REPO_UUID]
+
+
+def test_same_git_common_directory_cannot_be_adopted_after_remote_change(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    _run(
+        repo,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/example/changed-remote.git",
+    )
+    before_state = _tree_snapshot(store.state.root)
+
+    with pytest.raises(UUIDCollisionError, match="already enrolled|already bound"):
+        store.adopt(
+            discover_source(repo),
+            _authorization(IdentityAction.ADOPT, "reject-already-bound"),
+            expected_revision=1,
+        )
+
+    document = store.load().to_dict()
+    assert document["revision"] == 1
+    assert document["workspaces"][0]["aliases"] == []
+    assert _tree_snapshot(store.state.root) == before_state
+
+
+def test_adopt_allows_a_distinct_clone_when_retained_inode_is_reused(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID)
+    clone = _clone_repo(original, tmp_path / "clone")
+    original_source = discover_source(original)
+    clone_source = discover_source(clone)
+    assert clone_source.root != original_source.root
+    assert (
+        clone_source.registry_source["git_common_dir"]
+        != original_source.registry_source["git_common_dir"]
+    )
+    simulated_reuse = replace(
+        clone_source,
+        git_common_device=original_source.git_common_device,
+        git_common_inode=original_source.git_common_inode,
+    )
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        original_source,
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+
+    adopted = store.adopt(
+        simulated_reuse,
+        _authorization(IdentityAction.ADOPT, "adopt-reused-inode"),
+        expected_revision=1,
+    )
+
+    entry = _workspace_entry(adopted)
+    assert adopted.to_dict()["revision"] == 2
+    assert [alias["path"] for alias in entry["aliases"]] == [str(clone.resolve())]
+
+
+def test_adopt_rejects_unrelated_history_when_retained_inode_is_reused(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
+    unrelated = _create_repo(tmp_path / "unrelated", REPO_UUID, marker="unrelated")
+    original_source = discover_source(original)
+    unrelated_source = discover_source(unrelated)
+    assert not set(original_source.history_roots).intersection(unrelated_source.history_roots)
+    simulated_reuse = replace(
+        unrelated_source,
+        git_common_device=original_source.git_common_device,
+        git_common_inode=original_source.git_common_inode,
+    )
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        original_source,
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    before_state = _tree_snapshot(store.state.root)
+
+    with pytest.raises(UUIDCollisionError, match="shared history"):
+        store.adopt(
+            simulated_reuse,
+            _authorization(IdentityAction.ADOPT, "reject-reused-inode"),
+            expected_revision=1,
+        )
+
+    assert store.load().to_dict()["revision"] == 1
+    assert _tree_snapshot(store.state.root) == before_state
+
+
+def test_rebind_allows_enrolled_common_directory_after_history_rewrite(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    enrolled_source = discover_source(repo)
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    enrolled = store.enroll(
+        enrolled_source,
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    enrolled_entry = _workspace_entry(enrolled)
+
+    rewritten_head = _run(
+        repo,
+        "commit-tree",
+        _run(repo, "write-tree"),
+        "-m",
+        "rewritten-root",
+    )
+    _run(repo, "update-ref", "HEAD", rewritten_head)
+    rewritten_source = discover_source(repo)
+    assert (
+        rewritten_source.git_common_device,
+        rewritten_source.git_common_inode,
+    ) == (
+        enrolled_source.git_common_device,
+        enrolled_source.git_common_inode,
+    )
+    assert not set(enrolled_source.history_roots).intersection(
+        rewritten_source.history_roots
+    )
+
+    rebound = store.rebind(
+        rewritten_source,
+        _authorization(IdentityAction.REBIND, "rebind-rewritten-history"),
+        expected_revision=1,
+    )
+
+    rebound_entry = _workspace_entry(rebound)
+    assert rebound.to_dict()["revision"] == 2
+    assert rebound_entry["uuid_enrollment"]["current_evidence_sha256"] != (
+        enrolled_entry["uuid_enrollment"]["current_evidence_sha256"]
+    )
+    evidence = store.read_evidence(
+        rebound_entry["uuid_enrollment"]["current_evidence_sha256"]
+    )
+    assert evidence["action"] == "REBIND"
+    assert evidence["history_roots"] == list(rewritten_source.history_roots)
 
 
 def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> None:

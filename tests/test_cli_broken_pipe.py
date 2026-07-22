@@ -13,6 +13,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 PYTHON = sys.executable
 
 
@@ -87,3 +89,59 @@ def test_workspace_nonzero_exit_flushes_inside_broken_pipe_guard(tmp_path: Path)
 
     assert rc == 0, f"expected guarded broken-pipe exit, got {rc}: {stderr}"
     assert "Exception ignored while flushing sys.stdout" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_exit"),
+    [
+        (["workspace", "register"], 64),
+        (
+            [
+                "workspace",
+                "register",
+                "enroll",
+                "--repo-uuid",
+                "11111111-1111-4111-8111-111111111111",
+                "--expected-registry-revision",
+                "0",
+                "--authorization-stdin",
+            ],
+            20,
+        ),
+    ],
+)
+@pytest.mark.parametrize("combined_output", [False, True])
+def test_workspace_registration_preserves_failure_exit_when_pipe_is_closed(
+    tmp_path: Path,
+    arguments: list[str],
+    expected_exit: int,
+    combined_output: bool,
+) -> None:
+    home = tmp_path / "home"
+    state_home = tmp_path / "state-home"
+    checkout = tmp_path / "checkout"
+    home.mkdir()
+    checkout.mkdir()
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(state_home),
+            "PYTHONPATH": str(Path(__file__).parents[1]),
+        }
+    )
+    read_descriptor, write_descriptor = os.pipe()
+    os.close(read_descriptor)
+    try:
+        producer = subprocess.Popen(
+            [PYTHON, "-m", "graphify", *arguments],
+            cwd=checkout,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=write_descriptor if combined_output else subprocess.DEVNULL,
+            stderr=write_descriptor,
+        )
+    finally:
+        os.close(write_descriptor)
+
+    assert producer.wait() == expected_exit
