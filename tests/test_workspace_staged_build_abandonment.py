@@ -27,6 +27,7 @@ from graphify.workspace.contracts import (
 from graphify.workspace.generations import (
     CertificationRequest,
     GenerationConflict,
+    GenerationError,
     GenerationStore,
     StagedBuildCompletion,
     StagedBuildOperation,
@@ -740,6 +741,76 @@ def test_fresh_manifest_drift_terminally_abandons_each_recoverable_staged_state(
         source_observations=observations,
     )
     assert successor_state.lifecycle_state == "REQUESTED"
+
+
+def test_compatibility_drift_abandons_when_selected_source_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    harness, store, _pointers = _runtime(tmp_path)
+    observations = _observations(harness)
+    request = _request(harness, observations)
+    _requested(store, harness, request, observations)
+    fresh_store = _reopen_store(
+        harness,
+        compatibility_manifest=_alternate_manifest(),
+    )
+    restored = trust_source_observations(fresh_store, observations)
+    harness.repo.rename(tmp_path / "source-moved")
+
+    recovery = fresh_store.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        acquired_at=START + timedelta(seconds=2),
+        monotonic_ns=20_000,
+        ttl_ns=1_000_000,
+    )
+    abandoned = fresh_store.abandon_staged_build(
+        recovery,
+        source_observations=observations,
+        monotonic_ns=20_001,
+    )
+    fresh_store.leases.release(recovery.grant)
+
+    assert abandoned.lifecycle_state == "ABANDONED"
+    assert abandoned.abandon_reason == "COMPATIBILITY_CHANGED"
+    assert restored.calls == 0
+
+
+def test_unavailable_source_without_higher_authority_drift_fails_closed(
+    tmp_path: Path,
+) -> None:
+    harness, store, _pointers = _runtime(tmp_path)
+    observations = _observations(harness)
+    request = _request(harness, observations)
+    _requested(store, harness, request, observations)
+    restored = trust_source_observations(store, observations)
+    harness.repo.rename(tmp_path / "source-moved")
+
+    recovery = store.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        acquired_at=START + timedelta(seconds=2),
+        monotonic_ns=20_000,
+        ttl_ns=1_000_000,
+    )
+    with pytest.raises(
+        GenerationError,
+        match="trusted source observations are unavailable",
+    ):
+        store.abandon_staged_build(
+            recovery,
+            source_observations=observations,
+            monotonic_ns=20_001,
+        )
+    store.leases.release(recovery.grant)
+
+    assert restored.calls == 0
+    staged = store._load_staged_build_locked(REPO_UUID)
+    assert staged is not None
+    assert staged.lifecycle_state == "REQUESTED"
+    assert staged.abandonment_intent is None
 
 
 def test_abandoned_terminal_commit_unknown_recovers_by_exact_request_replay(

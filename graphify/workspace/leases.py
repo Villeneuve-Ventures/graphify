@@ -418,6 +418,33 @@ class LeaseStore:
             )
         return discovered.root
 
+    def _assert_staged_recovery_source_boundary(
+        self,
+        repo_uuid: str,
+        entry: dict[str, Any],
+    ) -> None:
+        """Keep recovery state external without requiring a live selected source."""
+
+        try:
+            source_root = self._verify_selected_source(repo_uuid, entry)
+        except SourceAmbiguousError:
+            recorded_root = Path(str(entry["active_source"]["path"]))
+            try:
+                source_root = recorded_root.resolve(strict=True)
+            except (OSError, RuntimeError):
+                source_root = Path(os.path.abspath(recorded_root))
+            if (
+                self.state.root == source_root
+                or self.state.root in source_root.parents
+                or source_root in self.state.root.parents
+            ):
+                raise StatePathError(
+                    f"external state root {self.state.root} overlaps "
+                    f"recorded source checkout {source_root}"
+                )
+            return
+        self.state.assert_external_to(source_root)
+
     @contextmanager
     def _bound_request_state(
         self,
@@ -730,8 +757,11 @@ class LeaseStore:
             raise LeaseError("ttl_ns must be positive and monotonic_ns must be non-negative")
         entry = _registry_entry(document, repo_uuid)
         if verify_active:
-            source_root = self._verify_selected_source(repo_uuid, entry)
-            self.state.assert_external_to(source_root)
+            if allow_stale_staged_authority:
+                self._assert_staged_recovery_source_boundary(repo_uuid, entry)
+            else:
+                source_root = self._verify_selected_source(repo_uuid, entry)
+                self.state.assert_external_to(source_root)
         with self.workspace_lock(repo_uuid):
             state = self._load_state_locked(document, repo_uuid)
             staged_build = self._load_staged_build_locked(repo_uuid)
@@ -918,8 +948,7 @@ class LeaseStore:
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
         with self.registry.recovered_snapshot() as document:
             entry = _registry_entry(document, repo_uuid)
-            source_root = self._verify_selected_source(repo_uuid, entry)
-            self.state.assert_external_to(source_root)
+            self._assert_staged_recovery_source_boundary(repo_uuid, entry)
             with self.workspace_lock(repo_uuid):
                 state = self._load_state_locked(document, repo_uuid)
                 _domain, current = self._matching_lease(state, grant)

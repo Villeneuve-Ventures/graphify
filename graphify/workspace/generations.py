@@ -751,6 +751,32 @@ class GenerationStore:
             ),
         }
 
+    @classmethod
+    def _observations_bind_staged_request(
+        cls,
+        request: StructuralBuildRequest,
+        source_observations: Sequence[SourceObservation],
+    ) -> bool:
+        observations = tuple(source_observations)
+        if len(observations) != 2:
+            return False
+        try:
+            evidence_sha256 = cls.structural_observation_evidence_sha256(observations)
+        except GenerationConflict:
+            return False
+        observation = observations[0]
+        return (
+            observation.source_commit,
+            observation.policy_sha256,
+            observation.inventory_sha256,
+            evidence_sha256,
+        ) == (
+            request.source_commit,
+            request.policy_sha256,
+            request.observation_manifest_sha256,
+            request.observation_evidence_sha256,
+        )
+
     @staticmethod
     def _registry_workspace_entry(
         operation: LeaseOperation,
@@ -765,12 +791,12 @@ class GenerationStore:
             raise GenerationConflict("registry has no singular staged workspace entry")
         return int(registry_value["revision"]), entries[0]
 
-    def _staged_abandonment_proof_locked(
+    def _staged_abandonment_proof_if_stale_locked(
         self,
         operation: LeaseOperation,
         state: StagedBuildState,
         trusted_observations: Sequence[SourceObservation],
-    ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None]:
+    ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None] | None:
         registry_revision, entry = self._registry_workspace_entry(operation)
         active_source_revision = int(entry["active_source_revision"])
         pointer = self._visible_pointer_locked(operation.repo_uuid)
@@ -819,11 +845,26 @@ class GenerationStore:
         )
         try:
             reason = evidence.reason_for(request)
-        except ContractError as exc:
+        except ContractError:
+            return None
+        return reason, evidence, pointer
+
+    def _staged_abandonment_proof_locked(
+        self,
+        operation: LeaseOperation,
+        state: StagedBuildState,
+        trusted_observations: Sequence[SourceObservation],
+    ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None]:
+        proof = self._staged_abandonment_proof_if_stale_locked(
+            operation,
+            state,
+            trusted_observations,
+        )
+        if proof is None:
             raise GenerationConflict(
                 "staged build authority is still current and cannot be abandoned"
-            ) from exc
-        return reason, evidence, pointer
+            )
+        return proof
 
     @staticmethod
     def _pointer_references_staged_generation(
@@ -1275,6 +1316,30 @@ class GenerationStore:
         self.fault_hook(f"generation:{state.generation_id}:staged_abandoned_durable")
         return committed
 
+    def _commit_new_staged_abandonment_locked(
+        self,
+        operation: LeaseOperation,
+        state: StagedBuildState,
+        *,
+        reason: str,
+        evidence: StagedBuildAbandonmentEvidence,
+        occurred_at: datetime,
+    ) -> StagedBuildState:
+        self._require_staged_abandonment_safe_locked(operation, state)
+        intent = self._staged_abandonment_intent(
+            operation,
+            state,
+            reason=reason,
+            evidence=evidence,
+        )
+        state = self._commit_staged_abandonment_intent_locked(state, intent)
+        return self._finish_staged_abandonment_locked(
+            operation,
+            state,
+            intent,
+            occurred_at=occurred_at,
+        )
+
     def abandon_staged_build(
         self,
         attempt: StagedBuildOperation,
@@ -1312,6 +1377,21 @@ class GenerationStore:
                     state.abandonment_intent,
                     occurred_at=occurred_at,
                 )
+            if self._observations_bind_staged_request(request, source_observations):
+                proof = self._staged_abandonment_proof_if_stale_locked(
+                    operation,
+                    state,
+                    source_observations,
+                )
+                if proof is not None:
+                    reason, evidence, _pointer = proof
+                    return self._commit_new_staged_abandonment_locked(
+                        operation,
+                        state,
+                        reason=reason,
+                        evidence=evidence,
+                        occurred_at=occurred_at,
+                    )
 
         trusted = self._trusted_structural_observations(
             attempt.state.repo_uuid,
@@ -1344,14 +1424,13 @@ class GenerationStore:
                     state,
                     trusted,
                 )
-                self._require_staged_abandonment_safe_locked(operation, state)
-                intent = self._staged_abandonment_intent(
+                return self._commit_new_staged_abandonment_locked(
                     operation,
                     state,
                     reason=reason,
                     evidence=evidence,
+                    occurred_at=occurred_at,
                 )
-                state = self._commit_staged_abandonment_intent_locked(state, intent)
             return self._finish_staged_abandonment_locked(
                 operation,
                 state,
