@@ -1771,7 +1771,10 @@ class DurableStateRoot:
         decoder: Callable[[bytes], RecordT],
         revision: Callable[[RecordT], int],
         allow_missing: bool = False,
+        max_bytes: int | None = None,
     ) -> RecordT | None:
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
         paths = {
             "current": self.path(current),
             "pending": self.path(pending),
@@ -1786,7 +1789,10 @@ class DurableStateRoot:
         invalid: dict[str, Exception] = {}
         for name, path in paths.items():
             try:
-                data = self.read_optional_existing_bytes(path.relative_to(self.root))
+                data = self.read_optional_existing_bytes(
+                    path.relative_to(self.root),
+                    max_bytes=max_bytes,
+                )
             except Exception as exc:
                 invalid[name] = exc
                 continue
