@@ -907,6 +907,18 @@ def test_source_identity_rejects_a_symlinked_graphify_directory(tmp_path: Path) 
         discover_source(repo)
 
 
+def test_source_discovery_config_byte_limit_is_explicit_per_caller(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID)
+    config = repo / ".graphify/workspace.toml"
+    config.write_bytes(config.read_bytes() + b"\n#" + b"x" * (64 * 1024))
+
+    assert discover_source(repo).repo_uuid == REPO_UUID
+    with pytest.raises(SourceDiscoveryError, match="exceeds byte limit"):
+        discover_source(repo, max_bytes=64 * 1024)
+
+
 def test_uuid_collision_adoption_and_enrollment_evidence_rotation(tmp_path: Path) -> None:
     original = _create_repo(tmp_path / "original", REPO_UUID, marker="original")
     clone = _clone_repo(original, tmp_path / "clone")

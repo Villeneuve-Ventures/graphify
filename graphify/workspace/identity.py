@@ -26,7 +26,6 @@ _RFC3339_UTC = re.compile(
     r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
     r"T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?Z$"
 )
-_WORKSPACE_CONFIG_MAX_BYTES = 64 * 1024
 
 
 class IdentityError(RuntimeError):
@@ -538,6 +537,7 @@ def discover_source(
     source_root: Path,
     *,
     deadline_ns: int | None = None,
+    max_bytes: int | None = None,
 ) -> SourceIdentity:
     """Discover source identity without mutating the checkout or Git metadata."""
 
@@ -560,7 +560,7 @@ def discover_source(
     config, config_bytes = _read_workspace_config(
         root,
         deadline_ns=deadline_ns,
-        max_bytes=_WORKSPACE_CONFIG_MAX_BYTES,
+        max_bytes=max_bytes,
     )
     repo_uuid = str(config.to_dict()["repo_uuid"])
 

@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import errno
 import json
+from json import loads as _load_json
 import os
 from pathlib import Path
 import re
 import sys
 import time
-from typing import cast, Sequence, TextIO
+from typing import Any, cast, Sequence, TextIO
 
 from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.composition import (
@@ -64,7 +65,11 @@ from graphify.workspace.status import (
 _REGISTRATION_CONTRACT = "graphify.workspace.registration"
 _REGISTRATION_SCHEMA_VERSION = 1
 _AUTHORIZATION_MAX_BYTES = 16 * 1024
+_REGISTRATION_CONFIG_MAX_BYTES = 64 * 1024
 _REGISTRATION_SOURCE_TIMEOUT_NS = 5_000_000_000
+_REGISTRATION_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "registration.schema.json"
+)
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt> --repo-uuid UUID "
@@ -90,6 +95,7 @@ class _RegistrationFailure:
     exit_code: int
     reason_code: str
     action_code: str
+    registry_revision: int | None = None
 
 
 def _parse_register_request(command: tuple[str, ...]) -> _RegisterRequest | None:
@@ -272,18 +278,19 @@ def _registration_failure(
     request: _RegisterRequest,
     failure: _RegistrationFailure,
 ) -> str:
-    return _registration_bytes(
-        {
-            "action": request.action.value.lower(),
-            "action_code": failure.action_code,
-            "cli_contract_version": CLI_CONTRACT_VERSION,
-            "contract": _REGISTRATION_CONTRACT,
-            "exit_code": failure.exit_code,
-            "reason_code": failure.reason_code,
-            "schema_version": _REGISTRATION_SCHEMA_VERSION,
-            "state": failure.state,
-        }
-    )
+    receipt: dict[str, object] = {
+        "action": request.action.value.lower(),
+        "action_code": failure.action_code,
+        "cli_contract_version": CLI_CONTRACT_VERSION,
+        "contract": _REGISTRATION_CONTRACT,
+        "exit_code": failure.exit_code,
+        "reason_code": failure.reason_code,
+        "schema_version": _REGISTRATION_SCHEMA_VERSION,
+        "state": failure.state,
+    }
+    if failure.registry_revision is not None:
+        receipt["registry_revision"] = failure.registry_revision
+    return _registration_bytes(receipt)
 
 
 def _emit_registration_receipt(stream: TextIO, payload: str, *, exit_code: int) -> int:
@@ -306,11 +313,17 @@ def _emit_registration_receipt(stream: TextIO, payload: str, *, exit_code: int) 
 
 def _classify_registration_error(error: Exception) -> _RegistrationFailure:
     if isinstance(error, RevisionConflict):
+        action_code = (
+            "refresh_registry_revision"
+            if error.actual_registry_revision is not None
+            else "run_workspace_doctor"
+        )
         return _RegistrationFailure(
             "conflict",
             EXIT_DEGRADED,
             "revision_conflict",
-            "refresh_registry_revision",
+            action_code,
+            error.actual_registry_revision,
         )
     if isinstance(error, UUIDCollisionError):
         return _RegistrationFailure(
@@ -429,6 +442,7 @@ def _run_registration(
             source = discover_source(
                 source_root,
                 deadline_ns=source_deadline_ns,
+                max_bytes=_REGISTRATION_CONFIG_MAX_BYTES,
             )
             _validate_registration_source(source)
             if source.repo_uuid != request.repo_uuid:
@@ -438,6 +452,7 @@ def _run_registration(
             refreshed_source = discover_source(
                 source_root,
                 deadline_ns=source_deadline_ns,
+                max_bytes=_REGISTRATION_CONFIG_MAX_BYTES,
             )
             _validate_registration_source(refreshed_source)
             if refreshed_source != source:
@@ -568,4 +583,13 @@ def run_workspace_command(
     return report.exit_code
 
 
-__all__ = ["run_workspace_command"]
+def load_registration_schema() -> dict[str, Any]:
+    """Load the public registration receipt schema."""
+
+    value = _load_json(_REGISTRATION_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace registration schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+__all__ = ["load_registration_schema", "run_workspace_command"]

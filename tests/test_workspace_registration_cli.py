@@ -15,6 +15,7 @@ from threading import Barrier
 from types import SimpleNamespace
 from typing import Any
 
+from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
 from graphify.workspace.adapters import UnsupportedCompatibility
@@ -133,7 +134,12 @@ def _run_register(
 
 
 def _registration_payload(stream: StringIO) -> dict[str, Any]:
-    return json.loads(stream.getvalue())
+    payload = json.loads(stream.getvalue())
+    Draft202012Validator(
+        _cli().load_registration_schema(),
+        format_checker=FormatChecker(),
+    ).validate(payload)
+    return payload
 
 
 class _AllowingState:
@@ -187,6 +193,70 @@ def test_registration_docs_freeze_exact_authorization_stdin_contract() -> None:
     assert "replace `ENROLL` with `ADOPT`" in readme
 
 
+def test_registration_schema_freezes_success_conflict_and_invalid_receipts() -> None:
+    schema = _cli().load_registration_schema()
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    common = {
+        "action": "enroll",
+        "cli_contract_version": 1,
+        "contract": "graphify.workspace.registration",
+        "schema_version": 1,
+    }
+    valid = [
+        {
+            **common,
+            "exit_code": 0,
+            "registry_revision": 1,
+            "repo_uuid": REPO_UUID,
+            "state": "registered",
+        },
+        {
+            **common,
+            "action_code": "refresh_registry_revision",
+            "exit_code": 10,
+            "reason_code": "revision_conflict",
+            "registry_revision": 2,
+            "state": "conflict",
+        },
+        {
+            **common,
+            "action_code": "verify_registration_identity",
+            "exit_code": 10,
+            "reason_code": "uuid_collision",
+            "state": "conflict",
+        },
+        {
+            **common,
+            "action_code": "run_workspace_doctor",
+            "exit_code": 10,
+            "reason_code": "revision_conflict",
+            "state": "conflict",
+        },
+        {
+            **common,
+            "action_code": "provide_valid_authorization",
+            "exit_code": 20,
+            "reason_code": "authorization_invalid",
+            "state": "invalid",
+        },
+    ]
+
+    for receipt in valid:
+        assert not list(validator.iter_errors(receipt))
+
+    missing_retry_revision = dict(valid[1])
+    missing_retry_revision.pop("registry_revision")
+    contradictory_invalid = {**valid[3], "registry_revision": 2}
+    success_with_failure_code = {**valid[0], "reason_code": "registration_failed"}
+    for receipt in (
+        missing_retry_revision,
+        contradictory_invalid,
+        success_with_failure_code,
+    ):
+        assert list(validator.iter_errors(receipt))
+
+
 def _assert_external_state_allowlist(state_root: Path, *, includes_authority: bool) -> None:
     allowed = re.compile(
         r"(?:registry(?:\.(?:previous|pending))?\.json|registry\.lock|"
@@ -232,7 +302,7 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     cwd.mkdir()
     source = _source_stub(cwd)
     calls: list[tuple[str, object, object, int]] = []
-    discoveries: list[tuple[Path, int]] = []
+    discoveries: list[tuple[Path, int, int | None]] = []
 
     class Registry:
         state = _AllowingState()
@@ -256,8 +326,13 @@ def test_register_emits_the_versioned_canonical_success_receipt(
         lambda _inputs: SimpleNamespace(registry=Registry()),
         raising=False,
     )
-    def discover(root: Path, *, deadline_ns: int) -> object:
-        discoveries.append((root, deadline_ns))
+    def discover(
+        root: Path,
+        *,
+        deadline_ns: int,
+        max_bytes: int | None,
+    ) -> object:
+        discoveries.append((root, deadline_ns, max_bytes))
         return source
 
     monkeypatch.setattr(workspace_cli, "discover_source", discover, raising=False)
@@ -291,7 +366,10 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     assert calls[0][0] == method
     assert calls[0][1] is source
     assert calls[0][3] == 3
-    assert discoveries == [(cwd, 5_000_000_123), (cwd, 5_000_000_123)]
+    assert discoveries == [
+        (cwd, 5_000_000_123, 64 * 1024),
+        (cwd, 5_000_000_123, 64 * 1024),
+    ]
     assert isinstance(calls[0][2], OperatorAuthorization)
     assert calls[0][2].to_dict() == json.loads(_authorization_payload(action.upper()))
     expected = {
@@ -380,7 +458,15 @@ def test_register_usage_errors_do_not_read_stdin_or_discover_state(
 @pytest.mark.parametrize(
     "error, state, exit_code",
     [
-        (RevisionConflict("private current revision"), "conflict", 10),
+        (
+            RevisionConflict(
+                "private current revision",
+                actual_registry_revision=7,
+            ),
+            "conflict",
+            10,
+        ),
+        (RevisionConflict("private unavailable revision"), "conflict", 10),
         (UUIDCollisionError("private source path"), "conflict", 10),
         (AuthorizationError("private authorization reason"), "invalid", 20),
         (TypeError("private runtime failure"), "invalid", 20),
@@ -414,7 +500,7 @@ def test_register_failures_are_canonical_opaque_and_redacted(
     monkeypatch.setattr(
         workspace_cli,
         "discover_source",
-        lambda _root, *, deadline_ns: source,
+        lambda _root, *, deadline_ns, max_bytes: source,
         raising=False,
     )
     monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
@@ -451,6 +537,15 @@ def test_register_failures_are_canonical_opaque_and_redacted(
     assert payload["exit_code"] == exit_code
     assert payload["action"] == "enroll"
     assert payload["reason_code"] and payload["action_code"]
+    if isinstance(error, RevisionConflict):
+        if error.actual_registry_revision is None:
+            assert payload["action_code"] == "run_workspace_doctor"
+            assert "registry_revision" not in payload
+        else:
+            assert payload["action_code"] == "refresh_registry_revision"
+            assert payload["registry_revision"] == 7
+    else:
+        assert "registry_revision" not in payload
     assert "private" not in stderr.getvalue()
     assert str(cwd) not in stderr.getvalue()
 
@@ -569,10 +664,15 @@ def test_register_applies_a_deadline_to_source_discovery_without_mutation(
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     state_root = tmp_path / "external-state"
-    observed_deadlines: list[int] = []
+    observed_calls: list[tuple[int, int | None]] = []
 
-    def time_out(_root: Path, *, deadline_ns: int) -> None:
-        observed_deadlines.append(deadline_ns)
+    def time_out(
+        _root: Path,
+        *,
+        deadline_ns: int,
+        max_bytes: int | None,
+    ) -> None:
+        observed_calls.append((deadline_ns, max_bytes))
         raise SourceDiscoveryTimeout("private source command timed out")
 
     monkeypatch.setattr(workspace_cli, "discover_source", time_out, raising=False)
@@ -589,7 +689,7 @@ def test_register_applies_a_deadline_to_source_discovery_without_mutation(
     assert result == 20
     assert stdout.getvalue() == ""
     assert _registration_payload(stderr)["reason_code"] == "source_discovery_timeout"
-    assert observed_deadlines == [5_000_000_456]
+    assert observed_calls == [(5_000_000_456, 64 * 1024)]
     assert not state_root.exists()
 
 
@@ -609,8 +709,13 @@ def test_register_revalidates_source_head_before_mutation(
     inputs = _inputs(tmp_path / "external-state")
     discover = workspace_cli.discover_source
 
-    def switch_head_after_discovery(root: Path, *, deadline_ns: int) -> Any:
-        source = discover(root, deadline_ns=deadline_ns)
+    def switch_head_after_discovery(
+        root: Path,
+        *,
+        deadline_ns: int,
+        max_bytes: int | None,
+    ) -> Any:
+        source = discover(root, deadline_ns=deadline_ns, max_bytes=max_bytes)
         _git(checkout, "update-ref", "HEAD", raced_head)
         return source
 
@@ -647,9 +752,14 @@ def test_register_resnapshots_all_source_evidence_before_mutation(
     discover = workspace_cli.discover_source
     discovery_count = 0
 
-    def mutate_after_first_discovery(root: Path, *, deadline_ns: int) -> Any:
+    def mutate_after_first_discovery(
+        root: Path,
+        *,
+        deadline_ns: int,
+        max_bytes: int | None,
+    ) -> Any:
         nonlocal discovery_count
-        source = discover(root, deadline_ns=deadline_ns)
+        source = discover(root, deadline_ns=deadline_ns, max_bytes=max_bytes)
         discovery_count += 1
         if discovery_count == 1:
             if changed_fact == "config":
@@ -783,7 +893,7 @@ def test_register_rejects_noncanonical_filesystem_identity_before_external_mutat
     monkeypatch.setattr(
         workspace_cli,
         "discover_source",
-        lambda _root, *, deadline_ns: noncanonical,
+        lambda _root, *, deadline_ns, max_bytes: noncanonical,
         raising=False,
     )
     inputs = _inputs(tmp_path / "external-state")
@@ -828,7 +938,7 @@ def test_register_rejects_inconsistent_source_evidence_before_external_mutation(
     monkeypatch.setattr(
         workspace_cli,
         "discover_source",
-        lambda _root, *, deadline_ns: inconsistent,
+        lambda _root, *, deadline_ns, max_bytes: inconsistent,
         raising=False,
     )
     inputs = _inputs(tmp_path / "external-state")
@@ -1129,7 +1239,10 @@ def test_register_duplicate_and_stale_requests_do_not_change_external_state(
     assert duplicate_exit == repeated_exit == stale_exit == 10
     assert repeated_stderr.getvalue() == duplicate_stderr.getvalue()
     assert _registration_payload(duplicate_stderr)["reason_code"] == "uuid_collision"
-    assert _registration_payload(stale_stderr)["reason_code"] == "revision_conflict"
+    stale_payload = _registration_payload(stale_stderr)
+    assert stale_payload["reason_code"] == "revision_conflict"
+    assert stale_payload["action_code"] == "refresh_registry_revision"
+    assert stale_payload["registry_revision"] == 1
     assert tree_snapshot(inputs.state_root) == before_tree
     assert set(metadata_snapshot(inputs.state_root)) == set(before_metadata)
     assert (
@@ -1605,7 +1718,9 @@ def test_registration_cli_cas_contention_emits_one_success_and_one_conflict(
     assert success[2].getvalue() == ""
     assert _registration_payload(success[1])["registry_revision"] == 1
     assert conflict[1].getvalue() == ""
-    assert _registration_payload(conflict[2])["reason_code"] == "revision_conflict"
+    conflict_payload = _registration_payload(conflict[2])
+    assert conflict_payload["reason_code"] == "revision_conflict"
+    assert conflict_payload["registry_revision"] == 1
     document = RegistryStore(inputs.state_root, capabilities=SUPPORTED).load().to_dict()
     assert document["revision"] == 1
     assert len(document["workspaces"]) == 1

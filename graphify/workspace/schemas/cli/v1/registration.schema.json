@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/registration.schema.json",
+  "title": "Graphify workspace registration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "cli_contract_version",
+    "state",
+    "action",
+    "exit_code"
+  ],
+  "properties": {
+    "contract": {"const": "graphify.workspace.registration"},
+    "schema_version": {"const": 1},
+    "cli_contract_version": {"const": 1},
+    "state": {"enum": ["registered", "conflict", "invalid"]},
+    "action": {"enum": ["enroll", "adopt"]},
+    "exit_code": {"enum": [0, 10, 20]},
+    "registry_revision": {"type": "integer", "minimum": 0},
+    "repo_uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "reason_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "action_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "state": {"const": "registered"},
+        "exit_code": {"const": 0}
+      },
+      "required": ["registry_revision", "repo_uuid"],
+      "not": {
+        "anyOf": [
+          {"required": ["reason_code"]},
+          {"required": ["action_code"]}
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "revision_conflict"},
+        "action_code": {"const": "refresh_registry_revision"}
+      },
+      "required": ["registry_revision", "reason_code", "action_code"],
+      "not": {"required": ["repo_uuid"]}
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "uuid_collision"},
+        "action_code": {"const": "verify_registration_identity"}
+      },
+      "required": ["reason_code", "action_code"],
+      "not": {
+        "anyOf": [
+          {"required": ["registry_revision"]},
+          {"required": ["repo_uuid"]}
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "revision_conflict"},
+        "action_code": {"const": "run_workspace_doctor"}
+      },
+      "required": ["reason_code", "action_code"],
+      "not": {
+        "anyOf": [
+          {"required": ["registry_revision"]},
+          {"required": ["repo_uuid"]}
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {"const": "invalid"},
+        "exit_code": {"const": 20}
+      },
+      "required": ["reason_code", "action_code"],
+      "not": {
+        "anyOf": [
+          {"required": ["registry_revision"]},
+          {"required": ["repo_uuid"]}
+        ]
+      }
+    }
+  ]
+}

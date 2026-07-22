@@ -34,9 +34,10 @@ the Git top level, ignores local Git replacement refs and legacy graft files,
 cross-checks its bounded no-follow `.graphify/workspace.toml`, and never infers
 adoption. It emits one canonical redacted receipt and writes only the existing
 P2 registry, workspace, lock, and evidence records beneath the configured
-external state root. Rebind, rotation, activation, remaining mutation/query
-commands, repair, watch/service, performance certification, and candidate
-publication remain later P5 work.
+external state root. The receipt's normative machine-readable schema is
+`graphify/workspace/schemas/cli/v1/registration.schema.json`. Rebind, rotation,
+activation, remaining mutation/query commands, repair, watch/service,
+performance certification, and candidate publication remain later P5 work.
 
 Authorization standard input is one JSON object with exactly the five string
 fields shown here; `action` is the uppercase operator intent, not the lowercase
@@ -59,8 +60,9 @@ or fork engine logic inside the package.
 
 ## Contract authority
 
-- JSON Schemas under `graphify/workspace/schemas/v1/` are normative for the
-  structural shape of JSON documents and the TOML-to-object representation of
+- JSON Schemas under `graphify/workspace/schemas/v1/` and
+  `graphify/workspace/schemas/cli/v1/` are normative for the structural shape
+  of durable documents, CLI receipts, and the TOML-to-object representation of
   repo policy.
 - `graphify.workspace` supplies dependency-free canonical reference models,
   exact v1 rejection, SHA-256 inputs, and journal frame encoding. Its

@@ -55,6 +55,15 @@ class RegistryError(RuntimeError):
 class RevisionConflict(RegistryError):
     code = "revision_conflict"
 
+    def __init__(
+        self,
+        detail: str,
+        *,
+        actual_registry_revision: int | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.actual_registry_revision = actual_registry_revision
+
 
 @dataclass(frozen=True)
 class ActivationResult:
@@ -191,7 +200,8 @@ class RegistryStore:
         revision = 0 if document is None else int(document.to_dict()["revision"])
         if expected_revision is not None and expected_revision != revision:
             raise RevisionConflict(
-                f"registry_revision expected {expected_revision}, found {revision}"
+                f"registry_revision expected {expected_revision}, found {revision}",
+                actual_registry_revision=revision,
             )
         return revision
 
