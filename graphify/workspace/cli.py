@@ -24,13 +24,17 @@ from graphify.workspace.contracts import (
     ContractError,
     WorkspaceLeaseState,
     canonical_json_bytes,
+    canonical_registry_source,
+    canonical_sha256,
 )
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
     IdentityError,
     OperatorAuthorization,
+    SourceDiscoveryError,
     SourceDiscoveryTimeout,
+    SourceIdentity,
     UUIDCollisionError,
     discover_source,
     source_root_identity,
@@ -187,13 +191,58 @@ def _read_operator_authorization(request: _RegisterRequest) -> OperatorAuthoriza
     authorization = cast(dict[str, str], value)
     if authorization["action"] != request.action.value:
         raise AuthorizationError("authorization action does not match registration intent")
-    return OperatorAuthorization(
+    result = OperatorAuthorization(
         action=request.action,
         operator_id=authorization["operator_id"],
         reason=authorization["reason"],
         issued_at=authorization["issued_at"],
         nonce=authorization["nonce"],
     )
+    try:
+        canonical_json_bytes(result.to_dict())
+    except ContractError as exc:
+        raise AuthorizationError(
+            "authorization fields are not canonically encodable"
+        ) from exc
+    return result
+
+
+def _validate_registration_source(source: SourceIdentity) -> None:
+    try:
+        canonical = canonical_registry_source(source.registry_source)
+    except ContractError as exc:
+        raise SourceDiscoveryError(
+            "source identity is not registry-compatible"
+        ) from exc
+    if canonical != source.registry_source:
+        raise SourceDiscoveryError(
+            "source filesystem identity is not canonically normalized"
+        )
+    aliases = cast(
+        list[dict[str, str]],
+        source.registry_source["remote_aliases"],
+    )
+    alias_evidence = {
+        alias["evidence_sha256"]: alias["url"]
+        for alias in aliases
+    }
+    discovered_evidence: dict[str, str] = {}
+    try:
+        for item in source.remote_evidence:
+            digest = canonical_sha256(item)
+            if digest in discovered_evidence:
+                raise ContractError("duplicate remote evidence")
+            discovered_evidence[digest] = item["url"]
+    except (ContractError, KeyError, TypeError) as exc:
+        raise SourceDiscoveryError(
+            "source remote evidence is not registry-compatible"
+        ) from exc
+    if (
+        source.source_sha256 != canonical_sha256(source.registry_source)
+        or len(alias_evidence) != len(aliases)
+        or discovered_evidence != alias_evidence
+    ):
+        raise SourceDiscoveryError("source evidence does not match its registry record")
 
 
 def _registration_bytes(value: dict[str, object]) -> str:
@@ -381,10 +430,21 @@ def _run_registration(
                 source_root,
                 deadline_ns=source_deadline_ns,
             )
+            _validate_registration_source(source)
             if source.repo_uuid != request.repo_uuid:
                 raise UUIDCollisionError(
                     "explicit registration UUID does not match the source configuration"
                 )
+            refreshed_source = discover_source(
+                source_root,
+                deadline_ns=source_deadline_ns,
+            )
+            _validate_registration_source(refreshed_source)
+            if refreshed_source != source:
+                raise SourceDiscoveryError(
+                    "source identity changed during registration"
+                )
+            source = refreshed_source
             git_common_dir = source.root / cast(
                 str,
                 source.registry_source["git_common_dir"],

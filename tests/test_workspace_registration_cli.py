@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from io import BytesIO, StringIO
 import importlib
 import json
@@ -22,6 +23,7 @@ from graphify.workspace.composition import (
     WorkspaceRuntimeInputs,
     WorkspaceRuntimeAuthority,
 )
+from graphify.workspace.contracts import canonical_sha256
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
@@ -140,16 +142,31 @@ class _AllowingState:
 
 
 def _source_stub(root: Path) -> SimpleNamespace:
+    remote_evidence = {
+        "kind": "graphify.workspace.remote_evidence",
+        "remote_name": "origin",
+        "url": "https://github.com/example/registration.git",
+    }
+    registry_source = {
+        "git_common_dir": str(root / ".git"),
+        "path": str(root),
+        "remote_aliases": [
+            {
+                "evidence_sha256": canonical_sha256(remote_evidence),
+                "url": remote_evidence["url"],
+            }
+        ],
+        "worktree_id": "main",
+    }
     return SimpleNamespace(
         git_common_device=0,
         git_common_inode=0,
         head_commit="a" * 40,
         repo_uuid=REPO_UUID,
         root=root,
-        registry_source={
-            "git_common_dir": str(root / ".git"),
-            "worktree_id": "main",
-        },
+        registry_source=registry_source,
+        remote_evidence=(remote_evidence,),
+        source_sha256=canonical_sha256(registry_source),
     )
 
 
@@ -215,6 +232,7 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     cwd.mkdir()
     source = _source_stub(cwd)
     calls: list[tuple[str, object, object, int]] = []
+    discoveries: list[tuple[Path, int]] = []
 
     class Registry:
         state = _AllowingState()
@@ -238,14 +256,11 @@ def test_register_emits_the_versioned_canonical_success_receipt(
         lambda _inputs: SimpleNamespace(registry=Registry()),
         raising=False,
     )
-    monkeypatch.setattr(
-        workspace_cli,
-        "discover_source",
-        lambda root, *, deadline_ns: source
-        if root == cwd and deadline_ns == 5_000_000_123
-        else None,
-        raising=False,
-    )
+    def discover(root: Path, *, deadline_ns: int) -> object:
+        discoveries.append((root, deadline_ns))
+        return source
+
+    monkeypatch.setattr(workspace_cli, "discover_source", discover, raising=False)
     monkeypatch.setattr(workspace_cli.time, "monotonic_ns", lambda: 123)
     monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
     monkeypatch.setattr(
@@ -276,6 +291,7 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     assert calls[0][0] == method
     assert calls[0][1] is source
     assert calls[0][3] == 3
+    assert discoveries == [(cwd, 5_000_000_123), (cwd, 5_000_000_123)]
     assert isinstance(calls[0][2], OperatorAuthorization)
     assert calls[0][2].to_dict() == json.loads(_authorization_payload(action.upper()))
     expected = {
@@ -604,6 +620,218 @@ def test_register_revalidates_source_head_before_mutation(
         switch_head_after_discovery,
         raising=False,
     )
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "source_discovery_error"
+    assert not inputs.state_root.exists()
+
+
+@pytest.mark.parametrize("changed_fact", ["config", "remote"])
+def test_register_resnapshots_all_source_evidence_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    changed_fact: str,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    inputs = _inputs(tmp_path / "external-state")
+    discover = workspace_cli.discover_source
+    discovery_count = 0
+
+    def mutate_after_first_discovery(root: Path, *, deadline_ns: int) -> Any:
+        nonlocal discovery_count
+        source = discover(root, deadline_ns=deadline_ns)
+        discovery_count += 1
+        if discovery_count == 1:
+            if changed_fact == "config":
+                config = checkout / ".graphify/workspace.toml"
+                config.write_bytes(config.read_bytes() + b"\n# raced registration\n")
+            else:
+                _git(
+                    checkout,
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "https://github.com/example/raced-registration.git",
+                )
+        return source
+
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        mutate_after_first_discovery,
+        raising=False,
+    )
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "source_discovery_error"
+    assert discovery_count == 2
+    assert not inputs.state_root.exists()
+
+
+def test_register_rejects_noncanonical_authorization_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    inputs = _inputs(tmp_path / "external-state")
+    authorization = json.dumps(
+        {
+            "action": "ENROLL",
+            "issued_at": "2026-07-16T15:00:00Z",
+            "nonce": "\ud800",
+            "operator_id": "operator:registration-test",
+            "reason": "operator authorization that must remain private",
+        }
+    )
+    workspace_cli = _cli()
+    monkeypatch.setattr(
+        workspace_cli,
+        "source_root_identity",
+        lambda *_args, **_kwargs: pytest.fail(
+            "noncanonical authorization must not inspect the source"
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda *_args, **_kwargs: pytest.fail(
+            "noncanonical authorization must not discover the source"
+        ),
+        raising=False,
+    )
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+        authorization=authorization,
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    payload = _registration_payload(stderr)
+    assert payload["reason_code"] == "authorization_invalid"
+    assert payload["action_code"] == "provide_valid_authorization"
+    assert not inputs.state_root.exists()
+
+
+def test_register_rejects_registry_incompatible_remote_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    _git(
+        checkout,
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/example/repo%2Fname.git",
+    )
+    inputs = _inputs(tmp_path / "external-state")
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "source_discovery_error"
+    assert not inputs.state_root.exists()
+
+
+def test_register_rejects_noncanonical_filesystem_identity_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "Caf\u00e9", REPO_UUID)
+    discovered = workspace_cli.discover_source(checkout)
+    registry_source = dict(discovered.registry_source)
+    registry_source["path"] = str(tmp_path / "Cafe\u0301")
+    assert registry_source["path"] != str(checkout)
+    noncanonical = replace(
+        discovered,
+        registry_source=registry_source,
+        source_sha256=canonical_sha256(registry_source),
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda _root, *, deadline_ns: noncanonical,
+        raising=False,
+    )
+    inputs = _inputs(tmp_path / "external-state")
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "source_discovery_error"
+    assert not inputs.state_root.exists()
+
+
+@pytest.mark.parametrize("inconsistency", ["source_hash", "remote_evidence"])
+def test_register_rejects_inconsistent_source_evidence_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    inconsistency: str,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    discovered = workspace_cli.discover_source(checkout)
+    if inconsistency == "source_hash":
+        inconsistent = replace(discovered, source_sha256="f" * 64)
+    else:
+        inconsistent = replace(
+            discovered,
+            remote_evidence=(
+                *discovered.remote_evidence,
+                {
+                    "kind": "graphify.workspace.remote_evidence",
+                    "remote_name": "private-origin",
+                    "url": "https://github.com/private/inconsistent.git",
+                },
+            ),
+        )
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda _root, *, deadline_ns: inconsistent,
+        raising=False,
+    )
+    inputs = _inputs(tmp_path / "external-state")
 
     exit_code, stdout, stderr = _run_register(
         monkeypatch,
