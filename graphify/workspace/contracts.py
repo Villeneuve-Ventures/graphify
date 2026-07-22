@@ -1625,6 +1625,10 @@ class StagedBuildAbandonmentEvidence:
     migration_epoch: int
     pointer_revision: int
     current_receipt_sha256: str | None
+    selected_compatibility_sha256: str
+    semantic_source_epoch: int | None
+    semantic_queue_watermark: int | None
+    semantic_queue_state_sha256: str | None
     source_commit: str
     source_inventory_sha256: str
     source_policy_sha256: str
@@ -1652,6 +1656,16 @@ class StagedBuildAbandonmentEvidence:
             "migration_epoch": self.migration_epoch,
             "pointer_revision": self.pointer_revision,
             "current_receipt_sha256": self.current_receipt_sha256,
+            "selected_compatibility_sha256": self.selected_compatibility_sha256,
+            "semantic_queue": (
+                None
+                if self.semantic_source_epoch is None
+                else {
+                    "source_epoch": self.semantic_source_epoch,
+                    "queue_watermark": self.semantic_queue_watermark,
+                    "queue_state_sha256": self.semantic_queue_state_sha256,
+                }
+            ),
             "source": {
                 "observation": self._observation_document(),
                 "observation_evidence_sha256": self.source_observation_evidence_sha256,
@@ -1693,6 +1707,13 @@ class StagedBuildAbandonmentEvidence:
             request.expected_current_receipt_sha256,
         ):
             return "POINTER_CHANGED"
+        if self.selected_compatibility_sha256 != request.compatibility_sha256:
+            return "COMPATIBILITY_CHANGED"
+        if (
+            self.semantic_source_epoch is not None
+            and self.semantic_source_epoch != request.source_epoch
+        ):
+            return "SEMANTIC_SOURCE_EPOCH_CHANGED"
         if (
             self.source_commit,
             self.source_policy_sha256,
@@ -1726,6 +1747,8 @@ class StagedBuildAbandonmentEvidence:
                 "migration_epoch",
                 "pointer_revision",
                 "current_receipt_sha256",
+                "selected_compatibility_sha256",
+                "semantic_queue",
                 "source",
             },
         )
@@ -1743,6 +1766,34 @@ class StagedBuildAbandonmentEvidence:
             raise ContractError(
                 "$.abandon_evidence.current_receipt_sha256: must be null exactly "
                 "when pointer_revision is zero"
+            )
+        semantic_queue_value = data["semantic_queue"]
+        semantic_source_epoch: int | None = None
+        semantic_queue_watermark: int | None = None
+        semantic_queue_state_sha256: str | None = None
+        if semantic_queue_value is not None:
+            semantic_queue = _mapping(
+                semantic_queue_value,
+                "$.abandon_evidence.semantic_queue",
+            )
+            _exact_keys(
+                semantic_queue,
+                "$.abandon_evidence.semantic_queue",
+                {"source_epoch", "queue_watermark", "queue_state_sha256"},
+            )
+            semantic_source_epoch = _integer(
+                semantic_queue["source_epoch"],
+                "$.abandon_evidence.semantic_queue.source_epoch",
+                minimum=1,
+            )
+            semantic_queue_watermark = _integer(
+                semantic_queue["queue_watermark"],
+                "$.abandon_evidence.semantic_queue.queue_watermark",
+                minimum=1,
+            )
+            semantic_queue_state_sha256 = _digest(
+                semantic_queue["queue_state_sha256"],
+                "$.abandon_evidence.semantic_queue.queue_state_sha256",
             )
         source = _mapping(data["source"], "$.abandon_evidence.source")
         _exact_keys(
@@ -1809,6 +1860,13 @@ class StagedBuildAbandonmentEvidence:
             ),
             pointer_revision=pointer_revision,
             current_receipt_sha256=receipt_sha256,
+            selected_compatibility_sha256=_digest(
+                data["selected_compatibility_sha256"],
+                "$.abandon_evidence.selected_compatibility_sha256",
+            ),
+            semantic_source_epoch=semantic_source_epoch,
+            semantic_queue_watermark=semantic_queue_watermark,
+            semantic_queue_state_sha256=semantic_queue_state_sha256,
             source_commit=_commit(
                 observation["source_commit"],
                 "$.abandon_evidence.source.observation.source_commit",
@@ -1956,6 +2014,8 @@ class StagedBuildAbandonmentIntent:
                     "ACTIVE_SOURCE_CHANGED",
                     "MIGRATION_CHANGED",
                     "POINTER_CHANGED",
+                    "COMPATIBILITY_CHANGED",
+                    "SEMANTIC_SOURCE_EPOCH_CHANGED",
                 },
             ),
             evidence=evidence,
@@ -2130,6 +2190,8 @@ class StagedBuildState:
                     "ACTIVE_SOURCE_CHANGED",
                     "MIGRATION_CHANGED",
                     "POINTER_CHANGED",
+                    "COMPATIBILITY_CHANGED",
+                    "SEMANTIC_SOURCE_EPOCH_CHANGED",
                 },
             )
             abandon_evidence_sha256 = _digest(

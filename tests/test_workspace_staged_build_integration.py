@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from graphify.workspace.adapters.base import SourceObservation
-from graphify.workspace.contracts import CapacityPolicy, payload_manifest_sha256
+from graphify.workspace.contracts import (
+    CapacityPolicy,
+    CompatibilityManifest,
+    payload_manifest_sha256,
+)
 from graphify.workspace.generations import (
     CertificationRequest,
+    GenerationConflict,
     GenerationStore,
     StagedBuildCompletion,
     StagedBuildOperation,
@@ -19,10 +24,14 @@ from graphify.workspace.generations import (
 )
 from graphify.workspace.identity import discover_source
 from graphify.workspace.journal import JournalStore
-from graphify.workspace.leases import LeaseRecoveryRequired
+from graphify.workspace.leases import LeaseRecoveryRequired, LeaseStore
 from graphify.workspace.persistence import CommitUnknown, InjectedFault
 from graphify.workspace.pointers import PointerCAS, PointerStore
-from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueueStore
+from graphify.workspace.semantic_queue import (
+    SemanticCertificationBlocked,
+    SemanticQueuePolicy,
+    SemanticQueueStore,
+)
 
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
@@ -50,6 +59,18 @@ POLICY = CapacityPolicy.from_mapping(
 )
 QUEUE_POLICY = SemanticQueuePolicy(max_items=16, max_bytes=1024 * 1024, retry_budget=1)
 GENERATION_ID = "gen-staged-integration"
+
+
+def _alternate_manifest() -> CompatibilityManifest:
+    return cast(
+        CompatibilityManifest,
+        CompatibilityManifest.from_mapping(
+            {
+                **COMPATIBILITY_MANIFEST.to_dict(),
+                "distribution_build": "alternate-published-build",
+            }
+        ),
+    )
 
 
 def _observations(harness: RuntimeHarness) -> tuple[SourceObservation, SourceObservation]:
@@ -256,6 +277,61 @@ def test_certify_marks_complete_staged_build_certified(tmp_path: Path) -> None:
     assert state.receipt_sha256 == receipt.sha256
 
 
+def test_certification_rejects_missing_stable_queue_view(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, store, _pointers, observations = _runtime(tmp_path)
+    _request_value, attempt, completion = _completed_staged_build(
+        harness,
+        store,
+        observations,
+    )
+    queue = store.semantic_queue
+    assert queue is not None
+    monkeypatch.setattr(
+        queue,
+        "certification_view",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(
+        SemanticCertificationBlocked,
+        match="requires a stable semantic queue view",
+    ):
+        _certify_staged_build(store, attempt, completion, observations)
+
+
+def test_certification_rejects_missing_final_staged_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, store, _pointers, observations = _runtime(tmp_path)
+    _request_value, attempt, completion = _completed_staged_build(
+        harness,
+        store,
+        observations,
+    )
+    original = store._require_staged_certification_locked
+
+    def lose_final_authority(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        final = store._generation(REPO_UUID, GENERATION_ID)
+        return None if store.state.private_directory_exists(final) else result
+
+    monkeypatch.setattr(
+        store,
+        "_require_staged_certification_locked",
+        lose_final_authority,
+    )
+
+    with pytest.raises(
+        GenerationConflict,
+        match="staged build authority disappeared during certification",
+    ):
+        _certify_staged_build(store, attempt, completion, observations)
+
+
 def test_request_bound_promote_acquisition_bypasses_generic_barrier_and_clears_capacity(
     tmp_path: Path,
 ) -> None:
@@ -332,6 +408,55 @@ def test_complete_staged_promotion_records_terminal_state_without_replaying_poin
     assert retry == terminal
     assert request_retry == terminal
     assert tree_snapshot(harness.state_root) == before_retry
+
+
+def test_fresh_manifest_completes_pointer_visible_promotion(
+    tmp_path: Path,
+) -> None:
+    harness, store, pointers, observations = _runtime(tmp_path)
+    request, build, completion = _completed_staged_build(harness, store, observations)
+    receipt = _certify_staged_build(store, build, completion, observations)
+    harness.leases.release(build.grant)
+    promote = store.acquire_staged_operation(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        operation="PROMOTE",
+        acquired_at=START + timedelta(seconds=3),
+        monotonic_ns=30_000,
+        ttl_ns=1_000_000,
+    )
+    pointer = pointers.promote(
+        promote.grant,
+        _cas(promote.grant, receipt),
+        occurred_at=START + timedelta(seconds=3),
+        monotonic_ns=30_001,
+    )
+    fresh_leases = LeaseStore(
+        harness.state_root,
+        harness.registry,
+        capabilities=harness.leases.state.capabilities,
+    )
+    fresh_store = GenerationStore(
+        harness.state_root,
+        fresh_leases,
+        JournalStore(
+            harness.state_root,
+            fresh_leases,
+            capabilities=fresh_leases.state.capabilities,
+        ),
+        compatibility_manifest=_alternate_manifest(),
+        capabilities=fresh_leases.state.capabilities,
+    )
+
+    terminal = fresh_store.complete_staged_promotion(
+        promote,
+        pointer,
+        monotonic_ns=30_002,
+    )
+
+    assert terminal.lifecycle_state == "PROMOTED"
+    assert terminal.pointer_revision == int(pointer.to_dict()["pointer_revision"])
 
 
 def test_successor_build_recovers_after_certification_journal_precedes_staged_state_commit(

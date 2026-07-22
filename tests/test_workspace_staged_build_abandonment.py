@@ -17,6 +17,7 @@ import pytest
 from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
     CapacityPolicy,
+    CompatibilityManifest,
     ContractError,
     PointerSet,
     StagedBuildAbandonmentEvidence,
@@ -36,7 +37,11 @@ from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import LeaseRecoveryRequired, LeaseStore
 from graphify.workspace.persistence import CommitUnknown, InjectedFault
 from graphify.workspace.pointers import PointerCAS, PointerStore
-from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueueStore
+from graphify.workspace.semantic_queue import (
+    SemanticCertificationBlocked,
+    SemanticQueuePolicy,
+    SemanticQueueStore,
+)
 
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
@@ -112,7 +117,11 @@ def _runtime(
     return harness, store, pointers
 
 
-def _reopen_store(harness: RuntimeHarness) -> GenerationStore:
+def _reopen_store(
+    harness: RuntimeHarness,
+    *,
+    compatibility_manifest: CompatibilityManifest = COMPATIBILITY_MANIFEST,
+) -> GenerationStore:
     leases = LeaseStore(
         harness.state_root,
         harness.registry,
@@ -134,8 +143,20 @@ def _reopen_store(harness: RuntimeHarness) -> GenerationStore:
         leases,
         journal,
         semantic_queue=queue,
-        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        compatibility_manifest=compatibility_manifest,
         capabilities=leases.state.capabilities,
+    )
+
+
+def _alternate_manifest() -> CompatibilityManifest:
+    return cast(
+        CompatibilityManifest,
+        CompatibilityManifest.from_mapping(
+            {
+                **COMPATIBILITY_MANIFEST.to_dict(),
+                "distribution_build": "alternate-published-build",
+            }
+        ),
     )
 
 
@@ -561,6 +582,164 @@ def test_visible_pointer_cas_drift_abandons_unallocated_request_without_replacem
     assert abandoned.abandon_reason == "POINTER_CHANGED"
     assert abandoned.request == request
     harness.leases.release(attempt.grant)
+
+
+def test_semantic_source_epoch_drift_terminally_abandons_completed_request(
+    tmp_path: Path,
+) -> None:
+    harness, store, _pointers = _runtime(tmp_path)
+    observations = _observations(harness)
+    request = _request(harness, observations)
+    build, completion = _completed(store, harness, request, observations)
+    queue = store.semantic_queue
+    assert queue is not None
+    queue.reconcile(
+        build.grant,
+        (),
+        source_epoch=2,
+        policy_sha256=observations[0].policy_sha256,
+        source_observations=observations,
+        desired_watermark=2,
+        semantic_required=False,
+        monotonic_ns=10_004,
+    )
+    bound = queue.bind_sealed_inputs(
+        build.grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256(
+            "graphify-out", completion.entries
+        ),
+        monotonic_ns=10_005,
+    )
+    trust_source_observations(store, observations)
+
+    with pytest.raises(SemanticCertificationBlocked, match="source epoch"):
+        store.certify(
+            build.grant,
+            completion.allocation,
+            _certification_request(observations),
+            source_observations=observations,
+            declared_entries=completion.entries,
+            staged_completion=completion,
+            occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=10_006,
+        )
+    harness.leases.release(build.grant)
+
+    attempt, abandoned = _abandon(
+        store,
+        harness,
+        request,
+        observations,
+        tick=3,
+    )
+    harness.leases.release(attempt.grant)
+
+    assert abandoned.lifecycle_state == "ABANDONED"
+    assert abandoned.abandon_reason == "SEMANTIC_SOURCE_EPOCH_CHANGED"
+    assert abandoned.abandon_evidence is not None
+    assert abandoned.abandon_evidence.semantic_source_epoch == 2
+    assert abandoned.abandon_evidence.semantic_queue_watermark == 2
+    assert abandoned.abandon_evidence.semantic_queue_state_sha256 == bound.sha256
+
+    rewritten = abandoned.to_dict()
+    evidence_value = cast(dict[str, Any], rewritten["abandon_evidence"])
+    semantic_value = cast(dict[str, Any], evidence_value["semantic_queue"])
+    semantic_value["source_epoch"] = request.source_epoch
+    rewritten_evidence = StagedBuildAbandonmentEvidence.from_mapping(evidence_value)
+    rewritten["abandon_evidence_sha256"] = rewritten_evidence.sha256
+    with pytest.raises(ContractError, match="does not prove stale staged-build authority"):
+        StagedBuildState.from_mapping(rewritten)
+
+    generic = acquire(harness, "BUILD", tick=4)
+    harness.leases.release(generic)
+
+
+@pytest.mark.parametrize("lifecycle", ["REQUESTED", "PUBLISHING", "COMPLETE", "CERTIFIED"])
+def test_fresh_manifest_drift_terminally_abandons_each_recoverable_staged_state(
+    tmp_path: Path,
+    lifecycle: str,
+) -> None:
+    harness, store, _pointers = _runtime(tmp_path)
+    observations = _observations(harness)
+    request = _request(harness, observations)
+    if lifecycle == "REQUESTED":
+        _requested(store, harness, request, observations)
+    elif lifecycle == "PUBLISHING":
+        attempt, _preparation = _publishing(store, harness, request, observations)
+        harness.leases.release(attempt.grant)
+    elif lifecycle == "COMPLETE":
+        attempt, _completion = _completed(store, harness, request, observations)
+        harness.leases.release(attempt.grant)
+    else:
+        attempt, _completion, _receipt = _certified(
+            store,
+            harness,
+            request,
+            observations,
+        )
+        harness.leases.release(attempt.grant)
+    alternate_manifest = _alternate_manifest()
+    fresh_store = _reopen_store(
+        harness,
+        compatibility_manifest=alternate_manifest,
+    )
+    restored = trust_source_observations(fresh_store, observations)
+
+    replay = fresh_store.request_staged_build(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        source_observations=observations,
+    )
+    assert replay.lifecycle_state == lifecycle
+    assert restored.calls == 0
+    recovery = fresh_store.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        acquired_at=START + timedelta(seconds=2),
+        monotonic_ns=20_000,
+        ttl_ns=1_000_000,
+    )
+    abandoned = fresh_store.abandon_staged_build(
+        recovery,
+        source_observations=observations,
+        monotonic_ns=20_001,
+    )
+    fresh_store.leases.release(recovery.grant)
+
+    assert abandoned.lifecycle_state == "ABANDONED"
+    assert abandoned.abandoned_from == lifecycle
+    assert abandoned.abandon_reason == "COMPATIBILITY_CHANGED"
+    assert abandoned.abandon_evidence is not None
+    assert (
+        abandoned.abandon_evidence.selected_compatibility_sha256
+        == alternate_manifest.sha256
+    )
+
+    rewritten = abandoned.to_dict()
+    evidence_value = cast(dict[str, Any], rewritten["abandon_evidence"])
+    evidence_value["selected_compatibility_sha256"] = request.compatibility_sha256
+    rewritten_evidence = StagedBuildAbandonmentEvidence.from_mapping(evidence_value)
+    rewritten["abandon_evidence_sha256"] = rewritten_evidence.sha256
+    with pytest.raises(ContractError, match="does not prove stale staged-build authority"):
+        StagedBuildState.from_mapping(rewritten)
+
+    generic = acquire(harness, "BUILD", tick=3)
+    harness.leases.release(generic)
+    successor = replace(
+        _request(harness, observations),
+        logical_request_sha256="f" * 64,
+        compatibility_sha256=alternate_manifest.sha256,
+    )
+    trust_source_observations(fresh_store, observations)
+    successor_state = fresh_store.request_staged_build(
+        REPO_UUID,
+        "gen-staged-after-compatibility-change",
+        successor,
+        source_observations=observations,
+    )
+    assert successor_state.lifecycle_state == "REQUESTED"
 
 
 def test_abandoned_terminal_commit_unknown_recovers_by_exact_request_replay(
@@ -1043,6 +1222,54 @@ def test_active_source_drift_recovers_durable_staging_receipt(tmp_path: Path) ->
     assert recovered.lifecycle_state == "CERTIFIED"
     assert final.is_dir()
     assert not staging.exists()
+
+
+def test_fresh_manifest_drift_recovers_durable_receipt_before_abandonment(
+    tmp_path: Path,
+) -> None:
+    harness, _store, request, build, observations = _crash_with_durable_staging_receipt(
+        tmp_path
+    )
+    harness.leases.release(build.grant)
+    alternate_manifest = _alternate_manifest()
+    fresh_store = _reopen_store(
+        harness,
+        compatibility_manifest=alternate_manifest,
+    )
+    recovery = fresh_store.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        acquired_at=START + timedelta(seconds=3),
+        monotonic_ns=30_000,
+        ttl_ns=1_000_000,
+    )
+
+    recovered = fresh_store.recover_staged_certification(
+        recovery,
+        monotonic_ns=30_001,
+    )
+    fresh_store.leases.release(recovery.grant)
+
+    assert recovered.lifecycle_state == "CERTIFIED"
+    terminal_attempt = fresh_store.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        acquired_at=START + timedelta(seconds=4),
+        monotonic_ns=40_000,
+        ttl_ns=1_000_000,
+    )
+    trust_source_observations(fresh_store, observations)
+    terminal = fresh_store.abandon_staged_build(
+        terminal_attempt,
+        source_observations=observations,
+        monotonic_ns=40_001,
+    )
+
+    assert terminal.lifecycle_state == "ABANDONED"
+    assert terminal.abandoned_from == "CERTIFIED"
+    assert terminal.abandon_reason == "COMPATIBILITY_CHANGED"
 
 
 def test_stale_certification_recovery_requires_immutable_semantic_binding(

@@ -363,6 +363,43 @@ def test_successor_fence_resets_interrupted_partial_stage(tmp_path: Path) -> Non
     assert not (reset.staging_path / "graphify-out").exists()
 
 
+def test_successor_reset_rejects_publishing_state_without_fence_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    store = _store(harness)
+    observations = _source_observations(harness)
+    request = _request(harness, observations)
+    _first, publishing = _request_and_acquire(store, harness, request, observations)
+    successor = store.acquire_staged_operation(
+        REPO_UUID,
+        "gen-staged-recovery",
+        request,
+        operation="BUILD",
+        acquired_at=START + timedelta(seconds=2),
+        monotonic_ns=2_000_000,
+        ttl_ns=1_000_000,
+    )
+    allocation = store.allocate(
+        successor.grant,
+        expected_payload_bytes=request.expected_payload_bytes,
+        capacity_policy=POLICY,
+        generation_id="gen-staged-recovery",
+        occurred_at=START + timedelta(seconds=2),
+        monotonic_ns=2_000_001,
+    )
+    invalid = replace(
+        publishing.state,
+        operation_epoch=None,
+        fence_token=None,
+    )
+    monkeypatch.setattr(store, "_load_staged_build_locked", lambda _repo_uuid: invalid)
+
+    with pytest.raises(GenerationConflict, match="missing durable fence authority"):
+        store.prepare_staged_build(successor, allocation, monotonic_ns=2_000_002)
+
+
 def test_complete_binds_manifest_and_exact_retry_reuses_completion(tmp_path: Path) -> None:
     harness = create_harness(tmp_path)
     store = _store(harness)
@@ -388,6 +425,30 @@ def test_complete_binds_manifest_and_exact_retry_reuses_completion(tmp_path: Pat
     assert completed == retry
     assert completed.state.lifecycle_state == "COMPLETE"
     assert completed.manifest_sha256
+
+
+def test_completed_staged_build_rejects_missing_durable_payload_manifest(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    store = _store(harness)
+    observations = _source_observations(harness)
+    request = _request(harness, observations)
+    _, publishing = _request_and_acquire(store, harness, request, observations)
+    _write_payload(publishing)
+    trust_source_observations(store, observations)
+    completed = store.complete_staged_build(
+        publishing,
+        source_observations=observations,
+        monotonic_ns=10_003,
+    )
+    invalid = replace(
+        completed,
+        state=replace(completed.state, payload_manifest_sha256=None),
+    )
+
+    with pytest.raises(GenerationConflict, match="missing a durable payload manifest"):
+        _ = invalid.manifest_sha256
 
 
 def test_corrupt_staged_build_record_fails_closed_without_replacement(tmp_path: Path) -> None:
