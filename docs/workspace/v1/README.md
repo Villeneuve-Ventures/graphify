@@ -39,6 +39,29 @@ external state root. The receipt's normative machine-readable schema is
 activation, remaining mutation/query commands, repair, watch/service,
 performance certification, and candidate publication remain later P5 work.
 
+## Deferred work ownership
+
+The external execution checklist and global plan own changing status, exact
+commits, and proof receipts. This section owns only stable responsibility
+boundaries, reconciled across merged workspace PRs #1-#10; it deliberately does
+not duplicate live SHAs or declare a next batch ready.
+
+| Area | Future owner | Stable boundary |
+|---|---|---|
+| Remaining workspace commands | Remaining P5B2 | Sync, query, migrate, rollback, GC, repair, rebind, rotation, activation, and other operator mutations require separately reviewed contracts and explicit operator intent. |
+| Service, release, and resource proof | P5C | Watch/service supervision, candidate-backed authority installation, publication, representative-corpus performance and resource accounting, record admission budgets, and any shared workspace read-lock optimization remain one benchmark-first release gate. |
+| Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
+| Portfolio migration and cutover | P6-P12 | Shadow migrations precede the P9 global installation and stable-route activation; legacy pruning remains separately authorized after the observation window. |
+| Semantic capability selection | Unranked cross-cutting follow-up | With no Gemini key, an interactive Graphify skill can use its active host agent; in Codex that means the current Codex-authenticated session. A direct headless fallback from `graphify extract` to Codex OAuth is desired but is not implemented or promised by v1. Any such backend requires a separate explicit authority, selection-precedence, opt-in, redaction, offline/failure, and test contract; provider choice must never be inferred from an absent credential. |
+| Contract and support horizon | Unranked future contract decisions | Possible v2 sorted-array admission, broader host/filesystem support, sudden-power-loss claims, automatic online GC, historical-generation query, and upstreaming are retained decisions or nonclaims, not current phase gates. |
+| Extraction diagnostics | Outside workspace phase gates | Zero-node fixture notices and missing optional SQL/DM parser extras remain non-blocking diagnostics unless a later requirement explicitly promotes their corpus coverage. |
+
+Historical deferrals for the labeling-order test, candidate packaging warnings,
+vulnerable optional/development dependencies, high-severity Bandit findings,
+and Gemini model-override test isolation are closed by later merged work and are
+not carried forward as debt. Deliberately rejected review suggestions likewise
+do not become backlog merely because their GitHub threads remain unresolved.
+
 Authorization standard input is one JSON object with exactly the five string
 fields shown here; `action` is the uppercase operator intent, not the lowercase
 CLI verb:
