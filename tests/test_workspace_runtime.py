@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import ctypes
+from dataclasses import replace
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -765,6 +766,41 @@ def test_source_discovery_scrubs_ambient_git_directory_overrides(
     assert source.repo_uuid == REPO_UUID
 
 
+def test_source_discovery_resolves_roots_from_the_captured_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "source", REPO_UUID, marker="source")
+    raced = _create_repo(tmp_path / "raced", REPO_UUID, marker="raced")
+    captured_head = _run(repo, "rev-parse", "HEAD")
+    captured_root = _run(repo, "rev-list", "--max-parents=0", captured_head)
+    raced_head = _run(raced, "rev-parse", "HEAD")
+    _run(repo, "fetch", "--quiet", str(raced), raced_head)
+    original_git = identity_module._git
+    switched = False
+
+    def switch_head_after_capture(
+        root: Path,
+        *arguments: str,
+        deadline_ns: int | None = None,
+    ) -> str:
+        nonlocal switched
+        result = original_git(root, *arguments, deadline_ns=deadline_ns)
+        if arguments == ("rev-parse", "HEAD") and not switched:
+            _run(repo, "update-ref", "HEAD", raced_head)
+            switched = True
+        return result
+
+    monkeypatch.setattr(identity_module, "_git", switch_head_after_capture)
+
+    source = discover_source(repo)
+
+    assert switched
+    assert source.head_commit == captured_head
+    assert source.history_roots == (captured_root,)
+    assert _run(repo, "rev-parse", "HEAD") == raced_head
+
+
 def test_source_discovery_ignores_replacement_refs_for_adoption_history(
     tmp_path: Path,
 ) -> None:
@@ -1003,6 +1039,41 @@ def test_same_git_common_directory_cannot_be_adopted_after_remote_change(
     assert document["revision"] == 1
     assert document["workspaces"][0]["aliases"] == []
     assert _tree_snapshot(store.state.root) == before_state
+
+
+def test_adopt_allows_a_distinct_clone_when_retained_inode_is_reused(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID)
+    clone = _clone_repo(original, tmp_path / "clone")
+    original_source = discover_source(original)
+    clone_source = discover_source(clone)
+    assert clone_source.root != original_source.root
+    assert (
+        clone_source.registry_source["git_common_dir"]
+        != original_source.registry_source["git_common_dir"]
+    )
+    simulated_reuse = replace(
+        clone_source,
+        git_common_device=original_source.git_common_device,
+        git_common_inode=original_source.git_common_inode,
+    )
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        original_source,
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+
+    adopted = store.adopt(
+        simulated_reuse,
+        _authorization(IdentityAction.ADOPT, "adopt-reused-inode"),
+        expected_revision=1,
+    )
+
+    entry = _workspace_entry(adopted)
+    assert adopted.to_dict()["revision"] == 2
+    assert [alias["path"] for alias in entry["aliases"]] == [str(clone.resolve())]
 
 
 def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> None:

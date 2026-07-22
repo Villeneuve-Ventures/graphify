@@ -33,6 +33,8 @@ from graphify.workspace.identity import (
     SourceDiscoveryTimeout,
     UUIDCollisionError,
     discover_source,
+    source_root_identity,
+    verify_source_checkout,
 )
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -175,7 +177,7 @@ def _read_operator_authorization(request: _RegisterRequest) -> OperatorAuthoriza
     try:
         raw = raw_bytes.decode("utf-8")
         value = json.loads(raw, object_pairs_hook=_unique_json_object)
-    except (TypeError, UnicodeError, ValueError) as exc:
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
         raise AuthorizationError("authorization input is not valid JSON") from exc
     required = {"action", "issued_at", "nonce", "operator_id", "reason"}
     if not isinstance(value, dict) or set(value) != required:
@@ -367,16 +369,36 @@ def _run_registration(
         else:
             runtime = compose_workspace_runtime(resolved_inputs)
             authorization = _read_operator_authorization(request)
+            source_deadline_ns = (
+                time.monotonic_ns() + _REGISTRATION_SOURCE_TIMEOUT_NS
+            )
+            source_root = Path.cwd()
+            root_identity = source_root_identity(
+                source_root,
+                deadline_ns=source_deadline_ns,
+            )
             source = discover_source(
-                Path.cwd(),
-                deadline_ns=time.monotonic_ns() + _REGISTRATION_SOURCE_TIMEOUT_NS,
+                source_root,
+                deadline_ns=source_deadline_ns,
             )
             if source.repo_uuid != request.repo_uuid:
                 raise UUIDCollisionError(
                     "explicit registration UUID does not match the source configuration"
                 )
-            runtime.registry.state.assert_external_to(
-                source.root / cast(str, source.registry_source["git_common_dir"])
+            git_common_dir = source.root / cast(
+                str,
+                source.registry_source["git_common_dir"],
+            )
+            runtime.registry.state.assert_external_to(git_common_dir)
+            verify_source_checkout(
+                source.root,
+                expected_git_common_dir=git_common_dir,
+                expected_worktree_id=cast(str, source.registry_source["worktree_id"]),
+                expected_git_common_device=source.git_common_device,
+                expected_git_common_inode=source.git_common_inode,
+                expected_root_identity=root_identity,
+                expected_head_commit=source.head_commit,
+                deadline_ns=source_deadline_ns,
             )
             if request.action is IdentityAction.ENROLL:
                 document = runtime.registry.enroll(

@@ -434,8 +434,8 @@ class RegistryStore:
             }
         )
 
-    def _assert_source_identity_available(
-        self,
+    @staticmethod
+    def _assert_source_binding_available(
         entries: list[dict[str, Any]],
         source: SourceIdentity,
     ) -> None:
@@ -450,6 +450,14 @@ class RegistryStore:
                     "source or Git common directory is already enrolled under "
                     f"{entry['repo_uuid']}"
                 )
+
+    def _assert_source_identity_available(
+        self,
+        entries: list[dict[str, Any]],
+        source: SourceIdentity,
+    ) -> None:
+        self._assert_source_binding_available(entries, source)
+        for entry in entries:
             evidence_digests = {
                 entry["uuid_enrollment"]["immutable_evidence_sha256"],
                 entry["uuid_enrollment"]["current_evidence_sha256"],
@@ -601,7 +609,7 @@ class RegistryStore:
                 raise UUIDCollisionError(f"{source.repo_uuid} has no enrollment to adopt")
             if self._known_source(entry, source):
                 raise UUIDCollisionError("source is already bound")
-            self._assert_source_identity_available(entries, source)
+            self._assert_source_binding_available(entries, source)
             if not self._related_to_enrollment(entry, source):
                 raise UUIDCollisionError("adoption requires shared history evidence")
             active_evidence = entry["active_source_evidence"]

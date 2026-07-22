@@ -141,9 +141,15 @@ class _AllowingState:
 
 def _source_stub(root: Path) -> SimpleNamespace:
     return SimpleNamespace(
+        git_common_device=0,
+        git_common_inode=0,
+        head_commit="a" * 40,
         repo_uuid=REPO_UUID,
         root=root,
-        registry_source={"git_common_dir": str(root / ".git")},
+        registry_source={
+            "git_common_dir": str(root / ".git"),
+            "worktree_id": "main",
+        },
     )
 
 
@@ -242,6 +248,12 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     )
     monkeypatch.setattr(workspace_cli.time, "monotonic_ns", lambda: 123)
     monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
+    monkeypatch.setattr(
+        workspace_cli,
+        "verify_source_checkout",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
     monkeypatch.setattr(sys, "stdin", StringIO(_authorization_payload(action.upper())))
     stdout = StringIO()
     stderr = StringIO()
@@ -390,6 +402,12 @@ def test_register_failures_are_canonical_opaque_and_redacted(
         raising=False,
     )
     monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
+    monkeypatch.setattr(
+        workspace_cli,
+        "verify_source_checkout",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
     monkeypatch.setattr(sys, "stdin", StringIO(_authorization_payload("ENROLL")))
     stdout = StringIO()
     stderr = StringIO()
@@ -559,6 +577,48 @@ def test_register_applies_a_deadline_to_source_discovery_without_mutation(
     assert not state_root.exists()
 
 
+def test_register_revalidates_source_head_before_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    raced = create_repo(tmp_path / "raced", REPO_UUID)
+    (raced / "README.md").write_text("raced registration source\n", encoding="utf-8")
+    _git(raced, "add", "README.md")
+    _git(raced, "commit", "--quiet", "--amend", "--no-edit")
+    raced_head = _git(raced, "rev-parse", "HEAD")
+    assert raced_head != _git(checkout, "rev-parse", "HEAD")
+    _git(checkout, "fetch", "--quiet", str(raced), raced_head)
+    inputs = _inputs(tmp_path / "external-state")
+    discover = workspace_cli.discover_source
+
+    def switch_head_after_discovery(root: Path, *, deadline_ns: int) -> Any:
+        source = discover(root, deadline_ns=deadline_ns)
+        _git(checkout, "update-ref", "HEAD", raced_head)
+        return source
+
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        switch_head_after_discovery,
+        raising=False,
+    )
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    assert _registration_payload(stderr)["reason_code"] == "source_discovery_error"
+    assert not inputs.state_root.exists()
+
+
 def test_register_authorization_input_is_bounded_in_bytes_before_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -589,6 +649,49 @@ def test_register_authorization_input_is_bounded_in_bytes_before_decode(
         workspace_cli._read_operator_authorization(request)
 
     assert read_sizes == [16 * 1024 + 1]
+
+
+def test_register_classifies_json_parser_depth_failure_as_invalid_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    inputs = _inputs(tmp_path / "external-state")
+    authorization = "[" * 1_100 + "0" + "]" * 1_100
+    assert len(authorization.encode("utf-8")) < 16 * 1024
+
+    def reject_parser_depth(
+        raw: str,
+        *,
+        object_pairs_hook: Any,
+    ) -> Any:
+        del object_pairs_hook
+        assert raw == authorization
+        raise RecursionError("private parser depth")
+
+    monkeypatch.setattr(
+        workspace_cli,
+        "json",
+        SimpleNamespace(loads=reject_parser_depth),
+        raising=False,
+    )
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+        authorization=authorization,
+    )
+
+    assert exit_code == 20
+    assert stdout.getvalue() == ""
+    payload = _registration_payload(stderr)
+    assert payload["reason_code"] == "authorization_invalid"
+    assert payload["action_code"] == "provide_valid_authorization"
+    assert not inputs.state_root.exists()
 
 
 @pytest.mark.parametrize(

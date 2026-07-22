@@ -467,6 +467,7 @@ def verify_source_checkout(
     expected_git_common_device: int,
     expected_git_common_inode: int,
     expected_root_identity: tuple[int, int],
+    expected_head_commit: str | None = None,
     deadline_ns: int | None = None,
 ) -> None:
     """Verify the selected checkout with one live local Git identity read."""
@@ -480,15 +481,21 @@ def verify_source_checkout(
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
     if (before.st_dev, before.st_ino) != expected_root_identity:
         raise SourceDiscoveryError("source root identity changed")
-    resolved = _git(
-        root,
+    arguments = [
         "rev-parse",
         "--show-toplevel",
         "--git-common-dir",
         "--git-dir",
+    ]
+    if expected_head_commit is not None:
+        arguments.append("HEAD")
+    resolved = _git(
+        root,
+        *arguments,
         deadline_ns=deadline_ns,
     ).splitlines()
-    if len(resolved) != 3:
+    expected_fields = 4 if expected_head_commit is not None else 3
+    if len(resolved) != expected_fields:
         raise SourceDiscoveryError("Git source identity response is malformed")
     top_level = _resolve_git_path(root, resolved[0], deadline_ns=deadline_ns)
     git_common_dir = _resolve_git_path(root, resolved[1], deadline_ns=deadline_ns)
@@ -498,6 +505,8 @@ def verify_source_checkout(
     worktree_id = "main" if git_dir == git_common_dir else git_dir.name
     if worktree_id != expected_worktree_id:
         raise SourceDiscoveryError("source worktree no longer matches registry Git identity")
+    if expected_head_commit is not None and resolved[3] != expected_head_commit:
+        raise SourceDiscoveryError("source HEAD changed during identity verification")
     common_details = git_common_dir.stat()
     if (
         common_details.st_dev != expected_git_common_device
@@ -610,7 +619,7 @@ def discover_source(
                     root,
                     "rev-list",
                     "--max-parents=0",
-                    "HEAD",
+                    head,
                     deadline_ns=deadline_ns,
                 ).splitlines(),
             )
