@@ -7,14 +7,32 @@ on:
     types: [created, edited]
 
 concurrency:
-  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  # Only eligible review requests share a PR-scoped group. Other comments use
+  # their own run ID so a bot response or unrelated comment cannot cancel an
+  # in-progress review before the job-level guard skips that event.
+  group: >-
+    pr-agent-${{
+      github.event.pull_request.number ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.sender.type != 'Bot' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/prreview' &&
+        contains(
+          fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+          github.event.comment.author_association
+        ) &&
+        github.event.issue.number
+      ) ||
+      github.run_id
+    }}
   cancel-in-progress: true
 
 jobs:
   review:
     # Secrets are unavailable to pull_request workflows from forks. Review those
-    # only after a trusted maintainer explicitly comments /review, which runs from
-    # the default branch through issue_comment.
+    # only after a trusted maintainer explicitly comments /prreview, which runs
+    # from the default branch through issue_comment.
     if: >-
       ${{
         github.event.sender.type != 'Bot' &&
@@ -27,7 +45,7 @@ jobs:
           (
             github.event_name == 'issue_comment' &&
             github.event.issue.pull_request &&
-            startsWith(github.event.comment.body, '/review') &&
+            github.event.comment.body == '/prreview' &&
             contains(
               fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
               github.event.comment.author_association
@@ -69,7 +87,8 @@ jobs:
           github_action_config.auto_describe: "false"
           github_action_config.auto_improve: "false"
           # The pinned runner handles synchronize through its push-trigger path.
-          # Route new commits through /review instead of silently skipping them.
+          # /review is internal here; the public issue-comment command is
+          # /prreview and is translated immediately before request handling.
           github_action_config.handle_push_trigger: "true"
           github_action_config.push_commands: "/review"
         run: |
@@ -123,10 +142,17 @@ jobs:
 
           original_handle_request = PRAgent.handle_request
 
-          async def handle_verified_request(self, *args, **kwargs):
-              handled = await original_handle_request(self, *args, **kwargs)
+          async def handle_verified_request(self, pr_url, request, *args, **kwargs):
+              # /prreview is the public GitHub command. Translate it to the
+              # pinned PR-Agent command without exposing /review to other apps.
+              if isinstance(request, str) and request.strip().lower() == "/prreview":
+                  request = "/review"
+
+              handled = await original_handle_request(
+                  self, pr_url, request, *args, **kwargs
+              )
               if handled is False:
-                  raise RuntimeError("PR-Agent did not handle the /review command")
+                  raise RuntimeError("PR-Agent did not handle the review command")
               return handled
 
           PRAgent.handle_request = handle_verified_request
