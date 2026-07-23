@@ -840,23 +840,6 @@ class GenerationStore:
             ) from exc
         return reason, evidence, pointer
 
-    def _staged_abandonment_proof_locked(
-        self,
-        operation: LeaseOperation,
-        state: StagedBuildState,
-        trusted_observations: Sequence[SourceObservation],
-    ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None]:
-        proof = self._staged_abandonment_proof_if_stale_locked(
-            operation,
-            state,
-            self._abandonment_source_document(trusted_observations),
-        )
-        if proof is None:
-            raise GenerationConflict(
-                "staged build authority is still current and cannot be abandoned"
-            )
-        return proof
-
     @staticmethod
     def _pointer_references_staged_generation(
         pointer: PointerSet,
@@ -1383,10 +1366,16 @@ class GenerationStore:
                     occurred_at=occurred_at,
                 )
 
-        trusted = self._trusted_structural_observations(
-            attempt.state.repo_uuid,
-            source_observations,
-        )
+        observation_error: GenerationError | None = None
+        try:
+            trusted = self._trusted_structural_observations(
+                attempt.state.repo_uuid,
+                source_observations,
+            )
+            source_document = self._abandonment_source_document(trusted)
+        except GenerationError as exc:
+            observation_error = exc
+            source_document = self._frozen_abandonment_source_document(request)
         with self.leases.current_staged_recovery(
             attempt.grant,
             attempt.state.generation_id,
@@ -1409,11 +1398,18 @@ class GenerationStore:
             )
             intent = state.abandonment_intent
             if intent is None:
-                reason, evidence, _pointer = self._staged_abandonment_proof_locked(
+                proof = self._staged_abandonment_proof_if_stale_locked(
                     operation,
                     state,
-                    trusted,
+                    source_document,
                 )
+                if proof is None:
+                    if observation_error is not None:
+                        raise observation_error
+                    raise GenerationConflict(
+                        "staged build authority is still current and cannot be abandoned"
+                    )
+                reason, evidence, _pointer = proof
                 return self._commit_new_staged_abandonment_locked(
                     operation,
                     state,
