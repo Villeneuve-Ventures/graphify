@@ -39,6 +39,12 @@ usage.
 - New upstream releases enter a non-promoting whole-artifact lane. A tag alone
   never widens support. The lane has probe metadata only: no executable adapter,
   staging, or promotion authority.
+- A new staged structural request uses the exact selected compatibility tuple
+  and freezes its digest. Recovery never adopts or broadens to a newer tuple.
+  If compatibility later drifts, exact P5B2b0 recovery may first finish a
+  durable certification boundary already authorized by the frozen request;
+  otherwise canonical drift is stale-authority evidence for terminal
+  abandonment, not permission to execute an unsupported tuple.
 
 ## Artifact set
 

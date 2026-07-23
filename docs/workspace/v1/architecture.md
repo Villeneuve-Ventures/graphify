@@ -39,10 +39,18 @@ requires matching stdin authorization and an expected registry revision,
 requires the current working directory itself to be the Git top level, then
 delegates to the P2 registry CAS.
 Adoption is never inferred: the operator must select `adopt`, and the existing
-registry must verify shared history for the same UUID. Rebind, rotation, activation,
-remaining mutation/query commands, repair, watch/service, installation,
-performance certification, candidate publication, and live-cutover work remain
-deferred; retained production query/service authority remains P5C work.
+registry must verify shared history for the same UUID. P5B2b0 adds only the
+internal, request-bound staged structural-build lifecycle needed to recover
+crashes and close requests made stale by durable authority drift. The exact
+request is installed before `BUILD` lease acquisition; request-bound `BUILD`,
+`PROMOTE`, and `POINTER_RECOVERY` successors are constrained by the durable
+lifecycle and the caller attempt digest. Durable certification recovery and
+terminal abandonment resolve the corresponding interrupted boundaries without
+adding a public sync command, provider selection, pointer-policy change, or
+inspection-schema revision. Rebind, rotation, activation, remaining
+mutation/query commands, repair, watch/service, installation, performance
+certification, candidate publication, and live-cutover work remain deferred;
+retained production query/service authority remains P5C work.
 
 ## Authority split
 
@@ -91,6 +99,20 @@ do not create it or guess its contents.
 P3 now owns generations, lifecycle journals, coordination locks, pointers,
 capacity reservations, and explicit offline-GC records. None of those paths is
 written inside a source checkout.
+
+P5B2b0 adds this bounded internal record under the same external lifecycle root:
+
+```text
+~/.local/state/graphify/workspaces/<repo_uuid>/
+  staged-build.json
+  staged-build.previous.json
+  staged-build.pending.json
+```
+
+The current, previous, and pending records use the existing canonical durable-
+record protocol, cap each read or write at 64 KiB, and bind one generation to
+one exact structural request and frozen observation summary. They are not a new
+public v1 schema and do not change status or doctor output.
 
 P5A adds this per-workspace state under the same external lifecycle root:
 
@@ -150,6 +172,16 @@ Once the binding is durable, the exact request and payload can recover even if
 newer desired work later advances the queue; a staged receipt alone is never
 queue authority. The receipt remains the idempotent boundary for the subsequent
 generation install and journal transition.
+
+P5B2b0 reuses the registry-before-workspace order and installs the exact
+`REQUESTED` record before acquiring its request-bound `BUILD` lease. A
+nonterminal staged record blocks ordinary workspace mutation. Only the exact
+request and caller attempt may acquire or recover the lifecycle-permitted
+`BUILD`, `PROMOTE`, or `POINTER_RECOVERY` successor, so process-owner equality
+alone cannot share a live fence. Exact durable certification may finish through
+recovery; otherwise canonical source, migration, pointer, compatibility,
+semantic-source, or trusted-observation drift may install an abandonment intent
+before cleanup. Source unavailability alone is not stale evidence.
 
 Activation, migration, promotion, rollback, repair, pointer recovery, and GC
 share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved
