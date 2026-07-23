@@ -778,6 +778,32 @@ def test_source_mutation_after_certification_blocks_pointer_promotion(
     assert successor.to_dict()["generation_id"] == "gen-sync-after-certified-drift"
 
 
+@pytest.mark.parametrize("boundary", ["build_acquired", "promotion_acquired"])
+def test_operator_interrupt_releases_the_active_sync_lease(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    target = f"sync:{GENERATION_ID}:{boundary}"
+    armed = True
+
+    def interrupt_once(event: str) -> None:
+        nonlocal armed
+        if armed and event == target:
+            armed = False
+            raise KeyboardInterrupt
+
+    harness, runtime = _runtime(tmp_path, fault_hook=interrupt_once)
+    _install_adapter(runtime, _adapter(harness))
+    request = _request(runtime)
+
+    with pytest.raises(KeyboardInterrupt):
+        synchronize_code_only(runtime, request)
+
+    assert armed is False
+    assert runtime.leases.inspect(REPO_UUID).leases.get("workspace") is None
+    assert synchronize_code_only(runtime, request).to_dict()["state"] == "synchronized"
+
+
 _SYNC_FAULT_BOUNDARIES = (
     "source_observed",
     "request_staged",
@@ -921,6 +947,55 @@ def test_fresh_runtime_recovers_each_ambiguous_durable_sync_boundary(
 
     assert receipt.to_dict()["state"] == "synchronized"
     assert synchronize_code_only(recovered_runtime, request).canonical == receipt.canonical
+
+
+@pytest.mark.parametrize(
+    "durable_event",
+    [
+        "pointer:promoted:pending_durable",
+        "pointer:promoted:visible",
+        "pointer:promoted:journal_durable",
+        "pointer:promoted:complete",
+    ],
+)
+def test_certified_pointer_recovery_does_not_require_source_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    durable_event: str,
+) -> None:
+    armed = True
+
+    def fail_once(event: str) -> None:
+        nonlocal armed
+        if armed and event == durable_event:
+            armed = False
+            raise InjectedFault(event)
+
+    harness, runtime = _runtime(tmp_path, fault_hook=fail_once)
+    _install_adapter(runtime, _adapter(harness))
+    request = _request(runtime)
+
+    with pytest.raises(InjectedFault, match=durable_event):
+        synchronize_code_only(runtime, request)
+    assert armed is False
+
+    recovered_runtime = _compose(harness)
+    recovered_adapter = _adapter(harness)
+    _install_adapter(recovered_runtime, recovered_adapter)
+
+    def unavailable_source(_repo_uuid: str) -> Any:
+        raise IdentityError("selected source is unavailable")
+
+    monkeypatch.setattr(
+        recovered_runtime.registry,
+        "resolve_active_source",
+        unavailable_source,
+    )
+
+    receipt = synchronize_code_only(recovered_runtime, request)
+
+    assert receipt.to_dict()["state"] == "synchronized"
+    assert recovered_adapter.calls == []
 
 
 def test_exact_replay_recovers_pending_staged_request_commit_unknown(

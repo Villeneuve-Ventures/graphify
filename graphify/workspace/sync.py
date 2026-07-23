@@ -37,7 +37,7 @@ from graphify.workspace.generations import (
 from graphify.workspace.identity import SourceIdentity
 from graphify.workspace.leases import LeaseGrant
 from graphify.workspace.persistence import CommitUnknown, StateRecoveryRequired
-from graphify.workspace.pointers import PointerCAS
+from graphify.workspace.pointers import PointerCAS, PointerRecoveryRequired
 
 
 SYNC_REQUEST_CONTRACT = "graphify.workspace.sync_request"
@@ -558,7 +558,7 @@ def _success_receipt(
 def _release_grant(
     runtime: WorkspaceRuntime,
     grant: LeaseGrant,
-    primary: tuple[Exception, TracebackType | None] | None,
+    primary: tuple[BaseException, TracebackType | None] | None,
 ) -> None:
     try:
         runtime.leases.release(grant)
@@ -660,7 +660,7 @@ def _build_and_certify(
             monotonic_ns=acquired_ns,
             ttl_ns=_SYNC_LEASE_TTL_NS,
         )
-    primary: tuple[Exception, TracebackType | None] | None = None
+    primary: tuple[BaseException, TracebackType | None] | None = None
     result: GenerationReceipt | None = None
     try:
         _sync_fault(runtime, request, "build_acquired")
@@ -750,7 +750,7 @@ def _build_and_certify(
             monotonic_ns=time.monotonic_ns(),
         )
         _sync_fault(runtime, request, "generation_certified")
-    except Exception as exc:
+    except BaseException as exc:
         primary = (exc, exc.__traceback__)
     _release_grant(runtime, attempt.grant, primary)
     if result is None:  # pragma: no cover - guarded by primary exception replay
@@ -763,10 +763,10 @@ def _promote(
     request: SyncRequest,
     structural_request: StructuralBuildRequest,
     receipt: GenerationReceipt,
-    observations: tuple[SourceObservation, SourceObservation],
+    observations: tuple[SourceObservation, SourceObservation] | None,
     *,
     attempt_sha256: str,
-) -> StagedBuildState:
+) -> StagedBuildState | None:
     acquired_at = datetime.now(timezone.utc)
     attempt = runtime.generations.acquire_staged_recovery(
         request.repo_uuid,
@@ -777,8 +777,9 @@ def _promote(
         monotonic_ns=time.monotonic_ns(),
         ttl_ns=_SYNC_LEASE_TTL_NS,
     )
-    primary: tuple[Exception, TracebackType | None] | None = None
+    primary: tuple[BaseException, TracebackType | None] | None = None
     terminal: StagedBuildState | None = None
+    source_observation_required = False
     try:
         _sync_fault(runtime, request, "promotion_acquired")
         operation = str(attempt.grant.lease.to_dict()["operation"])
@@ -801,53 +802,59 @@ def _promote(
                 visible_current["receipt_sha256"],
             ) == (request.generation_id, receipt_sha256)
             if not candidate_is_current:
-                try:
-                    runtime.generations.abandon_staged_build(
-                        attempt,
-                        source_observations=observations,
+                if observations is None:
+                    source_observation_required = True
+                else:
+                    try:
+                        runtime.generations.abandon_staged_build(
+                            attempt,
+                            source_observations=observations,
+                            monotonic_ns=time.monotonic_ns(),
+                        )
+                    except StagedBuildStillCurrent:
+                        pass
+                    else:
+                        raise SyncAuthorityConflict(
+                            "stale staged build was terminally abandoned"
+                        )
+                    pointer = runtime.pointers.promote(
+                        attempt.grant,
+                        PointerCAS(
+                            expected_pointer_revision=request.expected_pointer_revision,
+                            expected_active_source_revision=(
+                                attempt.grant.active_source_revision
+                            ),
+                            expected_source_epoch=request.source_epoch,
+                            expected_operation_epoch=attempt.grant.operation_epoch,
+                            expected_migration_epoch=attempt.grant.migration_epoch,
+                            expected_state_schema_version=STATE_SCHEMA_VERSION,
+                            expected_fence_token=int(
+                                attempt.grant.lease.to_dict()["fence_token"]
+                            ),
+                            candidate_generation_id=request.generation_id,
+                            candidate_receipt_sha256=receipt_sha256,
+                            expected_current_receipt_sha256=(
+                                request.expected_current_receipt_sha256
+                            ),
+                        ),
+                        occurred_at=acquired_at,
                         monotonic_ns=time.monotonic_ns(),
                     )
-                except StagedBuildStillCurrent:
-                    pass
-                else:
-                    raise SyncAuthorityConflict(
-                        "stale staged build was terminally abandoned"
-                    )
-                pointer = runtime.pointers.promote(
-                    attempt.grant,
-                    PointerCAS(
-                        expected_pointer_revision=request.expected_pointer_revision,
-                        expected_active_source_revision=(
-                            attempt.grant.active_source_revision
-                        ),
-                        expected_source_epoch=request.source_epoch,
-                        expected_operation_epoch=attempt.grant.operation_epoch,
-                        expected_migration_epoch=attempt.grant.migration_epoch,
-                        expected_state_schema_version=STATE_SCHEMA_VERSION,
-                        expected_fence_token=int(
-                            attempt.grant.lease.to_dict()["fence_token"]
-                        ),
-                        candidate_generation_id=request.generation_id,
-                        candidate_receipt_sha256=receipt_sha256,
-                        expected_current_receipt_sha256=(
-                            request.expected_current_receipt_sha256
-                        ),
-                    ),
-                    occurred_at=acquired_at,
-                    monotonic_ns=time.monotonic_ns(),
-                )
+        if not source_observation_required:
             if pointer is None:  # pragma: no cover - promotion must return authority
                 raise GenerationConflict("promotion returned no visible pointer")
-        _sync_fault(runtime, request, "pointer_moved")
-        terminal = runtime.generations.complete_staged_promotion(
-            attempt,
-            pointer,
-            monotonic_ns=time.monotonic_ns(),
-        )
-        _sync_fault(runtime, request, "promotion_completed")
-    except Exception as exc:
+            _sync_fault(runtime, request, "pointer_moved")
+            terminal = runtime.generations.complete_staged_promotion(
+                attempt,
+                pointer,
+                monotonic_ns=time.monotonic_ns(),
+            )
+            _sync_fault(runtime, request, "promotion_completed")
+    except BaseException as exc:
         primary = (exc, exc.__traceback__)
     _release_grant(runtime, attempt.grant, primary)
+    if source_observation_required:
+        return None
     if terminal is None:  # pragma: no cover - guarded by primary exception replay
         raise GenerationConflict("promotion returned no terminal staged state")
     return terminal
@@ -888,6 +895,48 @@ def synchronize_code_only(
                 raise SyncAuthorityConflict("exact staged build request was abandoned")
             structural_request = staged.request
             recovering = True
+
+    if staged is not None and staged.lifecycle_state == "CERTIFIED":
+        if structural_request is None:  # pragma: no cover - exact nonterminal invariant
+            raise GenerationConflict("certified staged build is not exact")
+        certified_receipt = runtime.generations.verify_generation(
+            request.repo_uuid,
+            request.generation_id,
+        )
+        if certified_receipt.sha256 != staged.receipt_sha256:
+            raise GenerationConflict(
+                "certified staged state differs from its generation receipt"
+            )
+        recovery_ready = False
+        try:
+            visible_pointer = runtime.pointers.load(
+                request.repo_uuid,
+                allow_missing=True,
+            )
+        except PointerRecoveryRequired:
+            recovery_ready = True
+        else:
+            if visible_pointer is not None:
+                current = cast(
+                    Mapping[str, object],
+                    visible_pointer.to_dict()["current"],
+                )
+                recovery_ready = (
+                    current["generation_id"],
+                    current["receipt_sha256"],
+                ) == (request.generation_id, certified_receipt.sha256)
+        if recovery_ready:
+            terminal = _promote(
+                runtime,
+                request,
+                structural_request,
+                certified_receipt,
+                None,
+                attempt_sha256=hashlib.sha256(secrets.token_bytes(32)).hexdigest(),
+            )
+            if terminal is not None:
+                _sync_fault(runtime, request, "promotion_released")
+                return _success_receipt(runtime, request, terminal)
 
     source, observations = _observe_structural_source(runtime, request.repo_uuid)
     _sync_fault(runtime, request, "source_observed")
@@ -939,6 +988,8 @@ def synchronize_code_only(
         observations,
         attempt_sha256=attempt_sha256,
     )
+    if terminal is None:  # pragma: no cover - observations were supplied
+        raise GenerationConflict("promotion unexpectedly requires source observation")
     _sync_fault(runtime, request, "promotion_released")
     return _success_receipt(runtime, request, terminal)
 

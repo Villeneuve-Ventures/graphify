@@ -1,6 +1,7 @@
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import importlib
 import json
@@ -4099,11 +4100,14 @@ def _safe_extract_with_xaml_root(
     previous_root = _XAML_ACTIVE_EXTRACT_ROOT
     _XAML_ACTIVE_EXTRACT_ROOT = root.resolve()
     try:
-        return (
-            _safe_extract(extractor, path, quiet=True)
-            if quiet
-            else _safe_extract(extractor, path)
-        )
+        if quiet:
+            with (
+                open(os.devnull, "w", encoding="utf-8") as discarded,
+                redirect_stdout(discarded),
+                redirect_stderr(discarded),
+            ):
+                return _safe_extract(extractor, path, quiet=True)
+        return _safe_extract(extractor, path)
     finally:
         _XAML_ACTIVE_EXTRACT_ROOT = previous_root
 
@@ -5070,6 +5074,11 @@ def extract(
             continue
         sf_path = Path(sf)
         if not sf_path.is_absolute():
+            if source_root is not None:
+                try:
+                    item["source_file"] = sf_path.relative_to(source_root).as_posix()
+                except ValueError:
+                    pass
             continue
         try:
             item["source_file"] = sf_path.relative_to(root).as_posix()

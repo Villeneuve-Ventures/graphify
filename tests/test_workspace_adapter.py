@@ -311,6 +311,38 @@ def test_0916_structural_build_keeps_temporary_work_inside_explicit_staging(
     assert Path.cwd() == cwd_before
 
 
+def test_0916_explicit_scratch_publishes_stable_repo_relative_source_paths(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    code_root = source / "pkg"
+    code_root.mkdir(parents=True)
+    (code_root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+    payloads: list[bytes] = []
+
+    for name in ("first", "second"):
+        output = tmp_path / "state" / name
+        output.mkdir(parents=True)
+        output.chmod(0o700)
+        adapter.build_structural(source, output_root=output, scratch_root=output)
+        payloads.append((output / "graphify-out" / "graph.json").read_bytes())
+
+    graph = json.loads(payloads[0])
+    source_files = {
+        item["source_file"]
+        for collection in (graph["nodes"], graph["links"])
+        for item in collection
+        if item.get("source_file")
+    }
+    assert source_files == {"pkg/app.py"}
+    assert payloads[0] == payloads[1]
+    assert b".graphify-source-" not in payloads[0]
+
+
 def test_0916_explicit_scratch_quarantines_before_recursive_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -607,6 +639,52 @@ def test_0916_explicit_scratch_ignores_ambient_output_and_suppresses_progress(
     assert completed.stderr == ""
     assert not ambient_output.exists()
     assert (output / "graphify-out" / "graph.json").is_file()
+
+
+def test_quiet_parallel_extraction_suppresses_nested_worker_diagnostics(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    cache = tmp_path / "cache"
+    source.mkdir()
+    cache.mkdir()
+    (source / "tsconfig.json").write_text("{ invalid", encoding="utf-8")
+    for index in range(20):
+        (source / f"module_{index:02d}.ts").write_text(
+            f'import value from "@app/value"; export const item{index} = value;\n',
+            encoding="utf-8",
+        )
+    environment = dict(os.environ)
+    environment["GRAPHIFY_MAX_WORKERS"] = "2"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "from contextlib import redirect_stderr, redirect_stdout",
+                    "from io import StringIO",
+                    "from pathlib import Path",
+                    "from graphify.extract import extract",
+                    "source = Path(__import__('sys').argv[1])",
+                    "with redirect_stdout(StringIO()), redirect_stderr(StringIO()):",
+                    "    result = extract(sorted(source.glob('*.ts')), cache_root=Path(__import__('sys').argv[2]), source_root=source, max_workers=2, quiet=True, honor_ambient_output=False)",
+                    "assert result['nodes']",
+                )
+            ),
+            os.fspath(source),
+            os.fspath(cache),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+    assert completed.stderr == ""
 
 
 def test_0916_explicit_scratch_cleanup_preserves_a_replacement_entry(
