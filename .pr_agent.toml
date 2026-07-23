@@ -34,6 +34,12 @@ ignore_pr_labels = ["skip-pr-agent"]
 restricted_mode = true
 
 
+[github_action_config]
+# The pinned runner treats synchronize separately from initial PR actions.
+handle_push_trigger = true
+push_commands = ["/review"]
+
+
 [pr_reviewer]
 publish_output_no_suggestions = true
 persistent_comment = true
