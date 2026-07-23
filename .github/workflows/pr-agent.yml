@@ -1,0 +1,139 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, review_requested, synchronize]
+  issue_comment:
+    types: [created, edited]
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Secrets are unavailable to pull_request workflows from forks. Review those
+    # only after a trusted maintainer explicitly comments /review, which runs from
+    # the default branch through issue_comment.
+    if: >-
+      ${{
+        github.event.sender.type != 'Bot' &&
+        (
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.draft == false &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          ) ||
+          (
+            github.event_name == 'issue_comment' &&
+            github.event.issue.pull_request &&
+            startsWith(github.event.comment.body, '/review') &&
+            contains(
+              fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+              github.event.comment.author_association
+            )
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned PR-Agent
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "git+https://github.com/qodo-ai/pr-agent.git@1885eb4056887b8c8a530f0a35b842bba05cb425"
+
+      - name: Run PR-Agent review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Keep provider-critical settings in the trusted workflow as well as
+          # .pr_agent.toml. This prevents a missing/unreadable repo config from
+          # silently falling back to PR-Agent's default OpenAI model.
+          config.model: "gemini/gemini-3.6-flash"
+          config.fallback_models: '["gemini/gemini-3.5-flash-lite"]'
+          config.reasoning_effort: "high"
+          config.custom_model_max_tokens: "1048576"
+          config.max_model_tokens: "65536"
+          github_action_config.auto_review: "true"
+          github_action_config.auto_describe: "false"
+          github_action_config.auto_improve: "false"
+          # The pinned runner handles synchronize through its push-trigger path.
+          # Route new commits through /review instead of silently skipping them.
+          github_action_config.handle_push_trigger: "true"
+          github_action_config.push_commands: "/review"
+        run: |
+          python - <<'PY'
+          import asyncio
+
+          from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
+
+          # PR-Agent at the pinned revision does not yet list these stable model
+          # IDs in its reasoning-effort allowlist. LiteLLM 1.92 supports their
+          # reasoning_effort parameter, so extend the in-memory list before
+          # importing the runner and its AI handler. .pr_agent.toml supplies the
+          # corresponding custom token limit.
+          for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
+              if model not in SUPPORT_REASONING_EFFORT_MODELS:
+                  SUPPORT_REASONING_EFFORT_MODELS.append(model)
+
+          # The pinned runner catches review exceptions and otherwise lets the
+          # Actions step exit successfully. Wrap the review path so a missing
+          # model prediction or failed persistent-comment publication makes the
+          # check fail instead of producing a false green result.
+          from pr_agent.agent.pr_agent import PRAgent
+          from pr_agent.tools.pr_reviewer import PRReviewer
+
+          original_review = PRReviewer.run
+          verification = {"review_completed": False}
+
+          async def run_verified_review(self):
+              review_published = False
+              original_publish = self.git_provider.publish_persistent_comment
+
+              def publish_verified_review(*args, **kwargs):
+                  nonlocal review_published
+                  result = original_publish(*args, **kwargs)
+                  review_published = True
+                  return result
+
+              self.git_provider.publish_persistent_comment = publish_verified_review
+              try:
+                  await original_review(self)
+              finally:
+                  self.git_provider.publish_persistent_comment = original_publish
+
+              if not self.prediction:
+                  raise RuntimeError("PR-Agent did not produce a model prediction")
+              if not review_published:
+                  raise RuntimeError("PR-Agent did not publish its persistent review")
+              verification["review_completed"] = True
+
+          PRReviewer.run = run_verified_review
+
+          original_handle_request = PRAgent.handle_request
+
+          async def handle_verified_request(self, *args, **kwargs):
+              handled = await original_handle_request(self, *args, **kwargs)
+              if handled is False:
+                  raise RuntimeError("PR-Agent did not handle the /review command")
+              return handled
+
+          PRAgent.handle_request = handle_verified_request
+
+          from pr_agent.servers.github_action_runner import run_action
+
+          asyncio.run(run_action())
+          if not verification["review_completed"]:
+              raise RuntimeError("PR-Agent did not complete a verified review")
+          PY

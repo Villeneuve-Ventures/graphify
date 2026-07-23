@@ -1,0 +1,107 @@
+[config]
+model = "gemini/gemini-3.6-flash"
+fallback_models = ["gemini/gemini-3.5-flash-lite"]
+reasoning_effort = "high"
+
+# High-effort reviews and larger diffs need more time and context than the
+# PR-Agent defaults. Gemini 3.6 Flash supports a 1M-token input window; this
+# repository deliberately caps review context at 64K to keep usage bounded.
+ai_timeout = 300
+max_model_tokens = 65536
+# PR-Agent's pinned token map does not yet include Google's stable 3.6 Flash or
+# 3.5 Flash-Lite IDs. Both have an official 1M input limit; max_model_tokens
+# still caps the effective review context at 64K.
+custom_model_max_tokens = 1048576
+large_patch_policy = "clip"
+
+patch_extra_lines_before = 5
+patch_extra_lines_after = 1
+allow_dynamic_context = true
+
+# Load only trusted PR target-branch policy and tool configuration. This keeps
+# reviews aligned with workspace/v1 as well as v8 without reading PR-head edits.
+# These files total fewer than 500 lines on both branches.
+repo_context_files = [
+    "AGENTS.md",
+    "SECURITY.md",
+    "pyproject.toml",
+    ".github/workflows/ci.yml",
+]
+repo_context_from_default_branch = false
+repo_context_max_lines = 500
+
+ignore_pr_labels = ["skip-pr-agent"]
+restricted_mode = true
+
+
+[github_action_config]
+# The pinned runner treats synchronize separately from initial PR actions.
+handle_push_trigger = true
+push_commands = ["/review"]
+
+
+[pr_reviewer]
+publish_output_no_suggestions = true
+persistent_comment = true
+final_update_message = false
+
+# PR-Agent defaults to three findings. Graphify uses five so reviews can cover
+# correctness, security, tests, and packaging without suppressing material issues.
+num_max_findings = 5
+
+require_tests_review = true
+require_security_review = true
+require_ticket_analysis_review = true
+require_can_be_split_review = true
+require_todo_scan = true
+
+require_estimate_effort_to_review = true
+enable_review_labels_effort = true
+enable_review_labels_security = true
+
+require_score_review = false
+require_estimate_contribution_time_cost = false
+
+extra_instructions = """
+Review this pull request as a senior Python maintainer. Report only actionable
+findings with a concrete failure mode; prioritize correctness, regressions,
+security, data loss, concurrency, resource leaks, error handling, compatibility,
+performance, packaging, and missing tests.
+
+Apply these repository-specific rules:
+
+- Preserve Python 3.10 compatibility. Do not recommend syntax, typing features,
+  or standard-library APIs introduced after Python 3.10 unless they are guarded.
+- Keep pyproject.toml and uv.lock synchronized when dependencies change. CI uses
+  frozen lockfile installs, so an unresolved dependency edit is a defect.
+- Treat generated Graphify skill artifacts as generated. Changes must be made in
+  their owning tools/skillgen sources and pass the repository's generation guards.
+- Preserve the security boundaries documented in SECURITY.md, especially URL and
+  redirect validation, private-network and metadata-endpoint blocking, graph path
+  containment, and HTML escaping.
+- Respect the configured Ruff and Pyright baselines. Do not request cosmetic work
+  already enforced by those tools or invent stricter repository policy.
+
+For Python changes, check specifically for:
+
+- Mutable default arguments. Use a None sentinel for per-call mutable values and
+  field(default_factory=...) for mutable dataclass fields.
+- Exception handling. Catch the narrowest applicable exception. Flag bare except
+  clauses and broad Exception catches that suppress unexpected failures; unexpected
+  exceptions should normally propagate or be logged and re-raised.
+- Resource lifetime. Files, clients, locks, transactions, subprocesses, and
+  temporary resources must use with, async with, or try/finally when cleanup is
+  required.
+- Async correctness. Flag missing await expressions, blocking I/O or time.sleep in
+  coroutine paths, leaked tasks, and cancellation paths that skip cleanup.
+- Type contracts. Where annotations exist, verify they match runtime behavior,
+  especially None handling, collection element types, and return values.
+- Public documentation. New or materially changed public APIs should document
+  behavior, parameters, return values, side effects, raised exceptions, and calling
+  restrictions when applicable. Do not request docstrings that restate a signature.
+- Tests. Bug fixes should include a regression test when feasible. New behavior
+  should cover important success, error, boundary, and cleanup paths.
+
+For each finding, state the triggering conditions, practical impact, relevant
+changed code, and smallest viable correction.
+"""
