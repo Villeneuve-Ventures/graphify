@@ -39,16 +39,20 @@ requires matching stdin authorization and an expected registry revision,
 requires the current working directory itself to be the Git top level, then
 delegates to the P2 registry CAS.
 Adoption is never inferred: the operator must select `adopt`, and the existing
-registry must verify shared history for the same UUID. P5B2b0 adds only the
-internal, request-bound staged structural-build lifecycle needed to recover
-crashes and close requests made stale by durable authority drift. The exact
-request is installed before `BUILD` lease acquisition; request-bound `BUILD`,
-`PROMOTE`, and `POINTER_RECOVERY` successors are constrained by the durable
-lifecycle and the caller attempt digest. Durable certification recovery and
-terminal abandonment resolve the corresponding interrupted boundaries without
-adding a public sync command, provider selection, pointer-policy change, or
-inspection-schema revision. Rebind, rotation, activation, remaining
-mutation/query commands, repair, watch/service, installation, performance
+registry must verify shared history for the same UUID. P5B2b0 adds the internal,
+request-bound staged structural-build lifecycle needed to recover crashes and
+close requests made stale by durable authority drift. P5B2b exposes only
+`graphify workspace sync --code-only --request-stdin`. The exact request is
+installed before `BUILD` lease acquisition; request-bound `BUILD`, `PROMOTE`,
+and `POINTER_RECOVERY` successors are constrained by the durable lifecycle and
+the caller attempt digest. The command builds one structural payload beneath
+external generation-owned staging, reconciles an empty semantic set with
+`semantic_required=false`, certifies immutable bytes, promotes through existing
+pointer CAS, and emits a canonical redacted receipt. It adds no provider
+selection, network authority, pointer-policy change, or durable-state schema.
+Status schema v2 makes staged recovery barriers visible. Rebind, rotation,
+activation, remaining mutation/query commands, repair, watch/service,
+installation, performance
 certification, candidate publication, and live-cutover work remain deferred;
 retained production query/service authority remains P5C work.
 
@@ -89,12 +93,12 @@ P2 writes only this external lifecycle state:
 
 P5B1 additionally reserves `runtime-manifest.json` at the root above as an
 internal format-version-1 read authority containing the complete frozen
-compatibility manifest and explicit semantic-queue policy. Status, doctor, and
-P5B2a registration authority loading read it through the same private-directory,
-singular-regular-file, 0600, no-follow, bounded-read rules used for durable
-state. Registration then writes only the P2 paths already shown above. P5C owns
-creating and atomically installing the candidate-backed authority; P5B1/P5B2a
-do not create it or guess its contents.
+compatibility manifest and explicit semantic-queue policy. Status, doctor,
+P5B2a registration, and P5B2b code-only sync authority loading read it through
+the same private-directory, singular-regular-file, 0600, no-follow, bounded-read
+rules used for durable state. Registration then writes only the P2 paths already
+shown above. P5C owns creating and atomically installing the candidate-backed
+authority; P5B1/P5B2a/P5B2b do not create it or guess its contents.
 
 P3 now owns generations, lifecycle journals, coordination locks, pointers,
 capacity reservations, and explicit offline-GC records. None of those paths is
@@ -111,8 +115,9 @@ P5B2b0 adds this bounded internal record under the same external lifecycle root:
 
 The current, previous, and pending records use the existing canonical durable-
 record protocol, cap each read or write at 64 KiB, and bind one generation to
-one exact structural request and frozen observation summary. They are not a new
-public v1 schema and do not change status or doctor output.
+one exact structural request and frozen observation summary. They remain an
+internal format under durable state schema v1. Public status schema v2 exposes
+only a bounded summary and never recovers or mutates the record.
 
 P5A adds this per-workspace state under the same external lifecycle root:
 
@@ -173,7 +178,7 @@ newer desired work later advances the queue; a staged receipt alone is never
 queue authority. The receipt remains the idempotent boundary for the subsequent
 generation install and journal transition.
 
-P5B2b0 reuses the registry-before-workspace order and installs the exact
+P5B2b reuses the P5B2b0 registry-before-workspace order and installs the exact
 `REQUESTED` record before acquiring its request-bound `BUILD` lease. A
 nonterminal staged record blocks ordinary workspace mutation. Only the exact
 request and caller attempt may acquire or recover the lifecycle-permitted
@@ -181,7 +186,9 @@ request and caller attempt may acquire or recover the lifecycle-permitted
 alone cannot share a live fence. Exact durable certification may finish through
 recovery; otherwise canonical source, migration, pointer, compatibility,
 semantic-source, or trusted-observation drift may install an abandonment intent
-before cleanup. Source unavailability alone is not stale evidence.
+before cleanup. Source unavailability alone is not stale evidence. The CLI
+accepts the exact authority and capacity inputs through canonical bounded stdin,
+then emits only the stable receipt after held leases have been released.
 
 Activation, migration, promotion, rollback, repair, pointer recovery, and GC
 share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved
@@ -191,5 +198,6 @@ workspace lease. Migration may invalidate semantic commit authority, but the
 exact trusted owner/fence can still release that stale record. P2 allocates and
 validates these leases; P3 consumes only the lifecycle-operation subset. P4
 owns adapter and freshness use. P5A consumes the semantic domain and binds
-stable semantic completion to certification. Later P5 slices remain responsible
-for orchestration, services, commands, installation, and publication.
+stable semantic completion to certification. P5B2b owns only code-only
+structural orchestration; later P5 slices remain responsible for all other
+orchestration, services, commands, installation, and publication.

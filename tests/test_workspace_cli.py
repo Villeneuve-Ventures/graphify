@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -69,6 +70,15 @@ def _ready_workspace() -> dict[str, Any]:
             "pending": [],
             "pending_reason_code": "ready",
         },
+        "staged_build": {
+            "present": False,
+            "blocking": False,
+            "revision": None,
+            "generation_id": None,
+            "lifecycle_state": None,
+            "logical_request_sha256": None,
+            "request_sha256": None,
+        },
         "queue": {
             "revision": 0,
             "desired_watermark": 0,
@@ -126,7 +136,7 @@ def _report(exit_code: int) -> WorkspaceStatusReport:
     return WorkspaceStatusReport(
         {
             "contract": "graphify.workspace.status",
-            "schema_version": 1,
+            "schema_version": 2,
             "cli_contract_version": 1,
             "state": state,
             "exit_code": exit_code,
@@ -213,6 +223,43 @@ def test_doctor_renders_the_same_checks_and_returns_report_exit_code(
     assert value["checks"][0]["component"] in rendered
     assert value["checks"][0]["reason_code"] in rendered
     assert value["checks"][0]["action_code"] in rendered
+
+
+def test_doctor_renders_the_staged_build_recovery_reason_and_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    report = SimpleNamespace(
+        exit_code=10,
+        to_dict=lambda: {
+            "state": "degraded",
+            "exit_code": 10,
+            "safe_to_query": False,
+            "reason_code": "staged_build_recovery_required",
+            "action_code": "resume_exact_workspace_sync",
+            "checks": [
+                {
+                    "component": "workspace:11111111-1111-4111-8111-111111111111:staged_build",
+                    "state": "degraded",
+                    "reason_code": "staged_build_recovery_required",
+                    "action_code": "resume_exact_workspace_sync",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(workspace_cli, "inspect_workspace_status", lambda _inputs: report)
+    stdout = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        ["doctor"],
+        inputs=object(),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 10
+    assert "staged_build_recovery_required" in stdout.getvalue()
+    assert "resume_exact_workspace_sync" in stdout.getvalue()
 
 
 @pytest.mark.parametrize(

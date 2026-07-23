@@ -1,4 +1,4 @@
-"""Versioned workspace contracts plus the bounded P2-P5B2b0 runtime.
+"""Versioned workspace contracts plus the bounded P2-P5B2b runtime.
 
 P2 adds external registry persistence, operator-authorized UUID/source
 identity, explicit active-source CAS, and fenced leases. P3 adds immutable
@@ -9,10 +9,10 @@ adds the durable semantic queue and stable-watermark certification binding.
 P5B1 adds production composition, versioned read-only status, and read-only
 doctor. P5B2a adds only explicit operator-authorized initial enrollment and
 verified clone/fork adoption through ``graphify workspace register``. P5B2b0
-adds only internal request-bound staged-build and stale-abandonment recovery;
-it does not expose ``workspace sync`` or revise public inspection schemas. All
-other mutation/query commands, services, installation, and candidate
-publication remain deferred.
+adds internal request-bound staged-build and stale-abandonment recovery. P5B2b
+adds provider-neutral ``workspace sync --code-only`` plus truthful staged-build
+visibility in status schema v2. All other mutation/query commands, services,
+installation, and candidate publication remain deferred.
 """
 
 from graphify.workspace.adapters import (
@@ -191,6 +191,21 @@ from graphify.workspace.status import (
     inspect_workspace_status,
     load_status_schema,
 )
+from graphify.workspace.sync import (
+    SYNC_MODE,
+    SYNC_RECEIPT_CONTRACT,
+    SYNC_REQUEST_CONTRACT,
+    SYNC_REQUEST_MAX_BYTES,
+    SYNC_SCHEMA_VERSION,
+    StagedBuildRecoveryRequired,
+    SyncAuthorityConflict,
+    SyncLeaseBusy,
+    SyncReceipt,
+    SyncRequest,
+    SyncRequestInvalid,
+    WorkspaceSyncError,
+    synchronize_code_only,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -211,6 +226,11 @@ __all__ = [
     "STATE_SCHEMA_VERSION",
     "STATUS_CONTRACT",
     "STATUS_SCHEMA_VERSION",
+    "SYNC_MODE",
+    "SYNC_RECEIPT_CONTRACT",
+    "SYNC_REQUEST_CONTRACT",
+    "SYNC_REQUEST_MAX_BYTES",
+    "SYNC_SCHEMA_VERSION",
     "WORKSPACE_SCHEMA_VERSION",
     "UPSTREAM_BASELINE_COMMIT",
     "WORKSPACE_SCHEMA_FILES",
@@ -326,6 +346,13 @@ __all__ = [
     "WorkspaceRuntimeInputs",
     "WorkspaceRuntimeError",
     "WorkspaceStatusReport",
+    "WorkspaceSyncError",
+    "StagedBuildRecoveryRequired",
+    "SyncAuthorityConflict",
+    "SyncLeaseBusy",
+    "SyncReceipt",
+    "SyncRequest",
+    "SyncRequestInvalid",
     "canonical_json_bytes",
     "canonical_sha256",
     "compose_workspace_runtime",
@@ -339,5 +366,6 @@ __all__ = [
     "load_status_schema",
     "parse_contract",
     "select_adapter",
+    "synchronize_code_only",
     "validate_installer_compensation",
 ]

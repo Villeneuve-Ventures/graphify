@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
+from io import StringIO
 import os
 from pathlib import Path
 import subprocess
@@ -18,11 +19,16 @@ from graphify.workspace.composition import (
     WorkspaceRuntimeInputs,
     compose_workspace_runtime,
 )
+from graphify.workspace.cli import run_workspace_command
 from graphify.workspace.contracts import (
+    CapacityPolicy,
     CompatibilityManifest,
     FreshnessRelease,
     GcIntentState,
     PointerSet,
+    StagedBuildAbandonmentEvidence,
+    StagedBuildState,
+    StructuralBuildRequest,
     canonical_json_bytes,
 )
 from graphify.workspace.freshness import FreshnessAuthority
@@ -74,6 +80,17 @@ QUEUE_POLICY = SemanticQueuePolicy(
     max_bytes=16 * 1024,
     retry_budget=1,
 )
+_STAGED_CAPACITY_POLICY = CapacityPolicy.from_mapping(
+    {
+        "contract": "graphify.workspace.capacity_policy.internal",
+        "format_version": 1,
+        "global_max_bytes": 32 * 1024 * 1024,
+        "global_max_generations": 16,
+        "workspace_max_bytes": 8 * 1024 * 1024,
+        "workspace_max_generations": 8,
+        "reserve_bytes": 1024,
+    }
+)
 
 
 def _inputs(
@@ -96,6 +113,194 @@ def _reason_codes(report: Any) -> set[str]:
         str(value["reason_code"]),
         *(str(check["reason_code"]) for check in value["checks"]),
     }
+
+
+def _fresh_runtime_with_staged_request(
+    tmp_path: Path,
+    *,
+    queue_state: str | None = None,
+) -> tuple[Any, Any, StructuralBuildRequest]:
+    """Create a current pointer plus a successor staged request without a lease."""
+
+    from tests.test_workspace_freshness import QUEUE_POLICY as FRESH_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as fresh_runtime
+
+    fresh = fresh_runtime(tmp_path)
+    inputs = WorkspaceRuntimeInputs(
+        state_root=fresh.state_root,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue_policy=FRESH_QUEUE_POLICY,
+        capabilities=SUPPORTED,
+    )
+    runtime = compose_workspace_runtime(inputs)
+    if queue_state is not None:
+        from tests.test_workspace_semantic_queue import _host_claim_inputs
+
+        harness = RuntimeHarness(
+            repo=fresh.repo,
+            state_root=fresh.state_root,
+            registry=runtime.registry,
+            leases=runtime.leases,
+        )
+        queue = runtime.generations.semantic_queue
+        assert queue is not None
+        build = acquire(harness, "BUILD", tick=3)
+        queue.enqueue(
+            build,
+            SemanticDesiredWork(
+                source_epoch=1,
+                policy_sha256="1" * 64,
+                operation="UPSERT",
+                path="docs/staged-status.md",
+                content_sha256="2" * 64,
+                desired_revision=2,
+            ),
+            monotonic_ns=30_001,
+        )
+        harness.leases.release(build)
+        if queue_state == "dead_letter":
+            semantic = acquire(harness, "SEMANTIC_CLAIM", tick=4)
+            claim = queue.claim(
+                semantic,
+                **_host_claim_inputs(harness),
+                monotonic_ns=40_001,
+            )
+            assert claim is not None
+            queue.fail(
+                semantic,
+                claim,
+                error_code="staged_status_test",
+                retryable=False,
+                monotonic_ns=40_002,
+            )
+            harness.leases.release(semantic)
+    registry = runtime.registry.load().to_dict()
+    entry = registry["workspaces"][0]
+    lease_state = runtime.leases.inspect(REPO_UUID)
+    observations = (
+        runtime.generations.adapter.observe(fresh.repo),
+        runtime.generations.adapter.observe(fresh.repo),
+    )
+    observation = runtime.generations._source_observation_document(observations[0])
+    pointer = runtime.pointers.load(REPO_UUID)
+    assert pointer is not None
+    pointer_value = pointer.to_dict()
+    current = cast(dict[str, str], pointer_value["current"])
+    request = StructuralBuildRequest.from_mapping(
+        {
+            "logical_request_sha256": "a" * 64,
+            "expected_registry_revision": int(registry["revision"]),
+            "expected_active_source_revision": int(entry["active_source_revision"]),
+            "expected_operation_epoch": lease_state.operation_epoch,
+            "expected_migration_epoch": lease_state.migration_epoch,
+            "expected_pointer_revision": int(pointer_value["pointer_revision"]),
+            "expected_current_receipt_sha256": current["receipt_sha256"],
+            "source_commit": observations[0].source_commit,
+            "source_epoch": int(pointer_value["source_epoch"]),
+            "policy_sha256": observations[0].policy_sha256,
+            "observation_manifest_sha256": observations[0].inventory_sha256,
+            "observation_evidence_sha256": runtime.generations.structural_observation_evidence_sha256(
+                observations
+            ),
+            "observation_detector_id": observation["detector_id"],
+            "observation_entries_sha256": observation["entries_sha256"],
+            "expected_payload_bytes": 4096,
+            "capacity_policy_sha256": _STAGED_CAPACITY_POLICY.sha256,
+            "compatibility_sha256": COMPATIBILITY_MANIFEST.sha256,
+        }
+    )
+    state = runtime.generations.request_staged_build(
+        REPO_UUID,
+        "gen-status-staged",
+        request,
+        source_observations=observations,
+    )
+    assert state.lifecycle_state == "REQUESTED"
+    return fresh, runtime, request
+
+
+def _write_staged_state(runtime: Any, state: StagedBuildState) -> None:
+    current, _previous, _pending = runtime.generations._staged_build_paths(REPO_UUID)
+    path = runtime.generations.state.path(current)
+    path.write_bytes(state.canonical)
+    path.chmod(0o600)
+
+
+def _staged_state(
+    request: StructuralBuildRequest,
+    lifecycle_state: str,
+    *,
+    pointer_revision: int | None = None,
+) -> StagedBuildState:
+    payload = "b" * 64 if lifecycle_state in {"COMPLETE", "CERTIFIED", "PROMOTED"} else None
+    receipt = "c" * 64 if lifecycle_state in {"CERTIFIED", "PROMOTED"} else None
+    return StagedBuildState.from_mapping(
+        {
+            "contract": "graphify.workspace.staged_build.internal",
+            "format_version": 1,
+            "revision": 2,
+            "repo_uuid": REPO_UUID,
+            "generation_id": "gen-status-staged",
+            "request": request.to_dict(),
+            "request_sha256": request.sha256,
+            "lifecycle_state": lifecycle_state,
+            "operation_epoch": None if lifecycle_state == "REQUESTED" else 1,
+            "fence_token": None if lifecycle_state == "REQUESTED" else 1,
+            "payload_manifest_sha256": payload,
+            "receipt_sha256": receipt,
+            "pointer_revision": pointer_revision,
+            "abandonment_intent": None,
+            "abandoned_from": None,
+            "abandon_reason": None,
+            "abandon_evidence": None,
+            "abandon_evidence_sha256": None,
+        }
+    )
+
+
+def _abandoned_staged_state(request: StructuralBuildRequest) -> StagedBuildState:
+    evidence = StagedBuildAbandonmentEvidence(
+        request_sha256=request.sha256,
+        registry_revision=request.expected_registry_revision,
+        active_source_revision=request.expected_active_source_revision + 1,
+        operation_epoch=request.expected_operation_epoch,
+        migration_epoch=request.expected_migration_epoch,
+        pointer_revision=request.expected_pointer_revision,
+        current_receipt_sha256=request.expected_current_receipt_sha256,
+        selected_compatibility_sha256=request.compatibility_sha256,
+        semantic_source_epoch=None,
+        semantic_queue_watermark=None,
+        semantic_queue_state_sha256=None,
+        source_commit=request.source_commit,
+        source_inventory_sha256=request.observation_manifest_sha256,
+        source_policy_sha256=request.policy_sha256,
+        source_detector_id=request.observation_detector_id,
+        source_stable_inventory_passes=2,
+        source_entries_sha256=request.observation_entries_sha256,
+        source_observation_evidence_sha256=request.observation_evidence_sha256,
+    )
+    return StagedBuildState.from_mapping(
+        {
+            "contract": "graphify.workspace.staged_build.internal",
+            "format_version": 1,
+            "revision": 2,
+            "repo_uuid": REPO_UUID,
+            "generation_id": "gen-status-staged",
+            "request": request.to_dict(),
+            "request_sha256": request.sha256,
+            "lifecycle_state": "ABANDONED",
+            "operation_epoch": 1,
+            "fence_token": 1,
+            "payload_manifest_sha256": None,
+            "receipt_sha256": None,
+            "pointer_revision": None,
+            "abandonment_intent": None,
+            "abandoned_from": "REQUESTED",
+            "abandon_reason": "ACTIVE_SOURCE_CHANGED",
+            "abandon_evidence": evidence.to_dict(),
+            "abandon_evidence_sha256": evidence.sha256,
+        }
+    )
 
 
 def _gc_intent(pointer: PointerSet, *, capacity_policy_sha256: str) -> GcIntentState:
@@ -185,7 +390,7 @@ def test_status_reports_enrolled_uninitialized_workspace_as_degraded(
     value = report.to_dict()
 
     assert value["contract"] == "graphify.workspace.status"
-    assert value["schema_version"] == 1
+    assert value["schema_version"] == 2
     assert value["cli_contract_version"] == 1
     assert value["state"] == "degraded"
     assert value["exit_code"] == 10
@@ -229,6 +434,225 @@ def test_status_reports_certified_visible_generation_as_ready(tmp_path: Path) ->
         load_status_schema(),
         format_checker=FormatChecker(),
     ).validate(value)
+
+
+@pytest.mark.parametrize("lifecycle_state", ["REQUESTED", "PUBLISHING", "COMPLETE", "CERTIFIED"])
+def test_status_blocks_query_when_a_nonterminal_staged_build_has_no_live_lease(
+    tmp_path: Path,
+    lifecycle_state: str,
+) -> None:
+    fresh, runtime, request = _fresh_runtime_with_staged_request(tmp_path)
+    from tests.test_workspace_freshness import QUEUE_POLICY as FRESH_QUEUE_POLICY
+
+    if lifecycle_state != "REQUESTED":
+        _write_staged_state(runtime, _staged_state(request, lifecycle_state))
+    before_tree = tree_snapshot(fresh.state_root)
+    before_metadata = metadata_snapshot(fresh.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=fresh.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=FRESH_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+    workspace = value["workspaces"][0]
+
+    assert value["schema_version"] == 2
+    assert report.exit_code == 10
+    assert value["safe_to_query"] is False
+    assert workspace["safe_to_query"] is False
+    assert workspace["state"] == "degraded"
+    assert workspace["reason_code"] == "staged_build_recovery_required"
+    assert workspace["action_code"] == "resume_exact_workspace_sync"
+    assert workspace["staged_build"] == {
+        "present": True,
+        "blocking": True,
+        "revision": 1 if lifecycle_state == "REQUESTED" else 2,
+        "generation_id": "gen-status-staged",
+        "lifecycle_state": lifecycle_state,
+        "logical_request_sha256": "a" * 64,
+        "request_sha256": request.sha256,
+    }
+    assert any(
+        check == {
+            "component": f"workspace:{REPO_UUID}:staged_build",
+            "state": "degraded",
+            "reason_code": "staged_build_recovery_required",
+            "action_code": "resume_exact_workspace_sync",
+        }
+        for check in value["checks"]
+    )
+    assert tree_snapshot(fresh.state_root) == before_tree
+    assert metadata_snapshot(fresh.state_root) == before_metadata
+
+
+@pytest.mark.parametrize("lifecycle_state", ["REQUESTED", "PUBLISHING", "COMPLETE", "CERTIFIED"])
+@pytest.mark.parametrize(
+    ("queue_state", "queue_reason"),
+    [
+        ("pending", "semantic_queue_pending"),
+        ("dead_letter", "semantic_queue_dead_letter"),
+    ],
+)
+def test_status_keeps_staged_resume_primary_over_semantic_queue_degradation(
+    tmp_path: Path,
+    lifecycle_state: str,
+    queue_state: str,
+    queue_reason: str,
+) -> None:
+    fresh, runtime, request = _fresh_runtime_with_staged_request(
+        tmp_path,
+        queue_state=queue_state,
+    )
+    from tests.test_workspace_freshness import QUEUE_POLICY as FRESH_QUEUE_POLICY
+
+    if lifecycle_state != "REQUESTED":
+        _write_staged_state(runtime, _staged_state(request, lifecycle_state))
+    inputs = WorkspaceRuntimeInputs(
+        state_root=fresh.state_root,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue_policy=FRESH_QUEUE_POLICY,
+        capabilities=SUPPORTED,
+    )
+
+    report = inspect_workspace_status(inputs)
+    value = report.to_dict()
+    workspace = value["workspaces"][0]
+
+    assert report.exit_code == 10
+    assert value["reason_code"] == "staged_build_recovery_required"
+    assert value["action_code"] == "resume_exact_workspace_sync"
+    assert workspace["reason_code"] == "staged_build_recovery_required"
+    assert workspace["action_code"] == "resume_exact_workspace_sync"
+    assert queue_reason in _reason_codes(report)
+    Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    ).validate(value)
+
+    doctor_stdout = StringIO()
+    doctor_stderr = StringIO()
+    assert run_workspace_command(
+        ("doctor",),
+        inputs=inputs,
+        stdout=doctor_stdout,
+        stderr=doctor_stderr,
+    ) == 10
+    assert "staged_build_recovery_required" in doctor_stdout.getvalue()
+    assert "resume_exact_workspace_sync" in doctor_stdout.getvalue()
+    assert doctor_stderr.getvalue() == ""
+
+    wrong_primary = deepcopy(value)
+    wrong_primary["reason_code"] = queue_reason
+    wrong_primary["action_code"] = "drain_semantic_queue"
+    validator = Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    )
+    assert not validator.is_valid(wrong_primary)
+
+    wrong_workspace = deepcopy(value)
+    wrong_workspace["workspaces"][0]["reason_code"] = queue_reason
+    wrong_workspace["workspaces"][0]["action_code"] = "drain_semantic_queue"
+    assert not validator.is_valid(wrong_workspace)
+
+
+def test_status_terminal_promoted_staged_build_does_not_block_query(tmp_path: Path) -> None:
+    fresh, runtime, request = _fresh_runtime_with_staged_request(tmp_path)
+    _write_staged_state(runtime, _staged_state(request, "PROMOTED", pointer_revision=1))
+    from tests.test_workspace_freshness import QUEUE_POLICY as FRESH_QUEUE_POLICY
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=fresh.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=FRESH_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert report.exit_code == 0
+    assert report.to_dict()["safe_to_query"] is True
+    assert report.to_dict()["workspaces"][0]["staged_build"]["blocking"] is False
+
+
+def test_status_corrupt_staged_build_fails_closed_without_creating_state(
+    tmp_path: Path,
+) -> None:
+    fresh, runtime, _request = _fresh_runtime_with_staged_request(tmp_path)
+    current, _previous, _pending = runtime.generations._staged_build_paths(REPO_UUID)
+    runtime.generations.state.path(current).write_bytes(b'{"not":"a staged build"}\n')
+    before_tree = tree_snapshot(fresh.state_root)
+    before_metadata = metadata_snapshot(fresh.state_root)
+    from tests.test_workspace_freshness import QUEUE_POLICY as FRESH_QUEUE_POLICY
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=fresh.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=FRESH_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert report.exit_code == 20
+    assert report.to_dict()["safe_to_query"] is False
+    assert report.to_dict()["workspaces"][0]["reason_code"] == "staged_build_invalid"
+    assert Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    ).is_valid(report.to_dict())
+    assert tree_snapshot(fresh.state_root) == before_tree
+    assert metadata_snapshot(fresh.state_root) == before_metadata
+
+
+def test_status_reports_pending_staged_commit_as_exact_sync_recovery(
+    tmp_path: Path,
+) -> None:
+    fresh, runtime, _request = _fresh_runtime_with_staged_request(tmp_path)
+    current, _previous, pending = runtime.generations._staged_build_paths(REPO_UUID)
+    current_path = runtime.generations.state.path(current)
+    pending_path = runtime.generations.state.path(pending)
+    pending_path.write_bytes(current_path.read_bytes())
+    pending_path.chmod(0o600)
+    before_tree = tree_snapshot(fresh.state_root)
+    before_metadata = metadata_snapshot(fresh.state_root)
+    from tests.test_workspace_freshness import QUEUE_POLICY as FRESH_QUEUE_POLICY
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=fresh.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=FRESH_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+    workspace = value["workspaces"][0]
+
+    assert report.exit_code == 10
+    assert value["safe_to_query"] is False
+    assert workspace["reason_code"] == "staged_build_recovery_required"
+    assert workspace["action_code"] == "resume_exact_workspace_sync"
+    assert workspace["repair"] == {"required": False, "count": None}
+    assert workspace["staged_build"] == {
+        "present": True,
+        "blocking": True,
+        "revision": None,
+        "generation_id": None,
+        "lifecycle_state": None,
+        "logical_request_sha256": None,
+        "request_sha256": None,
+    }
+    assert Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    ).is_valid(value)
+    assert tree_snapshot(fresh.state_root) == before_tree
+    assert metadata_snapshot(fresh.state_root) == before_metadata
 
 
 @pytest.mark.parametrize("mutation", ["edit", "create", "delete", "policy"])
@@ -465,6 +889,83 @@ def test_status_report_enforces_structural_schema_constraints(
     assert not validator.is_valid(document)
     with pytest.raises(ValueError, match="schema"):
         WorkspaceStatusReport(document)
+
+
+def test_status_v2_schema_rejects_unknown_nested_workspace_fields(tmp_path: Path) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    document = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    ).to_dict()
+    document["workspaces"][0]["generations"]["future_unversioned_field"] = True
+
+    validator = Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    )
+    assert not validator.is_valid(document)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "absent_with_detail",
+        "nonterminal_not_blocking",
+        "terminal_blocking",
+        "blocking_ready",
+    ],
+)
+def test_status_v2_schema_rejects_contradictory_staged_builds(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    document = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    ).to_dict()
+    staged = document["workspaces"][0]["staged_build"]
+    populated = {
+        "present": True,
+        "blocking": True,
+        "revision": 1,
+        "generation_id": "gen-status-staged",
+        "lifecycle_state": "REQUESTED",
+        "logical_request_sha256": "a" * 64,
+        "request_sha256": "b" * 64,
+    }
+
+    if mutation == "absent_with_detail":
+        staged["request_sha256"] = "b" * 64
+    elif mutation == "nonterminal_not_blocking":
+        document["workspaces"][0]["staged_build"] = {**populated, "blocking": False}
+    elif mutation == "terminal_blocking":
+        document["workspaces"][0]["staged_build"] = {
+            **populated,
+            "lifecycle_state": "PROMOTED",
+        }
+    else:
+        document["workspaces"][0]["staged_build"] = populated
+
+    validator = Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    )
+    assert not validator.is_valid(document)
 
 
 def test_status_report_rejects_nested_reason_codes_outside_schema_constraints(
@@ -1311,6 +1812,7 @@ def test_status_propagates_deadline_into_stable_record_reads(
         decoder: Any,
         revision: Any,
         allow_missing: bool = False,
+        max_bytes: int | None = None,
         deadline_ns: int | None = None,
     ) -> Any:
         observed.append((label, deadline_ns))
@@ -1325,6 +1827,8 @@ def test_status_propagates_deadline_into_stable_record_reads(
         }
         if deadline_ns is not None:
             kwargs["deadline_ns"] = deadline_ns
+        if max_bytes is not None:
+            kwargs["max_bytes"] = max_bytes
         return original_read_stable_record(state, **kwargs)
 
     monkeypatch.setattr(DurableStateRoot, "read_stable_record", capture_deadline)

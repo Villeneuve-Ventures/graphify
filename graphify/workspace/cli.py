@@ -28,6 +28,11 @@ from graphify.workspace.contracts import (
     canonical_registry_source,
     canonical_sha256,
 )
+from graphify.workspace.generations import (
+    CapacityExceeded,
+    GenerationConflict,
+    GenerationError,
+)
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
@@ -48,7 +53,15 @@ from graphify.workspace.persistence import (
     StatePathError,
     UnsupportedRuntime,
 )
+from graphify.workspace.leases import (
+    LeaseBusy,
+    LeaseExpired,
+    LeaseRecoveryRequired,
+    StaleLease,
+)
+from graphify.workspace.pointers import PointerConflict
 from graphify.workspace.registry import RevisionConflict
+from graphify.workspace.semantic_queue import SemanticQueueError
 from graphify.workspace.status import (
     EXIT_DEGRADED,
     EXIT_INVALID,
@@ -58,6 +71,17 @@ from graphify.workspace.status import (
     inspect_workspace_status,
     invalid_workspace_authority_report,
     missing_workspace_authority_report,
+)
+from graphify.workspace.sync import (
+    SYNC_MODE,
+    SYNC_RECEIPT_CONTRACT,
+    SYNC_REQUEST_MAX_BYTES,
+    SYNC_SCHEMA_VERSION,
+    SyncReceipt,
+    SyncRequest,
+    SyncRequestInvalid,
+    WorkspaceSyncError,
+    synchronize_code_only,
 )
 
 
@@ -69,15 +93,23 @@ _REGISTRATION_SOURCE_TIMEOUT_NS = 5_000_000_000
 _REGISTRATION_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "registration.schema.json"
 )
+_SYNC_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "sync-request.schema.json"
+)
+_SYNC_RECEIPT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "sync-receipt.schema.json"
+)
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt> --repo-uuid UUID "
     "--expected-registry-revision N --authorization-stdin"
 )
+_SYNC_USAGE = "graphify workspace sync --code-only --request-stdin"
 _USAGE = (
     "Usage: graphify workspace status --json\n"
     "       graphify workspace doctor\n"
-    f"       {_REGISTER_USAGE}"
+    f"       {_REGISTER_USAGE}\n"
+    f"       {_SYNC_USAGE}"
 )
 
 
@@ -95,6 +127,14 @@ class _RegistrationFailure:
     reason_code: str
     action_code: str
     registry_revision: int | None = None
+
+
+@dataclass(frozen=True)
+class _SyncFailure:
+    state: str
+    exit_code: int
+    reason_code: str
+    action_code: str
 
 
 def _parse_register_request(command: tuple[str, ...]) -> _RegisterRequest | None:
@@ -499,6 +539,189 @@ def _run_registration(
     return _emit_registration_receipt(stream, receipt, exit_code=exit_code)
 
 
+def _read_sync_request_bytes() -> bytes:
+    binary_input = getattr(sys.stdin, "buffer", None)
+    if binary_input is not None:
+        raw = binary_input.read(SYNC_REQUEST_MAX_BYTES + 1)
+        if not isinstance(raw, bytes):
+            raise SyncRequestInvalid("sync request input did not return bytes")
+        return raw
+
+    raw = bytearray()
+    while len(raw) <= SYNC_REQUEST_MAX_BYTES:
+        character = sys.stdin.read(1)
+        if not isinstance(character, str) or len(character) > 1:
+            raise SyncRequestInvalid("sync request input did not return text")
+        if character == "":
+            break
+        try:
+            raw.extend(character.encode("utf-8"))
+        except UnicodeError as exc:
+            raise SyncRequestInvalid("sync request input is not UTF-8") from exc
+    return bytes(raw)
+
+
+def _sync_failure_receipt(failure: _SyncFailure) -> str:
+    return canonical_json_bytes(
+        {
+            "action_code": failure.action_code,
+            "cli_contract_version": CLI_CONTRACT_VERSION,
+            "contract": SYNC_RECEIPT_CONTRACT,
+            "exit_code": failure.exit_code,
+            "mode": SYNC_MODE,
+            "reason_code": failure.reason_code,
+            "schema_version": SYNC_SCHEMA_VERSION,
+            "state": failure.state,
+        }
+    ).decode("utf-8")
+
+
+def _classify_sync_error(error: Exception) -> _SyncFailure:
+    if isinstance(error, WorkspaceSyncError):
+        return _SyncFailure(
+            error.state,
+            error.exit_code,
+            error.reason_code,
+            error.action_code,
+        )
+    if isinstance(error, WorkspaceAuthorityError):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            error.reason_code,
+            error.action_code,
+        )
+    if isinstance(error, LeaseBusy):
+        return _SyncFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "lease_busy",
+            "retry_workspace_sync",
+        )
+    if isinstance(error, (LeaseExpired, StaleLease)):
+        return _SyncFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "staged_build_recovery_required",
+            "resume_exact_workspace_sync",
+        )
+    if isinstance(error, CapacityExceeded):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "capacity_exceeded",
+            "adjust_capacity_policy",
+        )
+    if isinstance(error, CommitUnknown):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "commit_unknown",
+            "resume_exact_workspace_sync",
+        )
+    if isinstance(
+        error,
+        (
+            RevisionConflict,
+            GenerationConflict,
+            PointerConflict,
+            LeaseRecoveryRequired,
+            IdentityError,
+        ),
+    ):
+        return _SyncFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "sync_authority_conflict",
+            "refresh_sync_request",
+        )
+    if isinstance(error, StatePathError):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsafe_state_path",
+            "configure_safe_state_root",
+        )
+    if isinstance(error, UnsupportedRuntime):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsupported_runtime",
+            "use_supported_runtime",
+        )
+    if isinstance(error, UnsupportedCompatibility):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsupported_compatibility",
+            "install_supported_candidate",
+        )
+    if isinstance(error, StateCorrupt):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "state_corrupt",
+            "run_workspace_repair",
+        )
+    if isinstance(error, SemanticQueueError):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "sync_failed",
+            "run_workspace_doctor",
+        )
+    if isinstance(error, GenerationError):
+        return _SyncFailure(
+            "invalid",
+            EXIT_INVALID,
+            "sync_failed",
+            "run_workspace_doctor",
+        )
+    return _SyncFailure(
+        "invalid",
+        EXIT_INVALID,
+        "sync_failed",
+        "run_workspace_doctor",
+    )
+
+
+def _run_sync(
+    *,
+    inputs: WorkspaceRuntimeInputs | None,
+    output: TextIO,
+    errors: TextIO,
+) -> int:
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        if resolved_inputs is None:
+            failure = _SyncFailure(
+                "invalid",
+                EXIT_INVALID,
+                "runtime_authority_missing",
+                "install_candidate_authority",
+            )
+            payload = _sync_failure_receipt(failure)
+            exit_code = failure.exit_code
+        else:
+            try:
+                raw_request = _read_sync_request_bytes()
+            except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+                raise SyncRequestInvalid("sync request input cannot be read") from exc
+            request = SyncRequest.from_json(raw_request)
+            runtime = compose_workspace_runtime(resolved_inputs)
+            receipt: SyncReceipt = synchronize_code_only(runtime, request)
+            payload = receipt.canonical.decode("utf-8")
+            exit_code = EXIT_READY
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = _classify_sync_error(exc)
+        payload = _sync_failure_receipt(failure)
+        exit_code = failure.exit_code
+    stream = output if exit_code == EXIT_READY else errors
+    return _emit_registration_receipt(stream, payload, exit_code=exit_code)
+
+
 def _doctor_text(report: WorkspaceStatusReport) -> str:
     value = report.to_dict()
     lines = [
@@ -538,6 +761,18 @@ def run_workspace_command(
             )
         return _run_registration(
             request,
+            inputs=inputs,
+            output=output,
+            errors=errors,
+        )
+    if command and command[0] == "sync":
+        if command != ("sync", "--code-only", "--request-stdin"):
+            return _emit_registration_receipt(
+                errors,
+                _USAGE + "\n",
+                exit_code=EXIT_USAGE,
+            )
+        return _run_sync(
             inputs=inputs,
             output=output,
             errors=errors,
@@ -584,4 +819,27 @@ def load_registration_schema() -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
-__all__ = ["load_registration_schema", "run_workspace_command"]
+def load_sync_request_schema() -> dict[str, Any]:
+    """Load the public canonical code-only sync request schema."""
+
+    value = _load_json(_SYNC_REQUEST_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace sync request schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+def load_sync_receipt_schema() -> dict[str, Any]:
+    """Load the public redacted code-only sync receipt schema."""
+
+    value = _load_json(_SYNC_RECEIPT_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace sync receipt schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+__all__ = [
+    "load_registration_schema",
+    "load_sync_receipt_schema",
+    "load_sync_request_schema",
+    "run_workspace_command",
+]

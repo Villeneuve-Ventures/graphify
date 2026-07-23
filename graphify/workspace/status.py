@@ -28,7 +28,10 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
     canonical_sha256,
 )
-from graphify.workspace.generations import GenerationError
+from graphify.workspace.generations import (
+    GenerationError,
+    StagedBuildReadRecoveryRequired,
+)
 from graphify.workspace.gc import GcError
 from graphify.workspace.journal import JournalError, JournalSnapshot
 from graphify.workspace.leases import LeaseError
@@ -46,7 +49,7 @@ from graphify.workspace.semantic_queue import SemanticQueueError, SemanticQueueS
 
 
 STATUS_CONTRACT = "graphify.workspace.status"
-STATUS_SCHEMA_VERSION = 1
+STATUS_SCHEMA_VERSION = 2
 EXIT_READY = 0
 EXIT_DEGRADED = 10
 EXIT_INVALID = 20
@@ -87,6 +90,8 @@ REASON_CODES = frozenset(
         "source_unavailable",
         "source_unstable",
         "state_root_missing",
+        "staged_build_invalid",
+        "staged_build_recovery_required",
         "status_snapshot_changed",
         "unsafe_state_path",
         "unsupported_compatibility",
@@ -112,6 +117,7 @@ ACTION_CODES = frozenset(
         "register_workspace",
         "restore_source",
         "retry_status",
+        "resume_exact_workspace_sync",
         "run_workspace_repair",
         "run_workspace_sync",
         "use_supported_runtime",
@@ -520,7 +526,13 @@ class WorkspaceStatusReport:
 def load_status_schema() -> dict[str, Any]:
     """Load the public CLI schema without changing the frozen state catalog."""
 
-    path = Path(__file__).parent / "schemas" / "cli" / "v1" / "status.schema.json"
+    path = (
+        Path(__file__).parent
+        / "schemas"
+        / "cli"
+        / f"v{STATUS_SCHEMA_VERSION}"
+        / "status.schema.json"
+    )
     value = json.loads(path.read_bytes())
     if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
         raise ValueError("workspace status schema must be a JSON object")
@@ -551,7 +563,15 @@ def _finalize(
     elif degraded:
         state = "degraded"
         exit_code = EXIT_DEGRADED
-        primary = degraded[0]
+        primary = min(
+            degraded,
+            key=lambda item: (
+                item["reason_code"] != "staged_build_recovery_required",
+                item["component"],
+                item["reason_code"],
+                item["action_code"],
+            ),
+        )
     else:
         state = "ready"
         exit_code = EXIT_READY
@@ -748,6 +768,15 @@ def _workspace_shell(entry: Mapping[str, object]) -> dict[str, object]:
             "pending": [],
             "pending_reason_code": "not_evaluated_p5b1",
         },
+        "staged_build": {
+            "present": False,
+            "blocking": False,
+            "revision": None,
+            "generation_id": None,
+            "lifecycle_state": None,
+            "logical_request_sha256": None,
+            "request_sha256": None,
+        },
         "queue": {
             "revision": 0,
             "desired_watermark": 0,
@@ -846,6 +875,7 @@ def _inspect_workspace(
     deadline_ns: int,
     journal_tokens: dict[str, tuple[int, str]],
     queue_tokens: dict[str, tuple[int, str]],
+    staged_build_tokens: dict[str, tuple[int, str] | None],
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
     repo_uuid = str(entry["repo_uuid"])
     prefix = f"workspace:{repo_uuid}"
@@ -934,6 +964,80 @@ def _inspect_workspace(
                 )
             checks.append(_check(f"{prefix}:gc", "ready", "ready", "none"))
 
+            state_path_component = f"{prefix}:staged_build"
+            try:
+                staged_build = runtime.generations.read_only_staged_build_locked(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            except LockTimeout:
+                return _deadline_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:staged_build",
+                )
+            except StagedBuildReadRecoveryRequired:
+                staged_summary = cast(dict[str, object], workspace["staged_build"])
+                staged_summary.update(present=True, blocking=True)
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:staged_build",
+                    state="degraded",
+                    reason_code="staged_build_recovery_required",
+                    action_code="resume_exact_workspace_sync",
+                    repair_required=False,
+                )
+            except (GenerationError, StateCorrupt, ContractError, StatePathError):
+                staged_summary = cast(dict[str, object], workspace["staged_build"])
+                staged_summary.update(present=True, blocking=True)
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:staged_build",
+                    state="invalid",
+                    reason_code="staged_build_invalid",
+                    action_code="run_workspace_repair",
+                    repair_required=True,
+                )
+            if staged_build is None:
+                staged_build_tokens[repo_uuid] = None
+            else:
+                staged_value = staged_build.to_dict()
+                lifecycle_state = str(staged_value["lifecycle_state"])
+                blocking = lifecycle_state not in {"PROMOTED", "ABANDONED"}
+                workspace["staged_build"] = {
+                    "present": True,
+                    "blocking": blocking,
+                    "revision": int(staged_value["revision"]),
+                    "generation_id": str(staged_value["generation_id"]),
+                    "lifecycle_state": lifecycle_state,
+                    "logical_request_sha256": str(
+                        cast(Mapping[str, object], staged_value["request"])[
+                            "logical_request_sha256"
+                        ]
+                    ),
+                    "request_sha256": str(staged_value["request_sha256"]),
+                }
+                staged_build_tokens[repo_uuid] = (
+                    int(staged_value["revision"]),
+                    canonical_sha256(staged_value),
+                )
+                if blocking:
+                    workspace["state"] = "degraded"
+                    workspace["reason_code"] = "staged_build_recovery_required"
+                    workspace["action_code"] = "resume_exact_workspace_sync"
+                    checks.append(
+                        _check(
+                            f"{prefix}:staged_build",
+                            "degraded",
+                            "staged_build_recovery_required",
+                            "resume_exact_workspace_sync",
+                        )
+                    )
+                else:
+                    checks.append(_check(f"{prefix}:staged_build", "ready", "ready", "none"))
+
             state_path_component = f"{prefix}:semantic_queue"
             try:
                 queue = runtime.semantic_queue.read_only_snapshot_locked(
@@ -965,8 +1069,11 @@ def _inspect_workspace(
             else:
                 queue_reason, queue_action = queue_issue
                 workspace["state"] = "degraded"
-                workspace["reason_code"] = queue_reason
-                workspace["action_code"] = queue_action
+                if not bool(
+                    cast(Mapping[str, object], workspace["staged_build"])["blocking"]
+                ):
+                    workspace["reason_code"] = queue_reason
+                    workspace["action_code"] = queue_action
                 checks.append(
                     _check(
                         f"{prefix}:semantic_queue",
@@ -1068,6 +1175,18 @@ def _inspect_workspace(
             cast(dict[str, object], workspace["repair"])["count"] = repair_count
             checks.append(_check(f"{prefix}:journal", "ready", "ready", "none"))
             if pointer is None:
+                if bool(
+                    cast(Mapping[str, object], workspace["staged_build"])["blocking"]
+                ):
+                    checks.append(
+                        _check(
+                            f"{prefix}:pointer",
+                            "degraded",
+                            "no_current_generation",
+                            "run_workspace_sync",
+                        )
+                    )
+                    return workspace, checks
                 return _workspace_failure(
                     workspace,
                     checks,
@@ -1129,7 +1248,9 @@ def _inspect_workspace(
                 "pending": pending_generations,
                 "pending_reason_code": ("generation_pending" if pending_generations else "ready"),
             }
-            if queue_issue is None:
+            if queue_issue is None and not bool(
+                cast(Mapping[str, object], workspace["staged_build"])["blocking"]
+            ):
                 workspace["state"] = "ready"
                 workspace["reason_code"] = "freshness_not_observed"
                 workspace["action_code"] = "verify_freshness"
@@ -1262,6 +1383,30 @@ def _journal_snapshot_is_current_locked(
     return _journal_snapshot_token(observed) == expected
 
 
+def _staged_build_snapshot_is_current_locked(
+    runtime: WorkspaceRuntime,
+    repo_uuid: str,
+    expected: tuple[int, str] | None,
+    *,
+    deadline_ns: int,
+) -> bool:
+    try:
+        observed = runtime.generations.read_only_staged_build_locked(
+            repo_uuid,
+            deadline_ns=deadline_ns,
+        )
+    except LockTimeout:
+        raise
+    except (GenerationError, WorkspaceRuntimeError, ContractError, StatePathError):
+        return False
+    token = (
+        None
+        if observed is None
+        else (observed.revision, canonical_sha256(observed.to_dict()))
+    )
+    return token == expected
+
+
 def _pointer_snapshot_is_current_locked(
     runtime: WorkspaceRuntime,
     workspace: Mapping[str, object],
@@ -1305,7 +1450,12 @@ def _apply_freshness(
     deadline_ns: int,
 ) -> None:
     generations = cast(Mapping[str, object], workspace["generations"])
-    if generations["current"] is None or workspace["state"] == "invalid":
+    staged_build = cast(Mapping[str, object], workspace["staged_build"])
+    if (
+        generations["current"] is None
+        or workspace["state"] == "invalid"
+        or bool(staged_build["blocking"])
+    ):
         return
     repo_uuid = str(workspace["repo_uuid"])
     component = f"workspace:{repo_uuid}:freshness"
@@ -1500,6 +1650,7 @@ def inspect_workspace_status(
     workspaces: list[dict[str, object]] = []
     journal_tokens: dict[str, tuple[int, str]] = {}
     queue_tokens: dict[str, tuple[int, str]] = {}
+    staged_build_tokens: dict[str, tuple[int, str] | None] = {}
     registry_token: tuple[int, str] | None = None
     registry_lock_acquired = False
     try:
@@ -1524,6 +1675,7 @@ def inspect_workspace_status(
                     deadline_ns=absolute_deadline,
                     journal_tokens=journal_tokens,
                     queue_tokens=queue_tokens,
+                    staged_build_tokens=staged_build_tokens,
                 )
                 workspaces.append(workspace)
                 checks.extend(workspace_checks)
@@ -1668,6 +1820,19 @@ def inspect_workspace_status(
                                                 checks,
                                                 component=(
                                                     f"workspace:{repo_uuid}:pointer_snapshot"
+                                                ),
+                                            )
+                                        elif not _staged_build_snapshot_is_current_locked(
+                                            runtime,
+                                            repo_uuid,
+                                            staged_build_tokens.get(repo_uuid),
+                                            deadline_ns=absolute_deadline,
+                                        ):
+                                            _mark_snapshot_changed(
+                                                workspace,
+                                                checks,
+                                                component=(
+                                                    f"workspace:{repo_uuid}:staged_build_snapshot"
                                                 ),
                                             )
                                 except LockTimeout:

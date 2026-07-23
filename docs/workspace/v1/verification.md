@@ -168,7 +168,7 @@ output remains ignored and must not widen the P1 product diff.
   focused Pyright and high-severity Bandit, graph refresh, the provider-neutral
   full repository suite, exact-diff review, adversarial QA, and exact-head CI.
 
-## P5B2b0 staged-build recovery gates
+## P5B2b code-only sync and staged-recovery gates
 
 - the canonical internal staged-build record is limited to 64 KiB, uses the
   current/previous/pending durable-record protocol, and rejects corruption,
@@ -191,11 +191,29 @@ output remains ignored and must not widen the P1 product diff.
   selected-source discovery may read checkout and Git metadata first, and
   production typed rejections remain effective under optimized Python execution;
 - failpoints, restart schedules, deterministic races, and recursive before/after
-  source snapshots cover every lifecycle and no-write boundary; and
-- negative gates prove P5B2b0 adds no sync CLI, status/schema revision, provider
-  or network selection, or pointer movement policy. Before public structural
-  sync ships, P5B2b must add separately reviewed status/doctor visibility for
-  unresolved staged barriers and their permitted recovery action.
+  source snapshots cover every lifecycle and no-write boundary;
+- the only accepted public argv is
+  `workspace sync --code-only --request-stdin`; stdin is at most 16 KiB,
+  canonical, duplicate-free, schema-valid, complete, and rejected before
+  orchestration when invalid;
+- CLI-v1 request and receipt schemas freeze explicit identity, capacity, and
+  registry/source/operation/migration/pointer authority, deterministic redacted
+  stdout/stderr, and exit 0/10/20 behavior without private paths or exception
+  text;
+- initial and changed-source sync, exact terminal replay, every orchestration
+  and ambiguous durable failpoint, lease contention, stale CAS, capacity,
+  adapter, source-drift, containment, permission, link, and binding attacks
+  prove build, certification, promotion, and recovery through existing fenced
+  APIs only;
+- provider credentials and configuration cannot affect code-only sync, network
+  calls are denied, exact mutation allowlists keep writes under the configured
+  external state root, and recursive source, Git, real-home, Codex-home, and
+  global-install snapshots remain unchanged; and
+- status schema v2 and doctor render the bounded staged summary. Every
+  nonterminal staged record forces `safe_to_query=false` and exposes
+  `staged_build_recovery_required` / `resume_exact_workspace_sync`; terminal
+  records do not block, corruption fails closed, and inspection performs no
+  write or recovery.
 
 ## P5A semantic queue gates
 

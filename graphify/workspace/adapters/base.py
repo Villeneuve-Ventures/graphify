@@ -219,7 +219,13 @@ class EngineAdapter(Protocol):
     engine_baseline: str
     detector_id: str
 
-    def build_structural(self, source_root: Path, *, output_root: Path) -> StructuralBuild: ...
+    def build_structural(
+        self,
+        source_root: Path,
+        *,
+        output_root: Path,
+        scratch_root: Path | None = None,
+    ) -> StructuralBuild: ...
 
     def query_structural(self, payload_root: Path, request: QueryRequest) -> str: ...
 

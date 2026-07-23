@@ -2052,19 +2052,43 @@ class Graphify0916Adapter:
                 f"{CANDIDATE_DISTRIBUTION_VERSION}, found {installed}"
             )
 
-    def build_structural(self, source_root: Path, *, output_root: Path) -> StructuralBuild:
+    def build_structural(
+        self,
+        source_root: Path,
+        *,
+        output_root: Path,
+        scratch_root: Path | None = None,
+    ) -> StructuralBuild:
         root = _absolute_source_path(source_root)
         _require_initial_source_root(root)
         policy_root = _policy_root_for(root)
         output = _absolute_output_path(output_root)
+        scratch = (
+            None if scratch_root is None else _absolute_output_path(scratch_root)
+        )
+        if scratch is not None and scratch != output:
+            raise ObservationUnsupported("engine scratch root must equal output root")
         if output == policy_root or policy_root in output.parents:
             raise ObservationUnsupported(
                 "engine output root must be external to source checkout"
             )
         output_descriptor, output_identity = _open_empty_output_root(output)
         try:
-            with tempfile.TemporaryDirectory(prefix="graphify-workspace-build-") as temporary:
+            temporary_directory = (
+                tempfile.TemporaryDirectory(prefix="graphify-workspace-build-")
+                if scratch is None
+                else tempfile.TemporaryDirectory(
+                    prefix="graphify-workspace-build-",
+                    dir=os.fspath(output),
+                )
+            )
+            with temporary_directory as temporary:
                 engine_output = Path(temporary)
+                published_output_names = (
+                    tuple(sorted((engine_output.name, "graphify-out")))
+                    if scratch is not None
+                    else ("graphify-out",)
+                )
                 authority = _PinnedReadAuthority.open(policy_root)
                 try:
                     with tempfile.TemporaryDirectory(
@@ -2189,9 +2213,15 @@ class Graphify0916Adapter:
                     )
                     _require_policy_root_binding(root, policy_root)
                     _require_output_binding(output, output_identity)
-                    _require_output_contents(output_descriptor, ())
+                    _require_output_contents(
+                        output_descriptor,
+                        (engine_output.name,) if scratch is not None else (),
+                    )
                     _publish_structural_output(engine_output, output_descriptor)
-                    _require_output_contents(output_descriptor, ("graphify-out",))
+                    _require_output_contents(
+                        output_descriptor,
+                        published_output_names,
+                    )
                     _require_output_binding(output, output_identity)
                     authority.source.require_directory_binding(root, source_details)
                     authority.require_bindings()
@@ -2208,10 +2238,15 @@ class Graphify0916Adapter:
                         kind="policy",
                     )
                     _require_policy_root_binding(root, policy_root)
-                    _require_output_contents(output_descriptor, ("graphify-out",))
+                    _require_output_contents(
+                        output_descriptor,
+                        published_output_names,
+                    )
                     _require_output_binding(output, output_identity)
                 finally:
                     authority.close()
+            _require_output_binding(output, output_identity)
+            _require_output_contents(output_descriptor, ("graphify-out",))
         finally:
             os.close(output_descriptor)
         return StructuralBuild(

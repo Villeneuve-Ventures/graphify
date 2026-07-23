@@ -45,6 +45,9 @@ usage.
   durable certification boundary already authorized by the frozen request;
   otherwise canonical drift is stale-authority evidence for terminal
   abandonment, not permission to execute an unsupported tuple.
+- P5B2b sync requests and receipts use CLI contract version 1. Public status
+  schema version 2 adds staged-barrier inspection only; runtime-manifest format,
+  durable state schema, adapter contract, and CLI contract versions remain 1.
 
 ## Artifact set
 
@@ -85,11 +88,13 @@ complete `graphify.workspace.compatibility_manifest` and the explicit
 defaults: neither package constants nor existing queue state may supply a
 missing authority field.
 
-Status, doctor, and P5B2a registration authority loading accept only an owned,
-singular regular 0600 file beneath an owned private 0700 state root, cap the
-read at 64 KiB, reject duplicate or noncanonical JSON and unknown versions, and
-redact diagnostic details. The authority read itself never creates directories,
-files, locks, or recovery artifacts; registration writes only through the
-existing P2 registry stores after successful composition and source discovery.
-P5C installation will bind and atomically install this authority from the
-reviewed candidate; publication and installation are not part of P5B1/P5B2a.
+Status, doctor, P5B2a registration, and P5B2b code-only sync authority loading
+accept only an owned, singular regular 0600 file beneath an owned private 0700
+state root, cap the read at 64 KiB, reject duplicate or noncanonical JSON and
+unknown versions, and redact diagnostic details. The authority read itself
+never creates directories, files, locks, or recovery artifacts. Registration
+writes only through the existing P2 registry stores; sync writes only through
+the existing generation, semantic-queue, lease, journal, and pointer lifecycle
+stores after successful composition and source observation. P5C installation
+will bind and atomically install this authority from the reviewed candidate;
+publication and installation are not part of P5B1/P5B2a/P5B2b.

@@ -33,9 +33,10 @@ P4 adds read-only adapter/freshness operations and external-output structural
 builds. P5A adds only durable semantic desired-work reconciliation, fenced
 claims, bounded retries/dead letters, and stable-watermark certification.
 P5B2a adds only the initial enrollment and verified clone/fork adoption command.
-P5B2b0 adds only internal request-bound staged-build recovery and terminal stale
-abandonment. All other public workspace commands, service, installation, route,
-publication, and live-cutover transitions remain absent.
+P5B2b0 adds internal request-bound staged-build recovery and terminal stale
+abandonment. P5B2b adds only provider-neutral structural
+`workspace sync --code-only`; all other public workspace commands, service,
+installation, route, publication, and live-cutover transitions remain absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -62,6 +63,16 @@ cross-checks the requested UUID before registry mutation, exposes no source or
 state path, authorization detail, credential, or exception text, and maps stale
 CAS, collision, authority, corruption, and runtime failures to stable codes.
 
+Code-only sync accepts no provider, model, endpoint, credential, or path on
+argv, stdin, or ambient configuration. A bounded canonical request must carry
+every capacity and registry/source/lease/pointer CAS input explicitly;
+duplicate, unknown, noncanonical, inferred, or stale authority fails before
+sync mutation. The request digest binds the durable staged lifecycle. Engine
+scratch and output remain beneath generation-owned external staging, provider
+environment cannot select a backend, and network access is outside the
+command's authority. Public receipts and classified failures omit exception
+text, secrets, credentials, and absolute private paths.
+
 P5B2b0 installs the exact staged request before `BUILD` lease acquisition and
 treats every nonterminal staged record as a barrier to ordinary workspace
 mutation. The request, lease, staged state, workspace, and generation identities
@@ -75,9 +86,11 @@ Recovery may finish exact independently durable certification. Terminal
 abandonment instead requires canonical drift in the active source, migration
 epoch, pointer CAS, compatibility, semantic source epoch, or trusted source
 observation. Source unavailability alone is insufficient, and a durable
-abandonment intent precedes destructive cleanup. Status/doctor visibility for
-an unresolved recovery barrier remains separately reviewed P5B2b work before a
-public structural sync command can ship.
+abandonment intent precedes destructive cleanup. Existing-only status/doctor
+inspection exposes a bounded staged summary; every nonterminal lifecycle is a
+visible recovery barrier with `safe_to_query=false` and an exact-resume action.
+Terminal promoted or abandoned records do not create a false barrier, while
+corrupt or contradictory staged state fails closed.
 
 Operational corpus processing will use a cleaned allowlisted environment,
 network denial by default, bounded CPU/memory/file/time resources, read-only

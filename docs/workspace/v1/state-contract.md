@@ -155,8 +155,30 @@ precedes cleanup so a crash can finish the same close under a successor fence.
 The frozen request observation is sufficient when an earlier-priority durable
 authority already proves staleness, including when the selected source is no
 longer available. Source-only abandonment still requires two fresh trusted
-observations and fails closed when they cannot be obtained. P5B2b0 exposes no
-public sync command and does not change the frozen status/doctor JSON schemas.
+observations and fails closed when they cannot be obtained.
+
+P5B2b exposes the sole public mutation command
+`graphify workspace sync --code-only --request-stdin`. Its canonical request is
+limited to 16 KiB and explicitly binds workspace and generation identity,
+registry and active-source revisions, operation and migration epochs, pointer
+revision and current receipt, source epoch, semantic desired watermark,
+expected payload bytes, and all five capacity-policy bounds. No value is
+defaulted from state or ambient environment. The canonical request digest is
+the staged logical-request identity. Success emits the canonical CLI-v1
+`graphify.workspace.sync` receipt containing only the workspace, generation,
+request, certified receipt, and pointer revision; exact terminal replay emits
+identical bytes. Conflict and invalid outcomes use stable redacted reason/action
+codes and exit 10 or 20.
+
+Status and doctor emit public status schema v2. Its required `staged_build`
+summary reports presence, blocking state, record revision, generation,
+lifecycle, logical request digest, and internal request digest. `REQUESTED`,
+`PUBLISHING`, `COMPLETE`, and `CERTIFIED` force `safe_to_query=false` with
+`staged_build_recovery_required` / `resume_exact_workspace_sync`. `PROMOTED`
+and `ABANDONED` are terminal and do not create a false barrier. Corrupt or
+contradictory staged authority fails closed. Inspection uses only existing
+locks and existing-only reads; it never creates, repairs, recovers, cleans, or
+commits state.
 
 ## Semantic desired-work queue
 

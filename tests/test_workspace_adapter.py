@@ -288,6 +288,56 @@ def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path:
     assert _tree_bytes(source) == before
 
 
+def test_0916_structural_build_keeps_temporary_work_inside_explicit_staging(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    source.mkdir()
+    output.mkdir(parents=True)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert sorted(path.name for path in output.iterdir()) == ["graphify-out"]
+    assert not list(tmp_path.glob("graphify-workspace-build-*"))
+
+
+def test_0916_structural_build_rejects_mismatched_or_unsafe_explicit_scratch_root(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    scratch = tmp_path / "scratch"
+    source.mkdir()
+    output.mkdir()
+    scratch.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="scratch root must equal output root"):
+        adapter.build_structural(source, output_root=output, scratch_root=scratch)
+
+    assert list(output.iterdir()) == []
+
+    alias = tmp_path / "scratch-alias"
+    try:
+        alias.symlink_to(output, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not support symlinks")
+    with pytest.raises(ObservationUnsupported, match="scratch root must equal output root"):
+        adapter.build_structural(source, output_root=output, scratch_root=alias)
+
+    assert list(output.iterdir()) == []
+
+
 def test_0916_structural_build_rejects_unsupported_remote_comparison(
     tmp_path: Path,
 ) -> None:

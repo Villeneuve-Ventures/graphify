@@ -102,6 +102,9 @@ def _synthetic_repo(root: Path) -> tuple[Path, Path]:
         _write(root / "graphify/workspace/schemas/v1" / schema_name, "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/registration.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/status.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/sync-request.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/sync-receipt.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v2/status.schema.json", "{}\n")
     _write(root / "docs/workspace/v1/README.md", "# contracts\n")
     _write(root / "tests/fixtures/workspace/v1/positive/config.json", "{}\n")
     _write(root / "uv.lock", "version = 1\n")
@@ -162,6 +165,9 @@ def test_static_contract_fixture_skill_and_runtime_bundles_are_deterministic(
     with zipfile.ZipFile(artifacts_one["contract-bundle.zip"]) as archive:
         assert "schemas/cli/v1/registration.schema.json" in archive.namelist()
         assert "schemas/cli/v1/status.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/sync-request.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/sync-receipt.schema.json" in archive.namelist()
+        assert "schemas/cli/v2/status.schema.json" in archive.namelist()
 
 
 def test_contract_bundle_ignores_generated_adapter_bytecode(tmp_path: Path) -> None:

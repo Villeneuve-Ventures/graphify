@@ -51,6 +51,7 @@ from graphify.workspace.persistence import (
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
+    StateRecoveryRequired,
     Syscalls,
     require_before_deadline,
 )
@@ -122,6 +123,14 @@ class PayloadChanged(GenerationError):
 
 class GenerationConflict(GenerationError):
     code = "generation_conflict"
+
+
+class StagedBuildStillCurrent(GenerationConflict):
+    """A stale-abandonment probe found the exact staged authority current."""
+
+
+class StagedBuildReadRecoveryRequired(GenerationError):
+    """Existing-only inspection found a pending staged commit."""
 
 
 @dataclass(frozen=True)
@@ -323,6 +332,32 @@ class GenerationStore:
         except LeaseRecoveryRequired as exc:
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
 
+    def read_only_staged_build_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int,
+    ) -> StagedBuildState | None:
+        """Read existing staged-build authority without recovery or writes.
+
+        The caller must already hold the read-only workspace lock.  This path
+        deliberately rejects pending or divergent durable records rather than
+        attempting the normal mutation-capable recovery path.
+        """
+
+        try:
+            return self.leases._load_staged_build_locked(
+                repo_uuid,
+                recover=False,
+                deadline_ns=deadline_ns,
+            )
+        except LeaseRecoveryRequired as exc:
+            if isinstance(exc.__cause__, StateRecoveryRequired):
+                raise StagedBuildReadRecoveryRequired(
+                    "staged build has a pending durable commit"
+                ) from exc
+            raise GenerationError(f"staged build state is corrupt: {exc}") from exc
+
     def _commit_staged_build_locked(self, state: StagedBuildState) -> StagedBuildState:
         try:
             state = StagedBuildState.from_mapping(state.to_dict())
@@ -354,6 +389,12 @@ class GenerationStore:
                 canonical_json_bytes([entry.to_dict() for entry in observation.entries])
             ).hexdigest(),
         }
+
+    @staticmethod
+    def structural_observation_document(observation: SourceObservation) -> dict[str, object]:
+        """Return the sealed structural-observation document for public orchestration."""
+
+        return GenerationStore._source_observation_document(observation)
 
     @classmethod
     def structural_observation_evidence_sha256(
@@ -1409,7 +1450,7 @@ class GenerationStore:
                 if proof is None:
                     if observation_error is not None:
                         raise observation_error
-                    raise GenerationConflict(
+                    raise StagedBuildStillCurrent(
                         "staged build authority is still current and cannot be abandoned"
                     )
                 reason, evidence, _pointer = proof
@@ -3381,6 +3422,8 @@ __all__ = [
     "StagedBuildCompletion",
     "StagedBuildOperation",
     "StagedBuildPreparation",
+    "StagedBuildReadRecoveryRequired",
+    "StagedBuildStillCurrent",
     "StagedBuildState",
     "StructuralBuildRequest",
 ]
