@@ -168,6 +168,34 @@ output remains ignored and must not widen the P1 product diff.
   focused Pyright and high-severity Bandit, graph refresh, the provider-neutral
   full repository suite, exact-diff review, adversarial QA, and exact-head CI.
 
+## P5B2b0 staged-build recovery gates
+
+- the canonical internal staged-build record is limited to 64 KiB, uses the
+  current/previous/pending durable-record protocol, and rejects corruption,
+  ambiguity, links, unsafe paths, and cross-workspace identity mismatches;
+- `REQUESTED` is durable before `BUILD` acquisition, the exact request and
+  caller attempt digest bind every request-bound lease, same-process callers
+  cannot share a live fence, and commit-unknown retry is idempotent;
+- a resumed publication resets untrusted predecessor output and requires a new
+  descriptor-checked inventory plus two equal typed source observations before
+  `COMPLETE`;
+- exact certification recovery accepts only independently durable staging or
+  final receipt evidence with the required journal and semantic-certification
+  bindings; a staged receipt alone is not authority;
+- stale abandonment follows canonical priority across active-source, migration,
+  pointer, compatibility, semantic-source-epoch, and trusted-source-observation
+  drift; source unavailability alone cannot authorize it, and durable intent
+  precedes destructive mutation;
+- cross-workspace request, lease, state, or generation mismatch fails before
+  source access, and production typed rejections remain effective under
+  optimized Python execution;
+- failpoints, restart schedules, deterministic races, and recursive before/after
+  source snapshots cover every lifecycle and no-write boundary; and
+- negative gates prove P5B2b0 adds no sync CLI, status/schema revision, provider
+  or network selection, or pointer movement policy. Before public structural
+  sync ships, P5B2b must add separately reviewed status/doctor visibility for
+  unresolved staged barriers and their permitted recovery action.
+
 ## P5A semantic queue gates
 
 - enqueue and exact reconciliation monotonically advance the desired watermark,

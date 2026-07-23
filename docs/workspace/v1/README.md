@@ -48,11 +48,12 @@ it does not add that command, provider selection, or new status/doctor output.
 
 The external execution checklist and global plan own changing status, exact
 commits, and proof receipts. This section owns only stable responsibility
-boundaries, reconciled across merged workspace PRs #1-#10; it deliberately does
+boundaries, reconciled through merged workspace PR #12; it deliberately does
 not duplicate live SHAs or declare a next batch ready.
 
 | Area | Future owner | Stable boundary |
 |---|---|---|
+| Staged-recovery inspection | P5B2b | Before a public structural sync command can ship, status and doctor must surface an unresolved nonterminal staged-build barrier and its permitted recovery action through a separately reviewed public CLI/schema contract. P5B2b0 deliberately leaves the frozen inspection schemas unchanged. |
 | Remaining workspace commands | Remaining P5B2 | Sync, query, migrate, rollback, GC, repair, rebind, rotation, activation, and other operator mutations require separately reviewed contracts and explicit operator intent. |
 | Service, release, and resource proof | P5C | Watch/service supervision, candidate-backed authority installation, publication, representative-corpus performance and resource accounting, record admission budgets, and any shared workspace read-lock optimization remain one benchmark-first release gate. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
@@ -99,14 +100,17 @@ or fork engine logic inside the package.
   revision binding, or exact compensation coverage.
 - `graphify.workspace.persistence`, `.identity`, `.registry`, `.leases`,
   `.generations`, `.journal`, `.pointers`, and `.gc` implement the P2/P3
-  runtime boundary. `.adapters` and `.freshness` implement the bounded P4
+  runtime boundary. Within that boundary, `.generations` and `.leases` also
+  own P5B2b0's bounded internal staged-build, successor-lease, and stale-
+  abandonment recovery. `.adapters` and `.freshness` implement the bounded P4
   read-only engine/query boundary. `.semantic_queue` implements the bounded
   P5A durable queue and certification boundary. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
   P5B2a registration command with bounded authority, authorization, policy, and
   Git-discovery inputs; it reuses `.identity` and `.registry` without adding
-  another persistence path. Lifecycle mutation fails closed outside
+  another persistence path or exposing structural sync. Lifecycle mutation
+  fails closed outside
   non-elevated macOS on local APFS; tests use an explicit injected capability
   seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,

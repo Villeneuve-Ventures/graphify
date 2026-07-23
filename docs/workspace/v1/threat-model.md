@@ -33,8 +33,9 @@ P4 adds read-only adapter/freshness operations and external-output structural
 builds. P5A adds only durable semantic desired-work reconciliation, fenced
 claims, bounded retries/dead letters, and stable-watermark certification.
 P5B2a adds only the initial enrollment and verified clone/fork adoption command.
-All other workspace commands, service, installation, route, publication, and
-live-cutover transitions remain absent.
+P5B2b0 adds only internal request-bound staged-build recovery and terminal stale
+abandonment. All other public workspace commands, service, installation, route,
+publication, and live-cutover transitions remain absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -60,6 +61,22 @@ the repo policy through descriptor-relative no-follow traversal. The command
 cross-checks the requested UUID before registry mutation, exposes no source or
 state path, authorization detail, credential, or exception text, and maps stale
 CAS, collision, authority, corruption, and runtime failures to stable codes.
+
+P5B2b0 installs the exact staged request before `BUILD` lease acquisition and
+treats every nonterminal staged record as a barrier to ordinary workspace
+mutation. The request, lease, staged state, workspace, and generation identities
+must agree before recovery can use source content; a cross-workspace mismatch
+fails before source access. Each live staged lease also binds the caller attempt
+SHA-256, so a second caller in the same process cannot inherit commit authority
+from process-owner equality alone.
+
+Recovery may finish exact independently durable certification. Terminal
+abandonment instead requires canonical drift in the active source, migration
+epoch, pointer CAS, compatibility, semantic source epoch, or trusted source
+observation. Source unavailability alone is insufficient, and a durable
+abandonment intent precedes destructive cleanup. Status/doctor visibility for
+an unresolved recovery barrier remains separately reviewed P5B2b work before a
+public structural sync command can ship.
 
 Operational corpus processing will use a cleaned allowlisted environment,
 network denial by default, bounded CPU/memory/file/time resources, read-only
