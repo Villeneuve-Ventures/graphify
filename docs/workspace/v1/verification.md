@@ -186,9 +186,10 @@ output remains ignored and must not widen the P1 product diff.
   pointer, compatibility, semantic-source-epoch, and trusted-source-observation
   drift; source unavailability alone cannot authorize it, and durable intent
   precedes destructive mutation;
-- cross-workspace request, lease, state, or generation mismatch fails before
-  source access, and production typed rejections remain effective under
-  optimized Python execution;
+- cross-workspace request, lease, state, or generation mismatch is rejected
+  before source payload consumption or lifecycle-state mutation; selected-
+  source discovery may read checkout and Git metadata first, and production
+  typed rejections remain effective under optimized Python execution;
 - failpoints, restart schedules, deterministic races, and recursive before/after
   source snapshots cover every lifecycle and no-write boundary; and
 - negative gates prove P5B2b0 adds no sync CLI, status/schema revision, provider

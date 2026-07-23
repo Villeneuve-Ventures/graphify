@@ -65,10 +65,11 @@ CAS, collision, authority, corruption, and runtime failures to stable codes.
 P5B2b0 installs the exact staged request before `BUILD` lease acquisition and
 treats every nonterminal staged record as a barrier to ordinary workspace
 mutation. The request, lease, staged state, workspace, and generation identities
-must agree before recovery can use source content; a cross-workspace mismatch
-fails before source access. Each live staged lease also binds the caller attempt
-SHA-256, so a second caller in the same process cannot inherit commit authority
-from process-owner equality alone.
+must agree before recovery consumes source payload content or commits lifecycle
+state. Selected-source discovery may first read the recorded checkout and Git
+metadata, but remains read-only. Each live staged lease also binds the caller
+attempt SHA-256, so a second caller in the same process cannot inherit commit
+authority from process-owner equality alone.
 
 Recovery may finish exact independently durable certification. Terminal
 abandonment instead requires canonical drift in the active source, migration
