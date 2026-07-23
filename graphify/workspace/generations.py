@@ -2116,6 +2116,9 @@ class GenerationStore:
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"BUILD"}),
         ) as recovery_operation:
+            if preparation.state.repo_uuid != recovery_operation.repo_uuid:
+                raise GenerationConflict("staged build preparation repo_uuid mismatch")
+            repo_uuid = recovery_operation.repo_uuid
             recovery_state = self._load_staged_build_locked(recovery_operation.repo_uuid)
             if recovery_state is None:
                 raise GenerationConflict("staged build request is missing")
@@ -2148,7 +2151,7 @@ class GenerationStore:
                 )
 
         self._require_structural_evidence(
-            preparation.state.repo_uuid,
+            repo_uuid,
             request,
             source_observations,
         )

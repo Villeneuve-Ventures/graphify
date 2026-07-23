@@ -503,6 +503,48 @@ def test_complete_binds_manifest_and_exact_retry_reuses_completion(tmp_path: Pat
     assert completed.manifest_sha256
 
 
+def test_completion_rejects_preparation_bound_to_another_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    store = _store(harness)
+    observations = _source_observations(harness)
+    request = _request(harness, observations)
+    _, publishing = _request_and_acquire(store, harness, request, observations)
+    _write_payload(publishing)
+    observed_repo_uuids: list[str] = []
+
+    def observe(
+        repo_uuid: str,
+        _request: StructuralBuildRequest,
+        _source_observations: object,
+    ) -> tuple[SourceObservation, SourceObservation]:
+        observed_repo_uuids.append(repo_uuid)
+        return observations
+
+    monkeypatch.setattr(store, "_require_structural_evidence", observe)
+    mismatched = replace(
+        publishing,
+        state=replace(
+            publishing.state,
+            repo_uuid="22222222-2222-4222-8222-222222222222",
+        ),
+    )
+
+    with pytest.raises(
+        GenerationConflict,
+        match="staged build preparation repo_uuid mismatch",
+    ):
+        store.complete_staged_build(
+            mismatched,
+            source_observations=observations,
+            monotonic_ns=10_003,
+        )
+
+    assert observed_repo_uuids == []
+
+
 def test_completed_staged_build_rejects_missing_durable_payload_manifest(
     tmp_path: Path,
 ) -> None:
