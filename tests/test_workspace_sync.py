@@ -955,7 +955,12 @@ def test_cli_register_sync_status_is_provider_neutral_and_external_state_only(
         f"{workspace_root}/workspace.json",
         f"{workspace_root}/workspace.previous.json",
     }
-    assert changed == expected_changed
+    # Existing directory sizes may stay fixed across child creation on Linux.
+    optional_directory_metadata = {".", workspace_root}
+    assert changed - optional_directory_metadata == (
+        expected_changed - optional_directory_metadata
+    )
+    assert changed <= expected_changed
     assert metadata_snapshot(repo) == source_before
     assert metadata_snapshot(fake_home) == home_before
     assert metadata_snapshot(fake_codex_home) == codex_before
