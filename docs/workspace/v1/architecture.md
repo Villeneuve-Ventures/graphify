@@ -186,7 +186,10 @@ request and caller attempt may acquire or recover the lifecycle-permitted
 alone cannot share a live fence. Exact durable certification may finish through
 recovery; otherwise canonical source, migration, pointer, compatibility,
 semantic-source, or trusted-observation drift may install an abandonment intent
-before cleanup. Source unavailability alone is not stale evidence. The CLI
+before cleanup. A staged payload that exceeds its immutable reservation uses
+the same intent-first terminal close so a corrected request is not blocked by
+an impossible exact replay; transient pre-publication capacity failures remain
+recoverable. Source unavailability alone is not stale evidence. The CLI
 accepts the exact authority and capacity inputs through canonical bounded stdin,
 renews the `BUILD` lease only while the synchronous structural adapter runs,
 joins that renewal before staged completion, and emits only the stable receipt

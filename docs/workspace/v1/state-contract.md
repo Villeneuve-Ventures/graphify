@@ -148,14 +148,18 @@ does not let a second caller share the fence. Release removes the attempt
 binding.
 
 `ABANDONED` is the only terminal close that does not publish the staged bytes.
-It requires canonical evidence that the exact request is stale because the
-active source, migration epoch, pointer CAS, compatibility, semantic source
-epoch, or trusted source observation changed. A durable abandonment intent
-precedes cleanup so a crash can finish the same close under a successor fence.
-The frozen request observation is sufficient when an earlier-priority durable
-authority already proves staleness, including when the selected source is no
-longer available. Source-only abandonment still requires two fresh trusted
-observations and fails closed when they cannot be obtained.
+It requires canonical evidence that either the exact request is stale because
+the active source, migration epoch, pointer CAS, compatibility, semantic source
+epoch, or trusted source observation changed, or the staged payload inventory
+exceeds the request's immutable byte reservation. Capacity-failure evidence
+binds the observed payload byte count to the exact request. A durable
+abandonment intent precedes cleanup so a crash can finish the same close under a
+successor fence. The frozen request observation is sufficient when an
+earlier-priority durable authority already proves staleness, including when the
+selected source is no longer available. Source-only abandonment still requires
+two fresh trusted observations and fails closed when they cannot be obtained.
+Transient capacity rejection before publication retains the exact nonterminal
+request for retry; only a completed oversized staged inventory is terminal.
 
 P5B2b exposes the sole public mutation command
 `graphify workspace sync --code-only --request-stdin`. Its canonical request is

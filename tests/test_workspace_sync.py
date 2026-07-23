@@ -557,6 +557,92 @@ def test_capacity_rejection_leaves_an_exact_recoverable_barrier(
     )
 
 
+def test_payload_capacity_failure_allows_a_corrected_sync_request(
+    tmp_path: Path,
+) -> None:
+    harness, runtime = _runtime(tmp_path)
+    adapter = _adapter(harness)
+    _install_adapter(runtime, adapter)
+    undersized = _request(runtime, expected_payload_bytes=1)
+
+    with pytest.raises(CapacityExceeded, match="durable reservation"):
+        synchronize_code_only(runtime, undersized)
+
+    staged = runtime.generations._load_staged_build_locked(REPO_UUID)
+    assert staged is not None
+    assert staged.lifecycle_state == "ABANDONED"
+    assert staged.abandoned_from == "PUBLISHING"
+    assert staged.abandon_reason == "CAPACITY_EXCEEDED"
+    assert staged.abandon_evidence is not None
+    assert staged.abandon_evidence.capacity_failure_payload_bytes == 3
+    assert runtime.pointers.load(REPO_UUID, allow_missing=True) is None
+
+    with pytest.raises(SyncAuthorityConflict, match="was abandoned"):
+        synchronize_code_only(runtime, undersized)
+    assert len(adapter.calls) == 1
+
+    corrected = _request(
+        runtime,
+        generation_id="gen-sync-capacity-corrected",
+        expected_payload_bytes=4096,
+    )
+    receipt = synchronize_code_only(runtime, corrected)
+
+    assert receipt.to_dict()["state"] == "synchronized"
+    assert receipt.to_dict()["generation_id"] == "gen-sync-capacity-corrected"
+    assert len(adapter.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        f"generation:{GENERATION_ID}:abandon_intent_durable",
+        f"generation:{GENERATION_ID}:abandon_capacity_cleared",
+        f"generation:{GENERATION_ID}:staged_abandoned_durable",
+    ],
+)
+def test_payload_capacity_terminal_close_recovers_after_fault(
+    tmp_path: Path,
+    boundary: str,
+) -> None:
+    armed = True
+
+    def fail_once(event: str) -> None:
+        nonlocal armed
+        if armed and event == boundary:
+            armed = False
+            raise InjectedFault(event)
+
+    harness, runtime = _runtime(tmp_path, fault_hook=fail_once)
+    _install_adapter(runtime, _adapter(harness))
+    undersized = _request(runtime, expected_payload_bytes=1)
+
+    with pytest.raises(InjectedFault, match=boundary):
+        synchronize_code_only(runtime, undersized)
+    assert armed is False
+
+    recovered_runtime = _compose(harness)
+    _install_adapter(recovered_runtime, _adapter(harness))
+    with pytest.raises(SyncAuthorityConflict, match="abandoned"):
+        synchronize_code_only(recovered_runtime, undersized)
+
+    staged = recovered_runtime.generations._load_staged_build_locked(REPO_UUID)
+    assert staged is not None
+    assert staged.lifecycle_state == "ABANDONED"
+    assert staged.abandon_reason == "CAPACITY_EXCEEDED"
+    assert staged.abandon_evidence is not None
+    assert staged.abandon_evidence.capacity_failure_payload_bytes == 3
+
+    corrected = _request(
+        recovered_runtime,
+        generation_id="gen-sync-capacity-fault-recovery",
+        expected_payload_bytes=4096,
+    )
+    assert synchronize_code_only(recovered_runtime, corrected).to_dict()[
+        "state"
+    ] == "synchronized"
+
+
 def test_unstable_initial_observation_fails_before_staging(tmp_path: Path) -> None:
     harness, runtime = _runtime(tmp_path)
     adapter = _adapter(harness)

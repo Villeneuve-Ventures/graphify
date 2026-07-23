@@ -204,7 +204,9 @@ output remains ignored and must not widen the P1 product diff.
   and ambiguous durable failpoint, lease contention, stale CAS, capacity,
   adapter, source-drift, containment, permission, link, and binding attacks
   prove build, certification, promotion, and recovery through existing fenced
-  APIs only;
+  APIs only; an oversized staged payload terminally closes its impossible exact
+  request and permits a corrected request with a fresh generation identity,
+  while transient reservation rejection retains the exact recovery barrier;
 - a build longer than its renewal interval heartbeats the same fence, renewal
   failure blocks completion and remains exactly recoverable, descriptor-pinned
   scratch resists output-ancestor replacement, and process exit cannot recreate

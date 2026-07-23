@@ -1684,7 +1684,7 @@ class StructuralBuildRequest:
 
 @dataclass(frozen=True)
 class StagedBuildAbandonmentEvidence:
-    """Bounded canonical authority snapshot for one terminal stale close."""
+    """Bounded canonical evidence for one terminal staged-build close."""
 
     request_sha256: str
     registry_revision: int
@@ -1704,6 +1704,7 @@ class StagedBuildAbandonmentEvidence:
     source_stable_inventory_passes: int
     source_entries_sha256: str
     source_observation_evidence_sha256: str
+    capacity_failure_payload_bytes: int | None = None
 
     def _observation_document(self) -> dict[str, object]:
         return {
@@ -1716,7 +1717,7 @@ class StagedBuildAbandonmentEvidence:
         }
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "request_sha256": self.request_sha256,
             "registry_revision": self.registry_revision,
             "active_source_revision": self.active_source_revision,
@@ -1739,6 +1740,11 @@ class StagedBuildAbandonmentEvidence:
                 "observation_evidence_sha256": self.source_observation_evidence_sha256,
             },
         }
+        if self.capacity_failure_payload_bytes is not None:
+            document["capacity_failure"] = {
+                "payload_bytes": self.capacity_failure_payload_bytes,
+            }
+        return document
 
     @property
     def canonical(self) -> bytes:
@@ -1794,6 +1800,13 @@ class StagedBuildAbandonmentEvidence:
             request.observation_evidence_sha256,
         ):
             return "SOURCE_CHANGED"
+        if self.capacity_failure_payload_bytes is not None:
+            if self.capacity_failure_payload_bytes <= request.expected_payload_bytes:
+                raise ContractError(
+                    "$.abandon_evidence.capacity_failure.payload_bytes: "
+                    "must exceed the staged reservation"
+                )
+            return "CAPACITY_EXCEEDED"
         raise StagedBuildAuthorityCurrent(
             "$.abandon_evidence: does not prove stale staged-build authority"
         )
@@ -1804,22 +1817,21 @@ class StagedBuildAbandonmentEvidence:
         value: Mapping[str, object],
     ) -> "StagedBuildAbandonmentEvidence":
         data = _mapping(value, "$.abandon_evidence")
-        _exact_keys(
-            data,
-            "$.abandon_evidence",
-            {
-                "request_sha256",
-                "registry_revision",
-                "active_source_revision",
-                "operation_epoch",
-                "migration_epoch",
-                "pointer_revision",
-                "current_receipt_sha256",
-                "selected_compatibility_sha256",
-                "semantic_queue",
-                "source",
-            },
-        )
+        fields = {
+            "request_sha256",
+            "registry_revision",
+            "active_source_revision",
+            "operation_epoch",
+            "migration_epoch",
+            "pointer_revision",
+            "current_receipt_sha256",
+            "selected_compatibility_sha256",
+            "semantic_queue",
+            "source",
+        }
+        if "capacity_failure" in data:
+            fields.add("capacity_failure")
+        _exact_keys(data, "$.abandon_evidence", fields)
         pointer_revision = _integer(
             data["pointer_revision"],
             "$.abandon_evidence.pointer_revision",
@@ -1862,6 +1874,22 @@ class StagedBuildAbandonmentEvidence:
             semantic_queue_state_sha256 = _digest(
                 semantic_queue["queue_state_sha256"],
                 "$.abandon_evidence.semantic_queue.queue_state_sha256",
+            )
+        capacity_failure_payload_bytes: int | None = None
+        if "capacity_failure" in data:
+            capacity_failure = _mapping(
+                data["capacity_failure"],
+                "$.abandon_evidence.capacity_failure",
+            )
+            _exact_keys(
+                capacity_failure,
+                "$.abandon_evidence.capacity_failure",
+                {"payload_bytes"},
+            )
+            capacity_failure_payload_bytes = _integer(
+                capacity_failure["payload_bytes"],
+                "$.abandon_evidence.capacity_failure.payload_bytes",
+                minimum=1,
             )
         source = _mapping(data["source"], "$.abandon_evidence.source")
         _exact_keys(
@@ -1957,6 +1985,7 @@ class StagedBuildAbandonmentEvidence:
                 source["observation_evidence_sha256"],
                 "$.abandon_evidence.source.observation_evidence_sha256",
             ),
+            capacity_failure_payload_bytes=capacity_failure_payload_bytes,
         )
         expected_observation_evidence = hashlib.sha256(
             canonical_json_bytes(
@@ -2084,6 +2113,7 @@ class StagedBuildAbandonmentIntent:
                     "POINTER_CHANGED",
                     "COMPATIBILITY_CHANGED",
                     "SEMANTIC_SOURCE_EPOCH_CHANGED",
+                    "CAPACITY_EXCEEDED",
                 },
             ),
             evidence=evidence,
@@ -2260,6 +2290,7 @@ class StagedBuildState:
                     "POINTER_CHANGED",
                     "COMPATIBILITY_CHANGED",
                     "SEMANTIC_SOURCE_EPOCH_CHANGED",
+                    "CAPACITY_EXCEEDED",
                 },
             )
             abandon_evidence_sha256 = _digest(

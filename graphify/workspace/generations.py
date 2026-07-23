@@ -835,6 +835,8 @@ class GenerationStore:
         operation: LeaseOperation,
         state: StagedBuildState,
         source_document: Mapping[str, object],
+        *,
+        capacity_failure_payload_bytes: int | None = None,
     ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None] | None:
         registry_revision, entry = self._registry_workspace_entry(operation)
         active_source_revision = int(entry["active_source_revision"])
@@ -867,20 +869,23 @@ class GenerationStore:
                     "queue_state_sha256": queue_snapshot.sha256,
                 }
         request = state.request
-        evidence = StagedBuildAbandonmentEvidence.from_mapping(
-            {
-                "request_sha256": request.sha256,
-                "registry_revision": registry_revision,
-                "active_source_revision": active_source_revision,
-                "operation_epoch": operation.state.operation_epoch,
-                "migration_epoch": operation.state.migration_epoch,
-                "pointer_revision": pointer_cas[0],
-                "current_receipt_sha256": pointer_cas[1],
-                "selected_compatibility_sha256": self.compatibility_sha256,
-                "semantic_queue": semantic_queue,
-                "source": source_document,
+        evidence_value: dict[str, object] = {
+            "request_sha256": request.sha256,
+            "registry_revision": registry_revision,
+            "active_source_revision": active_source_revision,
+            "operation_epoch": operation.state.operation_epoch,
+            "migration_epoch": operation.state.migration_epoch,
+            "pointer_revision": pointer_cas[0],
+            "current_receipt_sha256": pointer_cas[1],
+            "selected_compatibility_sha256": self.compatibility_sha256,
+            "semantic_queue": semantic_queue,
+            "source": source_document,
+        }
+        if capacity_failure_payload_bytes is not None:
+            evidence_value["capacity_failure"] = {
+                "payload_bytes": capacity_failure_payload_bytes,
             }
-        )
+        evidence = StagedBuildAbandonmentEvidence.from_mapping(evidence_value)
         try:
             reason = evidence.reason_for(request)
         except StagedBuildAuthorityCurrent:
@@ -2223,6 +2228,7 @@ class GenerationStore:
             self._require_allocation(operation, preparation.allocation)
             self._require_structural_allocation(state, preparation.allocation)
             lock = self._lock(operation.repo_uuid, state.generation_id)
+            capacity_failure_payload_bytes: int | None = None
             with self.state.existing_generation_lock(
                 lock,
                 generation_id=state.generation_id,
@@ -2249,41 +2255,74 @@ class GenerationStore:
                     allowed_root_entries=frozenset({"graphify-out"}),
                 )
                 if inventory.total_bytes > preparation.allocation.expected_payload_bytes:
-                    raise CapacityExceeded(
-                        "staged payload exceeds its durable reservation"
+                    capacity_failure_payload_bytes = inventory.total_bytes
+                else:
+                    self._sync_inventory(
+                        operation.repo_uuid,
+                        state.generation_id,
+                        inventory,
                     )
-                self._sync_inventory(
-                    operation.repo_uuid,
-                    state.generation_id,
-                    inventory,
+                    self.fault_hook(
+                        f"generation:{state.generation_id}:before_completion_reinventory"
+                    )
+                    reinventory = self._inventory(
+                        preparation.allocation.staging_path,
+                        allowed_root_entries=frozenset({"graphify-out"}),
+                    )
+                    if canonical_json_bytes(
+                        list(reinventory.entries)
+                    ) != canonical_json_bytes(list(inventory.entries)):
+                        raise PayloadChanged("payload changed during staged completion")
+                    manifest = payload_manifest_sha256(
+                        "graphify-out",
+                        reinventory.entries,
+                    )
+                    complete = self._staged_state(
+                        revision=state.revision + 1,
+                        repo_uuid=state.repo_uuid,
+                        generation_id=state.generation_id,
+                        request=state.request,
+                        lifecycle_state="COMPLETE",
+                        operation_epoch=operation.grant.operation_epoch,
+                        fence_token=operation.fence_token,
+                        payload_manifest_sha256=manifest,
+                    )
+                    committed = self._commit_staged_build_locked(complete)
+                    self.fault_hook(
+                        f"generation:{state.generation_id}:completion_durable"
+                    )
+                    return StagedBuildCompletion(
+                        state=committed,
+                        allocation=preparation.allocation,
+                        entries=reinventory.entries,
+                    )
+            if capacity_failure_payload_bytes is None:  # pragma: no cover
+                raise GenerationConflict("staged completion produced no result")
+            proof = self._staged_abandonment_proof_if_stale_locked(
+                operation,
+                state,
+                self._abandonment_source_document(source_observations),
+                capacity_failure_payload_bytes=capacity_failure_payload_bytes,
+            )
+            if proof is None:  # pragma: no cover - payload bytes prove closure
+                raise GenerationConflict(
+                    "payload capacity failure produced no terminal evidence"
                 )
-                self.fault_hook(f"generation:{state.generation_id}:before_completion_reinventory")
-                reinventory = self._inventory(
-                    preparation.allocation.staging_path,
-                    allowed_root_entries=frozenset({"graphify-out"}),
-                )
-                if canonical_json_bytes(list(reinventory.entries)) != canonical_json_bytes(
-                    list(inventory.entries)
-                ):
-                    raise PayloadChanged("payload changed during staged completion")
-                manifest = payload_manifest_sha256("graphify-out", reinventory.entries)
-                complete = self._staged_state(
-                    revision=state.revision + 1,
-                    repo_uuid=state.repo_uuid,
-                    generation_id=state.generation_id,
-                    request=state.request,
-                    lifecycle_state="COMPLETE",
-                    operation_epoch=operation.grant.operation_epoch,
-                    fence_token=operation.fence_token,
-                    payload_manifest_sha256=manifest,
-                )
-                committed = self._commit_staged_build_locked(complete)
-                self.fault_hook(f"generation:{state.generation_id}:completion_durable")
-                return StagedBuildCompletion(
-                    state=committed,
-                    allocation=preparation.allocation,
-                    entries=reinventory.entries,
-                )
+            reason, evidence, _pointer = proof
+            lease_value = preparation.grant.lease.to_dict()
+            occurred_at = datetime.fromisoformat(
+                str(lease_value["acquired_at"]).replace("Z", "+00:00")
+            )
+            self._commit_new_staged_abandonment_locked(
+                operation,
+                state,
+                reason=reason,
+                evidence=evidence,
+                occurred_at=occurred_at,
+            )
+            raise CapacityExceeded(
+                "staged payload exceeds its durable reservation"
+            )
 
     def complete_staged_promotion(
         self,
