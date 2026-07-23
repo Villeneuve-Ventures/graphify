@@ -2228,7 +2228,6 @@ class GenerationStore:
             self._require_allocation(operation, preparation.allocation)
             self._require_structural_allocation(state, preparation.allocation)
             lock = self._lock(operation.repo_uuid, state.generation_id)
-            capacity_failure_payload_bytes: int | None = None
             with self.state.existing_generation_lock(
                 lock,
                 generation_id=state.generation_id,
@@ -2254,9 +2253,8 @@ class GenerationStore:
                     preparation.allocation.staging_path,
                     allowed_root_entries=frozenset({"graphify-out"}),
                 )
-                if inventory.total_bytes > preparation.allocation.expected_payload_bytes:
-                    capacity_failure_payload_bytes = inventory.total_bytes
-                else:
+                payload_bytes = inventory.total_bytes
+                if payload_bytes <= preparation.allocation.expected_payload_bytes:
                     self._sync_inventory(
                         operation.repo_uuid,
                         state.generation_id,
@@ -2296,13 +2294,11 @@ class GenerationStore:
                         allocation=preparation.allocation,
                         entries=reinventory.entries,
                     )
-            if capacity_failure_payload_bytes is None:  # pragma: no cover
-                raise GenerationConflict("staged completion produced no result")
             proof = self._staged_abandonment_proof_if_stale_locked(
                 operation,
                 state,
                 self._abandonment_source_document(source_observations),
-                capacity_failure_payload_bytes=capacity_failure_payload_bytes,
+                capacity_failure_payload_bytes=payload_bytes,
             )
             if proof is None:  # pragma: no cover - payload bytes prove closure
                 raise GenerationConflict(

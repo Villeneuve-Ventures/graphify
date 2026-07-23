@@ -1817,21 +1817,23 @@ class StagedBuildAbandonmentEvidence:
         value: Mapping[str, object],
     ) -> "StagedBuildAbandonmentEvidence":
         data = _mapping(value, "$.abandon_evidence")
-        fields = {
-            "request_sha256",
-            "registry_revision",
-            "active_source_revision",
-            "operation_epoch",
-            "migration_epoch",
-            "pointer_revision",
-            "current_receipt_sha256",
-            "selected_compatibility_sha256",
-            "semantic_queue",
-            "source",
-        }
-        if "capacity_failure" in data:
-            fields.add("capacity_failure")
-        _exact_keys(data, "$.abandon_evidence", fields)
+        _exact_keys(
+            data,
+            "$.abandon_evidence",
+            {
+                "request_sha256",
+                "registry_revision",
+                "active_source_revision",
+                "operation_epoch",
+                "migration_epoch",
+                "pointer_revision",
+                "current_receipt_sha256",
+                "selected_compatibility_sha256",
+                "semantic_queue",
+                "source",
+            },
+            {"capacity_failure"},
+        )
         pointer_revision = _integer(
             data["pointer_revision"],
             "$.abandon_evidence.pointer_revision",
