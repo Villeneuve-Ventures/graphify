@@ -95,10 +95,9 @@ jobs:
           from pr_agent.tools.pr_reviewer import PRReviewer
 
           original_review = PRReviewer.run
-          verified_review_completed = False
+          verification = {"review_completed": False}
 
           async def run_verified_review(self):
-              nonlocal verified_review_completed
               review_published = False
               original_publish = self.git_provider.publish_persistent_comment
 
@@ -118,7 +117,7 @@ jobs:
                   raise RuntimeError("PR-Agent did not produce a model prediction")
               if not review_published:
                   raise RuntimeError("PR-Agent did not publish its persistent review")
-              verified_review_completed = True
+              verification["review_completed"] = True
 
           PRReviewer.run = run_verified_review
 
@@ -135,6 +134,6 @@ jobs:
           from pr_agent.servers.github_action_runner import run_action
 
           asyncio.run(run_action())
-          if not verified_review_completed:
+          if not verification["review_completed"]:
               raise RuntimeError("PR-Agent did not complete a verified review")
           PY
