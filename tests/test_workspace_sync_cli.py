@@ -536,3 +536,92 @@ def test_top_level_sync_skips_ambient_install_version_checks(
     mainmod._run_cli()
 
     assert observed == ["workspace"]
+
+
+@pytest.mark.parametrize("help_flag", ["-h", "--help", "-?"])
+def test_top_level_sync_help_uses_the_exact_usage_error_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    help_flag: str,
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "workspace", "sync", help_flag],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        mainmod._run_cli()
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 64
+    assert captured.out == ""
+    assert captured.err == _cli()._USAGE + "\n"
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_top_level_sync_emits_only_one_receipt_when_engine_streams_are_noisy(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fails: bool,
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    workspace_cli = _cli()
+    request = SyncRequest.from_mapping(_request_value())
+    receipt = SyncReceipt(
+        repo_uuid=request.repo_uuid,
+        generation_id=request.generation_id,
+        request_sha256=request.sha256,
+        receipt_sha256="b" * 64,
+        pointer_revision=1,
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        SimpleNamespace(buffer=BytesIO(request.canonical)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "workspace", "sync", "--code-only", "--request-stdin"],
+    )
+    monkeypatch.setattr(workspace_cli, "load_workspace_runtime_inputs", object)
+    monkeypatch.setattr(workspace_cli, "compose_workspace_runtime", lambda _inputs: object())
+
+    def noisy_sync(_runtime: object, _request: SyncRequest) -> SyncReceipt:
+        print("AST extraction: 100/100 /private/operator-source", flush=True)
+        print(
+            "warning: skipped /private/operator-source/secret.py provider-secret",
+            file=sys.stderr,
+            flush=True,
+        )
+        if fails:
+            raise RuntimeError("/private/operator-source provider-secret")
+        return receipt
+
+    monkeypatch.setattr(workspace_cli, "synchronize_code_only", noisy_sync)
+
+    if fails:
+        with pytest.raises(SystemExit) as raised:
+            mainmod._run_cli()
+        assert raised.value.code == 20
+    else:
+        mainmod._run_cli()
+
+    captured = capsys.readouterr()
+    if fails:
+        assert captured.out == ""
+        payload = json.loads(captured.err)
+        assert payload == {
+            **_receipt_common(),
+            "state": "invalid",
+            "exit_code": 20,
+            "reason_code": "sync_failed",
+            "action_code": "run_workspace_doctor",
+        }
+    else:
+        assert captured.out == receipt.canonical.decode("utf-8")
+        assert captured.err == ""
+    assert "/private/operator-source" not in captured.out + captured.err
+    assert "provider-secret" not in captured.out + captured.err

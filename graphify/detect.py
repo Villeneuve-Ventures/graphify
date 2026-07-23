@@ -8,7 +8,7 @@ import shlex
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Collection, Iterator
 
 from graphify.google_workspace import (
     GOOGLE_WORKSPACE_EXTENSIONS,
@@ -774,14 +774,14 @@ def count_words(path: Path) -> int:
 
 
 # Directory names to always skip - venvs, caches, build artifacts, deps
-_SKIP_DIRS = {
+_BUILTIN_SKIP_DIRS = {
     "venv", ".venv", "env", ".env",
     "node_modules", "__pycache__", ".git",
     "dist", "build", "target", "out",
     "site-packages", "lib64",
     ".pytest_cache", ".mypy_cache", ".ruff_cache",
     ".tox", ".nox", ".eggs", "*.egg-info",  # nox is tox's successor, same .nox/ venv shape (#1804)
-    "graphify-out", GRAPHIFY_OUT_NAME,  # never treat own output as source input (#524); honour GRAPHIFY_OUT (#1423)
+    "graphify-out",  # never treat the default output as source input (#524)
     # Coverage/test-artefact dirs — generated, never architecturally meaningful
     "coverage", "lcov-report",              # Vitest/Istanbul/nyc HTML reports (#870)
     "visual-tests", "visual-test",          # Playwright/visual-regression bundles (#869)
@@ -794,6 +794,7 @@ _SKIP_DIRS = {
     ".graphify",  # graphify's own extraction cache — never index self-generated data
     ".worktrees",  # git worktree convention (#947) — sibling checkouts, always redundant
 }
+_SKIP_DIRS = _BUILTIN_SKIP_DIRS | {GRAPHIFY_OUT_NAME}  # honour GRAPHIFY_OUT (#1423)
 
 # Large generated files that are never useful to extract
 _SKIP_FILES = {
@@ -810,9 +811,14 @@ _SKIP_FILES = {
 _JS_SNAPSHOT_TEST_ROOTS = frozenset({"__tests__", "__test__"})
 
 
-def _is_noise_dir(part: str, parent: "Path | None" = None) -> bool:
+def _is_noise_dir(
+    part: str,
+    parent: "Path | None" = None,
+    *,
+    skip_dirs: Collection[str] | None = None,
+) -> bool:
     """Return True if this directory name looks like a venv, cache, or dep dir."""
-    if part in _SKIP_DIRS:
+    if part in (_SKIP_DIRS if skip_dirs is None else skip_dirs):
         return True
     if part == "snapshots":
         # Prune only when it looks like an actual JS/Vitest snapshot dir.
@@ -1330,6 +1336,8 @@ def detect(
     comparison_reader: ComparisonReader | None = None,
     comparison_pinner: ComparisonPinner | None = None,
     comparison_directory_lister: ComparisonDirectoryLister | None = None,
+    honor_ambient_output: bool = True,
+    quiet: bool = False,
 ) -> dict:
     """Detect supported corpus files.
 
@@ -1347,7 +1355,10 @@ def detect(
 
     When ordinary detection is given ``cache_root``, conversion sidecars follow
     the other detector outputs into that root instead of appearing in the source
-    checkout.
+    checkout. Certified workspace callers can set ``honor_ambient_output=False``
+    so a process-level ``GRAPHIFY_OUT`` override cannot alter their inventory,
+    and ``quiet=True`` suppresses path-bearing walk diagnostics that are returned
+    structurally through ``walk_errors`` instead.
     """
     if read_only and comparison_reader is None:
         raise ValueError("read_only detection requires a comparison reader")
@@ -1361,6 +1372,12 @@ def detect(
         raise ValueError("comparison_directory_lister requires a comparison pinner")
     if comparison_directory_lister is not None and follow_symlinks:
         raise ValueError("comparison directory listings do not follow symlinks")
+    output_name = GRAPHIFY_OUT if honor_ambient_output else "graphify-out"
+    skip_dirs = (
+        _SKIP_DIRS
+        if honor_ambient_output
+        else _BUILTIN_SKIP_DIRS
+    )
     root = (
         Path(os.path.abspath(os.fspath(root)))
         if read_only
@@ -1418,7 +1435,7 @@ def detect(
     # Ordinary detection includes graphify-out/memory/ so query results can be
     # filed back into the graph. Certified read-only comparison deliberately
     # excludes this pre-workspace generated state from source authority.
-    memory_dir = root / GRAPHIFY_OUT / "memory"
+    memory_dir = root / output_name / "memory"
     memory_present = not read_only and memory_dir.exists()
     scan_paths = [root]
     if memory_present:
@@ -1439,11 +1456,12 @@ def detect(
         import sys as _sys
         target = getattr(err, "filename", None) or "<unknown>"
         walk_errors.append(f"{target}: {err}")
-        print(
-            f"[graphify] WARNING: could not scan {target} ({err}); "
-            f"its files are missing from this run's enumeration.",
-            file=_sys.stderr,
-        )
+        if not quiet:
+            print(
+                f"[graphify] WARNING: could not scan {target} ({err}); "
+                f"its files are missing from this run's enumeration.",
+                file=_sys.stderr,
+            )
 
     for scan_root in scan_paths:
         in_memory_tree = memory_present and str(scan_root).startswith(str(memory_dir))
@@ -1494,7 +1512,7 @@ def detect(
                 # repos for no correctness gain.
                 dirnames[:] = [
                     d for d in dirnames
-                    if not _is_noise_dir(d, dp)
+                    if not _is_noise_dir(d, dp, skip_dirs=skip_dirs)
                     and not _is_ignored(dp / d, root, ignore_patterns, _cache=ignore_cache)
                 ]
                 if follow_symlinks:
@@ -1517,7 +1535,7 @@ def detect(
     all_files.sort(key=lambda p: str(p))
 
     output_root = root if cache_root is None else Path(cache_root).resolve()
-    converted_dir = output_root / GRAPHIFY_OUT / "converted"
+    converted_dir = output_root / output_name / "converted"
     comparison_unsupported: list[str] = []
 
     for p in all_files:

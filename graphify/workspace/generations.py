@@ -358,6 +358,16 @@ class GenerationStore:
                 ) from exc
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
 
+    def recover_staged_build(self, repo_uuid: str) -> StagedBuildState | None:
+        """Recover one pending staged record under canonical lock ordering."""
+
+        try:
+            with self.leases.registry.recovered_snapshot():
+                with self.leases.workspace_lock(repo_uuid):
+                    return self._load_staged_build_locked(repo_uuid)
+        except LeaseRecoveryRequired as exc:
+            raise GenerationError(f"staged build state is corrupt: {exc}") from exc
+
     def _commit_staged_build_locked(self, state: StagedBuildState) -> StagedBuildState:
         try:
             state = StagedBuildState.from_mapping(state.to_dict())

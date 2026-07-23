@@ -44,6 +44,7 @@ from graphify.workspace.registry import RevisionConflict
 from graphify.workspace.semantic_queue import SemanticQueuePolicy
 from graphify.workspace.status import inspect_workspace_status
 from graphify.workspace.sync import (
+    StagedBuildRecoveryRequired,
     SyncAuthorityConflict,
     SyncRequest,
     synchronize_code_only,
@@ -873,6 +874,85 @@ def test_exact_replay_recovers_pending_staged_request_commit_unknown(
         / REPO_UUID
         / "staged-build.pending.json"
     ).exists()
+
+
+def test_different_request_recovers_pending_staged_barrier_before_source_observation(
+    tmp_path: Path,
+) -> None:
+    target = f"staged-build:{REPO_UUID}:pending_durable"
+    armed = True
+
+    def fail_once(event: str) -> None:
+        nonlocal armed
+        if armed and event == target:
+            armed = False
+            raise InjectedFault(event)
+
+    harness, runtime = _runtime(tmp_path, fault_hook=fail_once)
+    _install_adapter(runtime, _adapter(harness))
+    request = _request(runtime)
+
+    with pytest.raises(CommitUnknown, match="commit_unknown"):
+        synchronize_code_only(runtime, request)
+    assert armed is False
+
+    recovered_runtime = _compose(harness)
+    adapter = _adapter(harness)
+
+    def forbidden_observation(*_args: Any, **_kwargs: Any) -> SourceObservation:
+        pytest.fail("a different pending request must block before source observation")
+
+    adapter.observe = forbidden_observation  # type: ignore[method-assign]
+    _install_adapter(recovered_runtime, adapter)
+    different = _request(
+        recovered_runtime,
+        generation_id="gen-different-pending-request",
+    )
+
+    with pytest.raises(StagedBuildRecoveryRequired, match="exact recovery"):
+        synchronize_code_only(recovered_runtime, different)
+
+    assert not (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "staged-build.pending.json"
+    ).exists()
+
+
+def test_rebooted_lease_reaches_exact_staged_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime = _runtime(tmp_path)
+    adapter = _adapter(harness, fail=True)
+    _install_adapter(runtime, adapter)
+    request = _request(runtime)
+
+    with pytest.raises(RuntimeError, match="intentional structural adapter failure"):
+        synchronize_code_only(runtime, request)
+    staged = runtime.generations.recover_staged_build(REPO_UUID)
+    assert staged is not None
+    held = runtime.generations.acquire_staged_operation(
+        REPO_UUID,
+        request.generation_id,
+        staged.request,
+        attempt_sha256="f" * 64,
+        operation="BUILD",
+        acquired_at=datetime.now(timezone.utc),
+        monotonic_ns=time.monotonic_ns(),
+        ttl_ns=10**18,
+    )
+    old_owner = runtime.leases.current_owner()
+    rebooted_owner = replace(old_owner, boot_id="rebooted-boot-identity")
+    monkeypatch.setattr(runtime.leases, "current_owner", lambda: rebooted_owner)
+    adapter.fail = False
+
+    receipt = synchronize_code_only(runtime, request)
+
+    assert receipt.to_dict()["state"] == "synchronized"
+    assert held.grant.lease.to_dict()["owner"]["boot_id"] == old_owner.boot_id
+    assert runtime.leases.inspect(REPO_UUID).leases == {}
 
 
 @pytest.mark.parametrize("attack", ["symlink", "hardlink", "mode"])

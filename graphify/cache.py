@@ -95,16 +95,23 @@ def _body_content(content: bytes) -> bytes:
 _stat_index: dict[str, dict] = {}
 _stat_index_root: Path | None = None
 _stat_index_dirty: bool = False
+_stat_index_uses_ambient_output: bool = True
 
 
-def _stat_index_file(root: Path) -> Path:
-    _out = Path(_GRAPHIFY_OUT)
+def _stat_index_file(root: Path, *, use_ambient_output: bool = True) -> Path:
+    _out = Path(_GRAPHIFY_OUT if use_ambient_output else "graphify-out")
     base = _out if _out.is_absolute() else Path(root).resolve() / _out
     return base / "cache" / "stat-index.json"
 
 
-def _ensure_stat_index(root: Path, cache_root: "Path | None" = None) -> None:
+def _ensure_stat_index(
+    root: Path,
+    cache_root: "Path | None" = None,
+    *,
+    honor_ambient_output: bool = True,
+) -> None:
     global _stat_index, _stat_index_root, _stat_index_dirty
+    global _stat_index_uses_ambient_output
     if _stat_index_root is not None:
         return
     # The stat index only determines the cache FILE location (entry keys are
@@ -112,7 +119,11 @@ def _ensure_stat_index(root: Path, cache_root: "Path | None" = None) -> None:
     # word-count cache under the requested --out dir instead of polluting the
     # scanned corpus with a stray graphify-out/ (#1747).
     _stat_index_root = Path(cache_root if cache_root is not None else root).resolve()
-    p = _stat_index_file(_stat_index_root)
+    _stat_index_uses_ambient_output = honor_ambient_output
+    p = _stat_index_file(
+        _stat_index_root,
+        use_ambient_output=_stat_index_uses_ambient_output,
+    )
     if p.exists():
         try:
             _stat_index = json.loads(p.read_text(encoding="utf-8"))
@@ -124,10 +135,13 @@ def _ensure_stat_index(root: Path, cache_root: "Path | None" = None) -> None:
 
 
 def _flush_stat_index() -> None:
-    global _stat_index_dirty, _stat_index_root
+    global _stat_index_dirty, _stat_index_root, _stat_index_uses_ambient_output
     if not _stat_index_dirty or _stat_index_root is None:
         return
-    p = _stat_index_file(_stat_index_root)
+    p = _stat_index_file(
+        _stat_index_root,
+        use_ambient_output=_stat_index_uses_ambient_output,
+    )
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=p.parent, prefix="stat-index.", suffix=".tmp")
@@ -160,14 +174,17 @@ def ephemeral_stat_index(cache_root: Path) -> Iterator[None]:
     """
 
     global _stat_index, _stat_index_root, _stat_index_dirty
+    global _stat_index_uses_ambient_output
     ephemeral_root = Path(cache_root).resolve()
     previous_index = _stat_index
     previous_root = _stat_index_root
     previous_dirty = _stat_index_dirty
+    previous_uses_ambient_output = _stat_index_uses_ambient_output
     atexit.unregister(_flush_stat_index)
     _stat_index = {}
     _stat_index_root = ephemeral_root
     _stat_index_dirty = False
+    _stat_index_uses_ambient_output = False
     try:
         yield
     finally:
@@ -175,6 +192,7 @@ def ephemeral_stat_index(cache_root: Path) -> Iterator[None]:
         _stat_index = previous_index
         _stat_index_root = previous_root
         _stat_index_dirty = previous_dirty
+        _stat_index_uses_ambient_output = previous_uses_ambient_output
         if previous_root is not None:
             atexit.register(_flush_stat_index)
 
@@ -190,7 +208,13 @@ def _normalize_path(path: Path) -> Path:
     return Path(os.path.normcase(s))
 
 
-def file_hash(path: Path, root: Path = Path("."), cache_root: "Path | None" = None) -> str:
+def file_hash(
+    path: Path,
+    root: Path = Path("."),
+    cache_root: "Path | None" = None,
+    *,
+    honor_ambient_output: bool = True,
+) -> str:
     """SHA256 of file contents + path relative to root.
 
     Uses a stat-based fastpath (size + mtime_ns) to skip full reads when the
@@ -214,7 +238,11 @@ def file_hash(path: Path, root: Path = Path("."), cache_root: "Path | None" = No
     # (cache_root), not the key-anchor root — otherwise it leaves a stray
     # graphify-out/cache/stat-index.json inside the analyzed source tree even when
     # the AST cache itself is redirected to CWD (#1774 completion).
-    _ensure_stat_index(root, cache_root=cache_root)
+    _ensure_stat_index(
+        root,
+        cache_root=cache_root,
+        honor_ambient_output=honor_ambient_output,
+    )
     abs_key = str(p.resolve())
     st: "os.stat_result | None" = None
     try:
@@ -368,7 +396,12 @@ def _absolutize_source_files_in(payload: dict, root: Path) -> None:
                 continue
 
 
-def cache_dir(root: Path = Path("."), kind: str = "ast") -> Path:
+def cache_dir(
+    root: Path = Path("."),
+    kind: str = "ast",
+    *,
+    use_ambient_output: bool = True,
+) -> Path:
     """Returns the cache directory for ``kind`` - creates it if needed.
 
     kind is "ast" or "semantic". Separate subdirectories prevent semantic cache
@@ -379,7 +412,7 @@ def cache_dir(root: Path = Path("."), kind: str = "ast") -> Path:
     contents. Semantic entries live unversioned in graphify-out/cache/semantic/
     (re-extraction costs LLM calls).
     """
-    _out = Path(_GRAPHIFY_OUT)
+    _out = Path(_GRAPHIFY_OUT if use_ambient_output else "graphify-out")
     base = _out if _out.is_absolute() else Path(root).resolve() / _out
     d = base / "cache" / kind
     if kind == "ast":
@@ -389,8 +422,14 @@ def cache_dir(root: Path = Path("."), kind: str = "ast") -> Path:
     return d
 
 
-def load_cached(path: Path, root: Path = Path("."), kind: str = "ast",
-                cache_root: Path | None = None) -> dict | None:
+def load_cached(
+    path: Path,
+    root: Path = Path("."),
+    kind: str = "ast",
+    cache_root: Path | None = None,
+    *,
+    honor_ambient_output: bool = True,
+) -> dict | None:
     """Return cached extraction for this file if hash matches, else None.
 
     Cache key: SHA256 of file contents.
@@ -412,10 +451,19 @@ def load_cached(path: Path, root: Path = Path("."), kind: str = "ast",
     """
     location = cache_root if cache_root is not None else root
     try:
-        h = file_hash(path, root, cache_root=cache_root)
+        h = file_hash(
+            path,
+            root,
+            cache_root=cache_root,
+            honor_ambient_output=honor_ambient_output,
+        )
     except OSError:
         return None
-    entry = cache_dir(location, kind) / f"{h}.json"
+    entry = cache_dir(
+        location,
+        kind,
+        use_ambient_output=honor_ambient_output,
+    ) / f"{h}.json"
     if entry.exists():
         try:
             result = json.loads(entry.read_text(encoding="utf-8"))
@@ -430,8 +478,15 @@ def load_cached(path: Path, root: Path = Path("."), kind: str = "ast",
     return None
 
 
-def save_cached(path: Path, result: dict, root: Path = Path("."), kind: str = "ast",
-                cache_root: Path | None = None) -> None:
+def save_cached(
+    path: Path,
+    result: dict,
+    root: Path = Path("."),
+    kind: str = "ast",
+    cache_root: Path | None = None,
+    *,
+    honor_ambient_output: bool = True,
+) -> None:
     """Save extraction result for this file.
 
     Stores as graphify-out/cache/{kind}/{hash}.json where hash = SHA256 of current file contents.
@@ -463,9 +518,18 @@ def save_cached(path: Path, result: dict, root: Path = Path("."), kind: str = "a
         import copy as _copy
         on_disk = _copy.deepcopy(result)
         _relativize_source_files_in(on_disk, root)
-    h = file_hash(p, root, cache_root=cache_root)
+    h = file_hash(
+        p,
+        root,
+        cache_root=cache_root,
+        honor_ambient_output=honor_ambient_output,
+    )
     location = cache_root if cache_root is not None else root
-    target_dir = cache_dir(location, kind)
+    target_dir = cache_dir(
+        location,
+        kind,
+        use_ambient_output=honor_ambient_output,
+    )
     entry = target_dir / f"{h}.json"
     fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=f"{h}.", suffix=".tmp")
     try:

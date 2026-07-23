@@ -2358,6 +2358,8 @@ class Graphify0916Adapter:
                             comparison_directory_lister=(
                                 authority.list_comparison_directory
                             ),
+                            honor_ambient_output=False,
+                            quiet=True,
                         )
                         authority.source.require_directory_binding(
                             root,
@@ -2424,6 +2426,8 @@ class Graphify0916Adapter:
                                 list(snapshot_files),
                                 cache_root=engine_output,
                                 source_root=snapshot_root,
+                                quiet=True,
+                                honor_ambient_output=False,
                             )
                         if extraction.get("errors"):
                             raise ObservationUnavailable(
@@ -2588,6 +2592,8 @@ class Graphify0916Adapter:
                 comparison_reader=authority.read,
                 comparison_pinner=authority.pin_comparison,
                 comparison_directory_lister=authority.list_comparison_directory,
+                honor_ambient_output=False,
+                quiet=True,
             )
             _emit(hook, "inventory_detected", pass_index=pass_index)
             authority.source.require_directory_binding(root, source_details)

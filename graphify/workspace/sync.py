@@ -440,10 +440,16 @@ def _read_staged_build(
                 deadline_ns=deadline_ns,
             )
             live_workspace_lease = lease_state.leases.get("workspace")
-            if live_workspace_lease is not None and time.monotonic_ns() < int(
-                live_workspace_lease.to_dict()["liveness_deadline_monotonic_ns"]
-            ):
-                raise SyncLeaseBusy("a live workspace lease excludes this sync")
+            if live_workspace_lease is not None:
+                live_value = live_workspace_lease.to_dict()
+                live_owner = cast(Mapping[str, object], live_value["owner"])
+                current_boot_id = runtime.leases.current_owner().boot_id
+                if (
+                    live_owner["boot_id"] == current_boot_id
+                    and time.monotonic_ns()
+                    < int(live_value["liveness_deadline_monotonic_ns"])
+                ):
+                    raise SyncLeaseBusy("a live workspace lease excludes this sync")
 
             exact = staged is not None and (
                 staged.generation_id == request.generation_id
@@ -613,6 +619,12 @@ def _build_structural_with_heartbeat(
     if build_failure is not None:
         error, traceback = build_failure
         raise error.with_traceback(traceback)
+    runtime.leases.heartbeat(
+        grant,
+        heartbeat_at=datetime.now(timezone.utc),
+        monotonic_ns=time.monotonic_ns(),
+        ttl_ns=_SYNC_LEASE_TTL_NS,
+    )
 
 
 def _build_and_certify(
@@ -852,9 +864,11 @@ def synchronize_code_only(
     try:
         staged = _read_staged_build(runtime, request)
     except (StagedBuildReadRecoveryRequired, StateRecoveryRequired):
-        # A pending staged commit is recoverable only through the exact mutating
-        # lifecycle below. The lifecycle still fails closed for corrupt bytes.
-        staged = None
+        # Reconcile pending bytes before source observation so a different exact
+        # request remains the primary recovery barrier and cannot be masked by
+        # source availability or generic request conflict classification.
+        runtime.generations.recover_staged_build(request.repo_uuid)
+        staged = _read_staged_build(runtime, request)
 
     structural_request: StructuralBuildRequest | None = None
     recovering = False

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 import errno
 import json
@@ -88,6 +89,28 @@ from graphify.workspace.sync import (
 _REGISTRATION_CONTRACT = "graphify.workspace.registration"
 _REGISTRATION_SCHEMA_VERSION = 1
 _AUTHORIZATION_MAX_BYTES = 16 * 1024
+
+
+class _DiscardingEngineStream:
+    """Text sink that keeps engine diagnostics out of canonical CLI receipts."""
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    @staticmethod
+    def write(value: str) -> int:
+        return len(value)
+
+    @staticmethod
+    def flush() -> None:
+        return None
+
+    @staticmethod
+    def isatty() -> bool:
+        return False
+
+
+_DISCARDED_ENGINE_OUTPUT = _DiscardingEngineStream()
 _REGISTRATION_CONFIG_MAX_BYTES = 64 * 1024
 _REGISTRATION_SOURCE_TIMEOUT_NS = 5_000_000_000
 _REGISTRATION_SCHEMA_PATH = (
@@ -709,7 +732,11 @@ def _run_sync(
                 raise SyncRequestInvalid("sync request input cannot be read") from exc
             request = SyncRequest.from_json(raw_request)
             runtime = compose_workspace_runtime(resolved_inputs)
-            receipt: SyncReceipt = synchronize_code_only(runtime, request)
+            with (
+                redirect_stdout(_DISCARDED_ENGINE_OUTPUT),
+                redirect_stderr(_DISCARDED_ENGINE_OUTPUT),
+            ):
+                receipt: SyncReceipt = synchronize_code_only(runtime, request)
             payload = receipt.canonical.decode("utf-8")
             exit_code = EXIT_READY
     except InjectedFault:

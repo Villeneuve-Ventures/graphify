@@ -553,6 +553,62 @@ def test_0916_explicit_scratch_is_not_recreated_at_process_exit(
     assert sorted(path.name for path in output.iterdir()) == ["graphify-out"]
 
 
+@pytest.mark.parametrize("ambient_name", ["src", "node_modules"])
+def test_0916_explicit_scratch_ignores_ambient_output_and_suppresses_progress(
+    tmp_path: Path,
+    ambient_name: str,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    ambient_output = tmp_path / "ambient" / ambient_name
+    code_root = source / "src"
+    code_root.mkdir(parents=True)
+    for index in range(100):
+        (code_root / f"module_{index:03d}.py").write_text(
+            f"VALUE_{index} = {index}\n",
+            encoding="utf-8",
+        )
+    ignored_root = source / "node_modules"
+    ignored_root.mkdir()
+    (ignored_root / "ignored.py").write_text("IGNORED = True\n", encoding="utf-8")
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    _init_git_repo(source)
+    environment = dict(os.environ)
+    environment["GRAPHIFY_OUT"] = os.fspath(ambient_output)
+    environment["GRAPHIFY_MAX_WORKERS"] = "2"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "from pathlib import Path",
+                    "from graphify.workspace.adapters import AdapterIntent, SUPPORTED_COMPATIBILITY, select_adapter",
+                    "adapter = select_adapter(SUPPORTED_COMPATIBILITY, intent=AdapterIntent.EXECUTE).require_adapter()",
+                    "result = adapter.build_structural(Path(__import__('sys').argv[1]), output_root=Path(__import__('sys').argv[2]), scratch_root=Path(__import__('sys').argv[2]))",
+                    "assert len(result.detected_code_files) == 100, result.detected_code_files",
+                    "assert result.detected_code_files[0] == 'src/module_000.py'",
+                    "assert result.detected_code_files[-1] == 'src/module_099.py'",
+                )
+            ),
+            os.fspath(source),
+            os.fspath(output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+    assert not ambient_output.exists()
+    assert (output / "graphify-out" / "graph.json").is_file()
+
+
 def test_0916_explicit_scratch_cleanup_preserves_a_replacement_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
