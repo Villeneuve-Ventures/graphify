@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
+from pathlib import Path
 import re
 import secrets
+from threading import Event, Thread
 import time
 from types import TracebackType
 from typing import Any, Mapping, cast
@@ -564,6 +566,55 @@ def _release_grant(
         raise error.with_traceback(traceback)
 
 
+def _build_structural_with_heartbeat(
+    runtime: WorkspaceRuntime,
+    grant: LeaseGrant,
+    source_root: Path,
+    staging_path: Path,
+) -> None:
+    stop = Event()
+    heartbeat_failure: list[tuple[Exception, TracebackType | None]] = []
+    interval_seconds = (_SYNC_LEASE_TTL_NS / 3) / 1_000_000_000
+
+    def heartbeat() -> None:
+        while not stop.wait(interval_seconds):
+            try:
+                runtime.leases.heartbeat(
+                    grant,
+                    heartbeat_at=datetime.now(timezone.utc),
+                    monotonic_ns=time.monotonic_ns(),
+                    ttl_ns=_SYNC_LEASE_TTL_NS,
+                )
+            except Exception as exc:
+                heartbeat_failure.append((exc, exc.__traceback__))
+                stop.set()
+                return
+
+    worker = Thread(
+        target=heartbeat,
+        name="graphify-workspace-sync-heartbeat",
+    )
+    worker.start()
+    build_failure: tuple[Exception, TracebackType | None] | None = None
+    try:
+        runtime.generations.adapter.build_structural(
+            source_root,
+            output_root=staging_path,
+            scratch_root=staging_path,
+        )
+    except Exception as exc:
+        build_failure = (exc, exc.__traceback__)
+    finally:
+        stop.set()
+        worker.join()
+    if heartbeat_failure:
+        error, traceback = heartbeat_failure[0]
+        raise error.with_traceback(traceback)
+    if build_failure is not None:
+        error, traceback = build_failure
+        raise error.with_traceback(traceback)
+
+
 def _build_and_certify(
     runtime: WorkspaceRuntime,
     request: SyncRequest,
@@ -630,10 +681,11 @@ def _build_and_certify(
         )
         _sync_fault(runtime, request, "staging_prepared")
         if preparation.state.lifecycle_state != "COMPLETE":
-            runtime.generations.adapter.build_structural(
+            _build_structural_with_heartbeat(
+                runtime,
+                attempt.grant,
                 source.root,
-                output_root=preparation.staging_path,
-                scratch_root=preparation.staging_path,
+                preparation.staging_path,
             )
             _sync_fault(runtime, request, "adapter_built")
         completion = runtime.generations.complete_staged_build(

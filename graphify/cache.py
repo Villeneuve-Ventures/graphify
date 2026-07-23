@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import atexit
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 import re
 import tempfile
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 # Output directory name — override with GRAPHIFY_OUT env var for worktrees or
@@ -146,6 +147,36 @@ def _flush_stat_index() -> None:
     except OSError:
         pass
     _stat_index_dirty = False
+
+
+@contextmanager
+def ephemeral_stat_index(cache_root: Path) -> Iterator[None]:
+    """Keep one extraction's stat index from outliving an ephemeral cache root.
+
+    The normal stat index is process-scoped and flushed at interpreter exit. An
+    adapter scratch directory has the opposite lifetime, so this scope gives the
+    extraction a fresh in-memory index and deliberately discards it on exit.
+    Any pre-existing process index is set aside and restored unchanged.
+    """
+
+    global _stat_index, _stat_index_root, _stat_index_dirty
+    ephemeral_root = Path(cache_root).resolve()
+    previous_index = _stat_index
+    previous_root = _stat_index_root
+    previous_dirty = _stat_index_dirty
+    atexit.unregister(_flush_stat_index)
+    _stat_index = {}
+    _stat_index_root = ephemeral_root
+    _stat_index_dirty = False
+    try:
+        yield
+    finally:
+        atexit.unregister(_flush_stat_index)
+        _stat_index = previous_index
+        _stat_index_root = previous_root
+        _stat_index_dirty = previous_dirty
+        if previous_root is not None:
+            atexit.register(_flush_stat_index)
 
 
 def _normalize_path(path: Path) -> Path:

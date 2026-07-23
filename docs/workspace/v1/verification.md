@@ -205,6 +205,10 @@ output remains ignored and must not widen the P1 product diff.
   adapter, source-drift, containment, permission, link, and binding attacks
   prove build, certification, promotion, and recovery through existing fenced
   APIs only;
+- a build longer than its renewal interval heartbeats the same fence, renewal
+  failure blocks completion and remains exactly recoverable, descriptor-pinned
+  scratch resists output-ancestor replacement, and process exit cannot recreate
+  removed staging through the extraction stat index;
 - provider credentials and configuration cannot affect code-only sync, network
   calls are denied, exact mutation allowlists keep writes under the configured
   external state root, and recursive source, Git, real-home, Codex-home, and

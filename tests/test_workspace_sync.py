@@ -11,12 +11,14 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+from threading import Event
 import time
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+import graphify.workspace.sync as workspace_sync
 from graphify.workspace.adapters.base import (
     ObservationHook,
     QueryRequest,
@@ -314,6 +316,95 @@ def test_adapter_failure_preserves_recoverable_staged_state_and_uses_external_st
     assert harness.state_root in output_root.parents
     assert harness.state_root in scratch_root.parents
     assert scratch_root == output_root
+
+
+def test_structural_build_heartbeats_its_lease_until_the_adapter_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime = _runtime(tmp_path)
+    adapter = _adapter(harness)
+    build = adapter.build_structural
+    release_build = Event()
+    heartbeat_calls = 0
+    original_heartbeat = runtime.leases.heartbeat
+
+    def blocking_build(
+        source_root: Path,
+        *,
+        output_root: Path,
+        scratch_root: Path,
+    ) -> StructuralBuild:
+        if not release_build.wait(timeout=1.5):
+            raise RuntimeError("lease heartbeat did not arrive")
+        return build(
+            source_root,
+            output_root=output_root,
+            scratch_root=scratch_root,
+        )
+
+    def heartbeat(*args: Any, **kwargs: Any) -> Any:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        release_build.set()
+        return original_heartbeat(*args, **kwargs)
+
+    adapter.build_structural = blocking_build  # type: ignore[method-assign]
+    _install_adapter(runtime, adapter)
+    monkeypatch.setattr(workspace_sync, "_SYNC_LEASE_TTL_NS", 1_000_000_000)
+    monkeypatch.setattr(runtime.leases, "heartbeat", heartbeat)
+
+    receipt = synchronize_code_only(runtime, _request(runtime))
+
+    assert receipt.to_dict()["state"] == "synchronized"
+    assert heartbeat_calls >= 1
+
+
+def test_heartbeat_failure_blocks_completion_and_pointer_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime = _runtime(tmp_path)
+    adapter = _adapter(harness)
+    build = adapter.build_structural
+    release_build = Event()
+    original_heartbeat = runtime.leases.heartbeat
+
+    def blocking_build(
+        source_root: Path,
+        *,
+        output_root: Path,
+        scratch_root: Path,
+    ) -> StructuralBuild:
+        release_build.wait(timeout=0.6)
+        return build(
+            source_root,
+            output_root=output_root,
+            scratch_root=scratch_root,
+        )
+
+    def fail_heartbeat(*_args: Any, **_kwargs: Any) -> Any:
+        release_build.set()
+        raise RuntimeError("injected lease heartbeat failure")
+
+    adapter.build_structural = blocking_build  # type: ignore[method-assign]
+    _install_adapter(runtime, adapter)
+    monkeypatch.setattr(workspace_sync, "_SYNC_LEASE_TTL_NS", 1_000_000_000)
+    monkeypatch.setattr(runtime.leases, "heartbeat", fail_heartbeat)
+    request = _request(runtime)
+
+    with pytest.raises(RuntimeError, match="injected lease heartbeat failure"):
+        synchronize_code_only(runtime, request)
+
+    staged = runtime.generations._load_staged_build_locked(REPO_UUID)
+    assert staged is not None
+    assert staged.lifecycle_state == "PUBLISHING"
+    assert runtime.pointers.load(REPO_UUID, allow_missing=True) is None
+
+    adapter.build_structural = build  # type: ignore[method-assign]
+    monkeypatch.setattr(runtime.leases, "heartbeat", original_heartbeat)
+    recovered = synchronize_code_only(runtime, request)
+    assert recovered.to_dict()["state"] == "synchronized"
 
 
 def test_changed_source_sync_promotes_a_new_structural_generation(tmp_path: Path) -> None:

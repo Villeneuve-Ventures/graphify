@@ -188,7 +188,10 @@ recovery; otherwise canonical source, migration, pointer, compatibility,
 semantic-source, or trusted-observation drift may install an abandonment intent
 before cleanup. Source unavailability alone is not stale evidence. The CLI
 accepts the exact authority and capacity inputs through canonical bounded stdin,
-then emits only the stable receipt after held leases have been released.
+renews the `BUILD` lease only while the synchronous structural adapter runs,
+joins that renewal before staged completion, and emits only the stable receipt
+after held leases have been released. Renewal failure leaves the exact
+`PUBLISHING` barrier recoverable and cannot authorize completion.
 
 Activation, migration, promotion, rollback, repair, pointer recovery, and GC
 share one fenced workspace-operation domain. `SEMANTIC_CLAIM` has its reserved
@@ -200,4 +203,5 @@ validates these leases; P3 consumes only the lifecycle-operation subset. P4
 owns adapter and freshness use. P5A consumes the semantic domain and binds
 stable semantic completion to certification. P5B2b owns only code-only
 structural orchestration; later P5 slices remain responsible for all other
-orchestration, services, commands, installation, and publication.
+orchestration, concurrent in-process services, commands, installation, and
+publication.

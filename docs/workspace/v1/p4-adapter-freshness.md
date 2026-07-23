@@ -56,7 +56,14 @@ installed rooted path is revalidated after hashing. The `0.9.16`
 extractor/build implementation runs only against that snapshot in an ephemeral
 private build directory. Per-file extractor errors reject the build, and the
 payload is constructed as a directed graph so reciprocal relationships remain
-distinct. The adapter requires existing, real-directory ancestry
+distinct. When the caller supplies generation-owned scratch, both ephemeral
+directories are created through the pinned output descriptor and engine paths
+remain relative to that pinned authority; replacing the lexical output ancestor
+cannot redirect an engine write. Pre-existing explicit staging must already be
+owned and `0700`, and each private temporary name is quarantined before recursive
+cleanup. The process-scoped stat index is isolated and discarded before the
+ephemeral directory is removed, so interpreter shutdown cannot recreate deleted
+staging. The adapter requires existing, real-directory ancestry
 for the requested output root, opens it descriptor-relative without following
 links, and keeps it pinned while copying the normalized result. The source read
 authority remains open through publication, and both source and output bindings

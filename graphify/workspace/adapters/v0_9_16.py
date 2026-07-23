@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import errno
 import hashlib
@@ -10,16 +11,19 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import tempfile
+from threading import RLock
 import time
-from typing import Callable, Mapping, NoReturn
+from typing import Callable, Iterator, Mapping, NoReturn
 
 from networkx.exception import NetworkXException
 from networkx.readwrite import json_graph
 
 # Engine-private imports are deliberately confined to this versioned adapter.
 from graphify.build import build_from_json
+from graphify.cache import ephemeral_stat_index
 from graphify.detect import detect
 from graphify.export import to_json
 from graphify.extract import extract
@@ -55,6 +59,7 @@ _STABLE_STAT_FIELDS = (
     "st_mtime_ns",
     "st_ctime_ns",
 )
+_ENGINE_CWD_LOCK = RLock()
 
 
 class _RelativePathMissing(ObservationUnstable):
@@ -1601,6 +1606,242 @@ def _absolute_source_path(source_root: Path) -> Path:
     return Path(os.path.abspath(os.fspath(source_root)))
 
 
+def _require_descriptor_cwd(descriptor: int) -> None:
+    try:
+        current = os.stat(".", follow_symlinks=False)
+        expected = os.fstat(descriptor)
+    except OSError as exc:
+        raise ObservationUnavailable(
+            f"engine working directory cannot be inspected safely: {exc}"
+        ) from exc
+    if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+        raise ObservationUnstable("engine working directory changed while staging")
+
+
+@contextmanager
+def _pinned_descriptor_cwd(descriptor: int) -> Iterator[None]:
+    if not hasattr(os, "fchdir"):
+        raise ObservationUnsupported("descriptor-pinned engine execution is unavailable")
+    with _ENGINE_CWD_LOCK:
+        try:
+            previous = os.open(".", _anchored_directory_flags())
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"engine working directory cannot be pinned safely: {exc}"
+            ) from exc
+        try:
+            try:
+                os.fchdir(descriptor)
+                _require_descriptor_cwd(descriptor)
+            except OSError as exc:
+                raise ObservationUnavailable(
+                    f"engine working directory cannot be pinned safely: {exc}"
+                ) from exc
+            yield
+        finally:
+            try:
+                os.fchdir(previous)
+            finally:
+                os.close(previous)
+
+
+def _remove_directory_contents(descriptor: int) -> None:
+    try:
+        with os.scandir(descriptor) as entries:
+            names = tuple(entry.name for entry in entries)
+        for name in names:
+            details = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+            if stat.S_ISDIR(details.st_mode):
+                child = os.open(
+                    name,
+                    _anchored_directory_flags(),
+                    dir_fd=descriptor,
+                )
+                try:
+                    _remove_directory_contents(child)
+                finally:
+                    os.close(child)
+                os.rmdir(name, dir_fd=descriptor)
+            else:
+                os.unlink(name, dir_fd=descriptor)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise ObservationUnavailable(
+            f"engine temporary directory cannot be removed safely: {exc}"
+        ) from exc
+
+
+def _remove_open_directory_at(
+    parent_descriptor: int,
+    name: str,
+    descriptor: int,
+) -> None:
+    quarantine_name: str | None = None
+    try:
+        opened = os.fstat(descriptor)
+        try:
+            installed = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError as exc:
+            raise ObservationUnstable(
+                "engine temporary directory disappeared before removal"
+            ) from exc
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"engine temporary directory cannot be inspected safely: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(installed.st_mode)
+            or (installed.st_dev, installed.st_ino)
+            != (opened.st_dev, opened.st_ino)
+        ):
+            raise ObservationUnstable(
+                "engine temporary directory changed before removal"
+            )
+        quarantine_name = f".graphify-workspace-cleanup-{secrets.token_hex(16)}"
+        try:
+            os.rename(
+                name,
+                quarantine_name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+            )
+            quarantined = os.stat(
+                quarantine_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"engine temporary directory cannot be quarantined safely: {exc}"
+            ) from exc
+        if (
+            not stat.S_ISDIR(quarantined.st_mode)
+            or (quarantined.st_dev, quarantined.st_ino)
+            != (opened.st_dev, opened.st_ino)
+        ):
+            raise ObservationUnstable(
+                "engine temporary directory changed during quarantine"
+            )
+        _remove_directory_contents(descriptor)
+        try:
+            os.rmdir(quarantine_name, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"engine temporary directory cannot be removed safely: {exc}"
+            ) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _create_private_directory_at(parent_descriptor: int, prefix: str) -> str:
+    for _attempt in range(128):
+        name = f"{prefix}{secrets.token_hex(16)}"
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"engine temporary directory cannot be created safely: {exc}"
+            ) from exc
+        return name
+    raise ObservationUnavailable("engine temporary directory name space is exhausted")
+
+
+@contextmanager
+def _temporary_directory_at(
+    parent_descriptor: int,
+    *,
+    prefix: str,
+) -> Iterator[tuple[Path, int]]:
+    _require_descriptor_cwd(parent_descriptor)
+    name = _create_private_directory_at(parent_descriptor, prefix)
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                _anchored_directory_flags(),
+                dir_fd=parent_descriptor,
+            )
+            installed = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(installed.st_mode)
+                or (installed.st_dev, installed.st_ino)
+                != (opened.st_dev, opened.st_ino)
+            ):
+                raise ObservationUnstable(
+                    "engine temporary directory changed while opening"
+                )
+        except OSError as exc:
+            raise ObservationUnavailable(
+                f"engine temporary directory cannot be used safely: {exc}"
+            ) from exc
+        yield Path(name), descriptor
+    finally:
+        if descriptor is not None:
+            _remove_open_directory_at(parent_descriptor, name, descriptor)
+
+
+@contextmanager
+def _engine_temporary_directory(
+    output_descriptor: int | None,
+) -> Iterator[tuple[Path, str, int | None]]:
+    if output_descriptor is None:
+        with tempfile.TemporaryDirectory(
+            prefix="graphify-workspace-build-"
+        ) as temporary:
+            root = Path(temporary)
+            yield root, root.name, None
+        return
+    with _pinned_descriptor_cwd(output_descriptor):
+        with _temporary_directory_at(
+            output_descriptor,
+            prefix="graphify-workspace-build-",
+        ) as (name, descriptor):
+            os.fchdir(descriptor)
+            _require_descriptor_cwd(descriptor)
+            try:
+                yield Path("."), name.name, descriptor
+            finally:
+                os.fchdir(output_descriptor)
+
+
+@contextmanager
+def _source_snapshot_directory(
+    engine_output: Path,
+    engine_descriptor: int | None,
+) -> Iterator[Path]:
+    if engine_descriptor is None:
+        with tempfile.TemporaryDirectory(
+            prefix=".graphify-source-",
+            dir=engine_output,
+        ) as temporary:
+            yield Path(temporary)
+        return
+    with _temporary_directory_at(
+        engine_descriptor,
+        prefix=".graphify-source-",
+    ) as (name, _descriptor):
+        yield name
+
+
 def _require_initial_source_root(root: Path) -> None:
     try:
         reader = _PinnedSourceReader.open(root)
@@ -1735,7 +1976,11 @@ def _open_existing_output_root(output: Path) -> tuple[int, os.stat_result]:
         os.close(parent_descriptor)
 
 
-def _open_empty_output_root(output: Path) -> tuple[int, tuple[int, int]]:
+def _open_empty_output_root(
+    output: Path,
+    *,
+    require_private: bool = False,
+) -> tuple[int, tuple[int, int]]:
     parent_descriptor = _open_output_parent(output)
     try:
         try:
@@ -1744,7 +1989,11 @@ def _open_empty_output_root(output: Path) -> tuple[int, tuple[int, int]]:
                 _anchored_directory_flags(),
                 dir_fd=parent_descriptor,
             )
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            if require_private:
+                raise ObservationUnsupported(
+                    "engine scratch root must already exist"
+                ) from exc
             try:
                 os.mkdir(output.name, 0o700, dir_fd=parent_descriptor)
             except FileExistsError:
@@ -1794,6 +2043,10 @@ def _open_empty_output_root(output: Path) -> tuple[int, tuple[int, int]]:
             if hasattr(os, "geteuid") and details.st_uid != os.geteuid():
                 raise ObservationUnsupported(
                     f"engine output root is not owned by the current user: {output}"
+                )
+            if require_private and stat.S_IMODE(details.st_mode) != 0o700:
+                raise ObservationUnsupported(
+                    "engine scratch root mode must already be 0700"
                 )
             with os.scandir(descriptor) as entries:
                 if next(entries, None) is not None:
@@ -2072,30 +2325,25 @@ class Graphify0916Adapter:
             raise ObservationUnsupported(
                 "engine output root must be external to source checkout"
             )
-        output_descriptor, output_identity = _open_empty_output_root(output)
+        output_descriptor, output_identity = _open_empty_output_root(
+            output,
+            require_private=scratch is not None,
+        )
         try:
-            temporary_directory = (
-                tempfile.TemporaryDirectory(prefix="graphify-workspace-build-")
-                if scratch is None
-                else tempfile.TemporaryDirectory(
-                    prefix="graphify-workspace-build-",
-                    dir=os.fspath(output),
-                )
-            )
-            with temporary_directory as temporary:
-                engine_output = Path(temporary)
+            with _engine_temporary_directory(
+                output_descriptor if scratch is not None else None
+            ) as (engine_output, engine_output_name, engine_descriptor):
                 published_output_names = (
-                    tuple(sorted((engine_output.name, "graphify-out")))
+                    tuple(sorted((engine_output_name, "graphify-out")))
                     if scratch is not None
                     else ("graphify-out",)
                 )
                 authority = _PinnedReadAuthority.open(policy_root)
                 try:
-                    with tempfile.TemporaryDirectory(
-                        prefix=".graphify-source-",
-                        dir=engine_output,
-                    ) as snapshot_temporary:
-                        snapshot_root = Path(snapshot_temporary)
+                    with _source_snapshot_directory(
+                        engine_output,
+                        engine_descriptor,
+                    ) as snapshot_root:
                         source_details = authority.source.directory_details(root)
                         authority.bind_comparison_directory(root, source_details)
                         workspace_policy = authority.pin_optional_comparison(
@@ -2171,11 +2419,12 @@ class Graphify0916Adapter:
                             source_details,
                         )
                         authority.require_bindings()
-                        extraction = extract(
-                            list(snapshot_files),
-                            cache_root=engine_output,
-                            source_root=snapshot_root,
-                        )
+                        with ephemeral_stat_index(engine_output):
+                            extraction = extract(
+                                list(snapshot_files),
+                                cache_root=engine_output,
+                                source_root=snapshot_root,
+                            )
                         if extraction.get("errors"):
                             raise ObservationUnavailable(
                                 "structural extraction failed for detected code input"
@@ -2215,7 +2464,7 @@ class Graphify0916Adapter:
                     _require_output_binding(output, output_identity)
                     _require_output_contents(
                         output_descriptor,
-                        (engine_output.name,) if scratch is not None else (),
+                        (engine_output_name,) if scratch is not None else (),
                     )
                     _publish_structural_output(engine_output, output_descriptor)
                     _require_output_contents(
