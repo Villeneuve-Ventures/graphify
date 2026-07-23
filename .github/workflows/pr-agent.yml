@@ -1,0 +1,77 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, review_requested]
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  review:
+    # Secrets are unavailable to pull_request workflows from forks. Review those
+    # only after a trusted maintainer explicitly comments /review, which runs from
+    # the default branch through issue_comment.
+    if: >-
+      ${{
+        github.event.sender.type != 'Bot' &&
+        (
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.draft == false &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          ) ||
+          (
+            github.event_name == 'issue_comment' &&
+            github.event.issue.pull_request &&
+            startsWith(github.event.comment.body, '/review') &&
+            contains(
+              fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+              github.event.comment.author_association
+            )
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned PR-Agent
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "git+https://github.com/qodo-ai/pr-agent.git@1885eb4056887b8c8a530f0a35b842bba05cb425"
+
+      - name: Run PR-Agent review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          github_action_config.auto_review: "true"
+          github_action_config.auto_describe: "false"
+          github_action_config.auto_improve: "false"
+        run: |
+          python - <<'PY'
+          import asyncio
+
+          from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
+
+          # PR-Agent at the pinned revision does not yet list these stable model
+          # IDs in its reasoning-effort allowlist. LiteLLM 1.92 supports their
+          # reasoning_effort parameter, so extend the in-memory list before
+          # importing the runner and its AI handler. .pr_agent.toml supplies the
+          # corresponding custom token limit.
+          for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
+              if model not in SUPPORT_REASONING_EFFORT_MODELS:
+                  SUPPORT_REASONING_EFFORT_MODELS.append(model)
+
+          from pr_agent.servers.github_action_runner import run_action
+
+          asyncio.run(run_action())
+          PY
