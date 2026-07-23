@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/sync-receipt.schema.json",
+  "title": "Graphify workspace code-only sync receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "cli_contract_version",
+    "mode",
+    "state",
+    "exit_code"
+  ],
+  "properties": {
+    "contract": {"const": "graphify.workspace.sync"},
+    "schema_version": {"const": 1},
+    "cli_contract_version": {"const": 1},
+    "mode": {"const": "code_only"},
+    "state": {"enum": ["synchronized", "conflict", "invalid"]},
+    "exit_code": {"enum": [0, 10, 20]},
+    "repo_uuid": {"type": "string", "format": "uuid"},
+    "generation_id": {
+      "type": "string",
+      "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+    },
+    "request_sha256": {"$ref": "#/$defs/digest"},
+    "receipt_sha256": {"$ref": "#/$defs/digest"},
+    "pointer_revision": {"type": "integer", "minimum": 1},
+    "reason_code": {"$ref": "#/$defs/reason_code"},
+    "action_code": {"$ref": "#/$defs/action_code"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "synchronized"}}, "required": ["state"]},
+      "then": {
+        "required": [
+          "repo_uuid",
+          "generation_id",
+          "request_sha256",
+          "receipt_sha256",
+          "pointer_revision"
+        ],
+        "properties": {"exit_code": {"const": 0}},
+        "not": {"anyOf": [{"required": ["reason_code"]}, {"required": ["action_code"]}]}
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "conflict"}}, "required": ["state"]},
+      "then": {
+        "required": ["reason_code", "action_code"],
+        "properties": {"exit_code": {"const": 10}},
+        "not": {
+          "anyOf": [
+            {"required": ["repo_uuid"]},
+            {"required": ["generation_id"]},
+            {"required": ["request_sha256"]},
+            {"required": ["receipt_sha256"]},
+            {"required": ["pointer_revision"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "invalid"}}, "required": ["state"]},
+      "then": {
+        "required": ["reason_code", "action_code"],
+        "properties": {"exit_code": {"const": 20}},
+        "not": {
+          "anyOf": [
+            {"required": ["repo_uuid"]},
+            {"required": ["generation_id"]},
+            {"required": ["request_sha256"]},
+            {"required": ["receipt_sha256"]},
+            {"required": ["pointer_revision"]}
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reason_code": {
+      "enum": [
+        "capacity_exceeded",
+        "commit_unknown",
+        "lease_busy",
+        "runtime_authority_invalid",
+        "runtime_authority_missing",
+        "runtime_authority_unsupported",
+        "staged_build_recovery_required",
+        "state_corrupt",
+        "sync_authority_conflict",
+        "sync_failed",
+        "sync_request_invalid",
+        "unsafe_state_path",
+        "unsupported_compatibility",
+        "unsupported_runtime"
+      ]
+    },
+    "action_code": {
+      "enum": [
+        "adjust_capacity_policy",
+        "configure_safe_state_root",
+        "install_candidate_authority",
+        "install_supported_candidate",
+        "provide_valid_sync_request",
+        "refresh_sync_request",
+        "resume_exact_workspace_sync",
+        "retry_workspace_sync",
+        "run_workspace_doctor",
+        "run_workspace_repair",
+        "use_supported_runtime"
+      ]
+    }
+  }
+}

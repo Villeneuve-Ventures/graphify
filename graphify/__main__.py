@@ -527,8 +527,11 @@ def _run_cli() -> None:
     # Skip during hook-check — it runs on every editor tool use and must be silent.
     # Deduplicate paths so platforms sharing the same install dir don't warn twice.
     _silent_cmds = {"install", "uninstall", "hook-check", "hook-guard"}
-    registration_command = tuple(sys.argv[1:3]) == ("workspace", "register")
-    if not registration_command and not any(arg in _silent_cmds for arg in sys.argv):
+    bounded_workspace_command = tuple(sys.argv[1:3]) in {
+        ("workspace", "register"),
+        ("workspace", "sync"),
+    }
+    if not bounded_workspace_command and not any(arg in _silent_cmds for arg in sys.argv):
         # Resolve each platform's real user-scope destination so per-platform
         # overrides (gemini, opencode, devin, antigravity, amp) check the dir
         # they actually install into, not the bare cfg['skill_dst'].
@@ -544,6 +547,8 @@ def _run_cli() -> None:
         print()
         print("Commands:")
         print("  workspace register ...    explicitly enroll or adopt one workspace")
+        print("  workspace sync --code-only --request-stdin")
+        print("                            build and promote one structural generation")
         print("  workspace status --json  emit versioned read-only workspace status JSON")
         print("  workspace doctor         run read-only workspace diagnostics")
         print("  install [--platform P]  copy skill to platform config dir (claude|windows|codebuddy|codex|opencode|aider|amp|agents|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro|pi|devin)")
@@ -735,7 +740,12 @@ def _run_cli() -> None:
     # Exempt: free-text commands (user string may contain these tokens), and
     # "install"/"uninstall" which have their own per-subcommand help handlers.
     _FREE_TEXT_CMDS = {"query", "explain", "path", "save-result", "install", "uninstall"}
-    if cmd not in _FREE_TEXT_CMDS and any(a in {"-h", "--help", "-?"} for a in sys.argv[2:]):
+    workspace_sync = tuple(sys.argv[1:3]) == ("workspace", "sync")
+    if (
+        cmd not in _FREE_TEXT_CMDS
+        and not workspace_sync
+        and any(a in {"-h", "--help", "-?"} for a in sys.argv[2:])
+    ):
         print(f"Run 'graphify --help' for full usage.")
         return
 

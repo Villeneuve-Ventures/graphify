@@ -386,15 +386,22 @@ class LeaseStore:
         repo_uuid: str,
         *,
         recover: bool = True,
+        deadline_ns: int | None = None,
     ) -> StagedBuildState | None:
         current, previous, pending = self._staged_build_paths(repo_uuid)
         try:
-            loader = (
-                self.state.recover_record
-                if recover
-                else self.state.read_stable_record
-            )
-            return loader(
+            if recover:
+                return self.state.recover_record(
+                    label=f"staged-build:{repo_uuid}",
+                    current=current,
+                    previous=previous,
+                    pending=pending,
+                    decoder=StagedBuildState.from_json,
+                    revision=lambda value: value.revision,
+                    allow_missing=True,
+                    max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
+                )
+            return self.state.read_stable_record(
                 label=f"staged-build:{repo_uuid}",
                 current=current,
                 previous=previous,
@@ -403,6 +410,7 @@ class LeaseStore:
                 revision=lambda value: value.revision,
                 allow_missing=True,
                 max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
+                deadline_ns=deadline_ns,
             )
         except (StateCorrupt, StatePathError) as exc:
             raise LeaseRecoveryRequired(f"staged build state requires recovery: {exc}") from exc

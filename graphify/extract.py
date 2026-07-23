@@ -1,6 +1,7 @@
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import importlib
 import json
@@ -153,17 +154,19 @@ def _raise_recursion_limit() -> None:
         sys.setrecursionlimit(_RECURSION_LIMIT)
 
 
-def _safe_extract(extractor: Callable, path: Path) -> dict:
+def _safe_extract(extractor: Callable, path: Path, *, quiet: bool = False) -> dict:
     try:
         return extractor(path)
     except RecursionError:
-        print(f"  warning: skipped {path} (recursion limit exceeded)", file=sys.stderr, flush=True)
+        if not quiet:
+            print(f"  warning: skipped {path} (recursion limit exceeded)", file=sys.stderr, flush=True)
         return {"nodes": [], "edges": [], "error": "recursion_limit_exceeded"}
     except Exception as e:
-        if os.environ.get("GRAPHIFY_DEBUG"):
+        if not quiet and os.environ.get("GRAPHIFY_DEBUG"):
             import traceback
             traceback.print_exc(file=sys.stderr)
-        print(f"  warning: skipped {path} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
+        if not quiet:
+            print(f"  warning: skipped {path} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
         return {"nodes": [], "edges": [], "error": f"{type(e).__name__}: {e}"}
 
 
@@ -4086,11 +4089,24 @@ def _get_extractor(path: Path) -> Any | None:
     return _DISPATCH.get(suffix)
 
 
-def _safe_extract_with_xaml_root(extractor, path: Path, root: Path) -> dict:
+def _safe_extract_with_xaml_root(
+    extractor,
+    path: Path,
+    root: Path,
+    *,
+    quiet: bool = False,
+) -> dict:
     global _XAML_ACTIVE_EXTRACT_ROOT
     previous_root = _XAML_ACTIVE_EXTRACT_ROOT
     _XAML_ACTIVE_EXTRACT_ROOT = root.resolve()
     try:
+        if quiet:
+            with (
+                open(os.devnull, "w", encoding="utf-8") as discarded,
+                redirect_stdout(discarded),
+                redirect_stderr(discarded),
+            ):
+                return _safe_extract(extractor, path, quiet=True)
         return _safe_extract(extractor, path)
     finally:
         _XAML_ACTIVE_EXTRACT_ROOT = previous_root
@@ -4111,11 +4127,27 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     Returns:
         (index, result_dict) so results can be placed back in order.
     """
-    if len(args) == 4:
+    if len(args) == 6:
+        (
+            idx,
+            path_str,
+            root_str,
+            cache_location_str,
+            quiet,
+            honor_ambient_output,
+        ) = args
+    elif len(args) == 5:
+        idx, path_str, root_str, cache_location_str, quiet = args
+        honor_ambient_output = True
+    elif len(args) == 4:
         idx, path_str, root_str, cache_location_str = args
+        quiet = False
+        honor_ambient_output = True
     else:  # legacy 3-tuple: location == anchor
         idx, path_str, root_str = args
         cache_location_str = root_str
+        quiet = False
+        honor_ambient_output = True
     path = Path(path_str)
     root = Path(root_str)
     cache_location = Path(cache_location_str)
@@ -4124,7 +4156,12 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
 
     # Check cache first (avoid re-extraction)
     if not bypass_cache:
-        cached = load_cached(path, root, cache_root=cache_location)
+        cached = load_cached(
+            path,
+            root,
+            cache_root=cache_location,
+            honor_ambient_output=honor_ambient_output,
+        )
         if cached is not None:
             return idx, cached
 
@@ -4132,14 +4169,24 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     if extractor is None:
         return idx, {"nodes": [], "edges": []}
 
-    result = _safe_extract_with_xaml_root(extractor, path, root)
+    result = (
+        _safe_extract_with_xaml_root(extractor, path, root, quiet=True)
+        if quiet
+        else _safe_extract_with_xaml_root(extractor, path, root)
+    )
     # Never cache a zero-node result for an extractable file. Every supported
     # source produces at least a file node, so an empty node list is anomalous
     # (e.g. a transient batch/parallel hiccup). Caching it makes the empty
     # byte-stable across runs and silently blinds affected/explain to and
     # through the file (#1666); skipping the write lets a rerun self-heal.
     if not bypass_cache and "error" not in result and result.get("nodes"):
-        save_cached(path, result, root, cache_root=cache_location)
+        save_cached(
+            path,
+            result,
+            root,
+            cache_root=cache_location,
+            honor_ambient_output=honor_ambient_output,
+        )
     return idx, result
 
 
@@ -4150,6 +4197,8 @@ def _extract_parallel(
     max_workers: int | None,
     total_files: int,
     cache_location: Path | None = None,
+    quiet: bool = False,
+    honor_ambient_output: bool = True,
 ) -> bool:
     """Extract uncached files in parallel using ProcessPoolExecutor.
 
@@ -4190,7 +4239,17 @@ def _extract_parallel(
     # the cache dir is written (defaults to root when not decoupled) (#1774).
     root_str = str(root)
     cache_loc_str = str(cache_location if cache_location is not None else root)
-    work_items = [(idx, str(path), root_str, cache_loc_str) for idx, path in uncached_work]
+    work_items = [
+        (
+            idx,
+            str(path),
+            root_str,
+            cache_loc_str,
+            quiet,
+            honor_ambient_output,
+        )
+        for idx, path in uncached_work
+    ]
 
     done_count = 0
     _PROGRESS_INTERVAL = 100
@@ -4212,13 +4271,15 @@ def _extract_parallel(
                         "edges": [],
                         "error": f"parallel worker failed: {type(exc).__name__}",
                     }
-                    print(
-                        f"  warning: worker failed for {work_items[pos][1]}: {exc}",
-                        file=sys.stderr, flush=True,
-                    )
+                    if not quiet:
+                        print(
+                            f"  warning: worker failed for {work_items[pos][1]}: {exc}",
+                            file=sys.stderr, flush=True,
+                        )
                 done_count += 1
                 if (
-                    total_files >= _PROGRESS_INTERVAL
+                    not quiet
+                    and total_files >= _PROGRESS_INTERVAL
                     and done_count % _PROGRESS_INTERVAL == 0
                 ):
                     print(
@@ -4232,15 +4293,16 @@ def _extract_parallel(
         # __main__ guard, so worker bootstrap raises and the pool dies before
         # any work completes. Fall back to in-process sequential extraction —
         # slower but correct.
-        print(
-            "  warning: parallel extraction failed (BrokenProcessPool); "
-            "falling back to sequential. On Windows this usually means the "
-            'caller is missing an `if __name__ == "__main__":` guard. Pass '
-            "parallel=False to extract() to skip the pool entirely.",
-            flush=True,
-        )
+        if not quiet:
+            print(
+                "  warning: parallel extraction failed (BrokenProcessPool); "
+                "falling back to sequential. On Windows this usually means the "
+                'caller is missing an `if __name__ == "__main__":` guard. Pass '
+                "parallel=False to extract() to skip the pool entirely.",
+                flush=True,
+            )
         return False
-    if total_files >= _PROGRESS_INTERVAL:
+    if not quiet and total_files >= _PROGRESS_INTERVAL:
         # Report the same denominator the intermediate lines used (uncached files
         # actually processed this run), not total_files — switching to the full
         # corpus made the count jump upward at the end (cached hits + files with no
@@ -4259,12 +4321,15 @@ def _extract_sequential(
     root: Path,
     total_files: int,
     cache_location: Path | None = None,
+    quiet: bool = False,
+    honor_ambient_output: bool = True,
 ) -> None:
     """Extract uncached files sequentially (fallback for small batches)."""
     _PROGRESS_INTERVAL = 100
     for work_idx, (idx, path) in enumerate(uncached_work):
         if (
-            total_files >= _PROGRESS_INTERVAL
+            not quiet
+            and total_files >= _PROGRESS_INTERVAL
             and work_idx % _PROGRESS_INTERVAL == 0
             and work_idx > 0
         ):
@@ -4278,12 +4343,22 @@ def _extract_sequential(
             continue
         bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         # XAML boundary anchors on `root` (the corpus), not the cache location.
-        result = _safe_extract_with_xaml_root(extractor, path, root)
+        result = (
+            _safe_extract_with_xaml_root(extractor, path, root, quiet=True)
+            if quiet
+            else _safe_extract_with_xaml_root(extractor, path, root)
+        )
         # See _extract_single_file: don't cache an anomalous zero-node result (#1666).
         if not bypass_cache and "error" not in result and result.get("nodes"):
-            save_cached(path, result, root, cache_root=cache_location)
+            save_cached(
+                path,
+                result,
+                root,
+                cache_root=cache_location,
+                honor_ambient_output=honor_ambient_output,
+            )
         per_file[idx] = result
-    if total_files >= _PROGRESS_INTERVAL:
+    if not quiet and total_files >= _PROGRESS_INTERVAL:
         # Consistent denominator with the intermediate lines (#1693).
         _done = len(uncached_work)
         print(f"  AST extraction: {_done}/{_done} uncached files (100%)", flush=True)
@@ -4299,6 +4374,8 @@ def extract(
     source_root: Path | None = None,
     parallel: bool = True,
     max_workers: int | None = None,
+    quiet: bool = False,
+    honor_ambient_output: bool = True,
 ) -> dict:
     """Extract AST nodes and edges from a list of code files.
 
@@ -4322,6 +4399,10 @@ def extract(
             use ProcessPoolExecutor for multi-core extraction.
         max_workers: max subprocess count. Defaults to cpu_count (or the
             value of GRAPHIFY_MAX_WORKERS if set), bounded by len(uncached_work).
+        quiet: suppress progress and path-bearing warnings while preserving
+            structured extraction errors in the returned payload.
+        honor_ambient_output: honor the process-level ``GRAPHIFY_OUT`` cache
+            location. Certified workspace extraction disables this explicitly.
     """
     paths = [Path(p) for p in paths]
     _check_tree_sitter_version()
@@ -4374,7 +4455,12 @@ def extract(
             continue
         bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         if not bypass_cache:
-            cached = load_cached(path, root, cache_root=cache_location)
+            cached = load_cached(
+                path,
+                root,
+                cache_root=cache_location,
+                honor_ambient_output=honor_ambient_output,
+            )
             if cached is not None:
                 per_file[i] = cached
                 continue
@@ -4384,11 +4470,45 @@ def extract(
     if uncached_work:
         ran_parallel = False
         if parallel and len(uncached_work) >= _PARALLEL_THRESHOLD:
-            ran_parallel = _extract_parallel(
-                uncached_work, per_file, root, max_workers, total, cache_location
-            )
+            if quiet or not honor_ambient_output:
+                ran_parallel = _extract_parallel(
+                    uncached_work,
+                    per_file,
+                    root,
+                    max_workers,
+                    total,
+                    cache_location,
+                    quiet=quiet,
+                    honor_ambient_output=honor_ambient_output,
+                )
+            else:
+                ran_parallel = _extract_parallel(
+                    uncached_work,
+                    per_file,
+                    root,
+                    max_workers,
+                    total,
+                    cache_location,
+                )
         if not ran_parallel:
-            _extract_sequential(uncached_work, per_file, root, total, cache_location)
+            if quiet or not honor_ambient_output:
+                _extract_sequential(
+                    uncached_work,
+                    per_file,
+                    root,
+                    total,
+                    cache_location,
+                    quiet=quiet,
+                    honor_ambient_output=honor_ambient_output,
+                )
+            else:
+                _extract_sequential(
+                    uncached_work,
+                    per_file,
+                    root,
+                    total,
+                    cache_location,
+                )
 
     # Fill any remaining None slots (shouldn't happen, but defensive)
     for i in range(total):
@@ -4405,7 +4525,7 @@ def extract(
             continue
         if _get_extractor(_p) is not None:
             _empty_sources.append(str(_p))
-    if _empty_sources:
+    if _empty_sources and not quiet:
         _shown = ", ".join(Path(x).name for x in _empty_sources[:5])
         _more = f" (+{len(_empty_sources) - 5} more)" if len(_empty_sources) > 5 else ""
         print(
@@ -4427,7 +4547,7 @@ def extract(
         _ext = _p.suffix.lower()
         if _ext in _CODE_EXTS and _get_extractor(_p) is None:
             _no_extractor[_ext] = _no_extractor.get(_ext, 0) + 1
-    if _no_extractor:
+    if _no_extractor and not quiet:
         _by_count = ", ".join(
             f"{ext} ({n})" for ext, n in sorted(_no_extractor.items(), key=lambda kv: (-kv[1], kv[0]))
         )
@@ -4454,7 +4574,11 @@ def extract(
             _ext = _p.suffix.lower()
             _missing_dep_count[_ext] = _missing_dep_count.get(_ext, 0) + 1
             _missing_dep_error.setdefault(_ext, _err)
-    for _ext, _n in sorted(_missing_dep_count.items(), key=lambda kv: (-kv[1], kv[0])):
+    for _ext, _n in (
+        ()
+        if quiet
+        else sorted(_missing_dep_count.items(), key=lambda kv: (-kv[1], kv[0]))
+    ):
         _extra = _EXTRA_FOR_EXTENSION.get(_ext)
         if _extra:
             _reason = _missing_dep_error[_ext].split(". ")[0]
@@ -4950,6 +5074,11 @@ def extract(
             continue
         sf_path = Path(sf)
         if not sf_path.is_absolute():
+            if source_root is not None:
+                try:
+                    item["source_file"] = sf_path.relative_to(source_root).as_posix()
+                except ValueError:
+                    pass
             continue
         try:
             item["source_file"] = sf_path.relative_to(root).as_posix()

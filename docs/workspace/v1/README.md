@@ -1,10 +1,10 @@
 # Graphify workspace contract v1
 
-Status: P5B2b0 internal staged structural-build recovery, P5B2a initial
-workspace registration, P5B1 read-only workspace status/doctor, P5A semantic
-queue, P4 adapter, and observed-current library runtime for `graphifyy
-0.9.16+workspace.1`; the public v1 contract fields remain frozen. P5B2b0 does
-not expose `workspace sync` or revise the public inspection schemas.
+Status: P5B2b provider-neutral code-only structural sync, P5B2b0 staged
+structural-build recovery, P5B2a initial workspace registration, P5B1 read-only
+workspace status/doctor, P5A semantic queue, P4 adapter, and observed-current
+library runtime for `graphifyy 0.9.16+workspace.1`. Durable state schema v1 and
+runtime-manifest format v1 remain frozen; public status JSON is schema v2.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -39,10 +39,14 @@ external state root. The receipt's normative machine-readable schema is
 `graphify/workspace/schemas/cli/v1/registration.schema.json`. Rebind, rotation,
 activation, remaining mutation/query commands, repair, watch/service,
 performance certification, and candidate publication remain later P5 work.
-P5B2b0 adds only the internal request-bound staged-build and stale-abandonment
-recovery contract described in [State contracts](state-contract.md). It closes
-the crash and drift barriers required before a public structural sync command;
-it does not add that command, provider selection, or new status/doctor output.
+P5B2b0 adds the internal request-bound staged-build and stale-abandonment
+recovery contract described in [State contracts](state-contract.md). P5B2b
+exposes only `graphify workspace sync --code-only --request-stdin`, using a
+bounded canonical JSON request, external generation-owned staging, the existing
+fenced lifecycle, and one canonical redacted receipt. Status and doctor now
+surface nonterminal staged-build recovery barriers through status schema v2.
+Provider selection, networking, semantic execution, and every other workspace
+command remain deferred.
 
 ## Deferred work ownership
 
@@ -53,8 +57,8 @@ not duplicate live SHAs or declare a next batch ready.
 
 | Area | Future owner | Stable boundary |
 |---|---|---|
-| Staged-recovery inspection | P5B2b | Before a public structural sync command can ship, status and doctor must surface an unresolved nonterminal staged-build barrier and its permitted recovery action through a separately reviewed public CLI/schema contract. P5B2b0 deliberately leaves the frozen inspection schemas unchanged. |
-| Remaining workspace commands | Remaining P5B2 | Sync, query, migrate, rollback, GC, repair, rebind, rotation, activation, and other operator mutations require separately reviewed contracts and explicit operator intent. |
+| Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
+| Remaining workspace commands | Remaining P5B2 | Query, migrate, rollback, GC, repair, rebind, rotation, activation, and other operator mutations require separately reviewed contracts and explicit operator intent. |
 | Service, release, and resource proof | P5C | Watch/service supervision, candidate-backed authority installation, publication, representative-corpus performance and resource accounting, record admission budgets, and any shared workspace read-lock optimization remain one benchmark-first release gate. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
 | Portfolio migration and cutover | P6-P12 | Shadow migrations precede the P9 global installation and stable-route activation; legacy pruning remains separately authorized after the observation window. |
@@ -89,10 +93,12 @@ or fork engine logic inside the package.
 
 ## Contract authority
 
-- JSON Schemas under `graphify/workspace/schemas/v1/` and
-  `graphify/workspace/schemas/cli/v1/` are normative for the structural shape
-  of durable documents, CLI receipts, and the TOML-to-object representation of
-  repo policy.
+- JSON Schemas under `graphify/workspace/schemas/v1/`,
+  `graphify/workspace/schemas/cli/v1/`, and
+  `graphify/workspace/schemas/cli/v2/` are normative for the structural shape
+  of durable documents, CLI requests and receipts, versioned status output,
+  and the TOML-to-object representation of repo policy. Sync request and receipt
+  contracts remain CLI v1; status JSON is schema v2.
 - `graphify.workspace` supplies dependency-free canonical reference models,
   exact v1 rejection, SHA-256 inputs, and journal frame encoding. Its
   cross-field and cross-document validation is normative where JSON Schema
@@ -102,14 +108,16 @@ or fork engine logic inside the package.
   `.generations`, `.journal`, `.pointers`, and `.gc` implement the P2/P3
   runtime boundary. Within that boundary, `.generations` and `.leases` also
   own P5B2b0's bounded internal staged-build, successor-lease, and stale-
-  abandonment recovery. `.adapters` and `.freshness` implement the bounded P4
-  read-only engine/query boundary. `.semantic_queue` implements the bounded
+  abandonment recovery. `.sync` composes those existing APIs for the sole
+  public code-only structural sync path. `.adapters` and `.freshness` implement
+  the bounded P4 read-only engine/query boundary. `.semantic_queue` implements the bounded
   P5A durable queue and certification boundary. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
   P5B2a registration command with bounded authority, authorization, policy, and
-  Git-discovery inputs; it reuses `.identity` and `.registry` without adding
-  another persistence path or exposing structural sync. Lifecycle mutation
+  Git-discovery inputs, plus the bounded sync request/receipt transport; it
+  reuses `.identity`, `.registry`, and `.sync` without adding another
+  persistence path. Lifecycle mutation
   fails closed outside
   non-elevated macOS on local APFS; tests use an explicit injected capability
   seam and disposable external state roots.

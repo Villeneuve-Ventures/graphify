@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -286,6 +287,580 @@ def test_0916_structural_build_redirects_engine_outputs_outside_source(tmp_path:
     )
     assert not (source / "graphify-out").exists()
     assert _tree_bytes(source) == before
+
+
+def test_0916_structural_build_keeps_temporary_work_inside_explicit_staging(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    source.mkdir()
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+    cwd_before = Path.cwd()
+
+    adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert sorted(path.name for path in output.iterdir()) == ["graphify-out"]
+    assert not list(tmp_path.glob("graphify-workspace-build-*"))
+    assert Path.cwd() == cwd_before
+
+
+def test_0916_explicit_scratch_publishes_stable_repo_relative_source_paths(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    code_root = source / "pkg"
+    code_root.mkdir(parents=True)
+    (code_root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+    payloads: list[bytes] = []
+
+    for name in ("first", "second"):
+        output = tmp_path / "state" / name
+        output.mkdir(parents=True)
+        output.chmod(0o700)
+        adapter.build_structural(source, output_root=output, scratch_root=output)
+        payloads.append((output / "graphify-out" / "graph.json").read_bytes())
+
+    graph = json.loads(payloads[0])
+    source_files = {
+        item["source_file"]
+        for collection in (graph["nodes"], graph["links"])
+        for item in collection
+        if item.get("source_file")
+    }
+    assert source_files == {"pkg/app.py"}
+    assert payloads[0] == payloads[1]
+    assert b".graphify-source-" not in payloads[0]
+
+
+def test_0916_explicit_scratch_quarantines_before_recursive_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    source.mkdir()
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+    original_remove = adapter_module._remove_directory_contents
+    quarantined_cleanups = 0
+    removing_top_level = False
+
+    def inspect_then_remove(descriptor: int) -> None:
+        nonlocal quarantined_cleanups, removing_top_level
+        if removing_top_level:
+            original_remove(descriptor)
+            return
+        parent = os.open(
+            "..",
+            adapter_module._anchored_directory_flags(),
+            dir_fd=descriptor,
+        )
+        try:
+            opened = os.fstat(descriptor)
+            matching_names: list[str] = []
+            with os.scandir(parent) as entries:
+                for entry in entries:
+                    details = os.stat(
+                        entry.name,
+                        dir_fd=parent,
+                        follow_symlinks=False,
+                    )
+                    if (details.st_dev, details.st_ino) == (
+                        opened.st_dev,
+                        opened.st_ino,
+                    ):
+                        matching_names.append(entry.name)
+        finally:
+            os.close(parent)
+        assert len(matching_names) == 1
+        assert matching_names[0].startswith(".graphify-workspace-cleanup-")
+        quarantined_cleanups += 1
+        removing_top_level = True
+        try:
+            original_remove(descriptor)
+        finally:
+            removing_top_level = False
+
+    monkeypatch.setattr(adapter_module, "_remove_directory_contents", inspect_then_remove)
+
+    adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert quarantined_cleanups == 2
+    assert sorted(path.name for path in output.iterdir()) == ["graphify-out"]
+
+
+def test_0916_explicit_scratch_rejects_a_preexisting_permissive_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    source.mkdir()
+    output.mkdir(parents=True)
+    output.chmod(0o755)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    before = _stable_metadata(output)
+
+    def forbidden_scratch_creation(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("permissive output reached scratch creation")
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_create_private_directory_at",
+        forbidden_scratch_creation,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="mode must already be 0700"):
+        adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert _stable_metadata(output) == before
+    assert list(output.iterdir()) == []
+
+
+def test_0916_explicit_scratch_requires_a_preexisting_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "missing-generation-staging"
+    source.mkdir()
+    output.parent.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    def forbidden_scratch_creation(*_args: Any, **_kwargs: Any) -> str:
+        raise AssertionError("missing output reached scratch creation")
+
+    monkeypatch.setattr(
+        adapter_module,
+        "_create_private_directory_at",
+        forbidden_scratch_creation,
+    )
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="must already exist"):
+        adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "swap_prefix",
+    ["graphify-workspace-build-", ".graphify-source-"],
+)
+def test_0916_explicit_scratch_keeps_each_temporary_on_the_pinned_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    swap_prefix: str,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    owner = tmp_path / "owner"
+    output = owner / "generation-staging"
+    parked_owner = tmp_path / "parked-owner"
+    replacement_owner = tmp_path / "replacement-owner"
+    source.mkdir()
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source)
+    (replacement_owner / output.name).mkdir(parents=True)
+    (replacement_owner / output.name / "sentinel").write_text(
+        "unchanged\n",
+        encoding="utf-8",
+    )
+    replacement_before = _tree_bytes(replacement_owner)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+    original_mkdir = adapter_module.os.mkdir
+    original_to_json = adapter_module.to_json
+    engine_graph_writes: list[Path] = []
+    swapped = False
+
+    cwd_before = Path.cwd()
+
+    def racing_mkdir(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal swapped
+        candidate = Path(os.fsdecode(path))
+        if candidate.name.startswith(swap_prefix) and not swapped:
+            swapped = True
+            if candidate.is_absolute() and swap_prefix == ".graphify-source-":
+                relative_parent = candidate.parent.relative_to(owner)
+                (replacement_owner / relative_parent).mkdir(parents=True)
+            owner.rename(parked_owner)
+            owner.symlink_to(replacement_owner, target_is_directory=True)
+        original_mkdir(path, mode, dir_fd=dir_fd)
+
+    def recording_to_json(*args: Any, **kwargs: Any) -> bool:
+        output_path = kwargs.get("output_path", args[2] if len(args) > 2 else None)
+        if output_path is not None:
+            engine_graph_writes.append(Path(output_path).resolve())
+        return original_to_json(*args, **kwargs)
+
+    monkeypatch.setattr(adapter_module.os, "mkdir", racing_mkdir)
+    monkeypatch.setattr(adapter_module, "to_json", recording_to_json)
+
+    with pytest.raises((ObservationUnstable, ObservationUnsupported)):
+        adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert swapped is True
+    assert len(engine_graph_writes) == 1
+    assert parked_owner in engine_graph_writes[0].parents
+    assert replacement_owner not in engine_graph_writes[0].parents
+    assert _tree_bytes(replacement_owner) == replacement_before
+    assert Path.cwd() == cwd_before
+    assert not list((parked_owner / output.name).glob("graphify-workspace-build-*"))
+    assert not list((replacement_owner / output.name).glob("graphify-workspace-build-*"))
+
+
+def test_0916_explicit_scratch_is_not_recreated_at_process_exit(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    source.mkdir()
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "from pathlib import Path",
+                    "from graphify.workspace.adapters import AdapterIntent, SUPPORTED_COMPATIBILITY, select_adapter",
+                    "adapter = select_adapter(SUPPORTED_COMPATIBILITY, intent=AdapterIntent.EXECUTE).require_adapter()",
+                    "adapter.build_structural(Path(__import__('sys').argv[1]), output_root=Path(__import__('sys').argv[2]), scratch_root=Path(__import__('sys').argv[2]))",
+                )
+            ),
+            os.fspath(source),
+            os.fspath(output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert sorted(path.name for path in output.iterdir()) == ["graphify-out"]
+
+
+@pytest.mark.parametrize("ambient_name", ["src", "node_modules"])
+def test_0916_explicit_scratch_ignores_ambient_output_and_suppresses_progress(
+    tmp_path: Path,
+    ambient_name: str,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    ambient_output = tmp_path / "ambient" / ambient_name
+    code_root = source / "src"
+    code_root.mkdir(parents=True)
+    for index in range(100):
+        (code_root / f"module_{index:03d}.py").write_text(
+            f"VALUE_{index} = {index}\n",
+            encoding="utf-8",
+        )
+    ignored_root = source / "node_modules"
+    ignored_root.mkdir()
+    (ignored_root / "ignored.py").write_text("IGNORED = True\n", encoding="utf-8")
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    _init_git_repo(source)
+    environment = dict(os.environ)
+    environment["GRAPHIFY_OUT"] = os.fspath(ambient_output)
+    environment["GRAPHIFY_MAX_WORKERS"] = "2"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "from pathlib import Path",
+                    "from graphify.workspace.adapters import AdapterIntent, SUPPORTED_COMPATIBILITY, select_adapter",
+                    "adapter = select_adapter(SUPPORTED_COMPATIBILITY, intent=AdapterIntent.EXECUTE).require_adapter()",
+                    "result = adapter.build_structural(Path(__import__('sys').argv[1]), output_root=Path(__import__('sys').argv[2]), scratch_root=Path(__import__('sys').argv[2]))",
+                    "assert len(result.detected_code_files) == 100, result.detected_code_files",
+                    "assert result.detected_code_files[0] == 'src/module_000.py'",
+                    "assert result.detected_code_files[-1] == 'src/module_099.py'",
+                )
+            ),
+            os.fspath(source),
+            os.fspath(output),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+    assert not ambient_output.exists()
+    assert (output / "graphify-out" / "graph.json").is_file()
+
+
+def test_quiet_parallel_extraction_suppresses_nested_worker_diagnostics(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    cache = tmp_path / "cache"
+    source.mkdir()
+    cache.mkdir()
+    (source / "tsconfig.json").write_text("{ invalid", encoding="utf-8")
+    for index in range(20):
+        (source / f"module_{index:02d}.ts").write_text(
+            f'import value from "@app/value"; export const item{index} = value;\n',
+            encoding="utf-8",
+        )
+    environment = dict(os.environ)
+    environment["GRAPHIFY_MAX_WORKERS"] = "2"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                (
+                    "from contextlib import redirect_stderr, redirect_stdout",
+                    "from io import StringIO",
+                    "from pathlib import Path",
+                    "from graphify.extract import extract",
+                    "source = Path(__import__('sys').argv[1])",
+                    "with redirect_stdout(StringIO()), redirect_stderr(StringIO()):",
+                    "    result = extract(sorted(source.glob('*.ts')), cache_root=Path(__import__('sys').argv[2]), source_root=source, max_workers=2, quiet=True, honor_ambient_output=False)",
+                    "assert result['nodes']",
+                )
+            ),
+            os.fspath(source),
+            os.fspath(cache),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
+def test_0916_explicit_scratch_cleanup_preserves_a_replacement_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    source.mkdir()
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+    original_rename = adapter_module.os.rename
+    cwd_before = Path.cwd()
+    parked_name: str | None = None
+    replacement_name: str | None = None
+
+    def racing_rename(
+        src: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        dst: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal parked_name, replacement_name
+        source_name = os.fsdecode(src)
+        destination_name = os.fsdecode(dst)
+        if (
+            source_name.startswith("graphify-workspace-build-")
+            and destination_name.startswith(".graphify-workspace-cleanup-")
+            and parked_name is None
+        ):
+            assert src_dir_fd is not None
+            parked_name = f"{source_name}.parked"
+            replacement_name = destination_name
+            original_rename(
+                src,
+                parked_name,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=src_dir_fd,
+            )
+            os.mkdir(source_name, 0o700, dir_fd=src_dir_fd)
+            replacement_descriptor = os.open(
+                source_name,
+                os.O_RDONLY | os.O_DIRECTORY,
+                dir_fd=src_dir_fd,
+            )
+            try:
+                sentinel = os.open(
+                    "sentinel",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=replacement_descriptor,
+                )
+                os.close(sentinel)
+            finally:
+                os.close(replacement_descriptor)
+        original_rename(
+            src,
+            dst,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(adapter_module.os, "rename", racing_rename)
+
+    with pytest.raises(ObservationUnstable, match="changed during quarantine"):
+        adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert parked_name is not None
+    assert replacement_name is not None
+    assert (output / parked_name).is_dir()
+    assert (output / replacement_name / "sentinel").is_file()
+    assert Path.cwd() == cwd_before
+
+
+def test_0916_explicit_scratch_cleanup_preserves_the_replaced_original_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.adapters import v0_9_16 as adapter_module
+
+    source = tmp_path / "source"
+    output = tmp_path / "state" / "generation-staging"
+    source.mkdir()
+    output.mkdir(parents=True)
+    output.chmod(0o700)
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _init_git_repo(source)
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+    original_rename = adapter_module.os.rename
+    replacement_name: str | None = None
+
+    def replace_original_after_quarantine(
+        src: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        dst: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replacement_name
+        original_rename(
+            src,
+            dst,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+        source_name = os.fsdecode(src)
+        if source_name.startswith("graphify-workspace-build-"):
+            assert src_dir_fd is not None
+            replacement_name = source_name
+            os.mkdir(source_name, 0o700, dir_fd=src_dir_fd)
+            replacement_descriptor = os.open(
+                source_name,
+                os.O_RDONLY | os.O_DIRECTORY,
+                dir_fd=src_dir_fd,
+            )
+            try:
+                sentinel = os.open(
+                    "sentinel",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=replacement_descriptor,
+                )
+                os.close(sentinel)
+            finally:
+                os.close(replacement_descriptor)
+
+    monkeypatch.setattr(adapter_module.os, "rename", replace_original_after_quarantine)
+
+    with pytest.raises(ObservationUnstable, match="contents changed"):
+        adapter.build_structural(source, output_root=output, scratch_root=output)
+
+    assert replacement_name is not None
+    assert (output / replacement_name / "sentinel").is_file()
+
+
+def test_0916_structural_build_rejects_mismatched_or_unsafe_explicit_scratch_root(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    scratch = tmp_path / "scratch"
+    source.mkdir()
+    output.mkdir()
+    scratch.mkdir()
+    (source / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    adapter = select_adapter(
+        SUPPORTED_COMPATIBILITY,
+        intent=AdapterIntent.EXECUTE,
+    ).require_adapter()
+
+    with pytest.raises(ObservationUnsupported, match="scratch root must equal output root"):
+        adapter.build_structural(source, output_root=output, scratch_root=scratch)
+
+    assert list(output.iterdir()) == []
+
+    alias = tmp_path / "scratch-alias"
+    try:
+        alias.symlink_to(output, target_is_directory=True)
+    except OSError:
+        pytest.skip("filesystem does not support symlinks")
+    with pytest.raises(ObservationUnsupported, match="scratch root must equal output root"):
+        adapter.build_structural(source, output_root=output, scratch_root=alias)
+
+    assert list(output.iterdir()) == []
 
 
 def test_0916_structural_build_rejects_unsupported_remote_comparison(

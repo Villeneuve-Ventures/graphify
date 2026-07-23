@@ -18,6 +18,7 @@ from pathlib import Path
 
 import graphify.extract as ex
 import graphify.cache as cache
+import pytest
 from graphify.cache import load_cached, file_hash
 
 
@@ -36,6 +37,41 @@ def _make_corpus(base: Path) -> Path:
     (corpus / "a.py").write_text("class Base:\n    def hello(self):\n        return 1\n")
     (corpus / "b.py").write_text("from a import Base\n\nclass Sub(Base):\n    pass\n")
     return corpus
+
+
+def test_ephemeral_stat_index_restores_dirty_prior_state_on_every_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_root = cache._stat_index_root
+    previous_index = {"prior": {"hash": "a" * 64}}
+    previous_root = tmp_path / "prior-cache"
+    monkeypatch.setattr(cache, "_stat_index", previous_index)
+    monkeypatch.setattr(cache, "_stat_index_root", previous_root)
+    monkeypatch.setattr(cache, "_stat_index_dirty", True)
+
+    with cache.ephemeral_stat_index(tmp_path / "ephemeral-cache"):
+        assert cache._stat_index == {}
+        assert cache._stat_index_root == (tmp_path / "ephemeral-cache").resolve()
+        cache._stat_index["temporary"] = {"hash": "b" * 64}
+        cache._stat_index_dirty = True
+
+    assert cache._stat_index is previous_index
+    assert cache._stat_index_root == previous_root
+    assert cache._stat_index_dirty is True
+
+    with pytest.raises(RuntimeError, match="injected ephemeral failure"):
+        with cache.ephemeral_stat_index(tmp_path / "failing-cache"):
+            cache._stat_index_dirty = True
+            raise RuntimeError("injected ephemeral failure")
+
+    assert cache._stat_index is previous_index
+    assert cache._stat_index_root == previous_root
+    assert cache._stat_index_dirty is True
+
+    cache.atexit.unregister(cache._flush_stat_index)
+    if original_root is not None:
+        cache.atexit.register(cache._flush_stat_index)
 
 
 def test_default_cache_lands_in_cwd_not_source_tree(tmp_path, monkeypatch):

@@ -58,6 +58,10 @@ class StateRecordMissing(StateCorrupt):
     """A required current durable record is absent."""
 
 
+class StateRecoveryRequired(StateCorrupt):
+    """A stable read found a durable pending record requiring recovery."""
+
+
 class CommitUnknown(WorkspaceRuntimeError):
     code = "commit_unknown"
 
@@ -1743,7 +1747,9 @@ class DurableStateRoot:
         except FileNotFoundError:
             pass
         else:
-            raise StateCorrupt(f"{label} has an unresolved pending commit")
+            raise StateRecoveryRequired(
+                f"{label} has an unresolved pending commit"
+            )
 
         current_candidate = load_candidate("current")
         previous_candidate = load_candidate("previous")
@@ -2098,6 +2104,7 @@ __all__ = [
     "RuntimeCapabilities",
     "StateCorrupt",
     "StatePathError",
+    "StateRecoveryRequired",
     "Syscalls",
     "UnsupportedRuntime",
     "WORKSPACE_LOCK_RANK",
