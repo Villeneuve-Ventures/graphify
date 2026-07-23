@@ -1330,6 +1330,9 @@ class GenerationStore:
             request,
             monotonic_ns=monotonic_ns,
         ) as operation:
+            if attempt.state.repo_uuid != operation.repo_uuid:
+                raise GenerationConflict("staged recovery attempt repo_uuid mismatch")
+            repo_uuid = operation.repo_uuid
             state = self._load_staged_build_locked(operation.repo_uuid)
             if state is None:
                 raise GenerationConflict("staged build request is missing")
@@ -1369,7 +1372,7 @@ class GenerationStore:
         observation_error: GenerationError | None = None
         try:
             trusted = self._trusted_structural_observations(
-                attempt.state.repo_uuid,
+                repo_uuid,
                 source_observations,
             )
             source_document = self._abandonment_source_document(trusted)

@@ -866,6 +866,45 @@ def test_active_source_drift_race_rechecks_when_source_becomes_unavailable(
     assert abandoned.abandon_reason == "ACTIVE_SOURCE_CHANGED"
 
 
+def test_abandonment_rejects_attempt_bound_to_another_workspace(
+    tmp_path: Path,
+) -> None:
+    harness, store, _pointers = _runtime(tmp_path)
+    observations = _observations(harness)
+    request = _request(harness, observations)
+    _requested(store, harness, request, observations)
+    recovery = store.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        request,
+        attempt_sha256=ATTEMPT_SHA256,
+        acquired_at=START + timedelta(seconds=2),
+        monotonic_ns=20_000,
+        ttl_ns=1_000_000,
+    )
+    mismatched = StagedBuildOperation(
+        state=replace(
+            recovery.state,
+            repo_uuid="22222222-2222-4222-8222-222222222222",
+        ),
+        grant=recovery.grant,
+    )
+    restored = trust_source_observations(store, observations)
+
+    with pytest.raises(
+        GenerationConflict,
+        match="staged recovery attempt repo_uuid mismatch",
+    ):
+        store.abandon_staged_build(
+            mismatched,
+            source_observations=observations,
+            monotonic_ns=20_001,
+        )
+    store.leases.release(recovery.grant)
+
+    assert restored.calls == 0
+
+
 def test_invalid_abandonment_evidence_is_not_treated_as_current_authority(
     tmp_path: Path,
 ) -> None:
