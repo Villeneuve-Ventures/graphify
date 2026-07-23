@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any, cast, Iterator, Protocol
@@ -18,6 +19,8 @@ from graphify.workspace.contracts import (
     CapacityReservationState,
     FencedLease,
     Registry,
+    StagedBuildState,
+    StructuralBuildRequest,
     WorkspaceLeaseState,
 )
 from graphify.workspace.identity import SourceAmbiguousError, discover_source
@@ -32,6 +35,11 @@ from graphify.workspace.persistence import (
     require_before_deadline,
 )
 from graphify.workspace.registry import RegistryStore, RevisionConflict
+
+
+_MAX_STAGED_BUILD_STATE_BYTES = 64 * 1024
+_STAGED_BUILD_TERMINAL_STATES = frozenset({"PROMOTED", "ABANDONED"})
+_STAGED_ATTEMPT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LeaseError(RuntimeError):
@@ -365,6 +373,94 @@ class LeaseStore:
             directory / "workspace.pending.json",
         )
 
+    def _staged_build_paths(self, repo_uuid: str) -> tuple[Path, Path, Path]:
+        directory = self._directory(repo_uuid)
+        return (
+            directory / "staged-build.json",
+            directory / "staged-build.previous.json",
+            directory / "staged-build.pending.json",
+        )
+
+    def _load_staged_build_locked(
+        self,
+        repo_uuid: str,
+        *,
+        recover: bool = True,
+    ) -> StagedBuildState | None:
+        current, previous, pending = self._staged_build_paths(repo_uuid)
+        try:
+            loader = (
+                self.state.recover_record
+                if recover
+                else self.state.read_stable_record
+            )
+            return loader(
+                label=f"staged-build:{repo_uuid}",
+                current=current,
+                previous=previous,
+                pending=pending,
+                decoder=StagedBuildState.from_json,
+                revision=lambda value: value.revision,
+                allow_missing=True,
+                max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
+            )
+        except (StateCorrupt, StatePathError) as exc:
+            raise LeaseRecoveryRequired(f"staged build state requires recovery: {exc}") from exc
+
+    @staticmethod
+    def _verify_selected_source(repo_uuid: str, entry: dict[str, Any]) -> Path:
+        recorded_source = entry["active_source"]
+        try:
+            discovered = discover_source(Path(recorded_source["path"]))
+        except (OSError, RuntimeError) as exc:
+            raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
+        if discovered.repo_uuid != repo_uuid or discovered.registry_source != recorded_source:
+            raise SourceAmbiguousError(
+                "selected active source no longer matches registry evidence"
+            )
+        return discovered.root
+
+    def _assert_staged_recovery_source_boundary(
+        self,
+        repo_uuid: str,
+        entry: dict[str, Any],
+    ) -> None:
+        """Keep recovery state external without requiring a live selected source."""
+
+        try:
+            source_root = self._verify_selected_source(repo_uuid, entry)
+        except SourceAmbiguousError:
+            recorded_root = Path(str(entry["active_source"]["path"]))
+            try:
+                source_root = recorded_root.resolve(strict=True)
+            except (OSError, RuntimeError):
+                source_root = Path(os.path.abspath(recorded_root))
+            if (
+                self.state.root == source_root
+                or self.state.root in source_root.parents
+                or source_root in self.state.root.parents
+            ):
+                raise StatePathError(
+                    f"external state root {self.state.root} overlaps "
+                    f"recorded source checkout {source_root}"
+                )
+            return
+        self.state.assert_external_to(source_root)
+
+    @contextmanager
+    def _bound_request_state(
+        self,
+        repo_uuid: str,
+    ) -> Iterator[tuple[Registry, dict[str, Any], WorkspaceLeaseState]]:
+        """Hold registry then workspace authority for a request-bound mutation."""
+
+        with self.registry.recovered_snapshot() as document:
+            entry = _registry_entry(document, repo_uuid)
+            source_root = self._verify_selected_source(repo_uuid, entry)
+            self.state.assert_external_to(source_root)
+            with self.workspace_lock(repo_uuid):
+                yield document, entry, self._load_state_locked(document, repo_uuid)
+
     def _durable_record_exists(self, relative: Path) -> bool:
         try:
             return self.state.private_file_exists(relative)
@@ -377,6 +473,7 @@ class LeaseStore:
         operation: str,
         *,
         recover: bool = True,
+        allow_staged_abandonment: bool = False,
     ) -> None:
         workspace = self._directory(repo_uuid)
         gc_intent = workspace / "gc" / "intent.json"
@@ -388,6 +485,27 @@ class LeaseStore:
         pointer_intent = workspace / "pointers.pending.json"
         if self._durable_record_exists(pointer_intent) and operation != "POINTER_RECOVERY":
             raise LeaseRecoveryRequired("unresolved pointer intent requires fenced recovery")
+        staged_build = self._load_staged_build_locked(repo_uuid, recover=recover)
+        if (
+            staged_build is not None
+            and staged_build.abandonment_intent is not None
+            and not allow_staged_abandonment
+        ):
+            raise LeaseRecoveryRequired(
+                "durable staged abandonment requires exact recovery"
+            )
+        if (
+            staged_build is not None
+            and staged_build.lifecycle_state not in _STAGED_BUILD_TERMINAL_STATES
+        ):
+            if staged_build.lifecycle_state == "CERTIFIED":
+                allowed = {"PROMOTE", "POINTER_RECOVERY"}
+            else:
+                allowed = {"BUILD"}
+            if operation not in allowed:
+                raise LeaseRecoveryRequired(
+                    "unresolved staged build requires request-bound recovery"
+                )
         if operation != "ACTIVATE":
             return
         try:
@@ -456,6 +574,7 @@ class LeaseStore:
             migration_epoch=recovered.migration_epoch,
             leases=dict(recovered.leases),
             lease_epochs=dict(recovered.lease_epochs),
+            staged_attempt_sha256=recovered.staged_attempt_sha256,
         )
 
     def _commit_state_locked(self, state: WorkspaceLeaseState) -> WorkspaceLeaseState:
@@ -533,6 +652,96 @@ class LeaseStore:
                 verify_active=True,
             )
 
+    def acquire_staged_request(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        operation: str,
+        owner: LeaseOwner,
+        request: StructuralBuildRequest,
+        *,
+        attempt_sha256: str,
+        acquired_at: datetime,
+        monotonic_ns: int,
+        ttl_ns: int,
+    ) -> LeaseGrant:
+        """Acquire or recover one exact staged-build operation.
+
+        The durable REQUESTED record proves the caller's original CAS before
+        an operation epoch advances. Only this narrow path may recover that
+        request across expired BUILD/PROMOTE attempts; ordinary ``acquire``
+        remains strict and cannot adopt staged-build authority. The caller
+        retains one unique attempt digest across a commit-unknown retry.
+        """
+
+        try:
+            request = StructuralBuildRequest.from_mapping(request.to_dict())
+        except Exception as exc:
+            raise LeaseRecoveryRequired(f"staged build request is invalid: {exc}") from exc
+        if operation not in {"BUILD", "PROMOTE", "POINTER_RECOVERY"}:
+            raise LeaseRecoveryRequired(
+                f"operation {operation} is not a staged-build recovery operation"
+            )
+        with self.registry.recovered_snapshot() as document:
+            return self._acquire_under_registry_lock(
+                document,
+                repo_uuid,
+                operation,
+                owner,
+                expected_registry_revision=request.expected_registry_revision,
+                expected_active_source_revision=request.expected_active_source_revision,
+                expected_operation_epoch=request.expected_operation_epoch,
+                expected_migration_epoch=request.expected_migration_epoch,
+                acquired_at=acquired_at,
+                monotonic_ns=monotonic_ns,
+                ttl_ns=ttl_ns,
+                verify_active=True,
+                staged_request=(generation_id, request),
+                staged_attempt_sha256=attempt_sha256,
+            )
+
+    def acquire_staged_recovery(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        operation: str,
+        owner: LeaseOwner,
+        request: StructuralBuildRequest,
+        *,
+        attempt_sha256: str,
+        acquired_at: datetime,
+        monotonic_ns: int,
+        ttl_ns: int,
+    ) -> LeaseGrant:
+        """Acquire stale recovery under one caller-retained attempt digest."""
+
+        try:
+            request = StructuralBuildRequest.from_mapping(request.to_dict())
+        except Exception as exc:
+            raise LeaseRecoveryRequired(f"staged build request is invalid: {exc}") from exc
+        if operation not in {"BUILD", "PROMOTE", "POINTER_RECOVERY"}:
+            raise LeaseRecoveryRequired(
+                f"operation {operation} cannot recover a staged build"
+            )
+        with self.registry.recovered_snapshot() as document:
+            return self._acquire_under_registry_lock(
+                document,
+                repo_uuid,
+                operation,
+                owner,
+                expected_registry_revision=request.expected_registry_revision,
+                expected_active_source_revision=request.expected_active_source_revision,
+                expected_operation_epoch=request.expected_operation_epoch,
+                expected_migration_epoch=request.expected_migration_epoch,
+                acquired_at=acquired_at,
+                monotonic_ns=monotonic_ns,
+                ttl_ns=ttl_ns,
+                verify_active=True,
+                staged_request=(generation_id, request),
+                staged_attempt_sha256=attempt_sha256,
+                allow_stale_staged_authority=True,
+            )
+
     def _acquire_under_registry_lock(
         self,
         document: Registry,
@@ -548,34 +757,66 @@ class LeaseStore:
         monotonic_ns: int,
         ttl_ns: int,
         verify_active: bool = False,
+        staged_request: tuple[str, StructuralBuildRequest] | None = None,
+        staged_attempt_sha256: str | None = None,
+        allow_stale_staged_authority: bool = False,
     ) -> LeaseGrant:
         owner = self._require_current_owner(owner)
+        if staged_request is None:
+            if staged_attempt_sha256 is not None:
+                raise LeaseError("staged attempt requires a staged request")
+        elif (
+            staged_attempt_sha256 is None
+            or _STAGED_ATTEMPT_SHA256_RE.fullmatch(staged_attempt_sha256) is None
+        ):
+            raise LeaseError("staged attempt must be lowercase SHA-256 hex")
         if ttl_ns <= 0 or monotonic_ns < 0:
             raise LeaseError("ttl_ns must be positive and monotonic_ns must be non-negative")
         entry = _registry_entry(document, repo_uuid)
         if verify_active:
-            recorded_source = entry["active_source"]
-            try:
-                discovered = discover_source(Path(recorded_source["path"]))
-            except (OSError, RuntimeError) as exc:
-                raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
-            if discovered.repo_uuid != repo_uuid or discovered.registry_source != recorded_source:
-                raise SourceAmbiguousError(
-                    "selected active source no longer matches registry evidence"
-                )
-            self.state.assert_external_to(discovered.root)
+            if allow_stale_staged_authority:
+                self._assert_staged_recovery_source_boundary(repo_uuid, entry)
+            else:
+                source_root = self._verify_selected_source(repo_uuid, entry)
+                self.state.assert_external_to(source_root)
         with self.workspace_lock(repo_uuid):
             state = self._load_state_locked(document, repo_uuid)
-            self._check_expected(
-                document,
-                entry,
-                state,
-                expected_registry_revision=expected_registry_revision,
-                expected_active_source_revision=expected_active_source_revision,
-                expected_operation_epoch=expected_operation_epoch,
-                expected_migration_epoch=expected_migration_epoch,
+            staged_build = self._load_staged_build_locked(repo_uuid)
+            if staged_request is None:
+                self._check_expected(
+                    document,
+                    entry,
+                    state,
+                    expected_registry_revision=expected_registry_revision,
+                    expected_active_source_revision=expected_active_source_revision,
+                    expected_operation_epoch=expected_operation_epoch,
+                    expected_migration_epoch=expected_migration_epoch,
+                )
+                if (
+                    staged_build is not None
+                    and staged_build.lifecycle_state not in _STAGED_BUILD_TERMINAL_STATES
+                ):
+                    raise LeaseRecoveryRequired(
+                        "unresolved staged build requires request-bound recovery"
+                    )
+            else:
+                generation_id, request = staged_request
+                self._check_staged_request_locked(
+                    document,
+                    entry,
+                    state,
+                    staged_build,
+                    repo_uuid=repo_uuid,
+                    generation_id=generation_id,
+                    operation=operation,
+                    request=request,
+                    allow_stale_authority=allow_stale_staged_authority,
+                )
+            self._assert_recovery_barriers_locked(
+                repo_uuid,
+                operation,
+                allow_staged_abandonment=allow_stale_staged_authority,
             )
-            self._assert_recovery_barriers_locked(repo_uuid, operation)
             domain = _lease_domain(operation)
             existing = state.leases.get(domain)
             if existing is not None:
@@ -584,6 +825,19 @@ class LeaseStore:
                 rebooted = existing_owner["boot_id"] != owner.boot_id
                 expired = monotonic_ns >= int(existing_value["liveness_deadline_monotonic_ns"])
                 if not rebooted and not expired:
+                    if (
+                        staged_request is not None
+                        and state.staged_attempt_sha256 == staged_attempt_sha256
+                        and existing_value["owner"] == owner.to_dict()
+                        and existing_value["operation"] == operation
+                    ):
+                        return LeaseGrant(
+                            lease=existing,
+                            registry_revision=int(document.to_dict()["revision"]),
+                            active_source_revision=int(entry["active_source_revision"]),
+                            operation_epoch=state.lease_epochs[domain],
+                            migration_epoch=state.migration_epoch,
+                        )
                     raise LeaseBusy(
                         f"{domain} lease is held by pid {existing_owner['pid']} "
                         f"with fence {existing_value['fence_token']}"
@@ -612,6 +866,9 @@ class LeaseStore:
             leases[domain] = lease
             lease_epochs = dict(state.lease_epochs)
             lease_epochs[domain] = operation_epoch
+            committed_staged_attempt = state.staged_attempt_sha256
+            if domain == "workspace":
+                committed_staged_attempt = staged_attempt_sha256
             committed = self._commit_state_locked(
                 WorkspaceLeaseState(
                     repo_uuid=repo_uuid,
@@ -621,6 +878,7 @@ class LeaseStore:
                     migration_epoch=migration_epoch,
                     leases=leases,
                     lease_epochs=lease_epochs,
+                    staged_attempt_sha256=committed_staged_attempt,
                 )
             )
             return LeaseGrant(
@@ -630,6 +888,120 @@ class LeaseStore:
                 operation_epoch=committed.operation_epoch,
                 migration_epoch=committed.migration_epoch,
             )
+
+    @staticmethod
+    def _check_staged_request_locked(
+        document: Registry,
+        entry: dict[str, Any],
+        state: WorkspaceLeaseState,
+        staged_build: StagedBuildState | None,
+        *,
+        repo_uuid: str,
+        generation_id: str,
+        operation: str,
+        request: StructuralBuildRequest,
+        allow_stale_authority: bool = False,
+    ) -> None:
+        if staged_build is None:
+            raise LeaseRecoveryRequired("staged build request is not durable")
+        if (
+            staged_build.repo_uuid != repo_uuid
+            or staged_build.generation_id != generation_id
+            or staged_build.request.sha256 != request.sha256
+        ):
+            raise LeaseRecoveryRequired("staged build request binding does not match")
+        if (
+            staged_build.abandonment_intent is not None
+            and not allow_stale_authority
+        ):
+            raise LeaseRecoveryRequired(
+                "durable staged abandonment requires exact recovery"
+            )
+        allowed = {
+            "BUILD": {"REQUESTED", "PUBLISHING", "COMPLETE"},
+            "PROMOTE": {"CERTIFIED"},
+            "POINTER_RECOVERY": {"CERTIFIED"},
+        }
+        if staged_build.lifecycle_state not in allowed[operation]:
+            raise LeaseRecoveryRequired(
+                f"staged build in {staged_build.lifecycle_state} cannot acquire {operation}"
+            )
+        actual_registry_revision = int(document.to_dict()["revision"])
+        if actual_registry_revision < request.expected_registry_revision:
+            raise RevisionConflict(
+                "registry_revision expected at least "
+                f"{request.expected_registry_revision}, found {actual_registry_revision}"
+            )
+        actual_active_revision = int(entry["active_source_revision"])
+        if (
+            not allow_stale_authority
+            and request.expected_active_source_revision != actual_active_revision
+        ):
+            raise RevisionConflict(
+                "active_source_revision expected "
+                f"{request.expected_active_source_revision}, found {actual_active_revision}"
+            )
+        if state.operation_epoch < request.expected_operation_epoch:
+            raise RevisionConflict(
+                "operation_epoch expected at least "
+                f"{request.expected_operation_epoch}, found {state.operation_epoch}"
+            )
+        if (
+            not allow_stale_authority
+            and state.migration_epoch != request.expected_migration_epoch
+        ):
+            raise RevisionConflict(
+                "migration_epoch expected "
+                f"{request.expected_migration_epoch}, found {state.migration_epoch}"
+            )
+
+    @contextmanager
+    def current_staged_recovery(
+        self,
+        grant: LeaseGrant,
+        generation_id: str,
+        request: StructuralBuildRequest,
+        *,
+        monotonic_ns: int,
+    ) -> Iterator[LeaseOperation]:
+        """Validate a stale request-bound grant without adopting its old source CAS."""
+
+        self._require_grant_owner(grant)
+        repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
+        with self.registry.recovered_snapshot() as document:
+            entry = _registry_entry(document, repo_uuid)
+            self._assert_staged_recovery_source_boundary(repo_uuid, entry)
+            with self.workspace_lock(repo_uuid):
+                state = self._load_state_locked(document, repo_uuid)
+                _domain, current = self._matching_lease(state, grant)
+                operation = str(current.to_dict()["operation"])
+                if monotonic_ns >= int(
+                    current.to_dict()["liveness_deadline_monotonic_ns"]
+                ):
+                    raise LeaseExpired("liveness deadline has passed")
+                staged_build = self._load_staged_build_locked(repo_uuid)
+                self._check_staged_request_locked(
+                    document,
+                    entry,
+                    state,
+                    staged_build,
+                    repo_uuid=repo_uuid,
+                    generation_id=generation_id,
+                    operation=operation,
+                    request=request,
+                    allow_stale_authority=True,
+                )
+                self._assert_recovery_barriers_locked(
+                    repo_uuid,
+                    operation,
+                    allow_staged_abandonment=True,
+                )
+                yield LeaseOperation(
+                    registry=document,
+                    state=state,
+                    lease=current,
+                    grant=grant,
+                )
 
     @staticmethod
     def _matching_lease(
@@ -793,6 +1165,7 @@ class LeaseStore:
                         migration_epoch=state.migration_epoch,
                         leases=leases,
                         lease_epochs=dict(state.lease_epochs),
+                        staged_attempt_sha256=state.staged_attempt_sha256,
                     )
                 )
                 return LeaseGrant(
@@ -829,6 +1202,9 @@ class LeaseStore:
             del leases[domain]
             lease_epochs = dict(state.lease_epochs)
             del lease_epochs[domain]
+            staged_attempt_sha256 = state.staged_attempt_sha256
+            if domain == "workspace":
+                staged_attempt_sha256 = None
             return self._commit_state_locked(
                 WorkspaceLeaseState(
                     repo_uuid=state.repo_uuid,
@@ -838,6 +1214,7 @@ class LeaseStore:
                     migration_epoch=state.migration_epoch,
                     leases=leases,
                     lease_epochs=lease_epochs,
+                    staged_attempt_sha256=staged_attempt_sha256,
                 )
             )
 

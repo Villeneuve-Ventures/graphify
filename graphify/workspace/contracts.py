@@ -117,6 +117,10 @@ class JournalFrameTruncated(ContractError):
     """A journal frame ends before its declared boundary."""
 
 
+class StagedBuildAuthorityCurrent(ContractError):
+    """Abandonment evidence does not prove that staged authority is stale."""
+
+
 JsonValue = None | bool | int | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
@@ -1298,6 +1302,7 @@ class WorkspaceLeaseState:
     migration_epoch: int
     leases: dict[str, FencedLease]
     lease_epochs: dict[str, int]
+    staged_attempt_sha256: str | None = None
 
     @staticmethod
     def canonical_repo_uuid(value: object) -> str:
@@ -1309,7 +1314,7 @@ class WorkspaceLeaseState:
         return "semantic" if name == "SEMANTIC_CLAIM" else "workspace"
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "contract": "graphify.workspace.lease_state.internal",
             "format_version": 1,
             "repo_uuid": self.repo_uuid,
@@ -1320,6 +1325,9 @@ class WorkspaceLeaseState:
             "leases": {name: lease.to_dict() for name, lease in sorted(self.leases.items())},
             "lease_epochs": dict(sorted(self.lease_epochs.items())),
         }
+        if self.staged_attempt_sha256 is not None:
+            value["staged_attempt_sha256"] = self.staged_attempt_sha256
+        return value
 
     @property
     def canonical(self) -> bytes:
@@ -1342,6 +1350,7 @@ class WorkspaceLeaseState:
                 "leases",
                 "lease_epochs",
             },
+            {"staged_attempt_sha256"},
         )
         if data["contract"] != "graphify.workspace.lease_state.internal":
             raise ContractError("$.contract: unsupported internal lease-state contract")
@@ -1377,6 +1386,21 @@ class WorkspaceLeaseState:
             if int(lease_value["fence_token"]) > fence_high_watermark:
                 raise ContractError(f"$.leases.{domain}.fence_token: exceeds fence_high_watermark")
             leases[domain] = lease
+        staged_attempt_sha256 = data.get("staged_attempt_sha256")
+        if staged_attempt_sha256 is not None:
+            staged_attempt_sha256 = _digest(
+                staged_attempt_sha256,
+                "$.staged_attempt_sha256",
+            )
+            workspace_lease = leases.get("workspace")
+            if (
+                workspace_lease is None
+                or workspace_lease.to_dict()["operation"]
+                not in {"BUILD", "PROMOTE", "POINTER_RECOVERY"}
+            ):
+                raise ContractError(
+                    "$.staged_attempt_sha256: requires a staged workspace lease"
+                )
         return cls(
             repo_uuid=repo_uuid,
             revision=revision,
@@ -1385,6 +1409,7 @@ class WorkspaceLeaseState:
             migration_epoch=migration_epoch,
             leases=leases,
             lease_epochs=lease_epochs,
+            staged_attempt_sha256=staged_attempt_sha256,
         )
 
     @classmethod
@@ -1491,6 +1516,870 @@ class CapacityPolicy:
         raw = value.encode("utf-8") if isinstance(value, str) else value
         if document.canonical != raw:
             raise ContractError("$: internal capacity policy is not canonical JSON")
+        return document
+
+
+@dataclass(frozen=True)
+class StructuralBuildRequest:
+    """Canonical immutable inputs for one provider-neutral structural build."""
+
+    logical_request_sha256: str
+    expected_registry_revision: int
+    expected_active_source_revision: int
+    expected_operation_epoch: int
+    expected_migration_epoch: int
+    expected_pointer_revision: int
+    expected_current_receipt_sha256: str | None
+    source_commit: str
+    source_epoch: int
+    policy_sha256: str
+    observation_manifest_sha256: str
+    observation_evidence_sha256: str
+    observation_detector_id: str
+    observation_entries_sha256: str
+    expected_payload_bytes: int
+    capacity_policy_sha256: str
+    compatibility_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "logical_request_sha256": self.logical_request_sha256,
+            "expected_registry_revision": self.expected_registry_revision,
+            "expected_active_source_revision": self.expected_active_source_revision,
+            "expected_operation_epoch": self.expected_operation_epoch,
+            "expected_migration_epoch": self.expected_migration_epoch,
+            "expected_pointer_revision": self.expected_pointer_revision,
+            "expected_current_receipt_sha256": self.expected_current_receipt_sha256,
+            "source_commit": self.source_commit,
+            "source_epoch": self.source_epoch,
+            "policy_sha256": self.policy_sha256,
+            "observation_manifest_sha256": self.observation_manifest_sha256,
+            "observation_evidence_sha256": self.observation_evidence_sha256,
+            "observation_detector_id": self.observation_detector_id,
+            "observation_entries_sha256": self.observation_entries_sha256,
+            "expected_payload_bytes": self.expected_payload_bytes,
+            "capacity_policy_sha256": self.capacity_policy_sha256,
+            "compatibility_sha256": self.compatibility_sha256,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical).hexdigest()
+
+    def source_observation_document(self) -> dict[str, object]:
+        return {
+            "source_commit": self.source_commit,
+            "inventory_sha256": self.observation_manifest_sha256,
+            "policy_sha256": self.policy_sha256,
+            "detector_id": self.observation_detector_id,
+            "stable_inventory_passes": 2,
+            "entries_sha256": self.observation_entries_sha256,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "StructuralBuildRequest":
+        data = _mapping(value, "$.request")
+        _exact_keys(
+            data,
+            "$.request",
+            {
+                "logical_request_sha256",
+                "expected_registry_revision",
+                "expected_active_source_revision",
+                "expected_operation_epoch",
+                "expected_migration_epoch",
+                "expected_pointer_revision",
+                "expected_current_receipt_sha256",
+                "source_commit",
+                "source_epoch",
+                "policy_sha256",
+                "observation_manifest_sha256",
+                "observation_evidence_sha256",
+                "observation_detector_id",
+                "observation_entries_sha256",
+                "expected_payload_bytes",
+                "capacity_policy_sha256",
+                "compatibility_sha256",
+            },
+        )
+        receipt = data["expected_current_receipt_sha256"]
+        if receipt is not None:
+            receipt = _digest(receipt, "$.request.expected_current_receipt_sha256")
+        pointer_revision = _integer(
+            data["expected_pointer_revision"],
+            "$.request.expected_pointer_revision",
+        )
+        if (pointer_revision == 0) != (receipt is None):
+            raise ContractError(
+                "$.request.expected_current_receipt_sha256: "
+                "must be null exactly when expected_pointer_revision is zero"
+            )
+        detector_id = _string(
+            data["observation_detector_id"],
+            "$.request.observation_detector_id",
+        )
+        if len(detector_id.encode("utf-8")) > 256:
+            raise ContractError(
+                "$.request.observation_detector_id: exceeds 256 bytes"
+            )
+        document = cls(
+            logical_request_sha256=_digest(data["logical_request_sha256"], "$.request.logical_request_sha256"),
+            expected_registry_revision=_integer(
+                data["expected_registry_revision"], "$.request.expected_registry_revision", minimum=1
+            ),
+            expected_active_source_revision=_integer(
+                data["expected_active_source_revision"],
+                "$.request.expected_active_source_revision",
+                minimum=1,
+            ),
+            expected_operation_epoch=_integer(
+                data["expected_operation_epoch"], "$.request.expected_operation_epoch", minimum=1
+            ),
+            expected_migration_epoch=_integer(
+                data["expected_migration_epoch"], "$.request.expected_migration_epoch"
+            ),
+            expected_pointer_revision=pointer_revision,
+            expected_current_receipt_sha256=receipt,
+            source_commit=_commit(data["source_commit"], "$.request.source_commit"),
+            source_epoch=_integer(data["source_epoch"], "$.request.source_epoch", minimum=1),
+            policy_sha256=_digest(data["policy_sha256"], "$.request.policy_sha256"),
+            observation_manifest_sha256=_digest(
+                data["observation_manifest_sha256"], "$.request.observation_manifest_sha256"
+            ),
+            observation_evidence_sha256=_digest(
+                data["observation_evidence_sha256"], "$.request.observation_evidence_sha256"
+            ),
+            observation_detector_id=detector_id,
+            observation_entries_sha256=_digest(
+                data["observation_entries_sha256"],
+                "$.request.observation_entries_sha256",
+            ),
+            expected_payload_bytes=_integer(
+                data["expected_payload_bytes"], "$.request.expected_payload_bytes", minimum=1
+            ),
+            capacity_policy_sha256=_digest(
+                data["capacity_policy_sha256"], "$.request.capacity_policy_sha256"
+            ),
+            compatibility_sha256=_digest(data["compatibility_sha256"], "$.request.compatibility_sha256"),
+        )
+        expected_evidence_sha256 = hashlib.sha256(
+            canonical_json_bytes(
+                [
+                    document.source_observation_document(),
+                    document.source_observation_document(),
+                ]
+            )
+        ).hexdigest()
+        if document.observation_evidence_sha256 != expected_evidence_sha256:
+            raise ContractError(
+                "$.request.observation_evidence_sha256: "
+                "must match the repeated frozen observation"
+            )
+        return document
+
+
+@dataclass(frozen=True)
+class StagedBuildAbandonmentEvidence:
+    """Bounded canonical authority snapshot for one terminal stale close."""
+
+    request_sha256: str
+    registry_revision: int
+    active_source_revision: int
+    operation_epoch: int
+    migration_epoch: int
+    pointer_revision: int
+    current_receipt_sha256: str | None
+    selected_compatibility_sha256: str
+    semantic_source_epoch: int | None
+    semantic_queue_watermark: int | None
+    semantic_queue_state_sha256: str | None
+    source_commit: str
+    source_inventory_sha256: str
+    source_policy_sha256: str
+    source_detector_id: str
+    source_stable_inventory_passes: int
+    source_entries_sha256: str
+    source_observation_evidence_sha256: str
+
+    def _observation_document(self) -> dict[str, object]:
+        return {
+            "source_commit": self.source_commit,
+            "inventory_sha256": self.source_inventory_sha256,
+            "policy_sha256": self.source_policy_sha256,
+            "detector_id": self.source_detector_id,
+            "stable_inventory_passes": self.source_stable_inventory_passes,
+            "entries_sha256": self.source_entries_sha256,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "request_sha256": self.request_sha256,
+            "registry_revision": self.registry_revision,
+            "active_source_revision": self.active_source_revision,
+            "operation_epoch": self.operation_epoch,
+            "migration_epoch": self.migration_epoch,
+            "pointer_revision": self.pointer_revision,
+            "current_receipt_sha256": self.current_receipt_sha256,
+            "selected_compatibility_sha256": self.selected_compatibility_sha256,
+            "semantic_queue": (
+                None
+                if self.semantic_source_epoch is None
+                else {
+                    "source_epoch": self.semantic_source_epoch,
+                    "queue_watermark": self.semantic_queue_watermark,
+                    "queue_state_sha256": self.semantic_queue_state_sha256,
+                }
+            ),
+            "source": {
+                "observation": self._observation_document(),
+                "observation_evidence_sha256": self.source_observation_evidence_sha256,
+            },
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical).hexdigest()
+
+    def reason_for(self, request: StructuralBuildRequest) -> str:
+        """Return the canonical first stale-authority reason bound by this snapshot."""
+
+        if self.request_sha256 != request.sha256:
+            raise ContractError(
+                "$.abandon_evidence.request_sha256: must bind the staged request"
+            )
+        if self.registry_revision < request.expected_registry_revision:
+            raise ContractError(
+                "$.abandon_evidence.registry_revision: predates the staged request"
+            )
+        if self.operation_epoch < request.expected_operation_epoch:
+            raise ContractError(
+                "$.abandon_evidence.operation_epoch: predates the staged request"
+            )
+        if self.active_source_revision != request.expected_active_source_revision:
+            return "ACTIVE_SOURCE_CHANGED"
+        if self.migration_epoch != request.expected_migration_epoch:
+            return "MIGRATION_CHANGED"
+        if (
+            self.pointer_revision,
+            self.current_receipt_sha256,
+        ) != (
+            request.expected_pointer_revision,
+            request.expected_current_receipt_sha256,
+        ):
+            return "POINTER_CHANGED"
+        if self.selected_compatibility_sha256 != request.compatibility_sha256:
+            return "COMPATIBILITY_CHANGED"
+        if (
+            self.semantic_source_epoch is not None
+            and self.semantic_source_epoch != request.source_epoch
+        ):
+            return "SEMANTIC_SOURCE_EPOCH_CHANGED"
+        if (
+            self.source_commit,
+            self.source_policy_sha256,
+            self.source_inventory_sha256,
+            self.source_observation_evidence_sha256,
+        ) != (
+            request.source_commit,
+            request.policy_sha256,
+            request.observation_manifest_sha256,
+            request.observation_evidence_sha256,
+        ):
+            return "SOURCE_CHANGED"
+        raise StagedBuildAuthorityCurrent(
+            "$.abandon_evidence: does not prove stale staged-build authority"
+        )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+    ) -> "StagedBuildAbandonmentEvidence":
+        data = _mapping(value, "$.abandon_evidence")
+        _exact_keys(
+            data,
+            "$.abandon_evidence",
+            {
+                "request_sha256",
+                "registry_revision",
+                "active_source_revision",
+                "operation_epoch",
+                "migration_epoch",
+                "pointer_revision",
+                "current_receipt_sha256",
+                "selected_compatibility_sha256",
+                "semantic_queue",
+                "source",
+            },
+        )
+        pointer_revision = _integer(
+            data["pointer_revision"],
+            "$.abandon_evidence.pointer_revision",
+        )
+        receipt_sha256 = data["current_receipt_sha256"]
+        if receipt_sha256 is not None:
+            receipt_sha256 = _digest(
+                receipt_sha256,
+                "$.abandon_evidence.current_receipt_sha256",
+            )
+        if (pointer_revision == 0) != (receipt_sha256 is None):
+            raise ContractError(
+                "$.abandon_evidence.current_receipt_sha256: must be null exactly "
+                "when pointer_revision is zero"
+            )
+        semantic_queue_value = data["semantic_queue"]
+        semantic_source_epoch: int | None = None
+        semantic_queue_watermark: int | None = None
+        semantic_queue_state_sha256: str | None = None
+        if semantic_queue_value is not None:
+            semantic_queue = _mapping(
+                semantic_queue_value,
+                "$.abandon_evidence.semantic_queue",
+            )
+            _exact_keys(
+                semantic_queue,
+                "$.abandon_evidence.semantic_queue",
+                {"source_epoch", "queue_watermark", "queue_state_sha256"},
+            )
+            semantic_source_epoch = _integer(
+                semantic_queue["source_epoch"],
+                "$.abandon_evidence.semantic_queue.source_epoch",
+                minimum=1,
+            )
+            semantic_queue_watermark = _integer(
+                semantic_queue["queue_watermark"],
+                "$.abandon_evidence.semantic_queue.queue_watermark",
+                minimum=1,
+            )
+            semantic_queue_state_sha256 = _digest(
+                semantic_queue["queue_state_sha256"],
+                "$.abandon_evidence.semantic_queue.queue_state_sha256",
+            )
+        source = _mapping(data["source"], "$.abandon_evidence.source")
+        _exact_keys(
+            source,
+            "$.abandon_evidence.source",
+            {"observation", "observation_evidence_sha256"},
+        )
+        observation = _mapping(
+            source["observation"],
+            "$.abandon_evidence.source.observation",
+        )
+        _exact_keys(
+            observation,
+            "$.abandon_evidence.source.observation",
+            {
+                "source_commit",
+                "inventory_sha256",
+                "policy_sha256",
+                "detector_id",
+                "stable_inventory_passes",
+                "entries_sha256",
+            },
+        )
+        detector_id = _string(
+            observation["detector_id"],
+            "$.abandon_evidence.source.observation.detector_id",
+        )
+        if len(detector_id.encode("utf-8")) > 256:
+            raise ContractError(
+                "$.abandon_evidence.source.observation.detector_id: exceeds 256 bytes"
+            )
+        passes = _integer(
+            observation["stable_inventory_passes"],
+            "$.abandon_evidence.source.observation.stable_inventory_passes",
+        )
+        if passes != 2:
+            raise ContractError(
+                "$.abandon_evidence.source.observation.stable_inventory_passes: "
+                "must be exactly two"
+            )
+        document = cls(
+            request_sha256=_digest(
+                data["request_sha256"],
+                "$.abandon_evidence.request_sha256",
+            ),
+            registry_revision=_integer(
+                data["registry_revision"],
+                "$.abandon_evidence.registry_revision",
+                minimum=1,
+            ),
+            active_source_revision=_integer(
+                data["active_source_revision"],
+                "$.abandon_evidence.active_source_revision",
+                minimum=1,
+            ),
+            operation_epoch=_integer(
+                data["operation_epoch"],
+                "$.abandon_evidence.operation_epoch",
+                minimum=1,
+            ),
+            migration_epoch=_integer(
+                data["migration_epoch"],
+                "$.abandon_evidence.migration_epoch",
+            ),
+            pointer_revision=pointer_revision,
+            current_receipt_sha256=receipt_sha256,
+            selected_compatibility_sha256=_digest(
+                data["selected_compatibility_sha256"],
+                "$.abandon_evidence.selected_compatibility_sha256",
+            ),
+            semantic_source_epoch=semantic_source_epoch,
+            semantic_queue_watermark=semantic_queue_watermark,
+            semantic_queue_state_sha256=semantic_queue_state_sha256,
+            source_commit=_commit(
+                observation["source_commit"],
+                "$.abandon_evidence.source.observation.source_commit",
+            ),
+            source_inventory_sha256=_digest(
+                observation["inventory_sha256"],
+                "$.abandon_evidence.source.observation.inventory_sha256",
+            ),
+            source_policy_sha256=_digest(
+                observation["policy_sha256"],
+                "$.abandon_evidence.source.observation.policy_sha256",
+            ),
+            source_detector_id=detector_id,
+            source_stable_inventory_passes=passes,
+            source_entries_sha256=_digest(
+                observation["entries_sha256"],
+                "$.abandon_evidence.source.observation.entries_sha256",
+            ),
+            source_observation_evidence_sha256=_digest(
+                source["observation_evidence_sha256"],
+                "$.abandon_evidence.source.observation_evidence_sha256",
+            ),
+        )
+        expected_observation_evidence = hashlib.sha256(
+            canonical_json_bytes(
+                [document._observation_document(), document._observation_document()]
+            )
+        ).hexdigest()
+        if document.source_observation_evidence_sha256 != expected_observation_evidence:
+            raise ContractError(
+                "$.abandon_evidence.source.observation_evidence_sha256: "
+                "must match the repeated observation"
+            )
+        return document
+
+
+@dataclass(frozen=True)
+class StagedBuildAbandonmentIntent:
+    """Durable authority to finish one already-proven staged abandonment."""
+
+    repo_uuid: str
+    generation_id: str
+    request_sha256: str
+    staged_revision: int
+    abandoned_from: str
+    operation_epoch: int
+    fence_token: int
+    reason: str
+    evidence: StagedBuildAbandonmentEvidence
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "repo_uuid": self.repo_uuid,
+            "generation_id": self.generation_id,
+            "request_sha256": self.request_sha256,
+            "staged_revision": self.staged_revision,
+            "abandoned_from": self.abandoned_from,
+            "operation_epoch": self.operation_epoch,
+            "fence_token": self.fence_token,
+            "reason": self.reason,
+            "evidence": self.evidence.to_dict(),
+            "evidence_sha256": self.evidence.sha256,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(
+        cls,
+        value: Mapping[str, object],
+    ) -> "StagedBuildAbandonmentIntent":
+        data = _mapping(value, "$.abandonment_intent")
+        _exact_keys(
+            data,
+            "$.abandonment_intent",
+            {
+                "repo_uuid",
+                "generation_id",
+                "request_sha256",
+                "staged_revision",
+                "abandoned_from",
+                "operation_epoch",
+                "fence_token",
+                "reason",
+                "evidence",
+                "evidence_sha256",
+            },
+        )
+        generation_id = _string(
+            data["generation_id"],
+            "$.abandonment_intent.generation_id",
+        )
+        if not _GENERATION_RE.fullmatch(generation_id):
+            raise ContractError(
+                "$.abandonment_intent.generation_id: invalid generation identity"
+            )
+        evidence = StagedBuildAbandonmentEvidence.from_mapping(
+            _mapping(data["evidence"], "$.abandonment_intent.evidence")
+        )
+        evidence_sha256 = _digest(
+            data["evidence_sha256"],
+            "$.abandonment_intent.evidence_sha256",
+        )
+        if evidence.sha256 != evidence_sha256:
+            raise ContractError(
+                "$.abandonment_intent.evidence_sha256: must match canonical evidence"
+            )
+        return cls(
+            repo_uuid=_uuid(
+                data["repo_uuid"],
+                "$.abandonment_intent.repo_uuid",
+            ),
+            generation_id=generation_id,
+            request_sha256=_digest(
+                data["request_sha256"],
+                "$.abandonment_intent.request_sha256",
+            ),
+            staged_revision=_integer(
+                data["staged_revision"],
+                "$.abandonment_intent.staged_revision",
+                minimum=1,
+            ),
+            abandoned_from=_enum(
+                data["abandoned_from"],
+                "$.abandonment_intent.abandoned_from",
+                {"REQUESTED", "PUBLISHING", "COMPLETE", "CERTIFIED"},
+            ),
+            operation_epoch=_integer(
+                data["operation_epoch"],
+                "$.abandonment_intent.operation_epoch",
+                minimum=1,
+            ),
+            fence_token=_integer(
+                data["fence_token"],
+                "$.abandonment_intent.fence_token",
+                minimum=1,
+            ),
+            reason=_enum(
+                data["reason"],
+                "$.abandonment_intent.reason",
+                {
+                    "SOURCE_CHANGED",
+                    "ACTIVE_SOURCE_CHANGED",
+                    "MIGRATION_CHANGED",
+                    "POINTER_CHANGED",
+                    "COMPATIBILITY_CHANGED",
+                    "SEMANTIC_SOURCE_EPOCH_CHANGED",
+                },
+            ),
+            evidence=evidence,
+        )
+
+
+@dataclass(frozen=True)
+class StagedBuildState:
+    """Crash-durable publication state for a single staged structural build."""
+
+    revision: int
+    repo_uuid: str
+    generation_id: str
+    request: StructuralBuildRequest
+    lifecycle_state: str
+    operation_epoch: int | None
+    fence_token: int | None
+    payload_manifest_sha256: str | None
+    receipt_sha256: str | None
+    pointer_revision: int | None
+    abandonment_intent: StagedBuildAbandonmentIntent | None = None
+    abandoned_from: str | None = None
+    abandon_reason: str | None = None
+    abandon_evidence: StagedBuildAbandonmentEvidence | None = None
+    abandon_evidence_sha256: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract": "graphify.workspace.staged_build.internal",
+            "format_version": 1,
+            "revision": self.revision,
+            "repo_uuid": self.repo_uuid,
+            "generation_id": self.generation_id,
+            "request": self.request.to_dict(),
+            "request_sha256": self.request.sha256,
+            "lifecycle_state": self.lifecycle_state,
+            "operation_epoch": self.operation_epoch,
+            "fence_token": self.fence_token,
+            "payload_manifest_sha256": self.payload_manifest_sha256,
+            "receipt_sha256": self.receipt_sha256,
+            "pointer_revision": self.pointer_revision,
+            "abandonment_intent": (
+                None
+                if self.abandonment_intent is None
+                else self.abandonment_intent.to_dict()
+            ),
+            "abandoned_from": self.abandoned_from,
+            "abandon_reason": self.abandon_reason,
+            "abandon_evidence": (
+                None if self.abandon_evidence is None else self.abandon_evidence.to_dict()
+            ),
+            "abandon_evidence_sha256": self.abandon_evidence_sha256,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "StagedBuildState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "contract",
+                "format_version",
+                "revision",
+                "repo_uuid",
+                "generation_id",
+                "request",
+                "request_sha256",
+                "lifecycle_state",
+                "operation_epoch",
+                "fence_token",
+                "payload_manifest_sha256",
+                "receipt_sha256",
+                "pointer_revision",
+                "abandonment_intent",
+                "abandoned_from",
+                "abandon_reason",
+                "abandon_evidence",
+                "abandon_evidence_sha256",
+            },
+        )
+        if data["contract"] != "graphify.workspace.staged_build.internal":
+            raise ContractError("$.contract: unsupported internal staged build state")
+        _exact_version(data["format_version"], "$.format_version")
+        request = StructuralBuildRequest.from_mapping(_mapping(data["request"], "$.request"))
+        request_sha256 = _digest(data["request_sha256"], "$.request_sha256")
+        if request_sha256 != request.sha256:
+            raise ContractError("$.request_sha256: must match canonical request bytes")
+        lifecycle_state = _enum(
+            data["lifecycle_state"],
+            "$.lifecycle_state",
+            {
+                "REQUESTED",
+                "PUBLISHING",
+                "COMPLETE",
+                "CERTIFIED",
+                "PROMOTED",
+                "ABANDONED",
+            },
+        )
+        revision = _integer(data["revision"], "$.revision", minimum=1)
+        repo_uuid = _uuid(data["repo_uuid"], "$.repo_uuid")
+        generation_id = _string(data["generation_id"], "$.generation_id")
+        if not _GENERATION_RE.fullmatch(generation_id):
+            raise ContractError("$.generation_id: invalid generation identity")
+
+        operation_epoch = data["operation_epoch"]
+        if operation_epoch is not None:
+            operation_epoch = _integer(operation_epoch, "$.operation_epoch", minimum=1)
+        fence_token = data["fence_token"]
+        if fence_token is not None:
+            fence_token = _integer(fence_token, "$.fence_token", minimum=1)
+        payload_manifest_sha256 = data["payload_manifest_sha256"]
+        if payload_manifest_sha256 is not None:
+            payload_manifest_sha256 = _digest(
+                payload_manifest_sha256, "$.payload_manifest_sha256"
+            )
+        receipt_sha256 = data["receipt_sha256"]
+        if receipt_sha256 is not None:
+            receipt_sha256 = _digest(receipt_sha256, "$.receipt_sha256")
+        pointer_revision = data["pointer_revision"]
+        if pointer_revision is not None:
+            pointer_revision = _integer(pointer_revision, "$.pointer_revision", minimum=1)
+
+        raw_abandonment_intent = data["abandonment_intent"]
+        abandonment_intent = (
+            None
+            if raw_abandonment_intent is None
+            else StagedBuildAbandonmentIntent.from_mapping(
+                _mapping(raw_abandonment_intent, "$.abandonment_intent")
+            )
+        )
+        if abandonment_intent is not None:
+            if lifecycle_state in {"PROMOTED", "ABANDONED"}:
+                raise ContractError(
+                    "$: terminal staged builds must not retain an abandonment intent"
+                )
+            if (
+                abandonment_intent.repo_uuid != repo_uuid
+                or abandonment_intent.generation_id != generation_id
+                or abandonment_intent.request_sha256 != request.sha256
+                or abandonment_intent.staged_revision != revision - 1
+                or abandonment_intent.abandoned_from != lifecycle_state
+            ):
+                raise ContractError(
+                    "$.abandonment_intent: must bind the immediately preceding staged state"
+                )
+            if abandonment_intent.evidence.reason_for(request) != abandonment_intent.reason:
+                raise ContractError(
+                    "$.abandonment_intent.reason: must match canonical abandonment evidence"
+                )
+
+        abandoned_from = data["abandoned_from"]
+        abandon_reason = data["abandon_reason"]
+        abandon_evidence = data["abandon_evidence"]
+        abandon_evidence_sha256 = data["abandon_evidence_sha256"]
+        if lifecycle_state == "ABANDONED":
+            abandoned_from = _enum(
+                abandoned_from,
+                "$.abandoned_from",
+                {"REQUESTED", "PUBLISHING", "COMPLETE", "CERTIFIED"},
+            )
+            abandon_reason = _enum(
+                abandon_reason,
+                "$.abandon_reason",
+                {
+                    "SOURCE_CHANGED",
+                    "ACTIVE_SOURCE_CHANGED",
+                    "MIGRATION_CHANGED",
+                    "POINTER_CHANGED",
+                    "COMPATIBILITY_CHANGED",
+                    "SEMANTIC_SOURCE_EPOCH_CHANGED",
+                },
+            )
+            abandon_evidence_sha256 = _digest(
+                abandon_evidence_sha256,
+                "$.abandon_evidence_sha256",
+            )
+            abandon_evidence = StagedBuildAbandonmentEvidence.from_mapping(
+                _mapping(abandon_evidence, "$.abandon_evidence")
+            )
+            if abandon_evidence.sha256 != abandon_evidence_sha256:
+                raise ContractError(
+                    "$.abandon_evidence_sha256: must match canonical abandonment evidence"
+                )
+            if abandon_evidence.reason_for(request) != abandon_reason:
+                raise ContractError(
+                    "$.abandon_reason: must match canonical abandonment evidence"
+                )
+        elif any(
+            item is not None
+            for item in (
+                abandoned_from,
+                abandon_reason,
+                abandon_evidence,
+                abandon_evidence_sha256,
+            )
+        ):
+            raise ContractError("$: only ABANDONED staged builds may record abandonment proof")
+
+        if lifecycle_state == "REQUESTED":
+            if any(
+                item is not None
+                for item in (
+                    operation_epoch,
+                    fence_token,
+                    payload_manifest_sha256,
+                    receipt_sha256,
+                    pointer_revision,
+                )
+            ):
+                raise ContractError("$: REQUESTED staged build must not record an attempt or result")
+        elif lifecycle_state == "PUBLISHING":
+            if operation_epoch is None or fence_token is None:
+                raise ContractError("$: PUBLISHING staged build requires an attempt")
+            if any(item is not None for item in (payload_manifest_sha256, receipt_sha256, pointer_revision)):
+                raise ContractError("$: PUBLISHING staged build must not record a result")
+        elif lifecycle_state == "COMPLETE":
+            if operation_epoch is None or fence_token is None or payload_manifest_sha256 is None:
+                raise ContractError("$: COMPLETE staged build requires an attempt and payload manifest")
+            if receipt_sha256 is not None or pointer_revision is not None:
+                raise ContractError("$: COMPLETE staged build must not record certification or promotion")
+        elif lifecycle_state == "CERTIFIED":
+            if (
+                operation_epoch is None
+                or fence_token is None
+                or payload_manifest_sha256 is None
+                or receipt_sha256 is None
+            ):
+                raise ContractError("$: CERTIFIED staged build requires an attempt, payload manifest, and receipt")
+            if pointer_revision is not None:
+                raise ContractError("$: CERTIFIED staged build must not record promotion")
+        elif lifecycle_state == "PROMOTED":
+            if (
+                operation_epoch is None
+                or fence_token is None
+                or payload_manifest_sha256 is None
+                or receipt_sha256 is None
+                or pointer_revision is None
+            ):
+                raise ContractError("$: PROMOTED staged build requires an attempt, payload manifest, receipt, and pointer")
+        else:
+            if operation_epoch is None or fence_token is None:
+                raise ContractError("$: ABANDONED staged build requires a fenced attempt")
+            if pointer_revision is not None:
+                raise ContractError("$: ABANDONED staged build must not record promotion")
+            if abandoned_from in {"REQUESTED", "PUBLISHING"} and any(
+                item is not None for item in (payload_manifest_sha256, receipt_sha256)
+            ):
+                raise ContractError(
+                    "$: precompletion abandonment must not record a payload or receipt"
+                )
+            if abandoned_from == "COMPLETE" and (
+                payload_manifest_sha256 is None or receipt_sha256 is not None
+            ):
+                raise ContractError(
+                    "$: COMPLETE abandonment requires only the payload manifest"
+                )
+            if abandoned_from == "CERTIFIED" and (
+                payload_manifest_sha256 is None or receipt_sha256 is None
+            ):
+                raise ContractError(
+                    "$: CERTIFIED abandonment requires payload and receipt proof"
+                )
+
+        return cls(
+            revision=revision,
+            repo_uuid=repo_uuid,
+            generation_id=generation_id,
+            request=request,
+            lifecycle_state=lifecycle_state,
+            operation_epoch=operation_epoch,
+            fence_token=fence_token,
+            payload_manifest_sha256=payload_manifest_sha256,
+            receipt_sha256=receipt_sha256,
+            pointer_revision=pointer_revision,
+            abandonment_intent=abandonment_intent,
+            abandoned_from=abandoned_from,
+            abandon_reason=abandon_reason,
+            abandon_evidence=abandon_evidence,
+            abandon_evidence_sha256=abandon_evidence_sha256,
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "StagedBuildState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal staged build state is not canonical JSON")
         return document
 
 
