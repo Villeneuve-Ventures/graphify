@@ -39,7 +39,7 @@ Setiap hubungan diberi label `EXTRACTED`, `INFERRED` (dengan skor kepercayaan), 
 
 ## Instalasi
 
-**Persyaratan:** Python 3.10+ dan salah satu dari: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) dan lainnya.
+**Persyaratan:** Python 3.14+ dan salah satu dari: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) dan lainnya.
 
 ```bash
 uv tool install graphifyy && graphify install

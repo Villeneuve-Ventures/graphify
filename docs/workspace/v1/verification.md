@@ -28,7 +28,7 @@
 ## Candidate gates
 
 - exact baseline ancestry and candidate version are checked;
-- artifact generation requires exact uv `0.11.29`, which supplies the frozen
+- artifact generation requires exact uv `0.11.30`, which supplies the frozen
   CycloneDX 1.5 export path;
 - two fixed-epoch clean wheel builds are byte-identical;
 - wheel package data contains every v1 schema;
@@ -58,7 +58,7 @@ setuptools builds, and no repository command or test consumes it. Candidate
 builds must not emit either the deprecated TOML-table license warning or the
 standalone-wheel command warning.
 
-All release-security commands use exact uv `0.11.29`:
+All release-security commands use exact uv `0.11.30`:
 
 ```sh
 uv sync --all-extras --frozen

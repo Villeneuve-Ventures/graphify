@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 from typing import Any
 
 
@@ -10,16 +11,6 @@ _CONFIDENCE_EXTRACTED = "EXTRACTED"
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
-    try:
-        import tomllib  # type: ignore[import-not-found]
-    except ModuleNotFoundError:
-        try:
-            import tomli as tomllib  # type: ignore[import-not-found,no-redef]
-        except ModuleNotFoundError:
-            raise ImportError(
-                "--cargo on Python 3.10 needs tomli. Install with: pip install tomli"
-            ) from None
-
     with path.open("rb") as manifest:
         return tomllib.load(manifest)
 

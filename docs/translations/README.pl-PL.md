@@ -39,7 +39,7 @@ Każda relacja jest oznaczona `EXTRACTED`, `INFERRED` (z wynikiem pewności) lub
 
 ## Instalacja
 
-**Wymagania:** Python 3.10+ i jedno z: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) i inne.
+**Wymagania:** Python 3.14+ i jedno z: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) i inne.
 
 ```bash
 uv tool install graphifyy && graphify install

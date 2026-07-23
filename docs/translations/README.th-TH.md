@@ -39,7 +39,7 @@ graphify ทำงานใน 3 รอบ ก่อนอื่น AST pass แ
 
 ## การติดตั้ง
 
-**ข้อกำหนด:** Python 3.10+ และหนึ่งใน: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) และอื่นๆ
+**ข้อกำหนด:** Python 3.14+ และหนึ่งใน: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) และอื่นๆ
 
 ```bash
 uv tool install graphifyy && graphify install

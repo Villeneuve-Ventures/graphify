@@ -27,7 +27,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          python-version: "3.12"
+          version: "0.11.30"
+          python-version: "3.14"
 
       # --frozen keeps uv from re-resolving and rewriting uv.lock as a side
       # effect of `uv run`; the lock is committed and must not churn in CI.
@@ -50,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.14"]
 
     steps:
       - uses: actions/checkout@v6
@@ -63,13 +64,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          version: "0.11.29"
+          version: "0.11.30"
           python-version: ${{ matrix.python-version }}
 
       - name: Verify candidate uv version
         run: |
           uv --version
-          uv --version | grep -Eq '^uv 0\.11\.29( |$)'
+          uv --version | grep -Eq '^uv 0\.11\.30( |$)'
 
       # --frozen installs straight from the committed uv.lock without re-resolving
       # or rewriting it, so CI never churns the lock.
@@ -100,13 +101,13 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          version: "0.11.29"
-          python-version: "3.12"
+          version: "0.11.30"
+          python-version: "3.14"
 
       - name: Verify candidate uv version
         run: |
           uv --version
-          uv --version | grep -Eq '^uv 0\.11\.29( |$)'
+          uv --version | grep -Eq '^uv 0\.11\.30( |$)'
 
       - name: Install dependencies
         run: uv sync --all-extras --frozen

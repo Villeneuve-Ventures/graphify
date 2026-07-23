@@ -19,16 +19,11 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import struct
+import tomllib
 import unicodedata
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 from typing import Any, ClassVar, TypeVar, cast, overload
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
-    import tomli as tomllib  # pyright: ignore[reportMissingImports]
-
 
 WORKSPACE_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 1

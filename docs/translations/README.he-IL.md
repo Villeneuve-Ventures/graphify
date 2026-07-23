@@ -67,7 +67,7 @@ graphify export callflow-html
 
 | דרישה | מינימום | בדיקה | התקנה |
 |---|---|---|---|
-| Python | 3.10+ | `python --version` | [python.org](https://www.python.org/downloads/) |
+| Python | 3.14+ | `python --version` | [python.org](https://www.python.org/downloads/) |
 | uv *(מומלץ)* | כל גרסה | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | pipx *(חלופה)* | כל גרסה | `pipx --version` | `pip install pipx` |
 
@@ -76,7 +76,7 @@ graphify export callflow-html
 </div>
 
 ```bash
-brew install python@3.12 uv
+brew install python@3.14 uv
 ```
 
 <div dir="rtl">
@@ -96,9 +96,8 @@ winget install astral-sh.uv
 </div>
 
 ```bash
-sudo apt install python3.12 python3-pip pipx
-# או התקנת uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.14
 ```
 
 ---
@@ -207,7 +206,6 @@ graphify install --project --platform codex
 | `neo4j` | דחיפה ל-Neo4j | `uv tool install "graphifyy[neo4j]"` |
 | `falkordb` | דחיפה ל-FalkorDB | `uv tool install "graphifyy[falkordb]"` |
 | `svg` | ייצוא גרף ל-SVG | `uv tool install "graphifyy[svg]"` |
-| `leiden` | זיהוי קהילות Leiden ‏(Python < 3.13 בלבד) | `uv tool install "graphifyy[leiden]"` |
 | `ollama` | הרצה מקומית עם Ollama | `uv tool install "graphifyy[ollama]"` |
 | `openai` | OpenAI / ממשקי API תואמי-OpenAI | `uv tool install "graphifyy[openai]"` |
 | `gemini` | Google Gemini API | `uv tool install "graphifyy[gemini]"` |

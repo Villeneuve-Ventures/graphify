@@ -39,7 +39,7 @@ Každý vztah je označen `EXTRACTED`, `INFERRED` (se skóre spolehlivosti) nebo
 
 ## Instalace
 
-**Požadavky:** Python 3.10+ a jedno z: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) a další.
+**Požadavky:** Python 3.14+ a jedno z: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) a další.
 
 ```bash
 uv tool install graphifyy && graphify install

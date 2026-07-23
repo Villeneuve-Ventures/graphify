@@ -39,7 +39,7 @@ Minden kapcsolat `EXTRACTED`, `INFERRED` (megbízhatósági pontszámmal) vagy `
 
 ## Telepítés
 
-**Követelmények:** Python 3.10+ és az alábbiak egyike: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) és mások.
+**Követelmények:** Python 3.14+ és az alábbiak egyike: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) és mások.
 
 ```bash
 uv tool install graphifyy && graphify install

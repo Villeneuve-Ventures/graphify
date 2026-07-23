@@ -16,6 +16,7 @@ path (never the LLM), so a manifest is extracted exactly once.
 from __future__ import annotations
 
 import re
+import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -172,14 +173,7 @@ def _pep508_name(spec: str) -> str:
 
 
 def _parse_pyproject(text: str) -> dict | None:
-    try:
-        import tomllib as _toml
-    except ImportError:
-        try:
-            import tomli as _toml  # type: ignore
-        except ImportError:
-            return None
-    data = _toml.loads(text)
+    data = tomllib.loads(text)
     proj = data.get("project", {}) if isinstance(data.get("project"), dict) else {}
     poetry = (data.get("tool", {}) or {}).get("poetry", {}) if isinstance(data.get("tool"), dict) else {}
     name = proj.get("name") or (poetry.get("name") if isinstance(poetry, dict) else None)
