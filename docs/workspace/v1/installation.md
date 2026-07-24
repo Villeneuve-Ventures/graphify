@@ -59,8 +59,8 @@ the candidate wheel and refreshes the Codex skill only there. It proves:
 5. a failure after binary/skill staging triggers plan-ordered, fixture-backed
    compensation;
 6. compensation succeeds with network disabled;
-7. the prior binary, dependency manifest, complete skill tree, and service return
-   byte-for-byte; and
+7. the prior binary, runtime-authority file, complete skill tree, and service
+   return byte-for-byte; and
 8. an isolated generations sentinel remains unchanged.
 
 The proof is not evidence for live service restart, writer quiescence,
