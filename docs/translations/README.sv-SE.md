@@ -39,7 +39,7 @@ Varje relation är märkt `EXTRACTED`, `INFERRED` (med konfidenspoäng) eller `A
 
 ## Installation
 
-**Krav:** Python 3.10+ och ett av: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) med flera.
+**Krav:** Python 3.14+ och ett av: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) med flera.
 
 ```bash
 uv tool install graphifyy && graphify install

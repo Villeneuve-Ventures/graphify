@@ -16,8 +16,8 @@ def _security_job() -> str:
 def test_security_job_pins_uv_and_cannot_mask_required_failures() -> None:
     job = _security_job()
     assert "fetch-depth: 0" in job
-    assert 'version: "0.11.29"' in job
-    assert "uv --version | grep -Eq '^uv 0\\.11\\.29( |$)'" in job
+    assert 'version: "0.11.30"' in job
+    assert "uv --version | grep -Eq '^uv 0\\.11\\.30( |$)'" in job
     assert "continue-on-error" not in job
 
 

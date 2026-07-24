@@ -1,3 +1,5 @@
+import tomllib
+
 import pytest
 
 from graphify.cargo_introspect import introspect_cargo
@@ -75,7 +77,7 @@ edition = "2021"
 
 def test_cargo_introspect_malformed_toml_reports_parser_error(tmp_path):
     """Malformed manifests surface the TOML parser failure, not an arbitrary crash."""
-    # Pin the class name so this works with stdlib tomllib and Python 3.10 tomli.
+    # Pin the stdlib parser's public exception class rather than its message text.
     _write_manifest(
         tmp_path / "Cargo.toml",
         """
@@ -84,10 +86,8 @@ name = "broken"
 """,
     )
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(tomllib.TOMLDecodeError):
         introspect_cargo(tmp_path)
-
-    assert exc_info.type.__name__ == "TOMLDecodeError"
 
 
 def test_cargo_introspect_degenerate_manifests_return_empty_or_skip_bad_deps(tmp_path):

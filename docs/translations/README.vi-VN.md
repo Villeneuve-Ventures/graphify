@@ -39,7 +39,7 @@ Mỗi mối quan hệ được gắn nhãn `EXTRACTED`, `INFERRED` (với điể
 
 ## Cài đặt
 
-**Yêu cầu:** Python 3.10+ và một trong: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) và các công cụ khác.
+**Yêu cầu:** Python 3.14+ và một trong: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) và các công cụ khác.
 
 ```bash
 uv tool install graphifyy && graphify install

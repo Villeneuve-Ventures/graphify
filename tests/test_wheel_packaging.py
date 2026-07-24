@@ -82,6 +82,7 @@ def test_wheel_build_uses_current_packaging_metadata_without_tool_warnings(
     assert "The 'wheel' package is no longer the canonical location" not in output
     assert "License-Expression: MIT\n" in metadata
     assert "License-File: LICENSE\n" in metadata
+    assert "Requires-Python: >=3.14\n" in metadata
 
 
 @pytest.mark.parametrize(

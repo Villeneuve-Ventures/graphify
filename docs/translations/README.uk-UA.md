@@ -52,13 +52,13 @@ graphify export callflow-html
 
 | Вимога | Мінімум | Перевірка | Встановлення |
 |---|---|---|---|
-| Python | 3.10+ | `python --version` | [python.org](https://www.python.org/downloads/) |
+| Python | 3.14+ | `python --version` | [python.org](https://www.python.org/downloads/) |
 | uv *(рекомендовано)* | будь-яка | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | pipx *(альтернатива)* | будь-яка | `pipx --version` | `pip install pipx` |
 
 **Швидке встановлення на macOS (Homebrew):**
 ```bash
-brew install python@3.12 uv
+brew install python@3.14 uv
 ```
 
 **Швидке встановлення на Windows:**
@@ -68,9 +68,8 @@ winget install astral-sh.uv
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt install python3.12 python3-pip pipx
-# або встановити uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.14
 ```
 
 ---
@@ -150,13 +149,14 @@ graphify install --project --platform codex
 | `mcp` | MCP stdio-сервер | `pip install "graphifyy[mcp]"` |
 | `neo4j` | Підтримка надсилання до Neo4j | `pip install "graphifyy[neo4j]"` |
 | `svg` | Експорт графу в SVG | `pip install "graphifyy[svg]"` |
-| `leiden` | Виявлення спільнот Leiden (лише Python < 3.13) | `pip install "graphifyy[leiden]"` |
 | `ollama` | Локальний вивід Ollama | `pip install "graphifyy[ollama]"` |
 | `openai` | OpenAI / OpenAI-сумісні API | `pip install "graphifyy[openai]"` |
 | `gemini` | Google Gemini API | `pip install "graphifyy[gemini]"` |
 | `bedrock` | AWS Bedrock (використовує IAM, без API-ключа) | `pip install "graphifyy[bedrock]"` |
 | `sql` | Вилучення SQL схем | `pip install "graphifyy[sql]"` |
 | `all` | Все вищезазначене | `pip install "graphifyy[all]"` |
+
+> Для виявлення спільнот використовується окремо встановлена сумісна реалізація Leiden, якщо вона доступна. Інакше Graphify використовує вбудований резервний алгоритм NetworkX Louvain.
 
 ---
 
@@ -549,7 +549,7 @@ git clone https://github.com/safishamsi/graphify.git
 cd graphify
 git checkout v8                        # гілка активної розробки
 
-# Створіть віртуальне середовище (потрібен Python 3.10+):
+# Створіть віртуальне середовище (потрібен Python 3.14+):
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\Scripts\activate
 

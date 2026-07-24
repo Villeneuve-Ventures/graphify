@@ -63,7 +63,7 @@ graphify export callflow-html
 
 | پیش‌نیاز | حداقل | بررسی | نصب |
 |---|---|---|---|
-| Python | ۳.۱۰+ | `python --version` | [python.org](https://www.python.org/downloads/) |
+| Python | ۳.۱۴+ | `python --version` | [python.org](https://www.python.org/downloads/) |
 | uv *(پیشنهادی)* | هر نسخه | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | pipx *(جایگزین)* | هر نسخه | `pipx --version` | `pip install pipx` |
 
@@ -74,7 +74,7 @@ graphify export callflow-html
 </div>
 
 ```bash
-brew install python@3.12 uv
+brew install python@3.14 uv
 ```
 
 <div dir="rtl">
@@ -94,9 +94,8 @@ winget install astral-sh.uv
 </div>
 
 ```bash
-sudo apt install python3.12 python3-pip pipx
-# یا نصب uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.14
 ```
 
 ---

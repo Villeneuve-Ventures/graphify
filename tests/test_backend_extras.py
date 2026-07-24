@@ -7,13 +7,9 @@ with no extra to satisfy it (claude was the only backend with no `[extra]`), and
 the message said `pip install anthropic`, which does not reach a uv tool venv.
 """
 from pathlib import Path
+import tomllib
 
 from graphify.llm import _backend_pkg_hint
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef]
 
 PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 

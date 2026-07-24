@@ -39,7 +39,7 @@ Ogni relazione è etichettata `EXTRACTED`, `INFERRED` (con punteggio di confiden
 
 ## Installazione
 
-**Requisiti:** Python 3.10+ e uno tra: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Aider](https://aider.chat) e altri.
+**Requisiti:** Python 3.14+ e uno tra: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com), [Gemini CLI](https://github.com/google-gemini/gemini-cli), [Aider](https://aider.chat) e altri.
 
 ```bash
 uv tool install graphifyy && graphify install

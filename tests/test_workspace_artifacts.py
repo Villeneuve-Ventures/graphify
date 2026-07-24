@@ -294,7 +294,7 @@ def test_isolated_environment_scrubs_untrusted_package_sources(
 
 
 def test_candidate_uv_version_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert CANDIDATE_UV_VERSION == "0.11.29"
+    assert CANDIDATE_UV_VERSION == "0.11.30"
     monkeypatch.setattr(candidate_artifacts.shutil, "which", lambda name: "/fixture/uv")
     monkeypatch.setattr(
         candidate_artifacts,
@@ -302,7 +302,7 @@ def test_candidate_uv_version_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None
         lambda *_args, **_kwargs: subprocess.CompletedProcess(
             ["/fixture/uv", "--version"],
             0,
-            stdout="uv 0.11.29 (fixture)\n",
+            stdout="uv 0.11.30 (fixture)\n",
             stderr="",
         ),
     )
@@ -313,10 +313,10 @@ def test_candidate_uv_version_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None
 @pytest.mark.parametrize(
     "reported",
     [
-        "uv 0.11.30\n",
+        "uv 0.11.29\n",
         "uv\n",
-        "uvx 0.11.29\n",
-        "uv 0.11.29-beta.1\n",
+        "uvx 0.11.30\n",
+        "uv 0.11.30-beta.1\n",
     ],
 )
 def test_candidate_uv_version_rejects_unpinned_or_malformed_toolchain(
@@ -335,7 +335,7 @@ def test_candidate_uv_version_rejects_unpinned_or_malformed_toolchain(
         ),
     )
 
-    with pytest.raises(ArtifactError, match="requires uv 0.11.29"):
+    with pytest.raises(ArtifactError, match=r"requires uv 0\.11\.30"):
         candidate_artifacts._uv()
 
 
@@ -739,7 +739,7 @@ def test_candidate_audit_covers_runtime_all_extras_and_dev_scopes(
         lambda command, **_kwargs: subprocess.CompletedProcess(
             command,
             0,
-            stdout="pip-audit 2.10.0\n" if "pip_audit" in command else "uv 0.11.29\n",
+            stdout="pip-audit 2.10.0\n" if "pip_audit" in command else "uv 0.11.30\n",
             stderr="",
         ),
     )
@@ -981,15 +981,15 @@ def test_candidate_entrypoints_reject_wrong_uv_before_writing_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def reject_uv() -> str:
-        raise ArtifactError("candidate artifact generation requires uv 0.11.29")
+        raise ArtifactError("candidate artifact generation requires uv 0.11.30")
 
     monkeypatch.setattr(candidate_artifacts, "_uv", reject_uv)
     candidate_root = tmp_path / "candidate"
     proof_root = tmp_path / "proof"
 
-    with pytest.raises(ArtifactError, match="requires uv 0.11.29"):
+    with pytest.raises(ArtifactError, match=r"requires uv 0\.11\.30"):
         build_candidate(repo_root=tmp_path / "repo", output_root=candidate_root)
-    with pytest.raises(ArtifactError, match="requires uv 0.11.29"):
+    with pytest.raises(ArtifactError, match=r"requires uv 0\.11\.30"):
         prove_candidate(artifact_root=tmp_path / "artifacts", proof_root=proof_root)
 
     assert not candidate_root.exists()

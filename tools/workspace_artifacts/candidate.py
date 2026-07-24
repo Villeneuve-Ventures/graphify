@@ -20,16 +20,12 @@ import subprocess  # nosec B404
 import sys
 import tarfile
 import tempfile
+import tomllib
 from typing import Iterator, Mapping
 from urllib.parse import urlparse
 from urllib.request import Request, url2pathname, urlopen
 import uuid
 import zipfile
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
-    import tomli as tomllib  # pyright: ignore[reportMissingImports,reportAssignmentType]
 
 from graphify.workspace import (
     ADAPTER_CONTRACT_VERSION,
@@ -66,7 +62,7 @@ UPSTREAM_WHEEL_NAME = "graphifyy-0.9.16-py3-none-any.whl"
 UPSTREAM_WHEEL_SHA256 = "24eefd6cd8e0f47eb8167671fbe3aceb31b49a6508b91fe1b60c4fd1978e32bc"
 UPSTREAM_PYPI_METADATA_URL = "https://pypi.org/pypi/graphifyy/0.9.16/json"
 CONTROLLED_UPSTREAM_INDEX = "https://pypi.org/simple"
-CANDIDATE_UV_VERSION = "0.11.29"
+CANDIDATE_UV_VERSION = "0.11.30"
 
 _PACKAGE_SOURCE_ENVIRONMENT = {
     "PIP_CONFIG_FILE",
