@@ -108,7 +108,8 @@ def test_ineligible_pull_request_runs_use_isolated_concurrency_groups() -> None:
 """
     assert eligible_pull_request_group in concurrency
     assert "\n      github.event.pull_request.number ||\n" not in concurrency
-    assert "github.run_id" in concurrency
+    assert "format('run-{0}', github.run_id)" in concurrency
+    assert "\n      github.run_id\n" not in concurrency
     assert "cancel-in-progress: false" in concurrency
 
 
