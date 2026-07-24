@@ -335,7 +335,7 @@ def test_candidate_uv_version_rejects_unpinned_or_malformed_toolchain(
         ),
     )
 
-    with pytest.raises(ArtifactError, match="requires uv 0.11.30"):
+    with pytest.raises(ArtifactError, match=r"requires uv 0\.11\.30"):
         candidate_artifacts._uv()
 
 
@@ -987,9 +987,9 @@ def test_candidate_entrypoints_reject_wrong_uv_before_writing_output(
     candidate_root = tmp_path / "candidate"
     proof_root = tmp_path / "proof"
 
-    with pytest.raises(ArtifactError, match="requires uv 0.11.30"):
+    with pytest.raises(ArtifactError, match=r"requires uv 0\.11\.30"):
         build_candidate(repo_root=tmp_path / "repo", output_root=candidate_root)
-    with pytest.raises(ArtifactError, match="requires uv 0.11.30"):
+    with pytest.raises(ArtifactError, match=r"requires uv 0\.11\.30"):
         prove_candidate(artifact_root=tmp_path / "artifacts", proof_root=proof_root)
 
     assert not candidate_root.exists()

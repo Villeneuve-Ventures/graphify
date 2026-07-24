@@ -156,6 +156,8 @@ graphify install --project --platform codex
 | `sql` | Вилучення SQL схем | `pip install "graphifyy[sql]"` |
 | `all` | Все вищезазначене | `pip install "graphifyy[all]"` |
 
+> Для виявлення спільнот використовується окремо встановлена сумісна реалізація Leiden, якщо вона доступна. Інакше Graphify використовує вбудований резервний алгоритм NetworkX Louvain.
+
 ---
 
 ## Змусьте асистента завжди використовувати граф

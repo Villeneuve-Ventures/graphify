@@ -1,3 +1,5 @@
+import tomllib
+
 import pytest
 
 from graphify.cargo_introspect import introspect_cargo
@@ -84,10 +86,8 @@ name = "broken"
 """,
     )
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(tomllib.TOMLDecodeError):
         introspect_cargo(tmp_path)
-
-    assert exc_info.type.__name__ == "TOMLDecodeError"
 
 
 def test_cargo_introspect_degenerate_manifests_return_empty_or_skip_bad_deps(tmp_path):
