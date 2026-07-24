@@ -25,9 +25,8 @@ semantic execution, other workspace commands, P5C, H3, and P6+ work.
 - Starting canonical branch/SHA/tree: `workspace/v1` at
   `5c39a84a17a06afaead5a2cc956f63afc13424c3`, tree
   `09d2a36c12ddc094898879b7118315c6a9d6cb7b`.
-- Topic branch/worktree:
-  `codex/workspace-p5b2b-sync-code-only` at
-  `/Users/lisrel.claw/.codex/worktrees/graphify-p5b2b-sync-code-only`.
+- Topic branch/worktree: `codex/workspace-p5b2b-sync-code-only`; its host-local
+  worktree was removed at closeout.
 - Starting evidence: canonical and origin were synchronized `0/0`; the topic
   branch was fast-forwarded with no unique commits; merge-head CI `29978128833`
   passed `skillgen-check`, `security-scan`, `test (3.10)`, and `test (3.12)`.
@@ -47,8 +46,7 @@ semantic execution, other workspace commands, P5C, H3, and P6+ work.
 
 ## Canonical closeout evidence
 
-- Canonical checkout:
-  `/Users/lisrel.claw/graphify` on `workspace/v1` at
+- Canonical repository checkout on `workspace/v1` at
   `ac5ac55bbd93e23c727aa1fd946d194f8729930e`, tree
   `ec6d9e8dd2106472d595d2d7059b45b2c9d51517`.
 - At the acceptance refresh, the checkout tracked `origin/workspace/v1` at

@@ -15,9 +15,8 @@ from the verified canonical branch.
 
 ## Historical evidence before this index
 
-Earlier receipts remain preserved in the former external execution checklist:
-
-`/Users/lisrel.claw/Documents/Codex/2026-07-14/don-t-bs-me-just-because/.omx/plans/graphify-workspace-execution-checklist.md`
+Earlier receipts remain preserved in the former host-local
+`graphify-workspace-execution-checklist.md` outside this repository.
 
 Its pre-staging SHA-256 is
 `ddf873a889ec5ad43b35762ea372605555a322f10e61467dba0a57271c9c2d51`.

@@ -41,7 +41,7 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical checkout | `/Users/lisrel.claw/graphify`; `workspace/v1` at `ac5ac55bbd93e23c727aa1fd946d194f8729930e`, tree `ec6d9e8dd2106472d595d2d7059b45b2c9d51517`; working-tree changes were limited to the four `docs/workspace/v1` documentation changes in this governance batch; upstream divergence `0/0` |
+| Canonical checkout | Repository root; `workspace/v1` at `ac5ac55bbd93e23c727aa1fd946d194f8729930e`, tree `ec6d9e8dd2106472d595d2d7059b45b2c9d51517`; working-tree changes were limited to the four `docs/workspace/v1` documentation changes in this governance batch; upstream divergence `0/0` |
 | Worktrees | Canonical checkout only |
 | GitHub | No open pull requests; repository Issues are disabled |
 | P5B2b delivery | PR [#14](https://github.com/Villeneuve-Ventures/graphify/pull/14); exact reviewed head `156797507c84bcad7e2ff0689e6e4ba6d3afa23c`; merge `513e6a6a5287362e62d8763213179149592e0368`; merge-head CI `30037483038` passed all four jobs; current `workspace/v1` descends from both reviewed head and merge |
@@ -107,6 +107,6 @@ Graphify-local status, readiness, or receipts.
 | `graphify-workspace-execution-checklist.md` | `ddf873a889ec5ad43b35762ea372605555a322f10e61467dba0a57271c9c2d51` |
 | `graphify-workspace-global-plan.md` | `28ec1c3ea527857fb6f03687e540d11c8755b5b139b60263bfff8eeea09dbe6b` |
 
-The checklist path and its pre-staging hash are repeated in the receipt index.
+The checklist name and its pre-staging hash are repeated in the receipt index.
 Both external files retain their prior historical starting SHAs, worktree
 records, and execution evidence below their conditional migration notices.
