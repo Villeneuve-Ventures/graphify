@@ -8,11 +8,17 @@ on:
 
 concurrency:
   # Eligible review requests share a PR-scoped group so /prreview waits for an
-  # in-progress initial summary/review to establish its baseline. Other comments
-  # use their own run ID and are skipped independently by the job-level guard.
+  # in-progress initial summary/review to establish its baseline. Ineligible
+  # events use their own run ID and cannot displace a queued eligible review.
   group: >-
     pr-agent-${{
-      github.event.pull_request.number ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.sender.type != 'Bot' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.number
+      ) ||
       (
         github.event_name == 'issue_comment' &&
         github.event.sender.type != 'Bot' &&

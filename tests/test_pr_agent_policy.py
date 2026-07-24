@@ -73,7 +73,6 @@ def test_initial_non_draft_event_publishes_summary_and_review() -> None:
     assert "review_requested" not in workflow
     assert "synchronize" not in workflow
     assert "github.event.pull_request.draft == false" in workflow
-    assert "cancel-in-progress: false" in workflow
     assert 'github_action_config.auto_describe: "true"' in workflow
     assert 'github_action_config.auto_review: "true"' in workflow
     assert 'github_action_config.handle_push_trigger: "false"' in workflow
@@ -92,6 +91,25 @@ def test_initial_non_draft_event_publishes_summary_and_review() -> None:
     assert config["pr_description"]["publish_description_as_comment"] is True
     assert config["pr_description"]["publish_description_as_comment_persistent"] is True
     assert config["pr_reviewer"]["persistent_comment"] is True
+
+
+def test_ineligible_pull_request_runs_use_isolated_concurrency_groups() -> None:
+    workflow = _workflow()
+    concurrency = workflow.split("concurrency:", 1)[1].split("\njobs:", 1)[0]
+
+    eligible_pull_request_group = """
+      (
+        github.event_name == 'pull_request' &&
+        github.event.sender.type != 'Bot' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.number
+      ) ||
+"""
+    assert eligible_pull_request_group in concurrency
+    assert "\n      github.event.pull_request.number ||\n" not in concurrency
+    assert "github.run_id" in concurrency
+    assert "cancel-in-progress: false" in concurrency
 
 
 def test_prreview_command_requests_a_published_incremental_review() -> None:
