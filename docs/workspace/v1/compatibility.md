@@ -65,7 +65,8 @@ artifacts:
 - `provenance.json`;
 - `sbom.cdx.json`;
 - `offline-rollback.zip`;
-- `compatibility.json`; and
+- `compatibility.json`;
+- `runtime-manifest.json`; and
 - `trusted-manifest.json`.
 
 ZIP members use fixed timestamps, normalized modes, sorted paths, and no host
@@ -76,6 +77,20 @@ second complete candidate and require identical digests for every output file.
 The trusted manifest is the local trust anchor for P1 tamper tests. V1 detects
 artifact mismatch relative to that frozen manifest; it does not claim safety if
 both the artifact and trust anchor are maliciously replaced.
+
+P5C1 generates `runtime-manifest.json` only after `compatibility.json` exists
+and before `trusted-manifest.json` is frozen. The runtime authority embeds the
+complete compatibility document, so the compatibility artifact deliberately
+does not hash the runtime authority back into itself. The outer trusted
+manifest covers both files independently, including exact bytes, SHA-256,
+size, and candidate mode `0644`.
+
+The embedded policy is named the **P5C1 isolated-proof authority** and is
+explicitly fixed to `max_items = 8`, `max_bytes = 16384`, and
+`retry_budget = 1`. These values exist only to make the candidate installation
+proof concrete. They are not a production default, publication authority,
+performance qualification, or public configuration value, and no loader or
+runtime fallback may infer them.
 
 ## Installed read authority
 
@@ -98,3 +113,10 @@ the existing generation, semantic-queue, lease, journal, and pointer lifecycle
 stores after successful composition and source observation. P5C installation
 will bind and atomically install this authority from the reviewed candidate;
 publication and installation are not part of P5B1/P5B2a/P5B2b.
+
+P5C1 exercises that boundary only beneath disposable absolute `HOME`,
+`XDG_STATE_HOME`, and `CODEX_HOME` roots. Candidate trust and the trusted
+runtime-authority digest are verified before
+`DurableStateRoot.install_once_bytes` creates the private `0600` installed
+file. Same-byte retries preserve the inode; different bytes fail closed without
+replacement. This proof is not a production install or upgrade path.

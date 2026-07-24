@@ -39,6 +39,7 @@ _REQUIRED_TAMPER_ARTIFACTS = (
     "skill-bundle.zip",
     "contract-bundle.zip",
     "fixture-manifest.json",
+    "runtime-manifest.json",
 )
 
 
@@ -473,6 +474,16 @@ def _file_snapshot(paths: Mapping[str, Path]) -> dict[str, str]:
     return result
 
 
+def _file_mode_snapshot(paths: Mapping[str, Path]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for name, path in paths.items():
+        details = path.lstat()
+        if path.is_symlink() or not stat.S_ISREG(details.st_mode):
+            raise ArtifactError(f"snapshot target must be a regular non-symlink file: {path}")
+        result[name] = f"{stat.S_IMODE(details.st_mode):04o}"
+    return result
+
+
 def snapshot_disposable_home(
     *,
     home: Path,
@@ -666,6 +677,7 @@ def run_disposable_compensation_proof(
     if set(candidate_files) != set(targets):
         raise ArtifactError(f"candidate_files must contain exactly {sorted(targets)}")
     before = _file_snapshot(targets)
+    modes_before = _file_mode_snapshot(targets)
     skill_root = targets["skill"].parent
     skill_before = strict_tree_sha256(skill_root)
     generations_root = home / ".local/state/graphify/workspaces/fixture/generations"
@@ -842,10 +854,15 @@ def run_disposable_compensation_proof(
     if execution is None:
         raise ArtifactError("compensation executor did not produce an execution record")
     after = _file_snapshot(targets)
+    modes_after = _file_mode_snapshot(targets)
     skill_after = strict_tree_sha256(skill_root)
     generations_after = strict_tree_sha256(generations_root)
     if before != after:
         raise ArtifactError(f"compensation did not restore the prior tuple: {before} != {after}")
+    if modes_before != modes_after:
+        raise ArtifactError(
+            f"compensation did not restore prior modes: {modes_before} != {modes_after}"
+        )
     if skill_before != skill_after:
         raise ArtifactError("compensation did not restore the complete prior skill tree")
     if generations_before != generations_after:
@@ -864,6 +881,8 @@ def run_disposable_compensation_proof(
         "compensation_plan_preimage": plan_document.to_dict(),
         "compensation_execution": execution,
         "restored": before,
+        "restored_modes": modes_before,
+        "runtime_target_restored": True,
         "skill_tree_restored": True,
         "generations_tree_sha256_before": generations_before,
         "generations_tree_sha256_after": generations_after,

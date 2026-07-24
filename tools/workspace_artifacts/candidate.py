@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
+import errno
 import hashlib
 from io import BytesIO
 import json
@@ -21,7 +22,7 @@ import sys
 import tarfile
 import tempfile
 import tomllib
-from typing import Iterator, Mapping
+from typing import Iterator, Mapping, cast
 from urllib.parse import urlparse
 from urllib.request import Request, url2pathname, urlopen
 import uuid
@@ -29,16 +30,29 @@ import zipfile
 
 from graphify.workspace import (
     ADAPTER_CONTRACT_VERSION,
+    ArtifactManifest,
     CANDIDATE_DISTRIBUTION_VERSION,
     CLI_CONTRACT_VERSION,
     ENGINE_BASELINE,
     EXTRACTOR_CACHE_ABI,
+    RUNTIME_AUTHORITY_FILENAME,
     STATE_SCHEMA_VERSION,
     UPSTREAM_BASELINE_COMMIT,
     CompatibilityManifest,
     ContractError,
+    SemanticQueuePolicy,
+    WorkspaceRuntimeAuthority,
     canonical_json_bytes,
     canonical_sha256,
+    load_workspace_runtime_inputs,
+)
+from graphify.workspace.persistence import (
+    CommitUnknown,
+    DurableStateRoot,
+    InjectedFault,
+    PosixSyscalls,
+    RuntimeCapabilities,
+    StateCorrupt,
 )
 from tools.workspace_artifacts import (
     ArtifactError,
@@ -63,6 +77,14 @@ UPSTREAM_WHEEL_SHA256 = "24eefd6cd8e0f47eb8167671fbe3aceb31b49a6508b91fe1b60c4fd
 UPSTREAM_PYPI_METADATA_URL = "https://pypi.org/pypi/graphifyy/0.9.16/json"
 CONTROLLED_UPSTREAM_INDEX = "https://pypi.org/simple"
 CANDIDATE_UV_VERSION = "0.11.30"
+
+# P5C1 isolated-proof authority only. These values are not a production default,
+# publication authority, performance qualification, or public configuration.
+_P5C1_ISOLATED_PROOF_QUEUE_POLICY = SemanticQueuePolicy(
+    max_items=8,
+    max_bytes=16_384,
+    retry_budget=1,
+)
 
 _PACKAGE_SOURCE_ENVIRONMENT = {
     "PIP_CONFIG_FILE",
@@ -172,6 +194,67 @@ def _file_hashes(root: Path) -> dict[str, str]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def _p5c1_runtime_authority(
+    compatibility_manifest: CompatibilityManifest,
+) -> WorkspaceRuntimeAuthority:
+    """Construct the explicit P5C1 isolated-proof runtime authority."""
+
+    return WorkspaceRuntimeAuthority(
+        compatibility_manifest=compatibility_manifest,
+        semantic_queue_policy=_P5C1_ISOLATED_PROOF_QUEUE_POLICY,
+    )
+
+
+def _trusted_artifact_sha256(*, trusted_manifest: bytes, name: str) -> str:
+    try:
+        document = ArtifactManifest.from_json(trusted_manifest)
+    except ContractError as exc:
+        raise ArtifactError(f"trusted manifest is invalid: {exc}") from exc
+    matches = [entry for entry in document.to_dict()["artifacts"] if entry["path"] == name]
+    if len(matches) != 1:
+        raise ArtifactError(f"trusted manifest must cover exactly one {name}")
+    entry = matches[0]
+    if entry["mode"] != "0644":
+        raise ArtifactError(f"candidate {name} must be frozen with mode 0644")
+    return str(entry["sha256"])
+
+
+def _validate_candidate_runtime_authority(
+    *,
+    artifact_root: Path,
+    trusted_manifest: bytes,
+    expected_sha256: str | None = None,
+) -> tuple[WorkspaceRuntimeAuthority, bytes, str]:
+    """Verify candidate trust, digest binding, and strict authority round-trip."""
+
+    verify_trusted_manifest(
+        artifact_root=artifact_root,
+        trusted_manifest=trusted_manifest,
+    )
+    trusted_sha256 = _trusted_artifact_sha256(
+        trusted_manifest=trusted_manifest,
+        name=RUNTIME_AUTHORITY_FILENAME,
+    )
+    if expected_sha256 is not None and expected_sha256 != trusted_sha256:
+        raise ArtifactError("expected runtime authority digest is not candidate-trusted")
+    try:
+        payload = (artifact_root / RUNTIME_AUTHORITY_FILENAME).read_bytes()
+        compatibility = CompatibilityManifest.from_json(
+            (artifact_root / "compatibility.json").read_bytes()
+        )
+        authority = WorkspaceRuntimeAuthority.from_json(payload)
+    except (OSError, ContractError, RuntimeError) as exc:
+        raise ArtifactError(f"candidate runtime authority is invalid: {exc}") from exc
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != trusted_sha256:
+        raise ArtifactError("candidate runtime authority digest does not match trusted manifest")
+    if authority.compatibility_manifest.canonical != compatibility.canonical:
+        raise ArtifactError("candidate runtime authority compatibility binding is invalid")
+    if authority.semantic_queue_policy.canonical != _P5C1_ISOLATED_PROOF_QUEUE_POLICY.canonical:
+        raise ArtifactError("candidate runtime authority proof policy is invalid")
+    return authority, payload, actual_sha256
 
 
 def _extract_git_archive(archive_bytes: bytes, destination: Path) -> None:
@@ -815,9 +898,14 @@ def audit_candidate(*, repo_root: Path, artifact_root: Path) -> dict[str, object
             (artifact_root / "compatibility.json").read_text(encoding="utf-8")
         )
         provenance = json.loads((artifact_root / "provenance.json").read_text(encoding="utf-8"))
-        compatibility = CompatibilityManifest.from_mapping(compatibility_data).to_dict()
+        compatibility_document = CompatibilityManifest.from_mapping(compatibility_data)
+        compatibility = compatibility_document.to_dict()
     except (OSError, json.JSONDecodeError, ContractError) as exc:
         raise ArtifactError(f"candidate audit cannot validate artifact identity: {exc}") from exc
+    _, _, runtime_authority_sha256 = _validate_candidate_runtime_authority(
+        artifact_root=artifact_root,
+        trusted_manifest=trusted,
+    )
     expected_identity = {
         "fork_commit": head,
         "runtime_lock_sha256": sha256_file(repo_root / "uv.lock"),
@@ -888,6 +976,7 @@ def audit_candidate(*, repo_root: Path, artifact_root: Path) -> dict[str, object
         "fork_commit": head,
         "fork_tree": tree,
         "wheel_sha256": sha256_file(wheel),
+        "runtime_manifest_sha256": runtime_authority_sha256,
         "runtime_requirements_sha256": sha256_file(runtime_requirements),
         "sbom_sha256": sha256_file(artifact_root / "sbom.cdx.json"),
         "installation": installation,
@@ -907,7 +996,8 @@ def _write_prior_home(home: Path, codex_home: Path) -> None:
     for name, path in targets.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(_PRIOR_FILES[name])
-        path.chmod(0o755 if name == "binary" else 0o644)
+        mode = 0o755 if name == "binary" else 0o600 if name == "runtime" else 0o644
+        path.chmod(mode)
     skill_root = targets["skill"].parent
     version = skill_root / ".graphify_version"
     version.write_bytes(b"0.9.16")
@@ -1034,10 +1124,19 @@ def build_candidate(*, repo_root: Path, output_root: Path) -> dict[str, object]:
         "sbom_sha256": artifact_hashes["sbom.cdx.json"],
         "artifacts": artifact_hashes,
     }
-    compatibility_document = CompatibilityManifest.from_mapping(compatibility_data)
+    compatibility_document = cast(
+        CompatibilityManifest,
+        CompatibilityManifest.from_mapping(compatibility_data),
+    )
     compatibility = output_root / "compatibility.json"
     compatibility.write_bytes(compatibility_document.canonical)
     artifacts[compatibility.name] = compatibility
+
+    runtime_authority = output_root / RUNTIME_AUTHORITY_FILENAME
+    runtime_authority.write_bytes(_p5c1_runtime_authority(compatibility_document).canonical)
+    # Reject any accidental serializer drift before the outer trust anchor is frozen.
+    WorkspaceRuntimeAuthority.from_json(runtime_authority.read_bytes())
+    artifacts[runtime_authority.name] = runtime_authority
 
     trusted = write_trusted_manifest(
         artifact_root=output_root,
@@ -1050,6 +1149,7 @@ def build_candidate(*, repo_root: Path, output_root: Path) -> dict[str, object]:
         "fork_commit": head,
         "fork_tree": tree,
         "artifact_count": len(files),
+        "runtime_manifest_sha256": sha256_file(runtime_authority),
         "trusted_manifest_sha256": sha256_file(output_root / "trusted-manifest.json"),
         "artifacts": files,
     }
@@ -1253,6 +1353,377 @@ def _temporary_environment(values: Mapping[str, str]) -> Iterator[None]:
                 os.environ[name] = value
 
 
+class _P5C1InstallFaultSyscalls(PosixSyscalls):
+    """Deterministic syscall failures for isolated runtime-authority proof fixtures."""
+
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        self.fsync_calls = 0
+        self.fired = False
+
+    def _fail(self, stage: str) -> None:
+        if self.stage == stage and not self.fired:
+            self.fired = True
+            raise OSError(errno.EIO, f"injected runtime authority {stage} failure")
+
+    def write(self, descriptor: int, data: memoryview) -> int:
+        self._fail("write")
+        return super().write(descriptor, data)
+
+    def fsync(self, descriptor: int) -> None:
+        self.fsync_calls += 1
+        if self.fsync_calls == 1:
+            self._fail("temporary_fsync")
+        elif self.fsync_calls == 2:
+            self._fail("parent_fsync")
+        super().fsync(descriptor)
+
+    def replace_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        self._fail("replace")
+        super().replace_at(
+            source,
+            destination,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
+
+
+class _P5C1CrashAt:
+    def __init__(self, event: str) -> None:
+        self.event = event
+        self.fired = False
+
+    def __call__(self, event: str) -> None:
+        if event == self.event and not self.fired:
+            self.fired = True
+            raise InjectedFault(event)
+
+
+def _runtime_target_snapshot(path: Path) -> dict[str, object]:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return {"present": False}
+    if path.is_symlink() or not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+        raise ArtifactError(f"runtime authority proof target is unsafe: {path}")
+    return {
+        "present": True,
+        "sha256": sha256_file(path),
+        "size": details.st_size,
+        "mode": f"{stat.S_IMODE(details.st_mode):04o}",
+    }
+
+
+def _proof_tree_snapshot(root: Path) -> dict[str, dict[str, object]]:
+    snapshot: dict[str, dict[str, object]] = {}
+    for path in (root, *sorted(root.rglob("*"))):
+        details = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if path.is_symlink():
+            raise ArtifactError(f"P5C1 proof tree contains a symbolic link: {path}")
+        entry: dict[str, object] = {
+            "mode": f"{stat.S_IMODE(details.st_mode):04o}",
+            "mtime_ns": details.st_mtime_ns,
+            "size": details.st_size,
+            "type": stat.S_IFMT(details.st_mode),
+        }
+        if stat.S_ISREG(details.st_mode):
+            entry["sha256"] = sha256_file(path)
+        snapshot[relative] = entry
+    return snapshot
+
+
+def _p5c1_fixture_environment(fixture_root: Path) -> tuple[dict[str, str], Path, Path]:
+    if not fixture_root.is_absolute():
+        raise ArtifactError("P5C1 fixture root must be absolute")
+    if fixture_root.exists() and any(fixture_root.iterdir()):
+        raise ArtifactError(f"P5C1 fixture root must be empty: {fixture_root}")
+    fixture_root.mkdir(parents=True, exist_ok=True)
+    home = fixture_root / "home"
+    state_home = fixture_root / "xdg-state-home"
+    codex_home = fixture_root / "codex-home"
+    for root in (home, state_home, codex_home):
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+    environ = {
+        "HOME": str(home),
+        "XDG_STATE_HOME": str(state_home),
+        "CODEX_HOME": str(codex_home),
+    }
+    return environ, state_home / "graphify", codex_home
+
+
+def _p5c1_state_fixture(
+    fixture_root: Path,
+) -> tuple[dict[str, str], DurableStateRoot, Path, Path, str]:
+    environ, state_root, codex_home = _p5c1_fixture_environment(fixture_root)
+    state = DurableStateRoot(
+        state_root,
+        capabilities=RuntimeCapabilities.supported_test_fixture(),
+    )
+    generation_relative = Path("workspaces/fixture/generations/gen-canary/receipt.json")
+    state.install_once_bytes(
+        generation_relative,
+        _CANARY,
+        label="p5c1-generation-canary",
+    )
+    generation_root = state_root / "workspaces/fixture/generations"
+    return environ, state, state_root, codex_home, strict_tree_sha256(generation_root)
+
+
+def _prove_successful_runtime_authority_install(
+    *,
+    fixture_root: Path,
+    payload: bytes,
+    payload_sha256: str,
+    authority: WorkspaceRuntimeAuthority,
+) -> dict[str, object]:
+    environ, state, state_root, codex_home, generations_before = _p5c1_state_fixture(fixture_root)
+    installed = state.install_once_bytes(
+        RUNTIME_AUTHORITY_FILENAME,
+        payload,
+        label="p5c1-runtime-authority",
+    )
+    installed_snapshot = _runtime_target_snapshot(installed)
+    if installed_snapshot != {
+        "present": True,
+        "sha256": payload_sha256,
+        "size": len(payload),
+        "mode": "0600",
+    }:
+        raise ArtifactError("installed runtime authority does not match candidate bytes and mode")
+    inode = installed.stat().st_ino
+    retried = state.install_once_bytes(
+        RUNTIME_AUTHORITY_FILENAME,
+        payload,
+        label="p5c1-runtime-authority-retry",
+    )
+    if retried.stat().st_ino != inode:
+        raise ArtifactError("same-byte runtime authority retry replaced the inode")
+    before_conflict = _runtime_target_snapshot(installed)
+    try:
+        state.install_once_bytes(
+            RUNTIME_AUTHORITY_FILENAME,
+            payload + b"\x00",
+            label="p5c1-runtime-authority-conflict",
+        )
+    except StateCorrupt:
+        pass
+    else:
+        raise ArtifactError("different-byte runtime authority retry did not fail closed")
+    if _runtime_target_snapshot(installed) != before_conflict or installed.stat().st_ino != inode:
+        raise ArtifactError("different-byte retry changed installed runtime authority state")
+
+    roots_before_loader = {
+        "home": _proof_tree_snapshot(Path(environ["HOME"])),
+        "state_home": _proof_tree_snapshot(Path(environ["XDG_STATE_HOME"])),
+        "codex_home": _proof_tree_snapshot(codex_home),
+    }
+    inputs = load_workspace_runtime_inputs(
+        environ=environ,
+        capabilities=RuntimeCapabilities.supported_test_fixture(),
+    )
+    if inputs is None:
+        raise ArtifactError("P5B1 loader did not read the installed runtime authority")
+    if inputs.compatibility_manifest.canonical != authority.compatibility_manifest.canonical:
+        raise ArtifactError("P5B1 loader changed candidate compatibility authority")
+    if inputs.semantic_queue_policy.canonical != authority.semantic_queue_policy.canonical:
+        raise ArtifactError("P5B1 loader changed candidate semantic queue policy")
+    roots_after_loader = {
+        "home": _proof_tree_snapshot(Path(environ["HOME"])),
+        "state_home": _proof_tree_snapshot(Path(environ["XDG_STATE_HOME"])),
+        "codex_home": _proof_tree_snapshot(codex_home),
+    }
+    if roots_after_loader != roots_before_loader:
+        raise ArtifactError("P5B1 loader wrote to an isolated external-state root")
+    generation_root = state_root / "workspaces/fixture/generations"
+    if strict_tree_sha256(generation_root) != generations_before:
+        raise ArtifactError("runtime authority installation changed generation fixtures")
+    return {
+        "installed_sha256": payload_sha256,
+        "installed_mode": "0600",
+        "same_byte_retry_inode_preserved": True,
+        "different_byte_retry_rejected": True,
+        "loader_read_only": True,
+        "generation_tree_sha256": generations_before,
+        "environment": environ,
+    }
+
+
+def _prove_preexisting_runtime_authority_conflict(
+    *,
+    fixture_root: Path,
+    payload: bytes,
+) -> dict[str, object]:
+    environ, state, state_root, _codex_home, generations_before = _p5c1_state_fixture(fixture_root)
+    prior_payload = canonical_json_bytes(
+        {
+            "contract": "graphify.workspace.runtime_authority.proof_conflict",
+            "format_version": 1,
+        }
+    )
+    target = state.install_once_bytes(
+        RUNTIME_AUTHORITY_FILENAME,
+        prior_payload,
+        label="p5c1-preexisting-runtime-authority",
+    )
+    prior = _runtime_target_snapshot(target)
+    prior_inode = target.stat().st_ino
+    try:
+        state.install_once_bytes(
+            RUNTIME_AUTHORITY_FILENAME,
+            payload,
+            label="p5c1-runtime-authority-conflict",
+        )
+    except StateCorrupt:
+        pass
+    else:
+        raise ArtifactError("candidate authority replaced a different pre-existing target")
+    if _runtime_target_snapshot(target) != prior or target.stat().st_ino != prior_inode:
+        raise ArtifactError("different pre-existing runtime authority was not preserved exactly")
+    generation_root = state_root / "workspaces/fixture/generations"
+    if strict_tree_sha256(generation_root) != generations_before:
+        raise ArtifactError("pre-existing authority conflict changed generation fixtures")
+    return {
+        "different_bytes_rejected": True,
+        "prior_state": prior,
+        "prior_inode_preserved": True,
+        "generation_tree_sha256": generations_before,
+        "environment": environ,
+    }
+
+
+def _prove_failed_runtime_authority_install(
+    *,
+    fixture_root: Path,
+    payload: bytes,
+    stage: str,
+) -> dict[str, object]:
+    environ, state, state_root, _codex_home, generations_before = _p5c1_state_fixture(fixture_root)
+    target = state_root / RUNTIME_AUTHORITY_FILENAME
+    prior = _runtime_target_snapshot(target)
+    syscalls = _P5C1InstallFaultSyscalls(stage)
+    crash = _P5C1CrashAt("p5c1-runtime-authority:installed")
+    failing_state = DurableStateRoot(
+        state_root,
+        capabilities=RuntimeCapabilities.supported_test_fixture(),
+        fault_hook=crash if stage == "installed_hook" else None,
+        syscalls=syscalls,
+    )
+    try:
+        failing_state.install_once_bytes(
+            RUNTIME_AUTHORITY_FILENAME,
+            payload,
+            label="p5c1-runtime-authority",
+        )
+    except BaseException as exc:
+        failure = exc
+    else:
+        raise ArtifactError(f"runtime authority failpoint did not fire: {stage}")
+
+    pre_visibility = stage in {"write", "temporary_fsync", "replace"}
+    if pre_visibility:
+        if not isinstance(failure, OSError) or not syscalls.fired:
+            raise ArtifactError(
+                f"runtime authority pre-visibility failure was misclassified: {stage}"
+            )
+    elif not isinstance(failure, CommitUnknown):
+        raise ArtifactError(f"runtime authority visibility failure was not commit-unknown: {stage}")
+    elif stage == "installed_hook" and not crash.fired:
+        raise ArtifactError("runtime authority installed-hook failpoint did not fire")
+    elif stage == "parent_fsync" and not syscalls.fired:
+        raise ArtifactError("runtime authority parent-fsync failpoint did not fire")
+
+    visible = state.read_optional_existing_bytes(RUNTIME_AUTHORITY_FILENAME)
+    if pre_visibility and visible is not None:
+        raise ArtifactError(f"pre-visibility failure left a new runtime authority: {stage}")
+    if not pre_visibility and visible != payload:
+        raise ArtifactError(f"commit-unknown state lacks exact candidate authority: {stage}")
+    if visible is not None:
+        state.unlink_and_sync(
+            RUNTIME_AUTHORITY_FILENAME,
+            label="p5c1-runtime-authority-compensation",
+        )
+    if _runtime_target_snapshot(target) != prior:
+        raise ArtifactError(f"runtime authority compensation did not restore absence: {stage}")
+    generation_root = state_root / "workspaces/fixture/generations"
+    if strict_tree_sha256(generation_root) != generations_before:
+        raise ArtifactError(f"runtime authority compensation changed generations: {stage}")
+    return {
+        "stage": stage,
+        "failure": type(failure).__name__,
+        "pre_visibility": pre_visibility,
+        "candidate_visible_before_compensation": visible is not None,
+        "prior_state": prior,
+        "restored_state": _runtime_target_snapshot(target),
+        "generation_tree_sha256": generations_before,
+        "environment": environ,
+    }
+
+
+def _prove_runtime_authority_installation(
+    *,
+    artifact_root: Path,
+    trusted_manifest: bytes,
+    expected_sha256: str,
+    proof_root: Path,
+) -> dict[str, object]:
+    """Prove P5C1 installation only beneath disposable external-state roots."""
+
+    authority, payload, payload_sha256 = _validate_candidate_runtime_authority(
+        artifact_root=artifact_root,
+        trusted_manifest=trusted_manifest,
+        expected_sha256=expected_sha256,
+    )
+    if not proof_root.is_absolute():
+        raise ArtifactError("runtime authority proof root must be absolute")
+    if proof_root.exists() and any(proof_root.iterdir()):
+        raise ArtifactError(f"runtime authority proof root must be empty: {proof_root}")
+    proof_root.mkdir(parents=True, exist_ok=True)
+    success = _prove_successful_runtime_authority_install(
+        fixture_root=proof_root / "success",
+        payload=payload,
+        payload_sha256=payload_sha256,
+        authority=authority,
+    )
+    preexisting_conflict = _prove_preexisting_runtime_authority_conflict(
+        fixture_root=proof_root / "preexisting-conflict",
+        payload=payload,
+    )
+    stages = ("write", "temporary_fsync", "replace", "installed_hook", "parent_fsync")
+    failures = [
+        _prove_failed_runtime_authority_install(
+            fixture_root=proof_root / f"failure-{stage}",
+            payload=payload,
+            stage=stage,
+        )
+        for stage in stages
+    ]
+    return {
+        "authority_sha256": payload_sha256,
+        "trusted_expected_sha256": expected_sha256,
+        "canonical_round_trip": authority.canonical == payload,
+        "proof_policy": authority.semantic_queue_policy.to_dict(),
+        "scope": "p5c1-isolated-proof-authority-only",
+        "production_default": False,
+        "publication_authority": False,
+        "performance_qualification": False,
+        "success": success,
+        "preexisting_conflict": preexisting_conflict,
+        "failures": failures,
+        "absent_target_compensation": True,
+        "preexisting_target_preserved_without_mutation": True,
+        "generation_trees_unchanged": True,
+    }
+
+
 def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, object]:
     """Run isolated clean-home, provenance, tamper, and compensation proofs."""
     artifact_root = artifact_root.resolve()
@@ -1265,6 +1736,20 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
     proof_root.mkdir(parents=True, exist_ok=True)
     trusted = (artifact_root / "trusted-manifest.json").read_bytes()
     verify_trusted_manifest(artifact_root=artifact_root, trusted_manifest=trusted)
+    expected_runtime_authority_sha256 = _trusted_artifact_sha256(
+        trusted_manifest=trusted,
+        name=RUNTIME_AUTHORITY_FILENAME,
+    )
+    runtime_authority_installation = _prove_runtime_authority_installation(
+        artifact_root=artifact_root,
+        trusted_manifest=trusted,
+        expected_sha256=expected_runtime_authority_sha256,
+        proof_root=proof_root / "runtime-authority-installation",
+    )
+    write_proof(
+        proof_root / "runtime-authority-installation-proof.json",
+        runtime_authority_installation,
+    )
 
     tamper = prove_independent_tamper_rejection(
         artifact_root=artifact_root,
@@ -1349,11 +1834,13 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
     compensation_codex = compensation_home / ".codex"
     _write_prior_home(compensation_home, compensation_codex)
     candidate_binary = (proof_root / "home-one/.local/bin/graphify").read_bytes()
-    candidate_skill = (
-        proof_root / "home-one/.codex/skills/graphify/SKILL.md"
-    ).read_bytes()
+    candidate_skill = (proof_root / "home-one/.codex/skills/graphify/SKILL.md").read_bytes()
     with _temporary_environment(
-        {"HOME": str(compensation_home), "CODEX_HOME": str(compensation_codex)}
+        {
+            "HOME": str(compensation_home),
+            "XDG_STATE_HOME": str(compensation_home / ".local/state"),
+            "CODEX_HOME": str(compensation_codex),
+        }
     ):
         compensation = run_disposable_compensation_proof(
             home=compensation_home,
@@ -1361,16 +1848,29 @@ def prove_candidate(*, artifact_root: Path, proof_root: Path) -> dict[str, objec
             rollback_bundle=artifact_root / "offline-rollback.zip",
             candidate_files={
                 "binary": candidate_binary,
-                "runtime": (artifact_root / "runtime-requirements.txt").read_bytes(),
+                "runtime": (artifact_root / RUNTIME_AUTHORITY_FILENAME).read_bytes(),
                 "skill": candidate_skill,
                 "service": b"candidate-login-service-fixture\n",
             },
             fail_after="skill",
         )
     write_proof(proof_root / "compensation-proof.json", compensation)
+    restored_modes = compensation.get("restored_modes")
+    if not isinstance(restored_modes, Mapping) or restored_modes.get("runtime") != "0600":
+        raise ArtifactError("runtime authority compensation did not restore prior mode 0600")
+    restored = compensation.get("restored")
+    if (
+        not isinstance(restored, Mapping)
+        or restored.get("runtime") != hashlib.sha256(_PRIOR_FILES["runtime"]).hexdigest()
+    ):
+        raise ArtifactError("runtime authority compensation did not restore prior bytes")
 
     summary = {
         "artifact_manifest_sha256": sha256_file(artifact_root / "trusted-manifest.json"),
+        "runtime_manifest_sha256": expected_runtime_authority_sha256,
+        "runtime_authority_installation": True,
+        "absent_target_compensation": runtime_authority_installation["absent_target_compensation"],
+        "preexisting_target_compensation": compensation["runtime_target_restored"],
         "clean_homes": True,
         "upstream_provenance": True,
         "tamper_cases": len(tamper),

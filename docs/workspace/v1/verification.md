@@ -34,9 +34,11 @@
 - wheel package data contains every v1 schema;
 - the schema directory, wheel, and contract bundle match one explicit frozen
   member set rather than deriving expectations from files present at runtime;
-- runtime lock, skill, contract, fixtures, provenance, SBOM, rollback, and
-  compatibility artifacts are SHA-256 covered by a frozen trusted manifest;
-- independent wheel, skill, contract, and fixture-manifest tamper cases fail;
+- runtime lock, skill, contract, fixtures, provenance, SBOM, rollback,
+  compatibility, and canonical runtime-authority artifacts are SHA-256 covered
+  by a frozen trusted manifest;
+- independent wheel, skill, contract, fixture-manifest, and runtime-authority
+  tamper cases fail;
 - two isolated clean homes resolve identical candidate dependency manifests;
 - each clean-home Codex skill tree (including version and references) matches
   the bytes encoded by `skill-bundle.zip`;
@@ -46,6 +48,34 @@
   unchanged; and
 - the real global Graphify binary and installed skill tree match their pre-P1
   digests afterward.
+
+## P5C1 candidate runtime-authority gates
+
+- `runtime-manifest.json` is the strict canonical
+  `WorkspaceRuntimeAuthority` representation of the candidate's existing
+  `CompatibilityManifest` plus the explicit P5C1 isolated-proof policy
+  `(max_items=8, max_bytes=16384, retry_budget=1)`;
+- the outer trusted manifest covers `compatibility.json` and
+  `runtime-manifest.json` independently without a recursive compatibility hash,
+  and two complete candidate roots remain byte-identical;
+- candidate trust and the expected runtime-authority SHA-256 are checked before
+  any fixture state root is created;
+- `DurableStateRoot.install_once_bytes` creates exact candidate bytes at mode
+  `0600`, same-byte retry preserves the inode, and a different pre-existing
+  target fails closed with its bytes, mode, and inode unchanged;
+- deterministic write, temporary-fsync, and replace failures occur before
+  visibility and leave no new authority, while installed-hook and parent-fsync
+  `CommitUnknown` cases reconcile exact candidate bytes and compensate to the
+  prior absent state;
+- the unchanged P5B1 loader reads the installed authority without explicit
+  state writes or changes to observed mode, mtime, size, type, or file bytes;
+  every failure fixture preserves generation-tree bytes, and the existing
+  offline compensation proof restores a pre-existing runtime target's exact
+  bytes and mode; and
+- every install/failure fixture stays beneath disposable absolute `HOME`,
+  `XDG_STATE_HOME`, and `CODEX_HOME` roots. The proof supplies no production
+  default, publication, performance, service, provider, or global-install
+  authority.
 
 ## H2 candidate packaging and security gates
 

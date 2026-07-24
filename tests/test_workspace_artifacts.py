@@ -693,6 +693,11 @@ def test_candidate_audit_covers_runtime_all_extras_and_dev_scopes(
     monkeypatch.setattr(candidate_artifacts, "verify_trusted_manifest", lambda **_kwargs: None)
     monkeypatch.setattr(
         candidate_artifacts,
+        "_validate_candidate_runtime_authority",
+        lambda **_kwargs: (None, b"fixture", "runtime-authority-sha256"),
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
         "sha256_file",
         lambda path: "lock-sha256" if path.name == "uv.lock" else f"sha256:{path.name}",
     )
@@ -822,6 +827,11 @@ def test_candidate_audit_rejects_resigned_checkout_or_lock_identity_drift(
         lambda _repo: ("head", "tree"),
     )
     monkeypatch.setattr(candidate_artifacts, "verify_trusted_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_validate_candidate_runtime_authority",
+        lambda **_kwargs: (None, b"fixture", "runtime-authority-sha256"),
+    )
     monkeypatch.setattr(
         candidate_artifacts,
         "sha256_file",
@@ -1259,7 +1269,16 @@ def test_absolute_candidate_update_does_not_refresh_real_home_skills(tmp_path: P
 def test_locally_frozen_manifest_rejects_independent_required_artifact_tamper(
     tmp_path: Path,
 ) -> None:
-    _, trusted = _build_candidate(tmp_path / "repo", tmp_path / "candidate")
+    artifacts, _ = _build_candidate(tmp_path / "repo", tmp_path / "candidate")
+    runtime_authority = _write(
+        tmp_path / "candidate/runtime-manifest.json",
+        canonical_json_bytes({"fixture": "candidate-runtime-authority"}),
+    )
+    artifacts[runtime_authority.name] = runtime_authority
+    trusted = write_trusted_manifest(
+        artifact_root=tmp_path / "candidate",
+        artifact_names=sorted(artifacts),
+    )
 
     results = prove_independent_tamper_rejection(
         artifact_root=tmp_path / "candidate",
@@ -1271,6 +1290,7 @@ def test_locally_frozen_manifest_rejects_independent_required_artifact_tamper(
         "skill-bundle.zip",
         "contract-bundle.zip",
         "fixture-manifest.json",
+        "runtime-manifest.json",
     }
     assert all("digest mismatch" in result for result in results.values())
     verify_trusted_manifest(artifact_root=tmp_path / "candidate", trusted_manifest=trusted)
@@ -1451,7 +1471,14 @@ def test_disposable_home_failpoint_compensates_offline_and_preserves_generations
         str(skill.parent / "references/candidate.md"),
     ]
     assert proof["generations_unchanged"] is True
+    assert proof["runtime_target_restored"] is True
     assert proof["restored"] == before
+    assert proof["restored_modes"] == {
+        "binary": "0755",
+        "runtime": "0644",
+        "skill": "0644",
+        "service": "0644",
+    }
     assert proof["generations_tree_sha256_before"] == generations_before
     assert proof["generations_tree_sha256_after"] == generations_before
     assert sha256_file(canary)
