@@ -1,6 +1,7 @@
 # Graphify workspace contract v1
 
-Status: P5B2b provider-neutral code-only structural sync, P5B2b0 staged
+Implemented contract scope through P5B2b provider-neutral code-only structural
+sync, P5B2b0 staged
 structural-build recovery, P5B2a initial workspace registration, P5B1 read-only
 workspace status/doctor, P5A semantic queue, P4 adapter, and observed-current
 library runtime for `graphifyy 0.9.16+workspace.1`. Durable state schema v1 and
@@ -23,8 +24,9 @@ commands read the canonical, versioned `runtime-manifest.json` authority from
 the external state root selected by `XDG_STATE_HOME` or `HOME`; missing,
 malformed, unsafe, or unsupported authority fails closed without creating or
 repairing state. P5B1 only consumes that file. Its candidate-backed atomic
-installation remains P5C work, alongside retained production query/service
-authority. P5B2a adds only `graphify workspace register enroll` for initial
+installation and compensation proof remain P5C1 work. Later P5C retains
+production query/service authority. P5B2a adds only
+`graphify workspace register enroll` for initial
 enrollment and `graphify workspace register adopt` for an already-enrolled
 verified clone or fork whose retained history includes a root recorded at
 enrollment. A shallow clone that omits that root fails the shared-history proof
@@ -48,18 +50,24 @@ surface nonterminal staged-build recovery barriers through status schema v2.
 Provider selection, networking, semantic execution, and every other workspace
 command remain deferred.
 
-## Deferred work ownership
+## Governance and deferred work ownership
 
-The external execution checklist and global plan own changing status, exact
-commits, and proof receipts. This section owns only stable responsibility
-boundaries, reconciled through merged workspace PR #12; it deliberately does
-not duplicate live SHAs or declare a next batch ready.
+The publication gate in [Workspace governance](governance.md) requires one
+published `workspace/v1` commit to add the governance ledger and receipts and
+update this ownership map. Until that gate activates, the external execution
+checklist and global plan retain Graphify-local status, readiness, and receipt
+authority, and these repository files are proposed migration records. After
+activation, Workspace governance owns Graphify-local live phase/readiness
+state, its [accepted receipts](receipts/) own completion evidence, and the
+external plans retain only cross-repository dependencies and P6-P12 portfolio
+sequencing. Direct operator instruction alone owns execution authorization.
 
 | Area | Future owner | Stable boundary |
 |---|---|---|
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
 | Remaining workspace commands | Remaining P5B2 | Query, migrate, rollback, GC, repair, rebind, rotation, activation, and other operator mutations require separately reviewed contracts and explicit operator intent. |
-| Service, release, and resource proof | P5C | Watch/service supervision, candidate-backed authority installation, publication, representative-corpus performance and resource accounting, record admission budgets, and any shared workspace read-lock optimization remain one benchmark-first release gate. |
+| Candidate runtime authority | P5C1 | Generate canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, bind its exact bytes/hash to the immutable candidate, install it atomically only in isolated external-state fixtures, prove deterministic-failure compensation, and preserve P5B1's read-only loader unchanged. |
+| Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
 | Portfolio migration and cutover | P6-P12 | Shadow migrations precede the P9 global installation and stable-route activation; legacy pruning remains separately authorized after the observation window. |
 | Semantic capability selection | Unranked cross-cutting follow-up | With no Gemini key, an interactive Graphify skill can use its active host agent; in Codex that means the current Codex-authenticated session. A direct headless fallback from `graphify extract` to Codex OAuth is desired but is not implemented or promised by v1. Any such backend requires a separate explicit authority, selection-precedence, opt-in, redaction, offline/failure, and test contract; provider choice must never be inferred from an absent credential. |
@@ -128,6 +136,8 @@ or fork engine logic inside the package.
 
 ## Documents
 
+- [Workspace governance](governance.md)
+- [Accepted governance receipts](receipts/)
 - [Architecture](architecture.md)
 - [State contracts](state-contract.md)
 - [P3 runtime](p3-runtime.md)
