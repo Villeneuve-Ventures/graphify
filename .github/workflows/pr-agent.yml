@@ -12,14 +12,12 @@ concurrency:
   # events use a run-specific namespace and cannot displace an eligible review.
   group: >-
     pr-agent-${{
-      (
+      case(
         github.event_name == 'pull_request' &&
         github.event.sender.type != 'Bot' &&
         github.event.pull_request.draft == false &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        github.event.pull_request.number
-      ) ||
-      (
+        github.event.pull_request.head.repo.full_name == github.repository,
+        github.event.pull_request.number,
         github.event_name == 'issue_comment' &&
         github.event.sender.type != 'Bot' &&
         github.event.issue.pull_request &&
@@ -27,10 +25,10 @@ concurrency:
         contains(
           fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
           github.event.comment.author_association
-        ) &&
-        github.event.issue.number
-      ) ||
-      format('run-{0}', github.run_id)
+        ),
+        github.event.issue.number,
+        format('run-{0}', github.run_id)
+      )
     }}
   cancel-in-progress: false
 

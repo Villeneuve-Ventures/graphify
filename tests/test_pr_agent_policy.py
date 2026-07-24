@@ -98,16 +98,29 @@ def test_ineligible_pull_request_runs_use_isolated_concurrency_groups() -> None:
     concurrency = workflow.split("concurrency:", 1)[1].split("\njobs:", 1)[0]
 
     eligible_pull_request_group = """
-      (
+      case(
         github.event_name == 'pull_request' &&
         github.event.sender.type != 'Bot' &&
         github.event.pull_request.draft == false &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        github.event.pull_request.number
-      ) ||
+        github.event.pull_request.head.repo.full_name == github.repository,
+        github.event.pull_request.number,
+"""
+    trusted_prreview_group = """
+        github.event_name == 'issue_comment' &&
+        github.event.sender.type != 'Bot' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/prreview' &&
+        contains(
+          fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'),
+          github.event.comment.author_association
+        ),
+        github.event.issue.number,
 """
     assert eligible_pull_request_group in concurrency
+    assert trusted_prreview_group in concurrency
     assert "\n      github.event.pull_request.number ||\n" not in concurrency
+    assert "&&\n        github.event.pull_request.number" not in concurrency
+    assert "&&\n        github.event.issue.number" not in concurrency
     assert "format('run-{0}', github.run_id)" in concurrency
     assert "\n      github.run_id\n" not in concurrency
     assert "cancel-in-progress: false" in concurrency
