@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-07-24T14:55:10Z`
+Ledger refresh: `2026-07-24T20:56:06Z`
 
 This document becomes the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -41,11 +41,11 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical checkout | Repository root; `workspace/v1` at `ac5ac55bbd93e23c727aa1fd946d194f8729930e`, tree `ec6d9e8dd2106472d595d2d7059b45b2c9d51517`; working-tree changes were limited to the four `docs/workspace/v1` documentation changes in this governance batch; upstream divergence `0/0` |
-| Worktrees | Canonical checkout only |
-| GitHub | No open pull requests; repository Issues are disabled |
-| P5B2b delivery | PR [#14](https://github.com/Villeneuve-Ventures/graphify/pull/14); exact reviewed head `156797507c84bcad7e2ff0689e6e4ba6d3afa23c`; merge `513e6a6a5287362e62d8763213179149592e0368`; merge-head CI `30037483038` passed all four jobs; current `workspace/v1` descends from both reviewed head and merge |
-| Support baseline | CPython `3.14+`; observed host CPython `3.14.6`; uv `0.11.30` |
+| Canonical checkout | Repository root; `workspace/v1` at `f5d8728d3935c13ad93edd130786fc0542c249c6`, tree `4c6ca29067214711a757b9488a1ce22ac123e44c`; clean and synchronized with `origin/workspace/v1` at upstream divergence `0/0` |
+| Worktrees | The canonical checkout was the only worktree at the fail-closed pre-edit preflight. One isolated governance-only proposal worktree now exists on local branch `codex/p5c1-governance-closeout`; the P5C1 delivery worktree is absent. |
+| GitHub | PR [#20](https://github.com/Villeneuve-Ventures/graphify/pull/20) is merged; the fork repository has no open pull requests |
+| P5C1 delivery | Exact reviewed head `e65ac020ebb46152fb0c0d9ff2b4f6cbaf8bb889`; merge `f5d8728d3935c13ad93edd130786fc0542c249c6`; reviewed/merge tree `4c6ca29067214711a757b9488a1ce22ac123e44c`; exact-head CI `30121615440` passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded; current `workspace/v1` descends from both reviewed head and merge |
+| Support baseline | Observed host CPython `3.14.6`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
 orientation only and cannot justify execution.
@@ -71,7 +71,7 @@ orientation only and cannot justify execution.
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
 | Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, query, migrate, rollback, GC, repair, rebind, rotation, activation, and every other command require separate review. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
-| P5C1 | P5B2b | READY | Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof. This is the sole ready child. |
+| P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
 | Remaining P5C concerns | P5C | WAITING | Watch/service, performance, shared-lock/root-traversal optimization, publication, retained query/service authority, and all other P5C work remain unchanged. |
 
 P6-P12 are intentionally absent from this Graphify-local ledger. Their
@@ -92,7 +92,10 @@ P5C1 is limited to all of the following as one reviewable proof boundary:
 P5C1 excludes real `HOME`, XDG, and `CODEX_HOME` state; watch/service work;
 performance or resource qualification; shared-lock or root-traversal
 optimization; publication; retained production query/service authority; H3;
-P6+; and every remaining P5B2 command. Product implementation has not started.
+P6+; and every remaining P5B2 command. The bounded candidate/proof
+implementation is complete under the accepted
+[`P5C1` receipt](receipts/p5c1.md); none of those exclusions changed, and no
+later child is `READY`.
 
 ## Migration provenance
 
