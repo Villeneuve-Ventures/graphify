@@ -42,7 +42,7 @@
 - two isolated clean homes resolve identical candidate dependency manifests;
 - each clean-home Codex skill tree (including version and references) matches
   the bytes encoded by `skill-bundle.zip`;
-- fixture-backed compensation restores binary, dependency, skill, and service
+- fixture-backed compensation restores binary, runtime-authority, skill, and service
   bytes offline by declared plan order, rejects untracked mutations or executor
   order drift, publishes transaction/plan preimages, and leaves generations
   unchanged; and
