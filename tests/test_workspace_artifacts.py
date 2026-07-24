@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 import json
 import os
@@ -1004,6 +1005,186 @@ def test_candidate_entrypoints_reject_wrong_uv_before_writing_output(
 
     assert not candidate_root.exists()
     assert not proof_root.exists()
+
+
+def test_candidate_assembly_freezes_runtime_authority_across_identical_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _write(repo / "uv.lock", "version = 1\n")
+
+    def build_wheel(_repo: Path, destination: Path) -> Path:
+        return _write(destination, b"fixture-wheel")
+
+    def export_runtime(_source: Path, requirements: Path, sbom: Path) -> None:
+        _write(requirements, "networkx==3.6.1\n")
+        _write(sbom, "{}\n")
+
+    def static_bundles(*, output_root: Path, wheel: Path, **_kwargs: object) -> dict[str, Path]:
+        names = (
+            "skill-bundle.zip",
+            "contract-bundle.zip",
+            "fixture-bundle.zip",
+            "fixture-manifest.json",
+            "runtime-bundle.zip",
+        )
+        artifacts = {name: _write(output_root / name, name) for name in names}
+        artifacts[wheel.name] = _write(output_root / wheel.name, wheel.read_bytes())
+        return artifacts
+
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_assert_candidate_source",
+        lambda _repo: ("a" * 40, "b" * 40),
+    )
+    monkeypatch.setattr(candidate_artifacts, "_assert_safe_output_root", lambda *_args: None)
+    monkeypatch.setattr(candidate_artifacts, "_extract_head", lambda *_args: None)
+    monkeypatch.setattr(candidate_artifacts, "_render_codex_skill", lambda _source: None)
+    monkeypatch.setattr(candidate_artifacts, "_build_reproducible_wheel", build_wheel)
+    monkeypatch.setattr(candidate_artifacts, "_export_runtime", export_runtime)
+    monkeypatch.setattr(candidate_artifacts, "build_static_bundles", static_bundles)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_build_offline_rollback",
+        lambda destination: _write(destination, b"fixture-rollback"),
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, stdout="uv 0.11.30\n", stderr=""
+        ),
+    )
+
+    first = tmp_path / "candidate-one"
+    second = tmp_path / "candidate-two"
+    first_result = build_candidate(repo_root=repo, output_root=first)
+    build_candidate(repo_root=repo, output_root=second)
+
+    runtime = first / "runtime-manifest.json"
+    authority = candidate_artifacts.WorkspaceRuntimeAuthority.from_json(runtime.read_bytes())
+    compatibility = (first / "compatibility.json").read_bytes()
+    trusted = (first / "trusted-manifest.json").read_bytes()
+    manifest = candidate_artifacts.ArtifactManifest.from_json(trusted).to_dict()
+    runtime_entry = next(entry for entry in manifest["artifacts"] if entry["path"] == runtime.name)
+
+    assert authority.canonical == runtime.read_bytes()
+    assert authority.compatibility_manifest.canonical == compatibility
+    assert authority.semantic_queue_policy.to_dict() == {
+        "contract": "graphify.workspace.semantic_queue_policy.internal",
+        "format_version": 1,
+        "max_items": 8,
+        "max_bytes": 16_384,
+        "retry_budget": 1,
+    }
+    assert runtime_entry == {
+        "path": runtime.name,
+        "file_type": "regular_file",
+        "size": runtime.stat().st_size,
+        "sha256": sha256_file(runtime),
+        "mode": "0644",
+    }
+    assert first_result["runtime_manifest_sha256"] == sha256_file(runtime)
+    assert compare_candidate_roots(first=first, second=second)["byte_identical"] is True
+
+
+def test_candidate_proof_wires_runtime_authority_into_installation_and_compensation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "candidate"
+    artifacts, _ = _build_candidate(tmp_path / "repo", artifact_root)
+    runtime = _write(artifact_root / "runtime-manifest.json", b"runtime-authority\n")
+    rollback = _write(artifact_root / "offline-rollback.zip", b"rollback\n")
+    artifacts.update({runtime.name: runtime, rollback.name: rollback})
+    trusted = write_trusted_manifest(
+        artifact_root=artifact_root,
+        artifact_names=sorted(artifacts),
+    )
+    proof_root = tmp_path / "proof"
+    expected_skill_tree = skill_bundle_tree_sha256(artifact_root / "skill-bundle.zip")
+    installation_calls: list[dict[str, object]] = []
+    compensation_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(candidate_artifacts, "_uv", lambda: "/fixture/uv")
+
+    def prove_installation(**kwargs: object) -> dict[str, object]:
+        installation_calls.append(kwargs)
+        return {"absent_target_compensation": True}
+
+    def install_clean_home(*, home: Path, **_kwargs: object) -> dict[str, str]:
+        _write(home / ".local/bin/graphify", "#!/bin/sh\n", executable=True)
+        _write(home / ".codex/skills/graphify/SKILL.md", "candidate skill\n")
+        return {
+            "dependency_manifest_sha256": "dependencies",
+            "skill_tree_sha256": expected_skill_tree,
+        }
+
+    def compensate(**kwargs: object) -> dict[str, object]:
+        compensation_calls.append(kwargs)
+        return {
+            "restored_modes": {"runtime": "0600"},
+            "restored": {"runtime": hashlib.sha256(b"graphifyy==0.9.16\n").hexdigest()},
+            "runtime_target_restored": True,
+            "generations_unchanged": True,
+        }
+
+    monkeypatch.setattr(
+        candidate_artifacts, "_prove_runtime_authority_installation", prove_installation
+    )
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "prove_independent_tamper_rejection",
+        lambda **_kwargs: {"runtime-manifest.json": "rejected"},
+    )
+    monkeypatch.setattr(candidate_artifacts, "_install_clean_home", install_clean_home)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_download_verified_upstream_wheel",
+        lambda _destination: {
+            "path": tmp_path / "upstream.whl",
+            "logical_requirement": "graphifyy==0.9.16",
+            "source_url": "https://example.invalid",
+            "filename": "upstream.whl",
+            "sha256": "upstream",
+        },
+    )
+    monkeypatch.setattr(candidate_artifacts, "_isolated_environment", lambda *_args: {})
+    monkeypatch.setattr(candidate_artifacts, "_write_prior_home", lambda *_args: None)
+    monkeypatch.setattr(candidate_artifacts, "run_disposable_compensation_proof", compensate)
+    monkeypatch.setattr(
+        candidate_artifacts,
+        "_run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, stdout="graphify 0.9.16\n", stderr=""
+        ),
+    )
+
+    summary = prove_candidate(artifact_root=artifact_root, proof_root=proof_root)
+
+    assert installation_calls == [
+        {
+            "artifact_root": artifact_root,
+            "trusted_manifest": trusted,
+            "expected_sha256": sha256_file(runtime),
+            "proof_root": proof_root / "runtime-authority-installation",
+        }
+    ]
+    assert len(compensation_calls) == 1
+    assert compensation_calls[0]["candidate_files"] == {
+        "binary": b"#!/bin/sh\n",
+        "runtime": runtime.read_bytes(),
+        "skill": b"candidate skill\n",
+        "service": b"candidate-login-service-fixture\n",
+    }
+    assert json.loads((proof_root / "runtime-authority-installation-proof.json").read_text()) == {
+        "absent_target_compensation": True
+    }
+    assert summary["runtime_authority_installation"] is True
+    assert summary["absent_target_compensation"] is True
+    assert summary["preexisting_target_compensation"] is True
 
 
 def test_upstream_wheel_selector_binds_exact_pypi_file_and_digest() -> None:
