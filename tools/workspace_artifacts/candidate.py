@@ -1623,7 +1623,7 @@ def _prove_failed_runtime_authority_install(
             payload,
             label="p5c1-runtime-authority",
         )
-    except BaseException as exc:
+    except Exception as exc:
         failure = exc
     else:
         raise ArtifactError(f"runtime authority failpoint did not fire: {stage}")

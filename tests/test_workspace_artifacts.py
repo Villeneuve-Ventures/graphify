@@ -1126,7 +1126,11 @@ def test_candidate_proof_wires_runtime_authority_into_installation_and_compensat
         compensation_calls.append(kwargs)
         return {
             "restored_modes": {"runtime": "0600"},
-            "restored": {"runtime": hashlib.sha256(b"graphifyy==0.9.16\n").hexdigest()},
+            "restored": {
+                "runtime": hashlib.sha256(
+                    candidate_artifacts._PRIOR_FILES["runtime"]
+                ).hexdigest()
+            },
             "runtime_target_restored": True,
             "generations_unchanged": True,
         }

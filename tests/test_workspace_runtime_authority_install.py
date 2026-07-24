@@ -101,6 +101,27 @@ def test_runtime_authority_rejects_untrusted_expected_digest_before_install(
     assert not proof_root.exists()
 
 
+@pytest.mark.parametrize("process_exit", [KeyboardInterrupt, SystemExit])
+def test_runtime_authority_failure_classifier_does_not_swallow_process_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_exit: type[BaseException],
+) -> None:
+    class ProcessExitSyscalls(candidate._P5C1InstallFaultSyscalls):
+        def write(self, descriptor: int, data: memoryview) -> int:
+            del descriptor, data
+            raise process_exit()
+
+    monkeypatch.setattr(candidate, "_P5C1InstallFaultSyscalls", ProcessExitSyscalls)
+
+    with pytest.raises(process_exit):
+        candidate._prove_failed_runtime_authority_install(
+            fixture_root=tmp_path / "proof",
+            payload=b"candidate-runtime-authority\n",
+            stage="write",
+        )
+
+
 def test_runtime_authority_installation_proof_is_isolated_and_compensates_failures(
     tmp_path: Path,
 ) -> None:
