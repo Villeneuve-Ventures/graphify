@@ -2,7 +2,7 @@ name: PR Agent
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, review_requested, synchronize]
+    types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created, edited]
 
@@ -71,7 +71,7 @@ jobs:
           python -m pip install --disable-pip-version-check
           "git+https://github.com/qodo-ai/pr-agent.git@1885eb4056887b8c8a530f0a35b842bba05cb425"
 
-      - name: Run PR-Agent review
+      - name: Run PR-Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -84,16 +84,22 @@ jobs:
           config.custom_model_max_tokens: "1048576"
           config.max_model_tokens: "65536"
           github_action_config.auto_review: "true"
-          github_action_config.auto_describe: "false"
+          github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "false"
-          # The pinned runner handles synchronize through its push-trigger path.
-          # /review is internal here; the public issue-comment command is
-          # /prreview and is translated immediately before request handling.
-          github_action_config.handle_push_trigger: "true"
-          github_action_config.push_commands: "/review"
+          # Publish the generated summary as its own persistent comment instead
+          # of replacing the maintainer-authored PR title or description.
+          pr_description.publish_description_as_comment: "true"
+          pr_description.publish_description_as_comment_persistent: "true"
+          # Initial non-draft events run the summary and full review. Later
+          # changes wait for an explicit /prreview incremental review request.
+          github_action_config.handle_push_trigger: "false"
+          pr_reviewer.publish_output_no_suggestions: "true"
+          pr_reviewer.persistent_comment: "true"
+          pr_reviewer.final_update_message: "true"
         run: |
           python - <<'PY'
           import asyncio
+          import os
 
           from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
 
@@ -106,36 +112,99 @@ jobs:
               if model not in SUPPORT_REASONING_EFFORT_MODELS:
                   SUPPORT_REASONING_EFFORT_MODELS.append(model)
 
-          # The pinned runner catches review exceptions and otherwise lets the
-          # Actions step exit successfully. Wrap the review path so a missing
-          # model prediction or failed persistent-comment publication makes the
-          # check fail instead of producing a false green result.
+          # The pinned tools catch their own exceptions. Wrap both initial tools
+          # so a missing prediction or publication fails the Actions check.
           from pr_agent.agent.pr_agent import PRAgent
+          from pr_agent.tools.pr_description import PRDescription
           from pr_agent.tools.pr_reviewer import PRReviewer
 
-          original_review = PRReviewer.run
-          verification = {"review_completed": False}
+          verification = {
+              "description_completed": False,
+              "incremental_review": False,
+              "review_completed": False,
+          }
 
-          async def run_verified_review(self):
-              review_published = False
+          original_description = PRDescription.run
+
+          async def run_verified_description(self):
+              description_published = False
               original_publish = self.git_provider.publish_persistent_comment
 
-              def publish_verified_review(*args, **kwargs):
-                  nonlocal review_published
+              def publish_verified_description(*args, **kwargs):
+                  nonlocal description_published
                   result = original_publish(*args, **kwargs)
-                  review_published = True
+                  if kwargs.get("name") == "describe":
+                      description_published = True
                   return result
 
-              self.git_provider.publish_persistent_comment = publish_verified_review
+              self.git_provider.publish_persistent_comment = (
+                  publish_verified_description
+              )
               try:
-                  await original_review(self)
+                  await original_description(self)
               finally:
                   self.git_provider.publish_persistent_comment = original_publish
 
               if not self.prediction:
-                  raise RuntimeError("PR-Agent did not produce a model prediction")
-              if not review_published:
-                  raise RuntimeError("PR-Agent did not publish its persistent review")
+                  raise RuntimeError("PR-Agent did not produce a summary prediction")
+              if not description_published:
+                  raise RuntimeError("PR-Agent did not publish its summary comment")
+              verification["description_completed"] = True
+
+          PRDescription.run = run_verified_description
+
+          original_review = PRReviewer.run
+
+          async def run_verified_review(self):
+              requested_incremental = bool(self.args and self.args[0] == "-i")
+              persistent_review_published = False
+              incremental_review_published = False
+              original_publish_persistent = (
+                  self.git_provider.publish_persistent_comment
+              )
+              original_publish_comment = self.git_provider.publish_comment
+
+              def publish_verified_persistent_review(*args, **kwargs):
+                  nonlocal persistent_review_published
+                  result = original_publish_persistent(*args, **kwargs)
+                  persistent_review_published = True
+                  return result
+
+              def publish_verified_incremental_review(*args, **kwargs):
+                  nonlocal incremental_review_published
+                  result = original_publish_comment(*args, **kwargs)
+                  if not kwargs.get("is_temporary", False):
+                      incremental_review_published = True
+                  return result
+
+              self.git_provider.publish_persistent_comment = (
+                  publish_verified_persistent_review
+              )
+              self.git_provider.publish_comment = publish_verified_incremental_review
+              try:
+                  await original_review(self)
+              finally:
+                  self.git_provider.publish_persistent_comment = (
+                      original_publish_persistent
+                  )
+                  self.git_provider.publish_comment = original_publish_comment
+
+              if requested_incremental:
+                  if not incremental_review_published:
+                      raise RuntimeError(
+                          "PR-Agent did not publish its incremental review"
+                      )
+              else:
+                  if not self.prediction:
+                      raise RuntimeError(
+                          "PR-Agent did not produce a review prediction"
+                      )
+                  if not persistent_review_published:
+                      raise RuntimeError(
+                          "PR-Agent did not publish its persistent review"
+                      )
+
+              verification["incremental_review"] = requested_incremental
               verification["review_completed"] = True
 
           PRReviewer.run = run_verified_review
@@ -143,10 +212,10 @@ jobs:
           original_handle_request = PRAgent.handle_request
 
           async def handle_verified_request(self, pr_url, request, *args, **kwargs):
-              # /prreview is the public GitHub command. Translate it to the
-              # pinned PR-Agent command without exposing /review to other apps.
+              # /prreview is the public GitHub command. Translate it to an
+              # incremental review without exposing /review to other apps.
               if isinstance(request, str) and request.strip().lower() == "/prreview":
-                  request = "/review"
+                  request = "/review -i"
 
               handled = await original_handle_request(
                   self, pr_url, request, *args, **kwargs
@@ -162,4 +231,10 @@ jobs:
           asyncio.run(run_action())
           if not verification["review_completed"]:
               raise RuntimeError("PR-Agent did not complete a verified review")
+          if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+              if not verification["description_completed"]:
+                  raise RuntimeError("PR-Agent did not complete a verified summary")
+          if os.environ.get("GITHUB_EVENT_NAME") == "issue_comment":
+              if not verification["incremental_review"]:
+                  raise RuntimeError("/prreview did not request an incremental review")
           PY
