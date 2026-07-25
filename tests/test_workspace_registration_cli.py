@@ -567,6 +567,34 @@ def test_register_usage_errors_do_not_read_stdin_or_discover_state(
     )
 
 
+def test_register_internal_dispatch_rejects_unsupported_action_before_authority_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    monkeypatch.setattr(
+        workspace_cli,
+        "load_workspace_runtime_inputs",
+        lambda: pytest.fail("unsupported register action must not load authority"),
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    with pytest.raises(AssertionError, match="unsupported register action: ACTIVATE"):
+        workspace_cli._run_registration(
+            workspace_cli._RegisterRequest(
+                action=IdentityAction.ACTIVATE,
+                repo_uuid=REPO_UUID,
+                expected_registry_revision=0,
+            ),
+            inputs=None,
+            output=stdout,
+            errors=stderr,
+        )
+
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == ""
+
+
 @pytest.mark.parametrize(
     "error, state, exit_code",
     [

@@ -668,6 +668,13 @@ def _run_registration(
     output: TextIO,
     errors: TextIO,
 ) -> int:
+    if request.action not in {
+        IdentityAction.ENROLL,
+        IdentityAction.ADOPT,
+        IdentityAction.REBIND,
+        IdentityAction.ROTATE,
+    }:
+        raise AssertionError(f"unsupported register action: {request.action.value}")
     identity_maintenance = request.action in {
         IdentityAction.REBIND,
         IdentityAction.ROTATE,
@@ -758,11 +765,15 @@ def _run_registration(
                     authorization,
                     expected_revision=request.expected_registry_revision,
                 )
-            else:
+            elif request.action is IdentityAction.ROTATE:
                 document = runtime.registry.rotate_enrollment_evidence(
                     source,
                     authorization,
                     expected_revision=request.expected_registry_revision,
+                )
+            else:
+                raise AssertionError(
+                    f"unsupported register action: {request.action.value}"
                 )
             try:
                 revision = int(document.to_dict()["revision"])
