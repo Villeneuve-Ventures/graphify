@@ -12,6 +12,7 @@ from the verified canonical branch.
 ## Accepted receipts
 
 - [P5B2b provider-neutral structural sync](p5b2b.md)
+- [P5C1 candidate runtime authority and isolated installation proof](p5c1.md)
 
 ## Historical evidence before this index
 

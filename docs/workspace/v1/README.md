@@ -1,10 +1,11 @@
 # Graphify workspace contract v1
 
-Implemented contract scope through P5B2b provider-neutral code-only structural
-sync, P5B2b0 staged
-structural-build recovery, P5B2a initial workspace registration, P5B1 read-only
-workspace status/doctor, P5A semantic queue, P4 adapter, and observed-current
-library runtime for `graphifyy 0.9.16+workspace.1`. Durable state schema v1 and
+Implemented contract scope through P5C1 candidate-bound canonical runtime
+authority generation and isolated atomic installation/compensation proof,
+P5B2b provider-neutral code-only structural sync, P5B2b0 staged structural-build
+recovery, P5B2a initial workspace registration, P5B1 read-only workspace
+status/doctor, P5A semantic queue, P4 adapter, and observed-current library
+runtime for `graphifyy 0.9.16+workspace.1`. Durable state schema v1 and
 runtime-manifest format v1 remain frozen; public status JSON is schema v2.
 
 This directory defines the first version of Graphify's workspace control-plane
@@ -23,9 +24,13 @@ root plus versioned read-only `graphify workspace status --json` and
 commands read the canonical, versioned `runtime-manifest.json` authority from
 the external state root selected by `XDG_STATE_HOME` or `HOME`; missing,
 malformed, unsafe, or unsupported authority fails closed without creating or
-repairing state. P5B1 only consumes that file. Its candidate-backed atomic
-installation and compensation proof remain P5C1 work. Later P5C retains
-production query/service authority. P5B2a adds only
+repairing state. P5B1 only consumes that file. P5C1 now generates its canonical
+candidate-bound bytes, binds them to the immutable candidate trust set, and
+proves atomic installation and compensation only beneath disposable
+external-state roots while preserving P5B1's loader unchanged. It supplies no
+production installation, publication, service/watch, provider, or performance
+authority.
+Later P5C retains production query/service authority. P5B2a adds only
 `graphify workspace register enroll` for initial
 enrollment and `graphify workspace register adopt` for an already-enrolled
 verified clone or fork whose retained history includes a root recorded at
@@ -62,11 +67,11 @@ state, its [accepted receipts](receipts/) own completion evidence, and the
 external plans retain only cross-repository dependencies and P6-P12 portfolio
 sequencing. Direct operator instruction alone owns execution authorization.
 
-| Area | Future owner | Stable boundary |
+| Area | Owner/status | Stable boundary |
 |---|---|---|
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
 | Remaining workspace commands | Remaining P5B2 | Query, migrate, rollback, GC, repair, rebind, rotation, activation, and other operator mutations require separately reviewed contracts and explicit operator intent. |
-| Candidate runtime authority | P5C1 | Generate canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, bind its exact bytes/hash to the immutable candidate, install it atomically only in isolated external-state fixtures, prove deterministic-failure compensation, and preserve P5B1's read-only loader unchanged. |
+| Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
 | Portfolio migration and cutover | P6-P12 | Shadow migrations precede the P9 global installation and stable-route activation; legacy pruning remains separately authorized after the observation window. |
