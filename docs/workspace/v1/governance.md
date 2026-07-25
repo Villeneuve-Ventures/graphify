@@ -1,19 +1,22 @@
 # Workspace governance
 
-Ledger refresh: `2026-07-24T20:56:06Z`
+Ledger refresh: `2026-07-25T13:51:21Z`
 
-This document becomes the canonical live ledger for Graphify-local phases
+This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
-after the publication gate is satisfied. That gate requires one commit
-reachable from the published `Villeneuve-Ventures/graphify@workspace/v1` branch
-to add this file, [`receipts/README.md`](receipts/README.md), and
+after the one-time migration publication gate was satisfied. That gate required
+one commit reachable from the published
+`Villeneuve-Ventures/graphify@workspace/v1` branch to add this file,
+[`receipts/README.md`](receipts/README.md), and
 [`receipts/p5b2b.md`](receipts/p5b2b.md), and to update
-[`README.md`](README.md) to identify this repository authority set. Until then,
-the external execution checklist and global plan remain the active
-Graphify-local authority, and these files are proposed migration records. If
-the publication gate cannot be verified, authority fails closed to those
-external plans. After activation, the external plans retain authority only for
-cross-repository dependencies and P6-P12 portfolio sequencing.
+[`README.md`](README.md) to identify this repository authority set. Later
+receipts do not expand or reopen that initial gate: each becomes repo-local
+accepted evidence only when its separate governance-only commit is published
+and merged, and [`receipts/README.md`](receipts/README.md) is the current
+accepted-receipt inventory. If the initial gate cannot be verified, authority
+fails closed to the external execution checklist and global plan. After
+activation, those external plans retain authority only for cross-repository
+dependencies and P6-P12 portfolio sequencing.
 
 ## Authority precedence
 
@@ -41,10 +44,10 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical checkout | Repository root; `workspace/v1` at `f5d8728d3935c13ad93edd130786fc0542c249c6`, tree `4c6ca29067214711a757b9488a1ce22ac123e44c`; clean and synchronized with `origin/workspace/v1` at upstream divergence `0/0` |
-| Worktrees | The canonical checkout was the only worktree at the fail-closed pre-edit preflight. One isolated governance-only proposal worktree now exists on local branch `codex/p5c1-governance-closeout`; the P5C1 delivery worktree is absent. |
-| GitHub | PR [#20](https://github.com/Villeneuve-Ventures/graphify/pull/20) is merged; the fork repository has no open pull requests |
-| P5C1 delivery | Exact reviewed head `e65ac020ebb46152fb0c0d9ff2b4f6cbaf8bb889`; merge `f5d8728d3935c13ad93edd130786fc0542c249c6`; reviewed/merge tree `4c6ca29067214711a757b9488a1ce22ac123e44c`; exact-head CI `30121615440` passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded; current `workspace/v1` descends from both reviewed head and merge |
+| Canonical checkout | Repository root; `workspace/v1` at `4a3c8d4a25191c0988ed9dd8c403d3ebeae6ed8a`, tree `5d094dfe950554b46e9033b49b2c7161b279a3a9`; clean and synchronized with `origin/workspace/v1` at upstream divergence `0/0` |
+| Worktrees | The canonical checkout was the only worktree at the fail-closed pre-edit preflight. One isolated governance-only proposal worktree now exists on local branch `codex/p5b2c-governance-closeout`; the P5B2c delivery worktree is absent. |
+| GitHub | PR [#24](https://github.com/Villeneuve-Ventures/graphify/pull/24) is merged; the fork repository has no open pull requests and Issues are disabled |
+| P5B2c delivery | Exact delivery head `910de7876ea52ed01926189bc620472a04d243fc`; merge `4a3c8d4a25191c0988ed9dd8c403d3ebeae6ed8a`; delivery/merge tree `5d094dfe950554b46e9033b49b2c7161b279a3a9`; exact-head CI `30145231441` passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded; unresolved review threads were `0` at closeout preflight; current `workspace/v1` descends from both delivery head and merge |
 | Support baseline | Observed host CPython `3.14.6`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
@@ -65,11 +68,12 @@ orientation only and cannot justify execution.
 | P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children are complete; remaining P5B2 and the broad P5C gate are not. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, and P5B2b are complete; all other commands remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, and P5B2c are complete; all other commands remain waiting. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption closed. |
 | P5B2b0 | P5B2a | COMPLETE | Request-bound staged-build recovery prerequisite closed. |
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
-| Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, query, migrate, rollback, GC, repair, rebind, rotation, activation, and every other command require separate review. |
+| P5B2c | P5C1 | COMPLETE | Accepted receipt: [`P5B2c`](receipts/p5b2c.md). One-shot certified `workspace query --request-stdin` transport only. |
+| Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, migrate, rollback, GC, repair, rebind, rotation, activation, mutation, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
 | Remaining P5C concerns | P5C | WAITING | Watch/service, performance, shared-lock/root-traversal optimization, publication, retained query/service authority, and all other P5C work remain unchanged. |
@@ -96,6 +100,29 @@ P6+; and every remaining P5B2 command. The bounded candidate/proof
 implementation is complete under the accepted
 [`P5C1` receipt](receipts/p5c1.md); none of those exclusions changed, and no
 later child is `READY`.
+
+## P5B2c boundary freeze
+
+P5B2c is limited to the exact
+`graphify workspace query --request-stdin` transport:
+
+- accept one bounded canonical CLI-v1 request and reuse the existing
+  `QueryRequest` validation;
+- load and compose installed runtime authority before consuming standard
+  input;
+- call the existing freshness query authority exactly once, without an
+  advisory status probe;
+- emit native UTF-8 output only for `release` / `observed_current`, with one
+  canonical redacted result certificate binding its byte count and SHA-256;
+  and
+- create no query log and write nothing to source, Git, workspace state,
+  `HOME`, or `CODEX_HOME`.
+
+Provider selection, networking, semantic execution, mutation, retained
+service/watch, publication, performance/resource qualification, H3, P6+, and
+every broader query or workspace-command authority remain excluded. The
+bounded delivery is complete under the accepted
+[`P5B2c` receipt](receipts/p5b2c.md); no later child is `READY`.
 
 ## Migration provenance
 
