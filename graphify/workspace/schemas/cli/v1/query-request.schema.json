@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/query-request.schema.json",
+  "title": "Graphify workspace query request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "cli_contract_version",
+    "repo_uuid",
+    "question",
+    "mode",
+    "depth",
+    "token_budget",
+    "context_filters",
+    "timeout_ms"
+  ],
+  "properties": {
+    "contract": {"const": "graphify.workspace.query_request"},
+    "schema_version": {"const": 1},
+    "cli_contract_version": {"const": 1},
+    "repo_uuid": {"$ref": "#/$defs/repo_uuid"},
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "x-graphify-utf8-max-bytes": 4096
+    },
+    "mode": {"enum": ["bfs", "dfs"]},
+    "depth": {"type": "integer", "minimum": 0, "maximum": 8},
+    "token_budget": {"type": "integer", "minimum": 1, "maximum": 32768},
+    "context_filters": {
+      "type": "array",
+      "maxItems": 16,
+      "x-graphify-utf8-total-max-bytes": 1024,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "x-graphify-utf8-max-bytes": 128
+      }
+    },
+    "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 60000}
+  },
+  "$defs": {
+    "repo_uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  }
+}

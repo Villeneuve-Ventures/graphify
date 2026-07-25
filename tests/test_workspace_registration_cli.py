@@ -453,6 +453,7 @@ def test_register_usage_errors_do_not_read_stdin_or_discover_state(
         "       graphify workspace register <enroll|adopt> --repo-uuid UUID "
         "--expected-registry-revision N --authorization-stdin\n"
         "       graphify workspace sync --code-only --request-stdin\n"
+        "       graphify workspace query --request-stdin\n"
     )
 
 
@@ -1568,6 +1569,7 @@ def test_registration_subprocess_uses_cwd_stdin_and_production_authority(
         "       graphify workspace register <enroll|adopt> --repo-uuid UUID "
         "--expected-registry-revision N --authorization-stdin\n"
         "       graphify workspace sync --code-only --request-stdin\n"
+        "       graphify workspace query --request-stdin\n"
     )
     assert json.loads(enrolled.stdout)["registry_revision"] == 1
     assert json.loads(adopted.stdout)["registry_revision"] == 2

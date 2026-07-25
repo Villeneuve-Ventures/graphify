@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/query-result.schema.json",
+  "title": "Graphify workspace query result control record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "cli_contract_version",
+    "state",
+    "decision",
+    "exit_code",
+    "reason_code",
+    "query_executed",
+    "observation_boundary"
+  ],
+  "properties": {
+    "contract": {"const": "graphify.workspace.query_result"},
+    "schema_version": {"const": 1},
+    "cli_contract_version": {"const": 1},
+    "state": {
+      "enum": ["released", "drifted", "timed_out", "withheld", "unsupported", "invalid"]
+    },
+    "decision": {"enum": ["release", "withhold"]},
+    "exit_code": {"enum": [0, 10, 20]},
+    "reason_code": {"type": "string"},
+    "action_code": {"type": "string"},
+    "query_executed": {"type": "boolean"},
+    "observation_boundary": {
+      "enum": ["not_observed", "pre_observed", "two_sided"]
+    },
+    "repo_uuid": {"$ref": "#/$defs/repo_uuid"},
+    "output": {"$ref": "#/$defs/output"}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "state": {"const": "released"},
+        "decision": {"const": "release"},
+        "exit_code": {"const": 0},
+        "reason_code": {"const": "observed_current"},
+        "query_executed": {"const": true},
+        "observation_boundary": {"const": "two_sided"}
+      },
+      "required": [
+        "repo_uuid",
+        "output"
+      ],
+      "not": {"required": ["action_code"]}
+    },
+    {
+      "properties": {
+        "decision": {"const": "withhold"},
+        "exit_code": {"const": 10}
+      },
+      "required": ["action_code"],
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "state": {"const": "drifted"},
+                "reason_code": {"const": "drift"},
+                "action_code": {"const": "sync_workspace"}
+              }
+            },
+            {
+              "properties": {
+                "state": {"const": "withheld"},
+                "reason_code": {"const": "source_unavailable"},
+                "action_code": {"const": "restore_workspace_source"}
+              }
+            },
+            {
+              "properties": {
+                "state": {"const": "timed_out"},
+                "reason_code": {"const": "timeout"},
+                "action_code": {"const": "retry_workspace_query"}
+              }
+            },
+            {
+              "properties": {
+                "state": {"const": "withheld"},
+                "reason_code": {"const": "unstable"},
+                "action_code": {"const": "retry_workspace_query"}
+              }
+            }
+          ]
+        },
+        {
+          "not": {
+            "anyOf": [
+              {"required": ["repo_uuid"]},
+              {"required": ["output"]}
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "properties": {
+        "decision": {"const": "withhold"},
+        "exit_code": {"const": 20}
+      },
+      "required": ["action_code"],
+      "allOf": [
+        {
+          "oneOf": [
+            {"properties": {"state": {"const": "unsupported"}, "reason_code": {"const": "query_unsupported"}, "action_code": {"const": "run_workspace_doctor"}}},
+            {"properties": {"state": {"const": "invalid"}, "reason_code": {"const": "query_request_invalid"}, "action_code": {"const": "provide_valid_query_request"}}},
+            {"properties": {"state": {"const": "unsupported"}, "reason_code": {"const": "query_request_unsupported"}, "action_code": {"const": "use_supported_query_contract"}}},
+            {"properties": {"state": {"const": "invalid"}, "reason_code": {"enum": ["runtime_authority_missing", "runtime_authority_invalid"]}, "action_code": {"const": "install_candidate_authority"}}},
+            {"properties": {"state": {"const": "unsupported"}, "reason_code": {"enum": ["runtime_authority_unsupported", "unsupported_compatibility"]}, "action_code": {"const": "install_supported_candidate"}}},
+            {"properties": {"state": {"const": "invalid"}, "reason_code": {"const": "unsafe_state_path"}, "action_code": {"const": "configure_safe_state_root"}}},
+            {"properties": {"state": {"const": "unsupported"}, "reason_code": {"const": "unsupported_runtime"}, "action_code": {"const": "use_supported_runtime"}}},
+            {"properties": {"state": {"const": "invalid"}, "reason_code": {"const": "state_corrupt"}, "action_code": {"const": "run_workspace_repair"}}},
+            {"properties": {"state": {"const": "invalid"}, "reason_code": {"enum": ["query_failed", "query_result_invalid"]}, "action_code": {"const": "run_workspace_doctor"}}}
+          ]
+        },
+        {
+          "not": {
+            "anyOf": [
+              {"required": ["repo_uuid"]},
+              {"required": ["output"]}
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "repo_uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream", "encoding", "bytes", "sha256"],
+      "properties": {
+        "stream": {"const": "stdout"},
+        "encoding": {"const": "utf-8"},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

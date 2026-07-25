@@ -50,11 +50,17 @@ external generation-owned staging, reconciles an empty semantic set with
 `semantic_required=false`, certifies immutable bytes, promotes through existing
 pointer CAS, and emits a canonical redacted receipt. It adds no provider
 selection, network authority, pointer-policy change, or durable-state schema.
-Status schema v2 makes staged recovery barriers visible. Rebind, rotation,
-activation, remaining mutation/query commands, repair, watch/service,
-installation, performance
-certification, candidate publication, and live-cutover work remain deferred;
-retained production query/service authority remains P5C work.
+Status schema v2 makes staged recovery barriers visible. P5B2c exposes only
+`graphify workspace query --request-stdin`: it loads and composes the installed
+runtime authority before reading its canonical, bounded CLI-v1 request, then
+calls `WorkspaceRuntime.freshness.query()` exactly once. It performs no
+advisory status probe. The existing freshness authority owns query bounds,
+locks, two-sided observation, and release; the CLI releases raw native UTF-8
+output only for `release` / `observed_current` and otherwise withholds output.
+Rebind, rotation, activation, remaining mutation and broader query commands,
+repair, watch/service, installation, performance certification, candidate
+publication, and live-cutover work remain deferred; retained production
+query/service authority remains P5C work.
 
 ## Authority split
 
@@ -94,11 +100,12 @@ P2 writes only this external lifecycle state:
 P5B1 additionally reserves `runtime-manifest.json` at the root above as an
 internal format-version-1 read authority containing the complete frozen
 compatibility manifest and explicit semantic-queue policy. Status, doctor,
-P5B2a registration, and P5B2b code-only sync authority loading read it through
-the same private-directory, singular-regular-file, 0600, no-follow, bounded-read
-rules used for durable state. Registration then writes only the P2 paths already
-shown above. P5C owns creating and atomically installing the candidate-backed
-authority; P5B1/P5B2a/P5B2b do not create it or guess its contents.
+P5B2a registration, P5B2b code-only sync, and P5B2c one-shot query authority
+loading read it through the same private-directory, singular-regular-file, 0600,
+no-follow, bounded-read rules used for durable state. Registration then writes
+only the P2 paths already shown above. P5C owns creating and atomically
+installing the candidate-backed authority; P5B1/P5B2a/P5B2b/P5B2c do not create
+it or guess its contents.
 
 P3 now owns generations, lifecycle journals, coordination locks, pointers,
 capacity reservations, and explicit offline-GC records. None of those paths is
@@ -205,6 +212,9 @@ exact trusted owner/fence can still release that stale record. P2 allocates and
 validates these leases; P3 consumes only the lifecycle-operation subset. P4
 owns adapter and freshness use. P5A consumes the semantic domain and binds
 stable semantic completion to certification. P5B2b owns only code-only
-structural orchestration; later P5 slices remain responsible for all other
-orchestration, concurrent in-process services, commands, installation, and
-publication.
+structural orchestration. P5B2c owns only the one-shot query transport: it
+forwards the validated existing `QueryRequest` and deadline to freshness, then
+emits a redacted control record. It does not add a query log, state write,
+service, watch loop, or retained query authority. Later P5 slices remain
+responsible for all other orchestration, concurrent in-process services,
+commands, installation, and publication.

@@ -251,6 +251,50 @@ output remains ignored and must not widen the P1 product diff.
   records do not block, corruption fails closed, and inspection performs no
   write or recovery.
 
+## P5B2c one-shot certified query gates
+
+- the only accepted public argv is `workspace query --request-stdin`; every
+  other argv returns exit 64 before authority loading or standard-input reads;
+- runtime authority loads and composes before standard-input consumption;
+  missing, invalid, unsafe, or unsupported authority fails closed with a
+  redacted CLI-v1 control record and exit 20;
+- standard input is bounded to 32 KiB before decode and is duplicate-free,
+  canonical UTF-8, schema-valid, complete, and extra-field-free; it carries an
+  explicit repo UUID, all and only the existing `QueryRequest` fields, and an
+  integer `timeout_ms` from 1 through 60000;
+- malformed, unsupported-version, untrimmed, oversized, or out-of-bound
+  requests reject before freshness locks or query execution. The CLI reuses
+  `QueryRequest` validation rather than duplicating enforcement. The CLI-v1
+  schema omits incompatible code-point `maxLength` constraints and publishes
+  the frozen question, per-filter, and aggregate-filter UTF-8 byte ceilings as
+  non-enforcing `x-graphify-*` annotations; exact-bound and one-byte-over
+  multibyte tests keep those annotations aligned with `QueryRequest`, and any
+  bound change requires a new CLI contract version;
+- the composed runtime receives exactly one `freshness.query(repo_uuid,
+  request, timeout_ns=...)` call and no advisory freshness status probe;
+- only `decision=release` with `reason=observed_current` writes the exact raw
+  native UTF-8 query output to standard output. The canonical redacted
+  `graphify.workspace.query_result` v1 record on standard error binds that
+  output through nested `output` metadata (`stream`, `encoding`, `bytes`, and
+  `sha256`), together with the explicit repo UUID. Consumers commit captured
+  output only when exit is 0, standard error contains exactly one canonical
+  schema-valid release / `observed_current` record for UTF-8 standard output,
+  and its byte count and digest match the captured bytes; otherwise they
+  discard the uncertified output;
+- all `drifted`, `timed_out`, and other `withheld` results, plus `unsupported`,
+  `invalid`, and execution-failure paths, leave standard output empty and omit
+  the repo UUID and `output` metadata from the control record. Exit 10 denotes
+  retryable withholding; exit 20 denotes invalid or unsupported conditions.
+  Existing freshness behavior collapses `LockTimeout` contention to the
+  truthful `timed_out` result;
+- native query logging remains bypassed, and recursive source, Git, workspace
+  state, `HOME`, and `CODEX_HOME` byte/metadata snapshots remain unchanged;
+  and
+- focused query-CLI tests validate the frozen request/result schemas,
+  canonicalization, release/withhold separation, stdout digest binding,
+  redaction, and no-write behavior before the existing workspace and
+  repository-wide gates.
+
 ## P5A semantic queue gates
 
 - enqueue and exact reconciliation monotonically advance the desired watermark,

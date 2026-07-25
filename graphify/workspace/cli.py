@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 import errno
+import hashlib
 import json
 from json import loads as _load_json
 import os
@@ -12,9 +13,13 @@ from pathlib import Path
 import re
 import sys
 import time
-from typing import Any, cast, Sequence, TextIO
+from typing import Any, cast, Mapping, Sequence, TextIO
 
-from graphify.workspace.adapters import UnsupportedCompatibility
+from graphify.workspace.adapters import (
+    QueryRejected,
+    QueryRequest,
+    UnsupportedCompatibility,
+)
 from graphify.workspace.composition import (
     WorkspaceAuthorityError,
     WorkspaceRuntimeInputs,
@@ -34,6 +39,7 @@ from graphify.workspace.generations import (
     GenerationConflict,
     GenerationError,
 )
+from graphify.workspace.freshness import FreshnessResult
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
@@ -122,17 +128,45 @@ _SYNC_REQUEST_SCHEMA_PATH = (
 _SYNC_RECEIPT_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "sync-receipt.schema.json"
 )
+_QUERY_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "query-request.schema.json"
+)
+_QUERY_RESULT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "query-result.schema.json"
+)
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt> --repo-uuid UUID "
     "--expected-registry-revision N --authorization-stdin"
 )
 _SYNC_USAGE = "graphify workspace sync --code-only --request-stdin"
+_QUERY_USAGE = "graphify workspace query --request-stdin"
 _USAGE = (
     "Usage: graphify workspace status --json\n"
     "       graphify workspace doctor\n"
     f"       {_REGISTER_USAGE}\n"
-    f"       {_SYNC_USAGE}"
+    f"       {_SYNC_USAGE}\n"
+    f"       {_QUERY_USAGE}"
+)
+
+_QUERY_REQUEST_CONTRACT = "graphify.workspace.query_request"
+_QUERY_RESULT_CONTRACT = "graphify.workspace.query_result"
+_QUERY_SCHEMA_VERSION = 1
+_QUERY_REQUEST_MAX_BYTES = 32 * 1024
+_QUERY_TIMEOUT_MAX_MS = 60_000
+_QUERY_REQUEST_FIELDS = frozenset(
+    {
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "repo_uuid",
+        "question",
+        "mode",
+        "depth",
+        "token_budget",
+        "context_filters",
+        "timeout_ms",
+    }
 )
 
 
@@ -158,6 +192,45 @@ class _SyncFailure:
     exit_code: int
     reason_code: str
     action_code: str
+
+
+@dataclass(frozen=True)
+class _QueryCliRequest:
+    repo_uuid: str
+    query: QueryRequest
+    timeout_ms: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cli_contract_version": CLI_CONTRACT_VERSION,
+            "context_filters": list(self.query.context_filters),
+            "contract": _QUERY_REQUEST_CONTRACT,
+            "depth": self.query.depth,
+            "mode": self.query.mode,
+            "question": self.query.question,
+            "repo_uuid": self.repo_uuid,
+            "schema_version": _QUERY_SCHEMA_VERSION,
+            "timeout_ms": self.timeout_ms,
+            "token_budget": self.query.token_budget,
+        }
+
+
+@dataclass(frozen=True)
+class _QueryFailure:
+    state: str
+    exit_code: int
+    reason_code: str
+    action_code: str
+    query_executed: bool = False
+    observation_boundary: str = "not_observed"
+
+
+class _QueryRequestInvalid(ValueError):
+    """The query CLI request cannot be accepted safely."""
+
+
+class _QueryRequestUnsupported(_QueryRequestInvalid):
+    """The query CLI request names an unsupported public contract."""
 
 
 def _parse_register_request(command: tuple[str, ...]) -> _RegisterRequest | None:
@@ -355,21 +428,52 @@ def _registration_failure(
     return _registration_bytes(receipt)
 
 
-def _emit_registration_receipt(stream: TextIO, payload: str, *, exit_code: int) -> int:
+def _silence_standard_streams_after_broken_pipe(
+    stream: TextIO,
+    error: OSError,
+) -> bool:
+    if (
+        (stream is not sys.stdout and stream is not sys.stderr)
+        or error.errno not in {errno.EPIPE, errno.EINVAL}
+    ):
+        return False
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        for standard_stream in (sys.stdout, sys.stderr):
+            os.dup2(devnull, standard_stream.fileno())
+    finally:
+        os.close(devnull)
+    return True
+
+
+def _emit_text_payload(stream: TextIO, payload: str, *, exit_code: int) -> int:
     try:
         stream.write(payload)
     except (BrokenPipeError, OSError) as exc:
-        if (
-            (stream is not sys.stdout and stream is not sys.stderr)
-            or getattr(exc, "errno", None) not in {errno.EPIPE, errno.EINVAL}
-        ):
+        if not _silence_standard_streams_after_broken_pipe(stream, exc):
             raise
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        try:
-            for standard_stream in (sys.stdout, sys.stderr):
-                os.dup2(devnull, standard_stream.fileno())
-        finally:
-            os.close(devnull)
+    return exit_code
+
+
+def _emit_query_output(
+    stream: TextIO,
+    text: str,
+    payload: bytes,
+    *,
+    exit_code: int,
+) -> int:
+    """Write certified UTF-8 bytes when the output stream exposes its buffer."""
+
+    binary_stream = getattr(stream, "buffer", None)
+    if binary_stream is None:
+        return _emit_text_payload(stream, text, exit_code=exit_code)
+    try:
+        written = binary_stream.write(payload)
+        if written != len(payload):
+            raise OSError(errno.EIO, "incomplete workspace query output")
+    except (BrokenPipeError, OSError) as exc:
+        if not _silence_standard_streams_after_broken_pipe(stream, exc):
+            raise
     return exit_code
 
 
@@ -559,7 +663,7 @@ def _run_registration(
         receipt = _registration_failure(request, failure)
         exit_code = failure.exit_code
     stream = output if exit_code == EXIT_READY else errors
-    return _emit_registration_receipt(stream, receipt, exit_code=exit_code)
+    return _emit_text_payload(stream, receipt, exit_code=exit_code)
 
 
 def _read_sync_request_bytes() -> bytes:
@@ -746,7 +850,386 @@ def _run_sync(
         payload = _sync_failure_receipt(failure)
         exit_code = failure.exit_code
     stream = output if exit_code == EXIT_READY else errors
-    return _emit_registration_receipt(stream, payload, exit_code=exit_code)
+    return _emit_text_payload(stream, payload, exit_code=exit_code)
+
+
+def _read_query_request_bytes() -> bytes:
+    binary_input = getattr(sys.stdin, "buffer", None)
+    if binary_input is not None:
+        raw = binary_input.read(_QUERY_REQUEST_MAX_BYTES + 1)
+        if not isinstance(raw, bytes):
+            raise _QueryRequestInvalid("query request input did not return bytes")
+        return raw
+
+    raw = bytearray()
+    while len(raw) <= _QUERY_REQUEST_MAX_BYTES:
+        character = sys.stdin.read(1)
+        if not isinstance(character, str) or len(character) > 1:
+            raise _QueryRequestInvalid("query request input did not return text")
+        if character == "":
+            break
+        try:
+            raw.extend(character.encode("utf-8"))
+        except UnicodeError as exc:
+            raise _QueryRequestInvalid("query request input is not UTF-8") from exc
+    return bytes(raw)
+
+
+def _query_request_from_mapping(value: Mapping[str, object]) -> _QueryCliRequest:
+    if set(value) != _QUERY_REQUEST_FIELDS:
+        raise _QueryRequestInvalid("query request fields are invalid")
+
+    contract = value.get("contract")
+    if not isinstance(contract, str):
+        raise _QueryRequestInvalid("query request contract is invalid")
+    if contract != _QUERY_REQUEST_CONTRACT:
+        raise _QueryRequestUnsupported("query request contract is unsupported")
+
+    for field, expected in (
+        ("schema_version", _QUERY_SCHEMA_VERSION),
+        ("cli_contract_version", CLI_CONTRACT_VERSION),
+    ):
+        version = value.get(field)
+        if type(version) is not int:
+            raise _QueryRequestInvalid(f"query request {field} is invalid")
+        if version != expected:
+            raise _QueryRequestUnsupported(f"query request {field} is unsupported")
+
+    try:
+        repo_uuid = WorkspaceLeaseState.canonical_repo_uuid(value.get("repo_uuid"))
+    except ContractError as exc:
+        raise _QueryRequestInvalid("query request repo UUID is invalid") from exc
+
+    timeout_ms = value.get("timeout_ms")
+    if (
+        type(timeout_ms) is not int
+        or timeout_ms < 1
+        or timeout_ms > _QUERY_TIMEOUT_MAX_MS
+    ):
+        raise _QueryRequestInvalid("query request timeout is invalid")
+
+    try:
+        query = QueryRequest(
+            question=cast(Any, value.get("question")),
+            mode=cast(Any, value.get("mode")),
+            depth=cast(Any, value.get("depth")),
+            token_budget=cast(Any, value.get("token_budget")),
+            context_filters=cast(Any, value.get("context_filters")),
+        )
+    except QueryRejected as exc:
+        raise _QueryRequestInvalid("query request payload is invalid") from exc
+    return _QueryCliRequest(
+        repo_uuid=repo_uuid,
+        query=query,
+        timeout_ms=timeout_ms,
+    )
+
+
+def _parse_query_request(raw: bytes) -> _QueryCliRequest:
+    if len(raw) > _QUERY_REQUEST_MAX_BYTES:
+        raise _QueryRequestInvalid("query request exceeds the byte limit")
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
+        raise _QueryRequestInvalid("query request is not valid JSON") from exc
+    if not isinstance(value, Mapping):
+        raise _QueryRequestInvalid("query request must be an object")
+    request = _query_request_from_mapping(value)
+    try:
+        canonical = canonical_json_bytes(request.to_dict())
+    except ContractError as exc:
+        raise _QueryRequestInvalid("query request is not canonically encodable") from exc
+    if canonical != raw:
+        raise _QueryRequestInvalid("query request is not canonical")
+    return request
+
+
+def _query_result_payload(
+    *,
+    state: str,
+    decision: str,
+    exit_code: int,
+    reason_code: str,
+    query_executed: bool,
+    observation_boundary: str,
+    action_code: str | None = None,
+    repo_uuid: str | None = None,
+    output_bytes: bytes | None = None,
+) -> str:
+    value: dict[str, object] = {
+        "cli_contract_version": CLI_CONTRACT_VERSION,
+        "contract": _QUERY_RESULT_CONTRACT,
+        "decision": decision,
+        "exit_code": exit_code,
+        "observation_boundary": observation_boundary,
+        "query_executed": query_executed,
+        "reason_code": reason_code,
+        "schema_version": _QUERY_SCHEMA_VERSION,
+        "state": state,
+    }
+    if action_code is not None:
+        value["action_code"] = action_code
+    if repo_uuid is not None and output_bytes is not None:
+        value["repo_uuid"] = repo_uuid
+        value["output"] = {
+            "bytes": len(output_bytes),
+            "encoding": "utf-8",
+            "sha256": hashlib.sha256(output_bytes).hexdigest(),
+            "stream": "stdout",
+        }
+    return canonical_json_bytes(value).decode("utf-8")
+
+
+def _classify_query_error(error: Exception) -> _QueryFailure:
+    if isinstance(error, _QueryRequestUnsupported):
+        return _QueryFailure(
+            "unsupported",
+            EXIT_INVALID,
+            "query_request_unsupported",
+            "use_supported_query_contract",
+        )
+    if isinstance(error, (_QueryRequestInvalid, QueryRejected)):
+        return _QueryFailure(
+            "invalid",
+            EXIT_INVALID,
+            "query_request_invalid",
+            "provide_valid_query_request",
+        )
+    if isinstance(error, WorkspaceAuthorityError):
+        state = (
+            "unsupported"
+            if error.reason_code == "runtime_authority_unsupported"
+            else "invalid"
+        )
+        return _QueryFailure(
+            state,
+            EXIT_INVALID,
+            error.reason_code,
+            error.action_code,
+        )
+    if isinstance(error, StatePathError):
+        return _QueryFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsafe_state_path",
+            "configure_safe_state_root",
+        )
+    if isinstance(error, UnsupportedRuntime):
+        return _QueryFailure(
+            "unsupported",
+            EXIT_INVALID,
+            "unsupported_runtime",
+            "use_supported_runtime",
+        )
+    if isinstance(error, UnsupportedCompatibility):
+        return _QueryFailure(
+            "unsupported",
+            EXIT_INVALID,
+            "unsupported_compatibility",
+            "install_supported_candidate",
+        )
+    if isinstance(error, StateCorrupt):
+        return _QueryFailure(
+            "invalid",
+            EXIT_INVALID,
+            "state_corrupt",
+            "run_workspace_repair",
+        )
+    return _QueryFailure(
+        "invalid",
+        EXIT_INVALID,
+        "query_failed",
+        "run_workspace_doctor",
+    )
+
+
+def _query_failure_payload(failure: _QueryFailure) -> str:
+    return _query_result_payload(
+        state=failure.state,
+        decision="withhold",
+        exit_code=failure.exit_code,
+        reason_code=failure.reason_code,
+        action_code=failure.action_code,
+        query_executed=failure.query_executed,
+        observation_boundary=failure.observation_boundary,
+    )
+
+
+def _emit_query_failure(errors: TextIO, failure: _QueryFailure) -> int:
+    return _emit_text_payload(
+        errors,
+        _query_failure_payload(failure),
+        exit_code=failure.exit_code,
+    )
+
+
+def _run_query(
+    *,
+    inputs: WorkspaceRuntimeInputs | None,
+    output: TextIO,
+    errors: TextIO,
+) -> int:
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        if resolved_inputs is None:
+            failure = _QueryFailure(
+                "invalid",
+                EXIT_INVALID,
+                "runtime_authority_missing",
+                "install_candidate_authority",
+            )
+            return _emit_query_failure(errors, failure)
+        runtime = compose_workspace_runtime(resolved_inputs)
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = _classify_query_error(exc)
+        return _emit_query_failure(errors, failure)
+
+    try:
+        raw_request = _read_query_request_bytes()
+        request = _parse_query_request(raw_request)
+    except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+        failure = _classify_query_error(
+            exc
+            if isinstance(exc, _QueryRequestInvalid)
+            else _QueryRequestInvalid("query request input cannot be read")
+        )
+        return _emit_query_failure(errors, failure)
+
+    try:
+        with (
+            redirect_stdout(_DISCARDED_ENGINE_OUTPUT),
+            redirect_stderr(_DISCARDED_ENGINE_OUTPUT),
+        ):
+            result = runtime.freshness.query(
+                request.repo_uuid,
+                request.query,
+                timeout_ns=request.timeout_ms * 1_000_000,
+            )
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = _classify_query_error(exc)
+        return _emit_query_failure(errors, failure)
+
+    if not isinstance(result, FreshnessResult):
+        failure = _QueryFailure(
+            "invalid",
+            EXIT_INVALID,
+            "query_result_invalid",
+            "run_workspace_doctor",
+        )
+        return _emit_query_failure(errors, failure)
+
+    observation_boundary = result.observation_boundary
+    if (
+        type(result.query_executed) is not bool
+        or not isinstance(result.decision, str)
+        or not isinstance(result.reason, str)
+        or not isinstance(observation_boundary, str)
+        or observation_boundary not in {"not_observed", "pre_observed", "two_sided"}
+    ):
+        failure = _QueryFailure(
+            "invalid",
+            EXIT_INVALID,
+            "query_result_invalid",
+            "run_workspace_doctor",
+        )
+    elif result.decision == "release" and result.reason == "observed_current":
+        if (
+            not result.query_executed
+            or observation_boundary != "two_sided"
+            or not isinstance(result.output, str)
+        ):
+            failure = _QueryFailure(
+                "invalid",
+                EXIT_INVALID,
+                "query_result_invalid",
+                "run_workspace_doctor",
+                query_executed=result.query_executed,
+                observation_boundary=observation_boundary,
+            )
+        else:
+            try:
+                native_bytes = result.output.encode("utf-8")
+            except UnicodeError:
+                failure = _QueryFailure(
+                    "invalid",
+                    EXIT_INVALID,
+                    "query_result_invalid",
+                    "run_workspace_doctor",
+                    query_executed=result.query_executed,
+                    observation_boundary=observation_boundary,
+                )
+            else:
+                control = _query_result_payload(
+                    state="released",
+                    decision="release",
+                    exit_code=EXIT_READY,
+                    reason_code="observed_current",
+                    query_executed=True,
+                    observation_boundary="two_sided",
+                    repo_uuid=request.repo_uuid,
+                    output_bytes=native_bytes,
+                )
+                _emit_query_output(
+                    output,
+                    result.output,
+                    native_bytes,
+                    exit_code=EXIT_READY,
+                )
+                return _emit_text_payload(
+                    errors,
+                    control,
+                    exit_code=EXIT_READY,
+                )
+    elif result.output is not None or result.decision != "withhold":
+        failure = _QueryFailure(
+            "invalid",
+            EXIT_INVALID,
+            "query_result_invalid",
+            "run_workspace_doctor",
+            query_executed=result.query_executed,
+            observation_boundary=observation_boundary,
+        )
+    else:
+        mapped = {
+            "drift": ("drifted", EXIT_DEGRADED, "sync_workspace"),
+            "source_unavailable": (
+                "withheld",
+                EXIT_DEGRADED,
+                "restore_workspace_source",
+            ),
+            "timeout": ("timed_out", EXIT_DEGRADED, "retry_workspace_query"),
+            "unstable": ("withheld", EXIT_DEGRADED, "retry_workspace_query"),
+            "unsupported": (
+                "unsupported",
+                EXIT_INVALID,
+                "run_workspace_doctor",
+            ),
+        }.get(result.reason)
+        if mapped is None:
+            failure = _QueryFailure(
+                "invalid",
+                EXIT_INVALID,
+                "query_result_invalid",
+                "run_workspace_doctor",
+                query_executed=result.query_executed,
+                observation_boundary=observation_boundary,
+            )
+        else:
+            state, exit_code, action_code = mapped
+            failure = _QueryFailure(
+                state,
+                exit_code,
+                "query_unsupported" if result.reason == "unsupported" else result.reason,
+                action_code,
+                query_executed=result.query_executed,
+                observation_boundary=observation_boundary,
+            )
+
+    return _emit_query_failure(errors, failure)
 
 
 def _doctor_text(report: WorkspaceStatusReport) -> str:
@@ -781,7 +1264,7 @@ def run_workspace_command(
     if command and command[0] == "register":
         request = _parse_register_request(command)
         if request is None:
-            return _emit_registration_receipt(
+            return _emit_text_payload(
                 errors,
                 _USAGE + "\n",
                 exit_code=EXIT_USAGE,
@@ -794,12 +1277,24 @@ def run_workspace_command(
         )
     if command and command[0] == "sync":
         if command != ("sync", "--code-only", "--request-stdin"):
-            return _emit_registration_receipt(
+            return _emit_text_payload(
                 errors,
                 _USAGE + "\n",
                 exit_code=EXIT_USAGE,
             )
         return _run_sync(
+            inputs=inputs,
+            output=output,
+            errors=errors,
+        )
+    if command and command[0] == "query":
+        if command != ("query", "--request-stdin"):
+            return _emit_text_payload(
+                errors,
+                _QUERY_USAGE + "\n",
+                exit_code=EXIT_USAGE,
+            )
+        return _run_query(
             inputs=inputs,
             output=output,
             errors=errors,
@@ -864,7 +1359,27 @@ def load_sync_receipt_schema() -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def load_query_request_schema() -> dict[str, Any]:
+    """Load the public canonical one-shot query request schema."""
+
+    value = _load_json(_QUERY_REQUEST_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace query request schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+def load_query_result_schema() -> dict[str, Any]:
+    """Load the public one-shot query result control-record schema."""
+
+    value = _load_json(_QUERY_RESULT_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace query result schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
 __all__ = [
+    "load_query_request_schema",
+    "load_query_result_schema",
     "load_registration_schema",
     "load_sync_receipt_schema",
     "load_sync_request_schema",
