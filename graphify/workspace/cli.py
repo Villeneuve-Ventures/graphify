@@ -145,7 +145,8 @@ _USAGE = (
     "Usage: graphify workspace status --json\n"
     "       graphify workspace doctor\n"
     f"       {_REGISTER_USAGE}\n"
-    f"       {_SYNC_USAGE}"
+    f"       {_SYNC_USAGE}\n"
+    f"       {_QUERY_USAGE}"
 )
 
 _QUERY_REQUEST_CONTRACT = "graphify.workspace.query_request"
@@ -1079,6 +1080,8 @@ def _run_query(
             )
             return _emit_query_failure(errors, failure)
         runtime = compose_workspace_runtime(resolved_inputs)
+    except InjectedFault:
+        raise
     except Exception as exc:
         failure = _classify_query_error(exc)
         return _emit_query_failure(errors, failure)
@@ -1104,6 +1107,8 @@ def _run_query(
                 request.query,
                 timeout_ns=request.timeout_ms * 1_000_000,
             )
+    except InjectedFault:
+        raise
     except Exception as exc:
         failure = _classify_query_error(exc)
         return _emit_query_failure(errors, failure)

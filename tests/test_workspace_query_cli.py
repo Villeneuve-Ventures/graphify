@@ -27,7 +27,7 @@ from graphify.workspace.composition import (
 )
 from graphify.workspace.contracts import JsonValue, canonical_json_bytes
 from graphify.workspace.freshness import FreshnessResult
-from graphify.workspace.persistence import StatePathError, UnsupportedRuntime
+from graphify.workspace.persistence import InjectedFault, StatePathError, UnsupportedRuntime
 
 
 REPO_UUID = "11111111-1111-4111-8111-111111111111"
@@ -246,6 +246,23 @@ def test_query_usage_is_exact_and_precedes_authority_and_stdin(
     assert stderr.getvalue() == _QUERY_USAGE + "\n"
 
 
+def test_general_workspace_usage_lists_the_query_command() -> None:
+    workspace_cli = _cli()
+    stdout, stderr = StringIO(), StringIO()
+
+    assert (
+        workspace_cli.run_workspace_command(
+            ("unknown",),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 64
+    )
+    assert stdout.getvalue() == ""
+    assert _QUERY_USAGE in stderr.getvalue()
+
+
 def test_query_missing_authority_is_reported_before_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -372,6 +389,7 @@ def test_query_uncomposable_runtime_authority_precedes_stdin(
     assert payload["reason_code"] == "unsupported_compatibility"
     assert payload["action_code"] == "install_supported_candidate"
     assert "/private" not in stderr.getvalue()
+    assert "provider-secret" not in stderr.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -425,9 +443,9 @@ def test_query_stdin_is_bounded_before_decode_or_runtime_query(
         "compose_workspace_runtime",
         lambda _inputs: SimpleNamespace(freshness=_ForbiddenFreshness()),
     )
-    monkeypatch.setattr(
-        sys, "stdin", SimpleNamespace(buffer=BytesIO(b"{" + b"x" * (32 * 1024 + 1)))
-    )
+    oversized = b"{" + b"x" * workspace_cli._QUERY_REQUEST_MAX_BYTES
+    assert len(oversized) == workspace_cli._QUERY_REQUEST_MAX_BYTES + 1
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(oversized)))
     stdout, stderr = StringIO(), StringIO()
     assert workspace_cli.run_workspace_command(
         ("query", "--request-stdin"), inputs=object(), stdout=stdout, stderr=stderr
@@ -685,6 +703,52 @@ def test_query_execution_failure_is_redacted_as_query_failed(
     assert payload["action_code"] == "run_workspace_doctor"
     assert "/private" not in stderr.getvalue()
     assert "provider-secret" not in stderr.getvalue()
+
+
+def test_query_reraises_injected_fault_from_runtime_composition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    injected = InjectedFault("compose-query-runtime")
+
+    def fail_compose(_inputs: object) -> None:
+        raise injected
+
+    monkeypatch.setattr(workspace_cli, "compose_workspace_runtime", fail_compose)
+    with pytest.raises(InjectedFault) as raised:
+        workspace_cli.run_workspace_command(
+            ("query", "--request-stdin"),
+            inputs=object(),
+            stdout=StringIO(),
+            stderr=StringIO(),
+        )
+    assert raised.value is injected
+
+
+def test_query_reraises_injected_fault_from_freshness_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    injected = InjectedFault("execute-query")
+
+    class Freshness:
+        def query(self, *_args: object, **_kwargs: object) -> FreshnessResult[str]:
+            raise injected
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes())))
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(freshness=Freshness()),
+    )
+    with pytest.raises(InjectedFault) as raised:
+        workspace_cli.run_workspace_command(
+            ("query", "--request-stdin"),
+            inputs=object(),
+            stdout=StringIO(),
+            stderr=StringIO(),
+        )
+    assert raised.value is injected
 
 
 @pytest.mark.parametrize(
