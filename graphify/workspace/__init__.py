@@ -11,7 +11,9 @@ doctor. P5B2a adds only explicit operator-authorized initial enrollment and
 verified clone/fork adoption through ``graphify workspace register``. P5B2b0
 adds internal request-bound staged-build and stale-abandonment recovery. P5B2b
 adds provider-neutral ``workspace sync --code-only`` plus truthful staged-build
-visibility in status schema v2. All other mutation/query commands, services,
+visibility in status schema v2. P5B2c adds only the one-shot certified
+``workspace query --request-stdin`` transport over the existing two-sided
+freshness authority. All mutation commands, retained query/service operation,
 installation, and candidate publication remain deferred.
 """
 

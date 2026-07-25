@@ -30,7 +30,7 @@ proves atomic installation and compensation only beneath disposable
 external-state roots while preserving P5B1's loader unchanged. It supplies no
 production installation, publication, service/watch, provider, or performance
 authority.
-Later P5C retains production query/service authority. P5B2a adds only
+P5C retains long-lived service/watch and broader query authority. P5B2a adds only
 `graphify workspace register enroll` for initial
 enrollment and `graphify workspace register adopt` for an already-enrolled
 verified clone or fork whose retained history includes a root recorded at
@@ -52,8 +52,48 @@ exposes only `graphify workspace sync --code-only --request-stdin`, using a
 bounded canonical JSON request, external generation-owned staging, the existing
 fenced lifecycle, and one canonical redacted receipt. Status and doctor now
 surface nonterminal staged-build recovery barriers through status schema v2.
-Provider selection, networking, semantic execution, and every other workspace
-command remain deferred.
+P5B2c exposes only the one-shot certified
+`graphify workspace query --request-stdin` transport described below. It loads
+and composes installed runtime authority before consuming standard input, then
+calls the existing `WorkspaceRuntime.freshness.query()` authority once; it does
+not perform an advisory status probe. Provider selection, networking, semantic
+execution, mutation, retained service/watch, and every broader query authority
+remain deferred.
+
+## P5B2c one-shot certified query
+
+The exact and only P5B2c argv is `graphify workspace query --request-stdin`.
+It accepts one CLI-v1 canonical JSON object on standard input. The object is
+duplicate-free UTF-8, at most 32 KiB, and contains exactly `contract`,
+`schema_version`, `cli_contract_version`, `repo_uuid`, the existing
+`QueryRequest` fields (`question`, `mode`, `depth`, `token_budget`, and
+`context_filters`), and `timeout_ms`. `repo_uuid` is explicit; `timeout_ms` is
+an integer from 1 through 60000. The command reuses `QueryRequest` for all
+query bounds, so the CLI does not define a second set of question, mode, depth,
+token-budget, or context-filter limits. Malformed, noncanonical, extra-field,
+untrimmed, oversized, out-of-bound, or unsupported-version input is rejected
+before freshness locking or query execution.
+
+The command writes raw native query output, encoded as UTF-8 without a wrapper,
+to standard output only when freshness returns `decision=release` and
+`reason=observed_current`. It also writes one canonical redacted
+`graphify.workspace.query_result` v1 control record to standard error. On
+release that record binds the explicit repo UUID and nested `output` metadata:
+`stream`, `encoding`, `bytes`, and `sha256`. Every other result leaves standard
+output empty and omits the repo UUID and `output` metadata from the control
+record.
+
+| Exit | Result | Standard output |
+|---:|---|---|
+| 0 | `released` | Exact native output only |
+| 10 | `drifted`, `timed_out`, or other retryable `withheld` result | Empty |
+| 20 | `unsupported` or `invalid` | Empty |
+| 64 | Any argv other than the exact invocation | Empty |
+
+Existing freshness behavior classifies `LockTimeout` contention as `timeout`;
+the CLI reports that truthfully as `timed_out` rather than inventing a separate
+contention result. The path creates no query log and writes nothing to the
+source checkout, Git metadata, workspace state, `HOME`, or `CODEX_HOME`.
 
 ## Governance and deferred work ownership
 
@@ -70,9 +110,10 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Area | Owner/status | Stable boundary |
 |---|---|---|
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
-| Remaining workspace commands | Remaining P5B2 | Query, migrate, rollback, GC, repair, rebind, rotation, activation, and other operator mutations require separately reviewed contracts and explicit operator intent. |
+| Certified one-shot query | P5B2c | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
+| Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, rebind, rotation, activation, mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
-| Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority, and any shared workspace read-lock optimization remain waiting outside P5C1. |
+| Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
 | Portfolio migration and cutover | P6-P12 | Shadow migrations precede the P9 global installation and stable-route activation; legacy pruning remains separately authorized after the observation window. |
 | Semantic capability selection | Unranked cross-cutting follow-up | With no Gemini key, an interactive Graphify skill can use its active host agent; in Codex that means the current Codex-authenticated session. A direct headless fallback from `graphify extract` to Codex OAuth is desired but is not implemented or promised by v1. Any such backend requires a separate explicit authority, selection-precedence, opt-in, redaction, offline/failure, and test contract; provider choice must never be inferred from an absent credential. |
@@ -110,8 +151,9 @@ or fork engine logic inside the package.
   `graphify/workspace/schemas/cli/v1/`, and
   `graphify/workspace/schemas/cli/v2/` are normative for the structural shape
   of durable documents, CLI requests and receipts, versioned status output,
-  and the TOML-to-object representation of repo policy. Sync request and receipt
-  contracts remain CLI v1; status JSON is schema v2.
+  and the TOML-to-object representation of repo policy. Sync request/receipt
+  and one-shot query request/result contracts are CLI v1; status JSON is schema
+  v2.
 - `graphify.workspace` supplies dependency-free canonical reference models,
   exact v1 rejection, SHA-256 inputs, and journal frame encoding. Its
   cross-field and cross-document validation is normative where JSON Schema
@@ -128,9 +170,9 @@ or fork engine logic inside the package.
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
   P5B2a registration command with bounded authority, authorization, policy, and
-  Git-discovery inputs, plus the bounded sync request/receipt transport; it
-  reuses `.identity`, `.registry`, and `.sync` without adding another
-  persistence path. Lifecycle mutation
+  Git-discovery inputs, the P5B2b sync request/receipt transport, and the P5B2c
+  one-shot query transport; it reuses `.identity`, `.registry`, `.sync`, and
+  `.freshness` without adding another persistence path. Lifecycle mutation
   fails closed outside
   non-elevated macOS on local APFS; tests use an explicit injected capability
   seam and disposable external state roots.
