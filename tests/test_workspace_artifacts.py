@@ -101,6 +101,10 @@ def _synthetic_repo(root: Path) -> tuple[Path, Path]:
         _write(root / "graphify/workspace" / module_name, f"# {module_name} runtime\n")
     for schema_name in WORKSPACE_SCHEMA_FILES:
         _write(root / "graphify/workspace/schemas/v1" / schema_name, "{}\n")
+    _write(
+        root / "graphify/workspace/schemas/cli/v1/identity-maintenance.schema.json",
+        "{}\n",
+    )
     _write(root / "graphify/workspace/schemas/cli/v1/registration.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/status.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/sync-request.schema.json", "{}\n")
@@ -164,6 +168,7 @@ def test_static_contract_fixture_skill_and_runtime_bundles_are_deterministic(
         assert artifacts_one[name].read_bytes() == artifacts_two[name].read_bytes(), name
     assert trusted_one == trusted_two
     with zipfile.ZipFile(artifacts_one["contract-bundle.zip"]) as archive:
+        assert "schemas/cli/v1/identity-maintenance.schema.json" in archive.namelist()
         assert "schemas/cli/v1/registration.schema.json" in archive.namelist()
         assert "schemas/cli/v1/status.schema.json" in archive.namelist()
         assert "schemas/cli/v1/sync-request.schema.json" in archive.namelist()

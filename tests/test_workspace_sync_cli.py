@@ -250,7 +250,7 @@ def test_sync_usage_errors_do_not_load_authority_or_read_stdin(
     assert stderr.getvalue() == (
         "Usage: graphify workspace status --json\n"
         "       graphify workspace doctor\n"
-        "       graphify workspace register <enroll|adopt> --repo-uuid UUID "
+        "       graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
         "--expected-registry-revision N --authorization-stdin\n"
         "       graphify workspace sync --code-only --request-stdin\n"
         "       graphify workspace query --request-stdin\n"

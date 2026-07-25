@@ -29,6 +29,7 @@ from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
     OperatorAuthorization,
+    SourceAmbiguousError,
     SourceDiscoveryTimeout,
     UUIDCollisionError,
 )
@@ -142,6 +143,15 @@ def _registration_payload(stream: StringIO) -> dict[str, Any]:
     return payload
 
 
+def _identity_maintenance_payload(stream: StringIO) -> dict[str, Any]:
+    payload = json.loads(stream.getvalue())
+    Draft202012Validator(
+        _cli().load_identity_maintenance_schema(),
+        format_checker=FormatChecker(),
+    ).validate(payload)
+    return payload
+
+
 class _AllowingState:
     def assert_external_to(self, _source_root: Path) -> None:
         pass
@@ -191,11 +201,15 @@ def test_registration_docs_freeze_exact_authorization_stdin_contract() -> None:
     assert all(isinstance(value, str) for value in payload.values())
     assert payload["action"] == "ENROLL"
     assert "replace `ENROLL` with `ADOPT`" in readme
+    assert "`REBIND`, or `ROTATE` respectively" in readme
+    assert "graphify.workspace.identity_maintenance" in readme
+    assert "identity-maintenance.schema.json" in readme
 
 
 def test_registration_schema_freezes_success_conflict_and_invalid_receipts() -> None:
     schema = _cli().load_registration_schema()
     Draft202012Validator.check_schema(schema)
+    assert schema["properties"]["action"]["enum"] == ["enroll", "adopt"]
     validator = Draft202012Validator(schema, format_checker=FormatChecker())
     common = {
         "action": "enroll",
@@ -253,6 +267,82 @@ def test_registration_schema_freezes_success_conflict_and_invalid_receipts() -> 
         missing_retry_revision,
         contradictory_invalid,
         success_with_failure_code,
+    ):
+        assert list(validator.iter_errors(receipt))
+
+
+def test_identity_maintenance_schema_freezes_success_conflict_and_invalid_receipts() -> None:
+    schema = _cli().load_identity_maintenance_schema()
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    common = {
+        "action": "rebind",
+        "cli_contract_version": 1,
+        "contract": "graphify.workspace.identity_maintenance",
+        "schema_version": 1,
+    }
+    valid = [
+        {
+            **common,
+            "exit_code": 0,
+            "registry_revision": 2,
+            "repo_uuid": REPO_UUID,
+            "state": "maintained",
+        },
+        {
+            **common,
+            "action_code": "refresh_registry_revision",
+            "exit_code": 10,
+            "reason_code": "revision_conflict",
+            "registry_revision": 3,
+            "state": "conflict",
+        },
+        {
+            **common,
+            "action_code": "verify_identity_maintenance_target",
+            "exit_code": 10,
+            "reason_code": "identity_mismatch",
+            "state": "conflict",
+        },
+        {
+            **common,
+            "action_code": "enroll_or_adopt_source",
+            "exit_code": 10,
+            "reason_code": "source_not_bound",
+            "state": "conflict",
+        },
+        {
+            **common,
+            "action_code": "run_workspace_doctor",
+            "exit_code": 10,
+            "reason_code": "revision_conflict",
+            "state": "conflict",
+        },
+        {
+            **common,
+            "action_code": "provide_valid_authorization",
+            "exit_code": 20,
+            "reason_code": "authorization_invalid",
+            "state": "invalid",
+        },
+    ]
+
+    for receipt in valid:
+        assert not list(validator.iter_errors(receipt))
+
+    missing_observed_revision = dict(valid[1])
+    missing_observed_revision.pop("registry_revision")
+    invalid_with_revision = {**valid[-1], "registry_revision": 3}
+    success_with_failure_code = {
+        **valid[0],
+        "reason_code": "identity_maintenance_failed",
+    }
+    registration_action = {**valid[0], "action": "enroll"}
+    for receipt in (
+        missing_observed_revision,
+        invalid_with_revision,
+        success_with_failure_code,
+        registration_action,
     ):
         assert list(validator.iter_errors(receipt))
 
@@ -394,9 +484,29 @@ def test_register_emits_the_versioned_canonical_success_receipt(
     [
         ["register"],
         ["register", "enroll", "--repo-uuid", REPO_UUID],
+        ["register", "rebind", "--repo-uuid", REPO_UUID],
+        [
+            "register",
+            "rotate",
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "1",
+            "--authorization-stdin",
+            "--authorization-stdin",
+        ],
         [
             "register",
             "delete",
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "0",
+            "--authorization-stdin",
+        ],
+        [
+            "register",
+            "activate",
             "--repo-uuid",
             REPO_UUID,
             "--expected-registry-revision",
@@ -450,7 +560,7 @@ def test_register_usage_errors_do_not_read_stdin_or_discover_state(
     assert stderr.getvalue() == (
         "Usage: graphify workspace status --json\n"
         "       graphify workspace doctor\n"
-        "       graphify workspace register <enroll|adopt> --repo-uuid UUID "
+        "       graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
         "--expected-registry-revision N --authorization-stdin\n"
         "       graphify workspace sync --code-only --request-stdin\n"
         "       graphify workspace query --request-stdin\n"
@@ -959,8 +1069,13 @@ def test_register_rejects_inconsistent_source_evidence_before_external_mutation(
     assert not inputs.state_root.exists()
 
 
+@pytest.mark.parametrize(
+    "action",
+    [IdentityAction.ENROLL, IdentityAction.REBIND, IdentityAction.ROTATE],
+)
 def test_register_authorization_input_is_bounded_in_bytes_before_decode(
     monkeypatch: pytest.MonkeyPatch,
+    action: IdentityAction,
 ) -> None:
     workspace_cli = _cli()
     read_sizes: list[int] = []
@@ -980,7 +1095,7 @@ def test_register_authorization_input_is_bounded_in_bytes_before_decode(
         ),
     )
     request = workspace_cli._RegisterRequest(
-        action=IdentityAction.ENROLL,
+        action=action,
         repo_uuid=REPO_UUID,
         expected_registry_revision=0,
     )
@@ -1566,7 +1681,7 @@ def test_registration_subprocess_uses_cwd_stdin_and_production_authority(
     assert usage.stderr == (
         "Usage: graphify workspace status --json\n"
         "       graphify workspace doctor\n"
-        "       graphify workspace register <enroll|adopt> --repo-uuid UUID "
+        "       graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
         "--expected-registry-revision N --authorization-stdin\n"
         "       graphify workspace sync --code-only --request-stdin\n"
         "       graphify workspace query --request-stdin\n"
@@ -1728,3 +1843,693 @@ def test_registration_cli_cas_contention_emits_one_success_and_one_conflict(
     document = RegistryStore(inputs.state_root, capabilities=SUPPORTED).load().to_dict()
     assert document["revision"] == 1
     assert len(document["workspaces"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "method"),
+    [
+        ("rebind", "rebind"),
+        ("rotate", "rotate_enrollment_evidence"),
+    ],
+)
+def test_identity_maintenance_emits_a_dedicated_canonical_success_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    action: str,
+    method: str,
+) -> None:
+    workspace_cli = _cli()
+    cwd = tmp_path / "checkout"
+    cwd.mkdir()
+    source = _source_stub(cwd)
+    calls: list[tuple[str, object, OperatorAuthorization, int]] = []
+
+    class Registry:
+        state = _AllowingState()
+
+        def rebind(
+            self,
+            discovered: object,
+            authorization: OperatorAuthorization,
+            *,
+            expected_revision: int,
+        ) -> Any:
+            calls.append(("rebind", discovered, authorization, expected_revision))
+            return SimpleNamespace(to_dict=lambda: {"revision": 4})
+
+        def rotate_enrollment_evidence(
+            self,
+            discovered: object,
+            authorization: OperatorAuthorization,
+            *,
+            expected_revision: int,
+        ) -> Any:
+            calls.append(("rotate_enrollment_evidence", discovered, authorization, expected_revision))
+            return SimpleNamespace(to_dict=lambda: {"revision": 4})
+
+    monkeypatch.setattr(workspace_cli, "load_workspace_runtime_inputs", lambda: object())
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(registry=Registry()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda _root, *, deadline_ns, max_bytes: source,
+        raising=False,
+    )
+    monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
+    monkeypatch.setattr(
+        workspace_cli,
+        "verify_source_checkout",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "stdin", StringIO(_authorization_payload(action.upper())))
+    stdout = StringIO()
+    stderr = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        [
+            "register",
+            action,
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "3",
+            "--authorization-stdin",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    expected = {
+        "action": action,
+        "cli_contract_version": 1,
+        "contract": "graphify.workspace.identity_maintenance",
+        "exit_code": 0,
+        "registry_revision": 4,
+        "repo_uuid": REPO_UUID,
+        "schema_version": 1,
+        "state": "maintained",
+    }
+    assert result == 0
+    assert calls == [(method, source, calls[0][2], 3)]
+    assert calls[0][2].to_dict() == json.loads(_authorization_payload(action.upper()))
+    assert stdout.getvalue().encode("utf-8") == (
+        json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    assert stderr.getvalue() == ""
+    payload = _identity_maintenance_payload(stdout)
+    assert payload == expected
+    assert list(
+        Draft202012Validator(
+            workspace_cli.load_registration_schema(),
+            format_checker=FormatChecker(),
+        ).iter_errors(payload)
+    )
+    assert "operator authorization" not in stdout.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("error", "state", "exit_code", "reason_code", "action_code", "revision"),
+    [
+        (
+            RevisionConflict("private current revision", actual_registry_revision=7),
+            "conflict",
+            10,
+            "revision_conflict",
+            "refresh_registry_revision",
+            7,
+        ),
+        (
+            RevisionConflict("private unavailable revision"),
+            "conflict",
+            10,
+            "revision_conflict",
+            "run_workspace_doctor",
+            None,
+        ),
+        (
+            UUIDCollisionError("private unrelated identity"),
+            "conflict",
+            10,
+            "identity_mismatch",
+            "verify_identity_maintenance_target",
+            None,
+        ),
+        (
+            SourceAmbiguousError("private unbound source"),
+            "conflict",
+            10,
+            "source_not_bound",
+            "enroll_or_adopt_source",
+            None,
+        ),
+        (
+            AuthorizationError("private authorization"),
+            "invalid",
+            20,
+            "authorization_invalid",
+            "provide_valid_authorization",
+            None,
+        ),
+        (
+            TypeError("private runtime failure"),
+            "invalid",
+            20,
+            "identity_maintenance_failed",
+            "run_workspace_doctor",
+            None,
+        ),
+    ],
+)
+def test_identity_maintenance_failures_are_canonical_opaque_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error: Exception,
+    state: str,
+    exit_code: int,
+    reason_code: str,
+    action_code: str,
+    revision: int | None,
+) -> None:
+    workspace_cli = _cli()
+    cwd = tmp_path / "private-checkout"
+    cwd.mkdir()
+    source = _source_stub(cwd)
+
+    class Registry:
+        state = _AllowingState()
+
+        def rebind(self, *_args: object, **_kwargs: object) -> None:
+            raise error
+
+    monkeypatch.setattr(workspace_cli, "load_workspace_runtime_inputs", lambda: object())
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(registry=Registry()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda _root, *, deadline_ns, max_bytes: source,
+        raising=False,
+    )
+    monkeypatch.setattr(workspace_cli, "Path", SimpleNamespace(cwd=lambda: cwd), raising=False)
+    monkeypatch.setattr(
+        workspace_cli,
+        "verify_source_checkout",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "stdin", StringIO(_authorization_payload("REBIND")))
+    stdout = StringIO()
+    stderr = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        [
+            "register",
+            "rebind",
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "6",
+            "--authorization-stdin",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    payload = _identity_maintenance_payload(stderr)
+    assert result == exit_code
+    assert stdout.getvalue() == ""
+    assert payload["state"] == state
+    assert payload["exit_code"] == exit_code
+    assert payload["reason_code"] == reason_code
+    assert payload["action_code"] == action_code
+    if revision is None:
+        assert "registry_revision" not in payload
+    else:
+        assert payload["registry_revision"] == revision
+    assert "repo_uuid" not in payload
+    assert "private" not in stderr.getvalue()
+    assert str(cwd) not in stderr.getvalue()
+
+
+@pytest.mark.parametrize("action", ["rebind", "rotate"])
+def test_identity_maintenance_composes_authority_before_reading_authorization_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace_cli = _cli()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        workspace_cli,
+        "load_workspace_runtime_inputs",
+        lambda: calls.append("load") or object(),
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: calls.append("compose")
+        or (_ for _ in ()).throw(UnsupportedRuntime("private runtime")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "discover_source",
+        lambda *_args, **_kwargs: pytest.fail("invalid runtime must not discover source"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        SimpleNamespace(read=lambda _size=-1: pytest.fail("invalid runtime must not read stdin")),
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        [
+            "register",
+            action,
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "1",
+            "--authorization-stdin",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert result == 20
+    assert stdout.getvalue() == ""
+    assert _identity_maintenance_payload(stderr)["reason_code"] == "unsupported_runtime"
+    assert calls == ["load", "compose"]
+
+
+@pytest.mark.parametrize(
+    ("action", "authorization"),
+    [
+        ("rebind", _authorization_payload("ROTATE")),
+        ("rotate", _authorization_payload("REBIND")),
+        (
+            "rebind",
+            '{"action":"REBIND","action":"REBIND","issued_at":"2026-07-16T15:00:00Z",'
+            '"nonce":"n","operator_id":"op","reason":"r"}',
+        ),
+        (
+            "rotate",
+            json.dumps(
+                {
+                    "action": "ROTATE",
+                    "issued_at": "2026-07-16T15:00:00Z",
+                    "nonce": "\ud800",
+                    "operator_id": "op",
+                    "reason": "r",
+                }
+            ),
+        ),
+    ],
+)
+def test_identity_maintenance_authorization_is_duplicate_safe_canonical_and_action_exact(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    authorization: str,
+) -> None:
+    workspace_cli = _cli()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        workspace_cli,
+        "load_workspace_runtime_inputs",
+        lambda: calls.append("load") or object(),
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: calls.append("compose") or SimpleNamespace(registry=object()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "source_root_identity",
+        lambda *_args, **_kwargs: pytest.fail("invalid authorization must not inspect source"),
+        raising=False,
+    )
+    monkeypatch.setattr(sys, "stdin", StringIO(authorization))
+    stdout = StringIO()
+    stderr = StringIO()
+
+    result = workspace_cli.run_workspace_command(
+        [
+            "register",
+            action,
+            "--repo-uuid",
+            REPO_UUID,
+            "--expected-registry-revision",
+            "1",
+            "--authorization-stdin",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    payload = _identity_maintenance_payload(stderr)
+    assert result == 20
+    assert stdout.getvalue() == ""
+    assert payload["reason_code"] == "authorization_invalid"
+    assert payload["action_code"] == "provide_valid_authorization"
+    assert calls == ["load", "compose"]
+    assert "operator authorization" not in stderr.getvalue()
+
+
+def _active_source_state(entry: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(
+        json.dumps(
+            {
+                "active_source": entry["active_source"],
+                "active_source_evidence": entry["active_source_evidence"],
+                "active_source_revision": entry["active_source_revision"],
+            }
+        )
+    )
+
+
+def test_identity_maintenance_rebind_and_rotate_obey_registry_policy_without_source_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    original = create_repo(tmp_path / "original", REPO_UUID)
+    clone = _clone(original, tmp_path / "clone")
+    unrelated = create_repo(tmp_path / "unrelated", REPO_UUID)
+    (unrelated / "README.md").write_text("unrelated identity history\n", encoding="utf-8")
+    _git(unrelated, "add", "README.md")
+    _git(unrelated, "commit", "--quiet", "--amend", "--no-edit")
+    inputs = _inputs(tmp_path / "external-state")
+    protected = (original, clone, unrelated)
+    snapshots = {root: tree_snapshot(root) for root in protected}
+
+    enrolled_exit, enrolled_stdout, enrolled_stderr = _run_register(
+        monkeypatch,
+        cwd=original,
+        action="enroll",
+        expected_revision=0,
+        inputs=inputs,
+    )
+    assert enrolled_exit == 0
+    assert enrolled_stderr.getvalue() == ""
+    assert _registration_payload(enrolled_stdout)["registry_revision"] == 1
+    store = RegistryStore(inputs.state_root, capabilities=SUPPORTED)
+    enrolled_entry = store.load().to_dict()["workspaces"][0]
+    active_before = _active_source_state(enrolled_entry)
+
+    rebound_exit, rebound_stdout, rebound_stderr = _run_register(
+        monkeypatch,
+        cwd=clone,
+        action="rebind",
+        expected_revision=1,
+        inputs=inputs,
+    )
+    assert rebound_exit == 0
+    assert rebound_stderr.getvalue() == ""
+    assert _identity_maintenance_payload(rebound_stdout)["registry_revision"] == 2
+    rebound_entry = store.load().to_dict()["workspaces"][0]
+    assert {alias["path"] for alias in rebound_entry["aliases"]} == {str(clone.resolve())}
+    assert _active_source_state(rebound_entry) == active_before
+
+    rotated_exit, rotated_stdout, rotated_stderr = _run_register(
+        monkeypatch,
+        cwd=clone,
+        action="rotate",
+        expected_revision=2,
+        inputs=inputs,
+    )
+    assert rotated_exit == 0
+    assert rotated_stderr.getvalue() == ""
+    assert _identity_maintenance_payload(rotated_stdout)["registry_revision"] == 3
+    rotated_entry = store.load().to_dict()["workspaces"][0]
+    assert _active_source_state(rotated_entry) == active_before
+
+    before_failed_state = tree_snapshot(inputs.state_root)
+    rotate_exit, rotate_stdout, rotate_stderr = _run_register(
+        monkeypatch,
+        cwd=unrelated,
+        action="rotate",
+        expected_revision=3,
+        inputs=inputs,
+    )
+    rebind_exit, rebind_stdout, rebind_stderr = _run_register(
+        monkeypatch,
+        cwd=unrelated,
+        action="rebind",
+        expected_revision=3,
+        inputs=inputs,
+    )
+
+    assert rotate_exit == rebind_exit == 10
+    assert rotate_stdout.getvalue() == rebind_stdout.getvalue() == ""
+    assert _identity_maintenance_payload(rotate_stderr)["reason_code"] == "source_not_bound"
+    assert _identity_maintenance_payload(rebind_stderr)["reason_code"] == "identity_mismatch"
+    assert store.load().to_dict()["revision"] == 3
+    assert tree_snapshot(inputs.state_root) == before_failed_state
+    assert _active_source_state(store.load().to_dict()["workspaces"][0]) == active_before
+    assert {root: tree_snapshot(root) for root in protected} == snapshots
+    _assert_external_state_allowlist(inputs.state_root, includes_authority=False)
+
+
+def test_identity_maintenance_rebind_accepts_the_enrolled_git_common_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    inputs = _inputs(tmp_path / "external-state")
+    assert (
+        _run_register(
+            monkeypatch,
+            cwd=checkout,
+            action="enroll",
+            expected_revision=0,
+            inputs=inputs,
+        )[0]
+        == 0
+    )
+    store = RegistryStore(inputs.state_root, capabilities=SUPPORTED)
+    active_before = _active_source_state(store.load().to_dict()["workspaces"][0])
+    rewritten_head = _git(
+        checkout,
+        "commit-tree",
+        _git(checkout, "write-tree"),
+        "-m",
+        "rewritten-root",
+    )
+    _git(checkout, "update-ref", "HEAD", rewritten_head)
+    before_checkout = tree_snapshot(checkout)
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="rebind",
+        expected_revision=1,
+        inputs=inputs,
+    )
+
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert _identity_maintenance_payload(stdout)["registry_revision"] == 2
+    entry = store.load().to_dict()["workspaces"][0]
+    assert _active_source_state(entry) == active_before
+    assert tree_snapshot(checkout) == before_checkout
+
+
+def test_identity_maintenance_partial_write_recovery_has_no_duplicate_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    state_root = tmp_path / "external-state"
+    assert (
+        _run_register(
+            monkeypatch,
+            cwd=checkout,
+            action="enroll",
+            expected_revision=0,
+            inputs=_inputs(state_root),
+        )[0]
+        == 0
+    )
+    fired = False
+
+    def crash_once(event: str) -> None:
+        nonlocal fired
+        if event == "registry:current_replaced" and not fired:
+            fired = True
+            raise InjectedFault(event)
+
+    first_exit, first_stdout, first_stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="rotate",
+        expected_revision=1,
+        inputs=_inputs(state_root, fault_hook=crash_once),
+    )
+    second_exit, second_stdout, second_stderr = _run_register(
+        monkeypatch,
+        cwd=checkout,
+        action="rotate",
+        expected_revision=1,
+        inputs=_inputs(state_root),
+    )
+
+    assert fired
+    assert first_exit == 20
+    assert first_stdout.getvalue() == ""
+    assert _identity_maintenance_payload(first_stderr)["reason_code"] in {
+        "commit_unknown",
+        "identity_maintenance_failed",
+    }
+    assert second_exit in {0, 10}
+    if second_exit == 0:
+        assert second_stderr.getvalue() == ""
+        assert _identity_maintenance_payload(second_stdout)["registry_revision"] == 2
+    else:
+        assert second_stdout.getvalue() == ""
+        payload = _identity_maintenance_payload(second_stderr)
+        assert payload["reason_code"] == "revision_conflict"
+        assert payload["registry_revision"] == 2
+    assert RegistryStore(state_root, capabilities=SUPPORTED).load().to_dict()["revision"] == 2
+
+
+def test_identity_maintenance_preserves_injected_fault_from_revision_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_cli = _cli()
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    state_root = tmp_path / "external-state"
+    inputs = _inputs(state_root)
+    assert (
+        _run_register(
+            monkeypatch,
+            cwd=checkout,
+            action="enroll",
+            expected_revision=0,
+            inputs=inputs,
+        )[0]
+        == 0
+    )
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+
+    class Document:
+        def to_dict(self) -> dict[str, object]:
+            raise InjectedFault("identity-maintenance-revision-receipt")
+
+    class Registry:
+        state = store.state
+
+        def rotate_enrollment_evidence(
+            self,
+            source: object,
+            authorization: OperatorAuthorization,
+            *,
+            expected_revision: int,
+        ) -> Document:
+            store.rotate_enrollment_evidence(
+                source,
+                authorization,
+                expected_revision=expected_revision,
+            )
+            return Document()
+
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(registry=Registry()),
+        raising=False,
+    )
+
+    with pytest.raises(InjectedFault, match="identity-maintenance-revision-receipt"):
+        _run_register(
+            monkeypatch,
+            cwd=checkout,
+            action="rotate",
+            expected_revision=1,
+            inputs=inputs,
+        )
+
+    assert store.load().to_dict()["revision"] == 2
+
+
+def test_identity_maintenance_cli_cas_contention_emits_one_success_and_one_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkout = create_repo(tmp_path / "checkout", REPO_UUID)
+    inputs = _inputs(tmp_path / "external-state")
+    assert (
+        _run_register(
+            monkeypatch,
+            cwd=checkout,
+            action="enroll",
+            expected_revision=0,
+            inputs=inputs,
+        )[0]
+        == 0
+    )
+    workspace_cli = _cli()
+    authorization = OperatorAuthorization(
+        action=IdentityAction.ROTATE,
+        operator_id="operator:contention-test",
+        reason="deterministic identity maintenance contention",
+        issued_at="2026-07-16T15:00:00Z",
+        nonce="identical-rotate-contention",
+    )
+    monkeypatch.setattr(
+        workspace_cli,
+        "_read_operator_authorization",
+        lambda _request: authorization,
+    )
+    monkeypatch.chdir(checkout)
+    barrier = Barrier(2)
+
+    def rotate() -> tuple[int, StringIO, StringIO]:
+        stdout = StringIO()
+        stderr = StringIO()
+        barrier.wait(timeout=5)
+        exit_code = workspace_cli.run_workspace_command(
+            [
+                "register",
+                "rotate",
+                "--repo-uuid",
+                REPO_UUID,
+                "--expected-registry-revision",
+                "1",
+                "--authorization-stdin",
+            ],
+            inputs=inputs,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return exit_code, stdout, stderr
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = [
+            future.result() for future in (executor.submit(rotate), executor.submit(rotate))
+        ]
+
+    assert sorted(outcome[0] for outcome in outcomes) == [0, 10]
+    success = next(outcome for outcome in outcomes if outcome[0] == 0)
+    conflict = next(outcome for outcome in outcomes if outcome[0] == 10)
+    assert success[2].getvalue() == ""
+    assert _identity_maintenance_payload(success[1])["registry_revision"] == 2
+    assert conflict[1].getvalue() == ""
+    conflict_payload = _identity_maintenance_payload(conflict[2])
+    assert conflict_payload["reason_code"] == "revision_conflict"
+    assert conflict_payload["registry_revision"] == 2
+    document = RegistryStore(inputs.state_root, capabilities=SUPPORTED).load().to_dict()
+    assert document["revision"] == 2

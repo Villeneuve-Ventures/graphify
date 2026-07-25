@@ -39,7 +39,15 @@ requires matching stdin authorization and an expected registry revision,
 requires the current working directory itself to be the Git top level, then
 delegates to the P2 registry CAS.
 Adoption is never inferred: the operator must select `adopt`, and the existing
-registry must verify shared history for the same UUID. P5B2b0 adds the internal,
+registry must verify shared history for the same UUID. The narrow remaining-
+P5B2 identity-maintenance slice adds explicit `register rebind` and
+`register rotate` forms on that same path. Installed authority is composed
+before their bounded matching authorization is read, and the source checkout is
+discovered and exactly revalidated before the expected-revision registry CAS.
+The CLI delegates rebind history/common-directory and rotation binding policy to
+the existing `RegistryStore` methods. It adds only a dedicated versioned receipt
+contract; it does not change the durable registry format, duplicate policy, or
+modify `active_source` or `active_source_revision`. P5B2b0 adds the internal,
 request-bound staged structural-build lifecycle needed to recover crashes and
 close requests made stale by durable authority drift. P5B2b exposes only
 `graphify workspace sync --code-only --request-stdin`. The exact request is
@@ -57,10 +65,10 @@ calls `WorkspaceRuntime.freshness.query()` exactly once. It performs no
 advisory status probe. The existing freshness authority owns query bounds,
 locks, two-sided observation, and release; the CLI releases raw native UTF-8
 output only for `release` / `observed_current` and otherwise withholds output.
-Rebind, rotation, activation, remaining mutation and broader query commands,
-repair, watch/service, installation, performance certification, candidate
-publication, and live-cutover work remain deferred; retained production
-query/service authority remains P5C work.
+Activation, remaining mutation and broader query commands, repair,
+watch/service, installation, performance certification, candidate publication,
+and live-cutover work remain deferred; retained production query/service
+authority remains P5C work.
 
 ## Authority split
 
@@ -100,12 +108,12 @@ P2 writes only this external lifecycle state:
 P5B1 additionally reserves `runtime-manifest.json` at the root above as an
 internal format-version-1 read authority containing the complete frozen
 compatibility manifest and explicit semantic-queue policy. Status, doctor,
-P5B2a registration, P5B2b code-only sync, and P5B2c one-shot query authority
-loading read it through the same private-directory, singular-regular-file, 0600,
-no-follow, bounded-read rules used for durable state. Registration then writes
-only the P2 paths already shown above. P5C owns creating and atomically
-installing the candidate-backed authority; P5B1/P5B2a/P5B2b/P5B2c do not create
-it or guess its contents.
+P5B2a registration, identity maintenance, P5B2b code-only sync, and P5B2c one-
+shot query authority loading read it through the same private-directory,
+singular-regular-file, 0600, no-follow, bounded-read rules used for durable
+state. Registration and identity maintenance then write only the P2 paths
+already shown above. P5C owns creating and atomically installing the candidate-
+backed authority; these consumers do not create it or guess its contents.
 
 P3 now owns generations, lifecycle journals, coordination locks, pointers,
 capacity reservations, and explicit offline-GC records. None of those paths is

@@ -1,6 +1,7 @@
 # Graphify workspace contract v1
 
-Implemented contract scope through P5B2c one-shot certified workspace query,
+Implemented contract scope through the narrow remaining-P5B2 identity-
+maintenance CLI, P5B2c one-shot certified workspace query,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -44,8 +45,18 @@ cross-checks its bounded no-follow `.graphify/workspace.toml`, and never infers
 adoption. It emits one canonical redacted receipt and writes only the existing
 P2 registry, workspace, lock, and evidence records beneath the configured
 external state root. The receipt's normative machine-readable schema is
-`graphify/workspace/schemas/cli/v1/registration.schema.json`. Rebind, rotation,
-activation, remaining mutation/query commands, repair, watch/service,
+`graphify/workspace/schemas/cli/v1/registration.schema.json`.
+The narrow identity-maintenance slice extends the same argv family with
+`graphify workspace register rebind` and
+`graphify workspace register rotate`. Both require the same explicit UUID,
+expected registry revision, installed authority, Git-top-level source proof,
+and bounded matching authorization. Rebind delegates shared-history or enrolled
+Git-common-directory policy to `RegistryStore.rebind()`; rotate delegates the
+explicitly-bound-source check to `RegistryStore.rotate_enrollment_evidence()`.
+Neither operation changes `active_source` or `active_source_revision`, and both
+emit the separate CLI-v1 receipt defined by
+`graphify/workspace/schemas/cli/v1/identity-maintenance.schema.json`.
+Activation, remaining mutation/query commands, repair, watch/service,
 performance certification, and candidate publication remain later P5 work.
 P5B2b0 adds the internal request-bound staged-build and stale-abandonment
 recovery contract described in [State contracts](state-contract.md). P5B2b
@@ -109,6 +120,33 @@ the CLI reports that truthfully as `timed_out` rather than inventing a separate
 contention result. The path creates no query log and writes nothing to the
 source checkout, Git metadata, workspace state, `HOME`, or `CODEX_HOME`.
 
+## Identity-maintenance CLI
+
+The exact identity-maintenance forms are:
+
+```text
+graphify workspace register rebind --repo-uuid UUID --expected-registry-revision N --authorization-stdin
+graphify workspace register rotate --repo-uuid UUID --expected-registry-revision N --authorization-stdin
+```
+
+Malformed argv exits 64 with the deterministic workspace usage text on standard
+error before authority loading, source discovery, or standard-input reads. For
+valid argv, installed runtime authority is loaded and composed before the
+authorization object is consumed. Authorization is duplicate-free UTF-8 JSON,
+bounded to 16 KiB, canonically encodable, and must name exactly `REBIND` or
+`ROTATE` for the selected lowercase verb. Source discovery, exact revalidation,
+external-state checks, and expected-revision CAS are identical to initial
+registration; policy remains solely in the existing registry methods.
+
+Success writes one canonical `graphify.workspace.identity_maintenance` v1
+receipt to standard output and exits 0. A revision or identity-policy conflict
+writes one redacted receipt to standard error and exits 10; an invalid authority,
+authorization, source, state, runtime, or uncertain commit writes one redacted
+receipt to standard error and exits 20. Failure receipts omit the repo UUID and
+include the observed registry revision only for a safe deterministic revision
+conflict. Registration v1 remains limited to `enroll` and `adopt` and does not
+admit either maintenance action.
+
 ## Governance and deferred work ownership
 
 The publication gate in [Workspace governance](governance.md) requires one
@@ -125,7 +163,8 @@ sequencing. Direct operator instruction alone owns execution authorization.
 |---|---|---|
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
-| Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, rebind, rotation, activation, mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
+| Identity maintenance | Narrow remaining-P5B2 implemented contract | `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, unchanged active-source state, and a dedicated receipt schema; governance status is unchanged by this implementation. |
+| Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, activation, mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
@@ -148,10 +187,11 @@ CLI verb:
 {"action":"ENROLL","issued_at":"2026-07-16T15:00:00Z","nonce":"example-nonce","operator_id":"operator:example","reason":"initial workspace enrollment"}
 ```
 
-For `register adopt`, replace `ENROLL` with `ADOPT`. `issued_at` must be a real
-RFC 3339 UTC timestamp ending in `Z`; the other values must be non-empty and
-trimmed. Extra fields, duplicate fields, non-string values, and an action that
-does not match the explicit CLI verb are rejected before mutation.
+For `register adopt`, `rebind`, or `rotate`, replace `ENROLL` with `ADOPT`,
+`REBIND`, or `ROTATE` respectively. `issued_at` must be a real RFC 3339 UTC
+timestamp ending in `Z`; the other values must be non-empty and trimmed. Extra
+fields, duplicate fields, non-string values, and an action that does not match
+the explicit CLI verb are rejected before mutation.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build
@@ -165,9 +205,9 @@ or fork engine logic inside the package.
   `graphify/workspace/schemas/cli/v1/`, and
   `graphify/workspace/schemas/cli/v2/` are normative for the structural shape
   of durable documents, CLI requests and receipts, versioned status output,
-  and the TOML-to-object representation of repo policy. Sync request/receipt
-  and one-shot query request/result contracts are CLI v1; status JSON is schema
-  v2.
+  and the TOML-to-object representation of repo policy. Registration, identity-
+  maintenance, sync request/receipt, and one-shot query request/result contracts
+  are CLI v1; status JSON is schema v2.
 - `graphify.workspace` supplies dependency-free canonical reference models,
   exact v1 rejection, SHA-256 inputs, and journal frame encoding. Its
   cross-field and cross-document validation is normative where JSON Schema
@@ -183,8 +223,9 @@ or fork engine logic inside the package.
   P5A durable queue and certification boundary. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
-  P5B2a registration command with bounded authority, authorization, policy, and
-  Git-discovery inputs, the P5B2b sync request/receipt transport, and the P5B2c
+  P5B2a registration command plus the bounded rebind/rotation identity-
+  maintenance slice with bounded authority, authorization, policy, and Git-
+  discovery inputs, the P5B2b sync request/receipt transport, and the P5B2c
   one-shot query transport; it reuses `.identity`, `.registry`, `.sync`, and
   `.freshness` without adding another persistence path. Lifecycle mutation
   fails closed outside
