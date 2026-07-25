@@ -68,11 +68,16 @@ duplicate-free UTF-8, at most 32 KiB, and contains exactly `contract`,
 `schema_version`, `cli_contract_version`, `repo_uuid`, the existing
 `QueryRequest` fields (`question`, `mode`, `depth`, `token_budget`, and
 `context_filters`), and `timeout_ms`. `repo_uuid` is explicit; `timeout_ms` is
-an integer from 1 through 60000. The command reuses `QueryRequest` for all
-query bounds, so the CLI does not define a second set of question, mode, depth,
-token-budget, or context-filter limits. Malformed, noncanonical, extra-field,
-untrimmed, oversized, out-of-bound, or unsupported-version input is rejected
-before freshness locking or query execution.
+an integer from 1 through 60000. The command reuses `QueryRequest` for runtime
+enforcement of all query bounds. Because JSON Schema `maxLength` counts Unicode
+code points rather than encoded bytes, the CLI-v1 schema publishes the frozen
+question and context-filter byte ceilings as non-enforcing
+`x-graphify-utf8-max-bytes` and `x-graphify-utf8-total-max-bytes` annotations.
+Focused parity tests bind those annotations to the existing `QueryRequest`
+UTF-8 behavior; changing the CLI-v1 bounds requires a new CLI contract version.
+Malformed, noncanonical, extra-field, untrimmed, oversized, out-of-bound, or
+unsupported-version input is rejected before freshness locking or query
+execution.
 
 The command writes raw native query output, encoded as UTF-8 without a wrapper,
 to standard output only when freshness returns `decision=release` and
@@ -82,6 +87,14 @@ release that record binds the explicit repo UUID and nested `output` metadata:
 `stream`, `encoding`, `bytes`, and `sha256`. Every other result leaves standard
 output empty and omits the repo UUID and `output` metadata from the control
 record.
+
+Consumers must treat captured standard output as committed only when the
+process exits 0, standard error contains exactly one canonical schema-valid
+CLI-v1 control record reporting `release` / `observed_current` output on
+UTF-8 standard output, and that record's byte count and SHA-256 digest match the
+captured standard-output bytes. If any condition fails, the captured output is
+uncertified and must be discarded. This commit rule verifies the deliberately
+split streams; it does not make their delivery atomic.
 
 | Exit | Result | Standard output |
 |---:|---|---|

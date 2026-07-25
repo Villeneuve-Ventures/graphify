@@ -21,14 +21,23 @@
     "schema_version": {"const": 1},
     "cli_contract_version": {"const": 1},
     "repo_uuid": {"$ref": "#/$defs/repo_uuid"},
-    "question": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "x-graphify-utf8-max-bytes": 4096
+    },
     "mode": {"enum": ["bfs", "dfs"]},
     "depth": {"type": "integer", "minimum": 0, "maximum": 8},
     "token_budget": {"type": "integer", "minimum": 1, "maximum": 32768},
     "context_filters": {
       "type": "array",
       "maxItems": 16,
-      "items": {"type": "string", "minLength": 1, "maxLength": 128}
+      "x-graphify-utf8-total-max-bytes": 1024,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "x-graphify-utf8-max-bytes": 128
+      }
     },
     "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 60000}
   },

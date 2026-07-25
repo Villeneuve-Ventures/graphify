@@ -57,6 +57,10 @@ def _request_bytes(value: dict[str, JsonValue] | None = None) -> bytes:
     return canonical_json_bytes(_request_value() if value is None else value)
 
 
+def _multibyte_question(*, overflow_bytes: int = 0) -> str:
+    return "é" + "\u2003" * 1_364 + " " * overflow_bytes + "é"
+
+
 def _result_common() -> dict[str, object]:
     return {
         "contract": "graphify.workspace.query_result",
@@ -99,6 +103,15 @@ def test_query_request_and_result_schemas_freeze_the_public_contract() -> None:
     assert list(request_validator.iter_errors({**request, "timeout_ms": 0}))
     assert list(request_validator.iter_errors({**request, "timeout_ms": 60_001}))
     assert list(request_validator.iter_errors({**request, "timeout_ms": True}))
+
+    question_schema = request_schema["properties"]["question"]
+    filter_array_schema = request_schema["properties"]["context_filters"]
+    filter_item_schema = filter_array_schema["items"]
+    assert "maxLength" not in question_schema
+    assert question_schema["x-graphify-utf8-max-bytes"] == 4_096
+    assert "maxLength" not in filter_item_schema
+    assert filter_item_schema["x-graphify-utf8-max-bytes"] == 128
+    assert filter_array_schema["x-graphify-utf8-total-max-bytes"] == 1_024
 
     success = {
         **_result_common(),
@@ -146,6 +159,59 @@ def test_query_request_and_result_schemas_freeze_the_public_contract() -> None:
             assert list(result_validator.iter_errors({**result, **leaked}))
     assert list(result_validator.iter_errors({**success, "action_code": "nope"}))
     assert list(result_validator.iter_errors({**success, "output": "not raw"}))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_bytes"),
+    [
+        ("question", _multibyte_question(), 4_096),
+        ("context_filters", ["é" * 64], 128),
+        ("context_filters", ["é" * 64] * 8, 1_024),
+    ],
+)
+def test_query_accepts_exact_multibyte_utf8_byte_bounds(
+    field: str,
+    value: JsonValue,
+    expected_bytes: int,
+) -> None:
+    request = {**_request_value(), field: value}
+    if field == "question":
+        assert isinstance(value, str)
+        actual_bytes = len(value.encode("utf-8"))
+    else:
+        assert isinstance(value, list)
+        filter_values = cast(list[str], value)
+        actual_bytes = sum(len(item.encode("utf-8")) for item in filter_values)
+    assert actual_bytes == expected_bytes
+    assert _cli()._parse_query_request(_request_bytes(request)).to_dict() == request
+
+
+def test_query_rejects_multibyte_utf8_byte_bounds_one_byte_over() -> None:
+    question = _multibyte_question(overflow_bytes=1)
+    item = "é" * 63 + "€"
+    filters = ["é" * 64] * 8 + ["x"]
+    assert len(question.encode("utf-8")) == 4_097
+    assert len(question) == 1_367
+    assert sum(len(part) for part in question.split()) == 2
+    assert len(item.encode("utf-8")) == 129
+    assert len(item) == 64
+    assert sum(len(value.encode("utf-8")) for value in filters) == 1_025
+    assert all(len(value.encode("utf-8")) <= 128 for value in filters)
+
+    workspace_cli = _cli()
+    validator = Draft202012Validator(
+        workspace_cli.load_query_request_schema(), format_checker=FormatChecker()
+    )
+    for field, value in (
+        ("question", cast(JsonValue, question)),
+        ("context_filters", cast(JsonValue, [item])),
+        ("context_filters", cast(JsonValue, filters)),
+    ):
+        request = _request_value()
+        request[field] = value
+        assert not list(validator.iter_errors(request))
+        with pytest.raises(ValueError, match="query request payload is invalid"):
+            workspace_cli._parse_query_request(_request_bytes(request))
 
 
 @pytest.mark.parametrize(
@@ -417,9 +483,10 @@ def test_query_passes_only_query_request_and_deadline_to_freshness(
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes())))
     monkeypatch.setattr(workspace_cli, "compose_workspace_runtime", lambda _inputs: runtime)
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
+    exit_code = workspace_cli.run_workspace_command(
         ("query", "--request-stdin"), inputs=object(), stdout=stdout, stderr=stderr
-    ) == 0
+    )
+    assert exit_code == 0
     timeout_ms = request_value["timeout_ms"]
     assert isinstance(timeout_ms, int) and not isinstance(timeout_ms, bool)
     assert calls == [
@@ -437,7 +504,11 @@ def test_query_passes_only_query_request_and_deadline_to_freshness(
     ]
     assert stdout.getvalue() == native_output
     output_bytes = native_output.encode("utf-8")
-    assert json.loads(stderr.getvalue()) == {
+    control = json.loads(stderr.getvalue())
+    Draft202012Validator(
+        workspace_cli.load_query_result_schema(), format_checker=FormatChecker()
+    ).validate(control)
+    assert control == {
         **_result_common(),
         "state": "released",
         "decision": "release",
@@ -453,7 +524,7 @@ def test_query_passes_only_query_request_and_deadline_to_freshness(
             "sha256": hashlib.sha256(output_bytes).hexdigest(),
         },
     }
-    assert stderr.getvalue().encode() == canonical_json_bytes(json.loads(stderr.getvalue()))
+    assert stderr.getvalue().encode() == canonical_json_bytes(control)
     assert stdout.getvalue().encode("utf-8") == output_bytes
 
 

@@ -264,14 +264,23 @@ output remains ignored and must not widen the P1 product diff.
   integer `timeout_ms` from 1 through 60000;
 - malformed, unsupported-version, untrimmed, oversized, or out-of-bound
   requests reject before freshness locks or query execution. The CLI reuses
-  `QueryRequest` validation rather than duplicating its query limits;
+  `QueryRequest` validation rather than duplicating enforcement. The CLI-v1
+  schema omits incompatible code-point `maxLength` constraints and publishes
+  the frozen question, per-filter, and aggregate-filter UTF-8 byte ceilings as
+  non-enforcing `x-graphify-*` annotations; exact-bound and one-byte-over
+  multibyte tests keep those annotations aligned with `QueryRequest`, and any
+  bound change requires a new CLI contract version;
 - the composed runtime receives exactly one `freshness.query(repo_uuid,
   request, timeout_ns=...)` call and no advisory freshness status probe;
 - only `decision=release` with `reason=observed_current` writes the exact raw
   native UTF-8 query output to standard output. The canonical redacted
   `graphify.workspace.query_result` v1 record on standard error binds that
   output through nested `output` metadata (`stream`, `encoding`, `bytes`, and
-  `sha256`), together with the explicit repo UUID;
+  `sha256`), together with the explicit repo UUID. Consumers commit captured
+  output only when exit is 0, standard error contains exactly one canonical
+  schema-valid release / `observed_current` record for UTF-8 standard output,
+  and its byte count and digest match the captured bytes; otherwise they
+  discard the uncertified output;
 - all `drifted`, `timed_out`, and other `withheld` results, plus `unsupported`,
   `invalid`, and execution-failure paths, leave standard output empty and omit
   the repo UUID and `output` metadata from the control record. Exit 10 denotes
