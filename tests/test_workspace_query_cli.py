@@ -7,6 +7,7 @@ independent of the freshness protocol tests.
 
 from __future__ import annotations
 
+import errno
 from io import BytesIO, StringIO, TextIOWrapper
 import hashlib
 import importlib
@@ -14,7 +15,7 @@ import json
 import sys
 from types import SimpleNamespace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from jsonschema import Draft202012Validator, FormatChecker
 import pytest
@@ -491,6 +492,42 @@ def test_query_writes_certified_utf8_bytes_independent_of_text_encoding(
     }
 
 
+def test_query_binary_output_preserves_standard_broken_pipe_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+
+    class BrokenBuffer:
+        @staticmethod
+        def write(_payload: bytes) -> int:
+            raise BrokenPipeError(errno.EPIPE, "closed reader")
+
+    standard_out = SimpleNamespace(buffer=BrokenBuffer(), fileno=lambda: 1)
+    standard_err = SimpleNamespace(fileno=lambda: 2)
+    duplicated: list[tuple[int, int]] = []
+    closed: list[int] = []
+    with monkeypatch.context() as patch:
+        patch.setattr(workspace_cli.sys, "stdout", standard_out)
+        patch.setattr(workspace_cli.sys, "stderr", standard_err)
+        patch.setattr(workspace_cli.os, "open", lambda _path, _flags: 99)
+        patch.setattr(
+            workspace_cli.os,
+            "dup2",
+            lambda source, target: duplicated.append((source, target)),
+        )
+        patch.setattr(workspace_cli.os, "close", closed.append)
+        result = workspace_cli._emit_query_output(
+            cast(Any, standard_out),
+            "payload",
+            b"payload",
+            exit_code=0,
+        )
+
+    assert result == 0
+    assert duplicated == [(99, 1), (99, 2)]
+    assert closed == [99]
+
+
 @pytest.mark.parametrize(
     ("result", "expected"),
     [
@@ -577,6 +614,56 @@ def test_query_execution_failure_is_redacted_as_query_failed(
     assert payload["action_code"] == "run_workspace_doctor"
     assert "/private" not in stderr.getvalue()
     assert "provider-secret" not in stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        FreshnessResult(
+            "withhold",
+            cast(Any, []),
+            None,
+            None,
+            False,
+            "not_observed",
+        ),
+        object(),
+    ],
+)
+def test_query_malformed_freshness_result_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    result: object,
+) -> None:
+    workspace_cli = _cli()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes())))
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(
+            freshness=SimpleNamespace(
+                query=lambda *_args, **_kwargs: result,
+            )
+        ),
+    )
+    stdout, stderr = StringIO(), StringIO()
+    assert workspace_cli.run_workspace_command(
+        ("query", "--request-stdin"), inputs=object(), stdout=stdout, stderr=stderr
+    ) == 20
+    assert stdout.getvalue() == ""
+    payload = _error_payload(stderr)
+    assert payload["state"] == "invalid"
+    assert payload["reason_code"] == "query_result_invalid"
+    assert payload["action_code"] == "run_workspace_doctor"
+
+
+def test_query_accepts_canonical_text_only_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    monkeypatch.setattr(sys, "stdin", StringIO(_request_bytes().decode("utf-8")))
+    raw = workspace_cli._read_query_request_bytes()
+    assert raw == _request_bytes()
+    assert workspace_cli._parse_query_request(raw).to_dict() == _request_value()
 
 
 def test_top_level_query_skips_ambient_install_version_checks(

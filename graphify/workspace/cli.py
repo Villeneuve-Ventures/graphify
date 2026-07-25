@@ -39,6 +39,7 @@ from graphify.workspace.generations import (
     GenerationConflict,
     GenerationError,
 )
+from graphify.workspace.freshness import FreshnessResult
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
@@ -426,21 +427,30 @@ def _registration_failure(
     return _registration_bytes(receipt)
 
 
-def _emit_registration_receipt(stream: TextIO, payload: str, *, exit_code: int) -> int:
+def _silence_standard_streams_after_broken_pipe(
+    stream: TextIO,
+    error: OSError,
+) -> bool:
+    if (
+        (stream is not sys.stdout and stream is not sys.stderr)
+        or error.errno not in {errno.EPIPE, errno.EINVAL}
+    ):
+        return False
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    try:
+        for standard_stream in (sys.stdout, sys.stderr):
+            os.dup2(devnull, standard_stream.fileno())
+    finally:
+        os.close(devnull)
+    return True
+
+
+def _emit_text_payload(stream: TextIO, payload: str, *, exit_code: int) -> int:
     try:
         stream.write(payload)
     except (BrokenPipeError, OSError) as exc:
-        if (
-            (stream is not sys.stdout and stream is not sys.stderr)
-            or getattr(exc, "errno", None) not in {errno.EPIPE, errno.EINVAL}
-        ):
+        if not _silence_standard_streams_after_broken_pipe(stream, exc):
             raise
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        try:
-            for standard_stream in (sys.stdout, sys.stderr):
-                os.dup2(devnull, standard_stream.fileno())
-        finally:
-            os.close(devnull)
     return exit_code
 
 
@@ -455,23 +465,14 @@ def _emit_query_output(
 
     binary_stream = getattr(stream, "buffer", None)
     if binary_stream is None:
-        return _emit_registration_receipt(stream, text, exit_code=exit_code)
+        return _emit_text_payload(stream, text, exit_code=exit_code)
     try:
         written = binary_stream.write(payload)
         if written != len(payload):
             raise OSError(errno.EIO, "incomplete workspace query output")
     except (BrokenPipeError, OSError) as exc:
-        if (
-            (stream is not sys.stdout and stream is not sys.stderr)
-            or getattr(exc, "errno", None) not in {errno.EPIPE, errno.EINVAL}
-        ):
+        if not _silence_standard_streams_after_broken_pipe(stream, exc):
             raise
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        try:
-            for standard_stream in (sys.stdout, sys.stderr):
-                os.dup2(devnull, standard_stream.fileno())
-        finally:
-            os.close(devnull)
     return exit_code
 
 
@@ -661,7 +662,7 @@ def _run_registration(
         receipt = _registration_failure(request, failure)
         exit_code = failure.exit_code
     stream = output if exit_code == EXIT_READY else errors
-    return _emit_registration_receipt(stream, receipt, exit_code=exit_code)
+    return _emit_text_payload(stream, receipt, exit_code=exit_code)
 
 
 def _read_sync_request_bytes() -> bytes:
@@ -848,7 +849,7 @@ def _run_sync(
         payload = _sync_failure_receipt(failure)
         exit_code = failure.exit_code
     stream = output if exit_code == EXIT_READY else errors
-    return _emit_registration_receipt(stream, payload, exit_code=exit_code)
+    return _emit_text_payload(stream, payload, exit_code=exit_code)
 
 
 def _read_query_request_bytes() -> bytes:
@@ -1053,6 +1054,14 @@ def _query_failure_payload(failure: _QueryFailure) -> str:
     )
 
 
+def _emit_query_failure(errors: TextIO, failure: _QueryFailure) -> int:
+    return _emit_text_payload(
+        errors,
+        _query_failure_payload(failure),
+        exit_code=failure.exit_code,
+    )
+
+
 def _run_query(
     *,
     inputs: WorkspaceRuntimeInputs | None,
@@ -1068,19 +1077,11 @@ def _run_query(
                 "runtime_authority_missing",
                 "install_candidate_authority",
             )
-            return _emit_registration_receipt(
-                errors,
-                _query_failure_payload(failure),
-                exit_code=failure.exit_code,
-            )
+            return _emit_query_failure(errors, failure)
         runtime = compose_workspace_runtime(resolved_inputs)
     except Exception as exc:
         failure = _classify_query_error(exc)
-        return _emit_registration_receipt(
-            errors,
-            _query_failure_payload(failure),
-            exit_code=failure.exit_code,
-        )
+        return _emit_query_failure(errors, failure)
 
     try:
         raw_request = _read_query_request_bytes()
@@ -1091,11 +1092,7 @@ def _run_query(
             if isinstance(exc, _QueryRequestInvalid)
             else _QueryRequestInvalid("query request input cannot be read")
         )
-        return _emit_registration_receipt(
-            errors,
-            _query_failure_payload(failure),
-            exit_code=failure.exit_code,
-        )
+        return _emit_query_failure(errors, failure)
 
     try:
         with (
@@ -1109,15 +1106,23 @@ def _run_query(
             )
     except Exception as exc:
         failure = _classify_query_error(exc)
-        return _emit_registration_receipt(
-            errors,
-            _query_failure_payload(failure),
-            exit_code=failure.exit_code,
+        return _emit_query_failure(errors, failure)
+
+    if not isinstance(result, FreshnessResult):
+        failure = _QueryFailure(
+            "invalid",
+            EXIT_INVALID,
+            "query_result_invalid",
+            "run_workspace_doctor",
         )
+        return _emit_query_failure(errors, failure)
 
     observation_boundary = result.observation_boundary
     if (
         type(result.query_executed) is not bool
+        or not isinstance(result.decision, str)
+        or not isinstance(result.reason, str)
+        or not isinstance(observation_boundary, str)
         or observation_boundary not in {"not_observed", "pre_observed", "two_sided"}
     ):
         failure = _QueryFailure(
@@ -1169,7 +1174,7 @@ def _run_query(
                     native_bytes,
                     exit_code=EXIT_READY,
                 )
-                return _emit_registration_receipt(
+                return _emit_text_payload(
                     errors,
                     control,
                     exit_code=EXIT_READY,
@@ -1219,11 +1224,7 @@ def _run_query(
                 observation_boundary=observation_boundary,
             )
 
-    return _emit_registration_receipt(
-        errors,
-        _query_failure_payload(failure),
-        exit_code=failure.exit_code,
-    )
+    return _emit_query_failure(errors, failure)
 
 
 def _doctor_text(report: WorkspaceStatusReport) -> str:
@@ -1258,7 +1259,7 @@ def run_workspace_command(
     if command and command[0] == "register":
         request = _parse_register_request(command)
         if request is None:
-            return _emit_registration_receipt(
+            return _emit_text_payload(
                 errors,
                 _USAGE + "\n",
                 exit_code=EXIT_USAGE,
@@ -1271,7 +1272,7 @@ def run_workspace_command(
         )
     if command and command[0] == "sync":
         if command != ("sync", "--code-only", "--request-stdin"):
-            return _emit_registration_receipt(
+            return _emit_text_payload(
                 errors,
                 _USAGE + "\n",
                 exit_code=EXIT_USAGE,
@@ -1283,7 +1284,7 @@ def run_workspace_command(
         )
     if command and command[0] == "query":
         if command != ("query", "--request-stdin"):
-            return _emit_registration_receipt(
+            return _emit_text_payload(
                 errors,
                 _QUERY_USAGE + "\n",
                 exit_code=EXIT_USAGE,
