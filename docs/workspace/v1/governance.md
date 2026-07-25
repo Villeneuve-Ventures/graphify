@@ -2,18 +2,21 @@
 
 Ledger refresh: `2026-07-25T13:51:21Z`
 
-This document becomes the canonical live ledger for Graphify-local phases
+This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
-after the publication gate is satisfied. That gate requires one commit
-reachable from the published `Villeneuve-Ventures/graphify@workspace/v1` branch
-to add this file, [`receipts/README.md`](receipts/README.md), and
+after the one-time migration publication gate was satisfied. That gate required
+one commit reachable from the published
+`Villeneuve-Ventures/graphify@workspace/v1` branch to add this file,
+[`receipts/README.md`](receipts/README.md), and
 [`receipts/p5b2b.md`](receipts/p5b2b.md), and to update
-[`README.md`](README.md) to identify this repository authority set. Until then,
-the external execution checklist and global plan remain the active
-Graphify-local authority, and these files are proposed migration records. If
-the publication gate cannot be verified, authority fails closed to those
-external plans. After activation, the external plans retain authority only for
-cross-repository dependencies and P6-P12 portfolio sequencing.
+[`README.md`](README.md) to identify this repository authority set. Later
+receipts do not expand or reopen that initial gate: each becomes repo-local
+accepted evidence only when its separate governance-only commit is published
+and merged, and [`receipts/README.md`](receipts/README.md) is the current
+accepted-receipt inventory. If the initial gate cannot be verified, authority
+fails closed to the external execution checklist and global plan. After
+activation, those external plans retain authority only for cross-repository
+dependencies and P6-P12 portfolio sequencing.
 
 ## Authority precedence
 
