@@ -1053,6 +1053,94 @@ def test_same_git_common_directory_cannot_be_adopted_after_remote_change(
     assert _tree_snapshot(store.state.root) == before_state
 
 
+def test_adopt_rejects_cross_uuid_persisted_common_directory_identity_before_writes(
+    tmp_path: Path,
+) -> None:
+    original = _create_repo(tmp_path / "original", REPO_UUID)
+    second = _clone_repo(original, tmp_path / "second")
+    original_source = discover_source(original)
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    store.enroll(
+        original_source,
+        _authorization(IdentityAction.ENROLL, "enroll-original"),
+        expected_revision=0,
+    )
+
+    (second / ".graphify/workspace.toml").write_text(
+        _workspace_toml(SECOND_UUID),
+        encoding="utf-8",
+    )
+    _run(second, "config", "user.email", "workspace-test@example.com")
+    _run(second, "config", "user.name", "Workspace Test")
+    _run(second, "add", ".graphify/workspace.toml")
+    _run(second, "commit", "--quiet", "-m", "retarget second workspace UUID")
+    second_source = discover_source(second)
+    store.enroll(
+        second_source,
+        _authorization(IdentityAction.ENROLL, "enroll-second"),
+        expected_revision=1,
+    )
+
+    moved = tmp_path / "moved-original"
+    original.rename(moved)
+    (moved / ".graphify/workspace.toml").write_text(
+        _workspace_toml(SECOND_UUID),
+        encoding="utf-8",
+    )
+    moved_source = discover_source(moved)
+    assert moved_source.root != original_source.root
+    assert (
+        moved_source.registry_source["git_common_dir"]
+        != original_source.registry_source["git_common_dir"]
+    )
+    assert (
+        moved_source.git_common_device,
+        moved_source.git_common_inode,
+    ) == (
+        original_source.git_common_device,
+        original_source.git_common_inode,
+    )
+    assert set(moved_source.history_roots).intersection(second_source.history_roots)
+
+    before_document = store.load().to_dict()
+    before_external = _tree_snapshot(store.state.root)
+    before_evidence = {path.name for path in (store.state.root / "evidence").iterdir()}
+    before_checkouts = {path: _tree_snapshot(path) for path in (moved, second)}
+    rejection: Exception | None = None
+    try:
+        store.adopt(
+            moved_source,
+            _authorization(IdentityAction.ADOPT, "reject-cross-uuid-identity"),
+            expected_revision=2,
+        )
+    except (UUIDCollisionError, StateCorrupt) as exc:
+        rejection = exc
+    else:
+        pytest.fail("cross-UUID persisted common-directory identity was adopted")
+
+    after_document = store.load().to_dict()
+    after_evidence = {path.name for path in (store.state.root / "evidence").iterdir()}
+    assert {
+        "rejection_type": type(rejection).__name__,
+        "registry_revision": after_document["revision"],
+        "registry_entries_unchanged": (
+            after_document["workspaces"] == before_document["workspaces"]
+        ),
+        "new_evidence_files": sorted(after_evidence - before_evidence),
+        "external_state_unchanged": _tree_snapshot(store.state.root) == before_external,
+        "source_checkouts_unchanged": (
+            {path: _tree_snapshot(path) for path in (moved, second)} == before_checkouts
+        ),
+    } == {
+        "rejection_type": "UUIDCollisionError",
+        "registry_revision": 2,
+        "registry_entries_unchanged": True,
+        "new_evidence_files": [],
+        "external_state_unchanged": True,
+        "source_checkouts_unchanged": True,
+    }
+
+
 def test_adopt_allows_a_distinct_clone_when_retained_inode_is_reused(
     tmp_path: Path,
 ) -> None:
