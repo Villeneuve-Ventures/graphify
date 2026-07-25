@@ -1,12 +1,13 @@
 # Graphify workspace contract v1
 
-Implemented contract scope through P5C1 candidate-bound canonical runtime
-authority generation and isolated atomic installation/compensation proof,
-P5B2b provider-neutral code-only structural sync, P5B2b0 staged structural-build
-recovery, P5B2a initial workspace registration, P5B1 read-only workspace
-status/doctor, P5A semantic queue, P4 adapter, and observed-current library
-runtime for `graphifyy 0.9.16+workspace.1`. Durable state schema v1 and
-runtime-manifest format v1 remain frozen; public status JSON is schema v2.
+Implemented contract scope through P5B2c one-shot certified workspace query,
+P5C1 candidate-bound canonical runtime authority generation and isolated atomic
+installation/compensation proof, P5B2b provider-neutral code-only structural
+sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
+registration, P5B1 read-only workspace status/doctor, P5A semantic queue, P4
+adapter, and observed-current library runtime for
+`graphifyy 0.9.16+workspace.1`. Durable state schema v1 and runtime-manifest
+format v1 remain frozen; public status JSON is schema v2.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -123,7 +124,7 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Area | Owner/status | Stable boundary |
 |---|---|---|
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
-| Certified one-shot query | P5B2c | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
+| Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, rebind, rotation, activation, mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
