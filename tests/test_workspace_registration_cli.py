@@ -45,6 +45,7 @@ from tests.workspace_p3_helpers import (
 
 
 REPO_UUID = "11111111-1111-4111-8111-111111111111"
+SECOND_UUID = "22222222-2222-4222-8222-222222222222"
 SUPPORTED = RuntimeCapabilities.supported_test_fixture()
 POLICY = SemanticQueuePolicy(max_items=8, max_bytes=16 * 1024, retry_budget=1)
 _SUBPROCESS_LAUNCHER = """
@@ -2329,6 +2330,73 @@ def test_identity_maintenance_rebind_and_rotate_obey_registry_policy_without_sou
     assert _active_source_state(store.load().to_dict()["workspaces"][0]) == active_before
     assert {root: tree_snapshot(root) for root in protected} == snapshots
     _assert_external_state_allowlist(inputs.state_root, includes_authority=False)
+
+
+def test_identity_maintenance_rebind_rejects_a_source_bound_to_another_uuid_without_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = create_repo(tmp_path / "first", REPO_UUID)
+    second = _clone(first, tmp_path / "second")
+    second_config = second / ".graphify/workspace.toml"
+    second_config.write_text(
+        second_config.read_text(encoding="utf-8").replace(REPO_UUID, SECOND_UUID),
+        encoding="utf-8",
+    )
+    _git(second, "config", "user.email", "workspace-test@example.com")
+    _git(second, "config", "user.name", "Workspace Test")
+    _git(second, "add", ".graphify/workspace.toml")
+    _git(second, "commit", "--quiet", "-m", "use second workspace UUID")
+    inputs = _inputs(tmp_path / "external-state")
+    assert (
+        _run_register(
+            monkeypatch,
+            cwd=first,
+            action="enroll",
+            expected_revision=0,
+            inputs=inputs,
+        )[0]
+        == 0
+    )
+    assert (
+        _run_register(
+            monkeypatch,
+            cwd=second,
+            action="enroll",
+            expected_revision=1,
+            inputs=inputs,
+            repo_uuid=SECOND_UUID,
+        )[0]
+        == 0
+    )
+    first_config = first / ".graphify/workspace.toml"
+    first_config.write_text(
+        first_config.read_text(encoding="utf-8").replace(REPO_UUID, SECOND_UUID),
+        encoding="utf-8",
+    )
+    before_external_state = tree_snapshot(inputs.state_root)
+    before_checkouts = {root: tree_snapshot(root) for root in (first, second)}
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=first,
+        action="rebind",
+        expected_revision=2,
+        inputs=inputs,
+        repo_uuid=SECOND_UUID,
+    )
+
+    payload = _identity_maintenance_payload(stderr)
+    assert exit_code == 10
+    assert stdout.getvalue() == ""
+    assert payload["state"] == "conflict"
+    assert payload["reason_code"] == "identity_mismatch"
+    assert payload["action_code"] == "verify_identity_maintenance_target"
+    assert RegistryStore(inputs.state_root, capabilities=SUPPORTED).load().to_dict()[
+        "revision"
+    ] == 2
+    assert tree_snapshot(inputs.state_root) == before_external_state
+    assert {root: tree_snapshot(root) for root in (first, second)} == before_checkouts
 
 
 def test_identity_maintenance_rebind_accepts_the_enrolled_git_common_directory(
