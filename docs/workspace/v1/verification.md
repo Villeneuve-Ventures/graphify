@@ -175,7 +175,8 @@ output remains ignored and must not widen the P1 product diff.
 
 - `enroll` and `adopt` require distinct, matching operator authorization on
   standard input, an explicit canonical repo UUID, and an expected registry
-  revision; no invocation may infer adoption or select rebind/activation;
+  revision; no invocation may infer adoption, and registration receipt v1 does
+  not admit rebind, rotation, or activation;
 - parsed-operation success and failure receipts are canonical, versioned,
   deterministic, redacted, and separated between stdout and stderr with exit
   codes 0, 10, and 20 for success, conflict, and invalid state respectively;
@@ -197,6 +198,36 @@ output remains ignored and must not widen the P1 product diff.
 - focused registration, runtime, composition, and CLI tests run before Ruff,
   focused Pyright and high-severity Bandit, graph refresh, the provider-neutral
   full repository suite, exact-diff review, adversarial QA, and exact-head CI.
+
+## Identity-maintenance CLI gates
+
+- the existing registration argv family adds exactly `rebind` and `rotate`;
+  malformed or unsupported argv still emits usage on standard error with exit
+  64 before authority loading, source discovery, or standard-input reads;
+- installed production authority is loaded and composed before the 16 KiB-
+  bounded, duplicate-free, canonically encodable authorization object is read;
+  `REBIND` and `ROTATE` are exact, non-interchangeable operator actions;
+- Git-top-level enforcement, bounded source discovery, exact second discovery,
+  checkout verification, external-state containment, and expected registry-
+  revision CAS remain the existing registration path;
+- the CLI calls `RegistryStore.rebind()` and
+  `RegistryStore.rotate_enrollment_evidence()` directly: shared enrollment
+  history or the enrolled Git common directory is required for rebind, and an
+  explicitly bound source is required for rotation;
+- neither successful operation changes `active_source`,
+  `active_source_revision`, or active-source evidence; recursive source and Git
+  snapshots remain byte-identical, and durable writes stay within the existing
+  private registry, workspace, lock, and evidence paths;
+- concurrent identical expected-revision attempts yield one success and one
+  deterministic conflict that includes the safely observed revision; partial
+  durable writes recover to exactly one new revision without duplication, and
+  `InjectedFault` is re-raised;
+- success, conflict, and invalid results are canonical, redacted, separated
+  between standard output and standard error, and exit 0, 10, and 20
+  respectively under the dedicated
+  `graphify.workspace.identity_maintenance` CLI-v1 receipt schema; and
+- the existing registration v1 schema and enroll/adopt receipts remain
+  unchanged and reject rebind/rotate actions.
 
 ## P5B2b code-only sync and staged-recovery gates
 

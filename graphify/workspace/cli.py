@@ -1,4 +1,4 @@
-"""Narrow workspace registration plus read-only status and doctor commands."""
+"""Narrow workspace identity, sync, query, status, and doctor commands."""
 
 from __future__ import annotations
 
@@ -45,6 +45,7 @@ from graphify.workspace.identity import (
     IdentityAction,
     IdentityError,
     OperatorAuthorization,
+    SourceAmbiguousError,
     SourceDiscoveryError,
     SourceDiscoveryTimeout,
     SourceIdentity,
@@ -94,6 +95,8 @@ from graphify.workspace.sync import (
 
 _REGISTRATION_CONTRACT = "graphify.workspace.registration"
 _REGISTRATION_SCHEMA_VERSION = 1
+_IDENTITY_MAINTENANCE_CONTRACT = "graphify.workspace.identity_maintenance"
+_IDENTITY_MAINTENANCE_SCHEMA_VERSION = 1
 _AUTHORIZATION_MAX_BYTES = 16 * 1024
 
 
@@ -122,6 +125,13 @@ _REGISTRATION_SOURCE_TIMEOUT_NS = 5_000_000_000
 _REGISTRATION_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "registration.schema.json"
 )
+_IDENTITY_MAINTENANCE_SCHEMA_PATH = (
+    Path(__file__).parent
+    / "schemas"
+    / "cli"
+    / "v1"
+    / "identity-maintenance.schema.json"
+)
 _SYNC_REQUEST_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "sync-request.schema.json"
 )
@@ -136,7 +146,7 @@ _QUERY_RESULT_SCHEMA_PATH = (
 )
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
-    "graphify workspace register <enroll|adopt> --repo-uuid UUID "
+    "graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
     "--expected-registry-revision N --authorization-stdin"
 )
 _SYNC_USAGE = "graphify workspace sync --code-only --request-stdin"
@@ -179,6 +189,15 @@ class _RegisterRequest:
 
 @dataclass(frozen=True)
 class _RegistrationFailure:
+    state: str
+    exit_code: int
+    reason_code: str
+    action_code: str
+    registry_revision: int | None = None
+
+
+@dataclass(frozen=True)
+class _IdentityMaintenanceFailure:
     state: str
     exit_code: int
     reason_code: str
@@ -240,6 +259,8 @@ def _parse_register_request(command: tuple[str, ...]) -> _RegisterRequest | None
         action = {
             "enroll": IdentityAction.ENROLL,
             "adopt": IdentityAction.ADOPT,
+            "rebind": IdentityAction.REBIND,
+            "rotate": IdentityAction.ROTATE,
         }[command[1]]
     except KeyError:
         return None
@@ -428,6 +449,44 @@ def _registration_failure(
     return _registration_bytes(receipt)
 
 
+def _identity_maintenance_success(
+    request: _RegisterRequest,
+    *,
+    registry_revision: int,
+) -> str:
+    return canonical_json_bytes(
+        {
+            "action": request.action.value.lower(),
+            "cli_contract_version": CLI_CONTRACT_VERSION,
+            "contract": _IDENTITY_MAINTENANCE_CONTRACT,
+            "exit_code": EXIT_READY,
+            "registry_revision": registry_revision,
+            "repo_uuid": request.repo_uuid,
+            "schema_version": _IDENTITY_MAINTENANCE_SCHEMA_VERSION,
+            "state": "maintained",
+        }
+    ).decode("utf-8")
+
+
+def _identity_maintenance_failure(
+    request: _RegisterRequest,
+    failure: _IdentityMaintenanceFailure,
+) -> str:
+    receipt: dict[str, object] = {
+        "action": request.action.value.lower(),
+        "action_code": failure.action_code,
+        "cli_contract_version": CLI_CONTRACT_VERSION,
+        "contract": _IDENTITY_MAINTENANCE_CONTRACT,
+        "exit_code": failure.exit_code,
+        "reason_code": failure.reason_code,
+        "schema_version": _IDENTITY_MAINTENANCE_SCHEMA_VERSION,
+        "state": failure.state,
+    }
+    if failure.registry_revision is not None:
+        receipt["registry_revision"] = failure.registry_revision
+    return canonical_json_bytes(receipt).decode("utf-8")
+
+
 def _silence_standard_streams_after_broken_pipe(
     stream: TextIO,
     error: OSError,
@@ -569,6 +628,39 @@ def _classify_registration_error(error: Exception) -> _RegistrationFailure:
     )
 
 
+def _classify_identity_maintenance_error(
+    error: Exception,
+) -> _IdentityMaintenanceFailure:
+    if isinstance(error, UUIDCollisionError):
+        return _IdentityMaintenanceFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "identity_mismatch",
+            "verify_identity_maintenance_target",
+        )
+    if isinstance(error, SourceAmbiguousError):
+        return _IdentityMaintenanceFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "source_not_bound",
+            "enroll_or_adopt_source",
+        )
+    registration_failure = _classify_registration_error(error)
+    reason_code = registration_failure.reason_code
+    action_code = registration_failure.action_code
+    if reason_code == "registration_failed":
+        reason_code = "identity_maintenance_failed"
+    if action_code == "retry_registration":
+        action_code = "retry_identity_maintenance"
+    return _IdentityMaintenanceFailure(
+        registration_failure.state,
+        registration_failure.exit_code,
+        reason_code,
+        action_code,
+        registration_failure.registry_revision,
+    )
+
+
 def _run_registration(
     request: _RegisterRequest,
     *,
@@ -576,17 +668,38 @@ def _run_registration(
     output: TextIO,
     errors: TextIO,
 ) -> int:
+    if request.action not in {
+        IdentityAction.ENROLL,
+        IdentityAction.ADOPT,
+        IdentityAction.REBIND,
+        IdentityAction.ROTATE,
+    }:
+        raise AssertionError(f"unsupported register action: {request.action.value}")
+    identity_maintenance = request.action in {
+        IdentityAction.REBIND,
+        IdentityAction.ROTATE,
+    }
     try:
         resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
         if resolved_inputs is None:
-            failure = _RegistrationFailure(
-                "invalid",
-                EXIT_INVALID,
-                "runtime_authority_missing",
-                "install_candidate_authority",
-            )
-            receipt = _registration_failure(request, failure)
-            exit_code = failure.exit_code
+            if identity_maintenance:
+                maintenance_failure = _IdentityMaintenanceFailure(
+                    "invalid",
+                    EXIT_INVALID,
+                    "runtime_authority_missing",
+                    "install_candidate_authority",
+                )
+                receipt = _identity_maintenance_failure(request, maintenance_failure)
+                exit_code = maintenance_failure.exit_code
+            else:
+                registration_failure = _RegistrationFailure(
+                    "invalid",
+                    EXIT_INVALID,
+                    "runtime_authority_missing",
+                    "install_candidate_authority",
+                )
+                receipt = _registration_failure(request, registration_failure)
+                exit_code = registration_failure.exit_code
         else:
             runtime = compose_workspace_runtime(resolved_inputs)
             authorization = _read_operator_authorization(request)
@@ -640,11 +753,27 @@ def _run_registration(
                     authorization,
                     expected_revision=request.expected_registry_revision,
                 )
-            else:
+            elif request.action is IdentityAction.ADOPT:
                 document = runtime.registry.adopt(
                     source,
                     authorization,
                     expected_revision=request.expected_registry_revision,
+                )
+            elif request.action is IdentityAction.REBIND:
+                document = runtime.registry.rebind(
+                    source,
+                    authorization,
+                    expected_revision=request.expected_registry_revision,
+                )
+            elif request.action is IdentityAction.ROTATE:
+                document = runtime.registry.rotate_enrollment_evidence(
+                    source,
+                    authorization,
+                    expected_revision=request.expected_registry_revision,
+                )
+            else:
+                raise AssertionError(
+                    f"unsupported register action: {request.action.value}"
                 )
             try:
                 revision = int(document.to_dict()["revision"])
@@ -652,16 +781,29 @@ def _run_registration(
                 raise
             except Exception as exc:
                 raise CommitUnknown(
-                    "registration completed without a valid revision receipt"
+                    (
+                        "identity maintenance completed without a valid revision receipt"
+                        if identity_maintenance
+                        else "registration completed without a valid revision receipt"
+                    )
                 ) from exc
-            receipt = _registration_success(request, registry_revision=revision)
+            receipt = (
+                _identity_maintenance_success(request, registry_revision=revision)
+                if identity_maintenance
+                else _registration_success(request, registry_revision=revision)
+            )
             exit_code = EXIT_READY
     except InjectedFault:
         raise
     except Exception as exc:
-        failure = _classify_registration_error(exc)
-        receipt = _registration_failure(request, failure)
-        exit_code = failure.exit_code
+        if identity_maintenance:
+            maintenance_failure = _classify_identity_maintenance_error(exc)
+            receipt = _identity_maintenance_failure(request, maintenance_failure)
+            exit_code = maintenance_failure.exit_code
+        else:
+            registration_failure = _classify_registration_error(exc)
+            receipt = _registration_failure(request, registration_failure)
+            exit_code = registration_failure.exit_code
     stream = output if exit_code == EXIT_READY else errors
     return _emit_text_payload(stream, receipt, exit_code=exit_code)
 
@@ -1341,6 +1483,15 @@ def load_registration_schema() -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def load_identity_maintenance_schema() -> dict[str, Any]:
+    """Load the public identity-maintenance receipt schema."""
+
+    value = _load_json(_IDENTITY_MAINTENANCE_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace identity-maintenance schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
 def load_sync_request_schema() -> dict[str, Any]:
     """Load the public canonical code-only sync request schema."""
 
@@ -1378,6 +1529,7 @@ def load_query_result_schema() -> dict[str, Any]:
 
 
 __all__ = [
+    "load_identity_maintenance_schema",
     "load_query_request_schema",
     "load_query_result_schema",
     "load_registration_schema",

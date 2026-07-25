@@ -547,7 +547,7 @@ def _run_cli() -> None:
         print("Usage: graphify <command>")
         print()
         print("Commands:")
-        print("  workspace register ...    explicitly enroll or adopt one workspace")
+        print("  workspace register ...    enroll, adopt, rebind, or rotate workspace identity")
         print("  workspace sync --code-only --request-stdin")
         print("                            build and promote one structural generation")
         print("  workspace query --request-stdin")

@@ -668,6 +668,14 @@ class RegistryStore:
                 raise UUIDCollisionError(
                     "rebind requires the enrolled Git common directory or shared history evidence"
                 )
+            self._assert_source_identity_available(
+                [
+                    item
+                    for item in entries
+                    if item["repo_uuid"] != source.repo_uuid
+                ],
+                source,
+            )
             active_evidence = entry["active_source_evidence"]
             evidence_digest = self._authorized_evidence(
                 source,
