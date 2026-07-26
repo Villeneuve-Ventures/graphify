@@ -77,6 +77,15 @@ calls `WorkspaceRuntime.freshness.query()` exactly once. It performs no
 advisory status probe. The existing freshness authority owns query bounds,
 locks, two-sided observation, and release; the CLI releases raw native UTF-8
 output only for `release` / `observed_current` and otherwise withholds output.
+The separate rollback slice exposes only
+`graphify workspace rollback --request-stdin`. It composes installed runtime
+authority before consuming one bounded canonical request, requires its target
+to equal the visible pointer's exact verified `last_good`, acquires one fenced
+`ROLLBACK` lease from caller-supplied pre-acquisition CAS, derives the accepted
+operation epoch and fence token from the grant, and delegates once to
+`PointerStore.rollback()`. The existing pointer, journal, lease, generation,
+and recovery layers continue to own durable mutation and commit-unknown
+barriers; the CLI adds no historical-generation selector or durable format.
 Remaining mutation and broader query commands, repair,
 watch/service, installation, performance certification, candidate publication,
 and live-cutover work remain deferred; retained production query/service
@@ -120,8 +129,9 @@ P2 writes only this external lifecycle state:
 P5B1 additionally reserves `runtime-manifest.json` at the root above as an
 internal format-version-1 read authority containing the complete frozen
 compatibility manifest and explicit semantic-queue policy. Status, doctor,
-P5B2a registration, identity maintenance, P5B2b code-only sync, and P5B2c one-
-shot query authority loading read it through the same private-directory,
+P5B2a registration, identity maintenance, P5B2b code-only sync, P5B2c one-shot
+query, and exact-last-good rollback authority loading read it through the same
+private-directory,
 singular-regular-file, 0600, no-follow, bounded-read rules used for durable
 state. Registration and identity maintenance then write only the P2 paths
 already shown above. P5C owns creating and atomically installing the candidate-
@@ -235,6 +245,9 @@ stable semantic completion to certification. P5B2b owns only code-only
 structural orchestration. P5B2c owns only the one-shot query transport: it
 forwards the validated existing `QueryRequest` and deadline to freshness, then
 emits a redacted control record. It does not add a query log, state write,
-service, watch loop, or retained query authority. Later P5 slices remain
-responsible for all other orchestration, concurrent in-process services,
-commands, installation, and publication.
+service, watch loop, or retained query authority. The rollback slice owns only the
+one-shot exact-`last_good` transport and reuses the existing fenced pointer
+domain; it adds no retained service, repair, GC, migration, or arbitrary
+historical selection authority. Later P5 slices remain responsible for all
+other orchestration, concurrent in-process services, commands, installation,
+and publication.

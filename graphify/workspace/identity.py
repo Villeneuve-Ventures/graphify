@@ -63,6 +63,7 @@ class IdentityAction(str, Enum):
     ROTATE = "ROTATE"
     REBIND = "REBIND"
     ACTIVATE = "ACTIVATE"
+    ROLLBACK = "ROLLBACK"
 
 
 @dataclass(frozen=True)

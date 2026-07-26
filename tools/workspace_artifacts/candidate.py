@@ -350,10 +350,13 @@ def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
         "graphify/workspace/persistence.py",
         "graphify/workspace/pointers.py",
         "graphify/workspace/registry.py",
+        "graphify/workspace/rollback.py",
         "graphify/workspace/adapters/__init__.py",
         "graphify/workspace/adapters/base.py",
         "graphify/workspace/adapters/v0_9_16.py",
         "graphify/workspace/schemas/v1/common.schema.json",
+        "graphify/workspace/schemas/cli/v1/rollback-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/rollback-receipt.schema.json",
     }
     missing = required - names
     if missing:

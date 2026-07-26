@@ -264,6 +264,54 @@ output remains ignored and must not widen the P1 product diff.
   shared usage emitted for malformed register, sync, status, and doctor argv now
   includes the standalone activation form.
 
+## P5B2 exact-last-good rollback CLI gates
+
+- the only new argv is `workspace rollback --request-stdin`; malformed or
+  extended argv exits 64 before installed-authority loading or standard-input
+  reads, and root help/version checks treat it as a bounded workspace command;
+- runtime authority loads and composes before one at-most-16-KiB standard-input
+  read. The CLI-v1 request is canonical UTF-8 JSON, duplicate-free,
+  extra-field-free, schema-valid, and complete; invalid input fails before any
+  lease or pointer mutation;
+- the request binds the explicit repo UUID, registry, active-source, operation,
+  migration, and pointer revisions, expected current receipt, exact target
+  generation and receipt, target source epoch, and the five-field canonical
+  authorization with action `ROLLBACK`;
+- read-only preflight verifies that the request names the visible pointer's
+  exact non-null `last_good` and its target source epoch. The same target is
+  revalidated after lease acquisition and before delegation; current,
+  arbitrary historical, missing, corrupt, or mismatched targets fail closed;
+- one `ROLLBACK` lease is acquired with trusted owner identity, UTC and
+  monotonic timestamps, a fixed 30-second TTL, and only caller-supplied
+  pre-acquisition registry/source/operation/migration CAS. `PointerCAS` derives
+  the accepted operation epoch, migration epoch, active-source revision, fence
+  token from the grant, and the current state-schema version from the frozen
+  runtime constant. Post-acquisition target verification is bounded by the
+  grant's liveness deadline, and monotonic time is sampled again immediately
+  before pointer mutation. The exact deadline is rechecked after mutation locks
+  are held and immediately before beginning the durable pointer/journal commit;
+- the orchestration calls `PointerStore.rollback()` exactly once. Existing
+  lease, generation, pointer, journal, GC-intent, staged-recovery, and
+  commit-unknown policies remain unchanged and produce the durable
+  `ROLLED_BACK` transition;
+- success emits one canonical `graphify.workspace.rollback` v1 receipt on
+  standard output and exits 0, binding request SHA-256, repo UUID, exact target
+  generation/receipt, and resulting pointer revision. Conflict exits 10;
+  invalid, unsupported, corrupt, or commit-uncertain state exits 20 with one
+  redacted standard-error receipt;
+- best-effort release never masks the primary failure, a release-only uncertain
+  outcome is commit-unknown, and `InjectedFault` is re-raised when it is the
+  primary failure or the only release failure. No receipt exposes authorization,
+  source/state paths,
+  lease owner, environment values, credentials, engine output, or raw
+  exceptions; and
+- focused tests prove authority-before-input ordering, canonical bounds,
+  exact-target/no-write rejection, every stale CAS dimension, contention and
+  recovery barriers, real two-generation rollback with `ROLLED_BACK` journal
+  evidence, release uncertainty, broken pipes, artifact/wheel inclusion, and
+  unchanged registration, activation, sync, query, status, doctor, pointer,
+  recovery, and GC behavior.
+
 ## P5B2b code-only sync and staged-recovery gates
 
 - the canonical internal staged-build record is limited to 64 KiB, uses the

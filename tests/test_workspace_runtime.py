@@ -14,6 +14,8 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
+import time
 from typing import Any, cast
 
 import pytest
@@ -45,6 +47,7 @@ from graphify.workspace.persistence import (
     CommitUnknown,
     DurableStateRoot,
     InjectedFault,
+    LockTimeout,
     LockOrderError,
     PosixSyscalls,
     REGISTRY_LOCK_RANK,
@@ -254,6 +257,18 @@ class FailFsyncCallSyscalls(PosixSyscalls):
         super().fsync(descriptor)
 
 
+class ExpireAfterFirstFsyncSyscalls(PosixSyscalls):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.expired = False
+
+    def fsync(self, descriptor: int) -> None:
+        super().fsync(descriptor)
+        self.calls += 1
+        if self.calls == 1:
+            self.expired = True
+
+
 def _enroll_process(
     state_root: str,
     repo_root: str,
@@ -282,6 +297,26 @@ def _hold_registry_lock(
     store = RegistryStore(Path(state_root), capabilities=SUPPORTED)
     lock = store.read_only_snapshot() if shared else store.exclusive_lock()
     started.set()
+    with lock:
+        acquired.set()
+        release.wait(timeout=15)
+
+
+def _hold_mutating_runtime_lock(
+    state_root: str,
+    repo_uuid: str,
+    *,
+    lock_name: str,
+    acquired: Any,
+    release: Any,
+) -> None:
+    registry = RegistryStore(Path(state_root), capabilities=SUPPORTED)
+    leases = LeaseStore(Path(state_root), registry, capabilities=SUPPORTED)
+    lock = (
+        registry.exclusive_lock()
+        if lock_name == "registry"
+        else leases.workspace_lock(repo_uuid)
+    )
     with lock:
         acquired.set()
         release.wait(timeout=15)
@@ -2431,6 +2466,305 @@ def test_registry_before_workspace_lock_order_is_enforced_and_observable(tmp_pat
     events.clear()
     leases.release(grant)
     assert_registry_encloses_workspace()
+
+
+@pytest.mark.parametrize("lock_name", ["registry", "workspace"])
+def test_lease_acquisition_deadline_bounds_mutating_lock_wait(
+    tmp_path: Path,
+    lock_name: str,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    workspace_path = state_root / "workspaces" / REPO_UUID / "workspace.json"
+    workspace_before = workspace_path.read_bytes()
+    context = multiprocessing.get_context("spawn")
+    acquired = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_mutating_runtime_lock,
+        kwargs={
+            "state_root": str(state_root),
+            "repo_uuid": REPO_UUID,
+            "lock_name": lock_name,
+            "acquired": acquired,
+            "release": release,
+        },
+    )
+    release_timer = threading.Timer(1.0, release.set)
+    try:
+        holder.start()
+        assert acquired.wait(timeout=5)
+        release_timer.start()
+        started = time.monotonic()
+        with pytest.raises(LockTimeout) as raised:
+            leases.acquire(
+                REPO_UUID,
+                "ROLLBACK",
+                leases.current_owner(),
+                expected_registry_revision=1,
+                expected_active_source_revision=1,
+                expected_operation_epoch=1,
+                expected_migration_epoch=0,
+                acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+                monotonic_ns=20_000,
+                ttl_ns=30_000_000_000,
+                deadline_ns=time.monotonic_ns() + 100_000_000,
+            )
+        assert time.monotonic() - started < 0.5
+        assert raised.value.phase == "acquire"
+        assert raised.value.kind == lock_name
+    finally:
+        release.set()
+        release_timer.cancel()
+        if holder.pid is not None:
+            holder.join(timeout=5)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(timeout=5)
+
+    assert workspace_path.read_bytes() == workspace_before
+
+
+@pytest.mark.parametrize("lock_name", ["registry", "workspace"])
+def test_current_operation_deadline_bounds_mutating_lock_wait(
+    tmp_path: Path,
+    lock_name: str,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    grant = leases.acquire(
+        REPO_UUID,
+        "BUILD",
+        leases.current_owner(),
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+        monotonic_ns=20_000,
+        ttl_ns=10_000,
+    )
+    context = multiprocessing.get_context("spawn")
+    acquired = context.Event()
+    release = context.Event()
+    holder = context.Process(
+        target=_hold_mutating_runtime_lock,
+        kwargs={
+            "state_root": str(state_root),
+            "repo_uuid": REPO_UUID,
+            "lock_name": lock_name,
+            "acquired": acquired,
+            "release": release,
+        },
+    )
+    release_timer = threading.Timer(1.0, release.set)
+    try:
+        holder.start()
+        assert acquired.wait(timeout=5)
+        release_timer.start()
+        started = time.monotonic()
+        with pytest.raises(LockTimeout) as raised:
+            with leases.current_operation(
+                grant,
+                monotonic_ns=20_001,
+                deadline_ns=time.monotonic_ns() + 100_000_000,
+            ):
+                pytest.fail("expired operation lock unexpectedly acquired")
+        assert time.monotonic() - started < 0.5
+        assert raised.value.phase == "acquire"
+        assert raised.value.kind == lock_name
+    finally:
+        release.set()
+        release_timer.cancel()
+        if holder.pid is not None:
+            holder.join(timeout=5)
+            if holder.is_alive():
+                holder.terminate()
+                holder.join(timeout=5)
+
+
+def test_current_operation_deadline_reaches_recovery_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    grant = leases.acquire(
+        REPO_UUID,
+        "BUILD",
+        leases.current_owner(),
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+        monotonic_ns=20_000,
+        ttl_ns=10_000,
+    )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: list[tuple[str, object]] = []
+    registry_recover = registry.state.recover_record
+    workspace_recover = leases.state.recover_record
+
+    def track_registry_recovery(**kwargs: Any) -> object:
+        observed.append((str(kwargs["label"]), kwargs.get("deadline_ns")))
+        return registry_recover(**kwargs)
+
+    def track_workspace_recovery(**kwargs: Any) -> object:
+        observed.append((str(kwargs["label"]), kwargs.get("deadline_ns")))
+        return workspace_recover(**kwargs)
+
+    monkeypatch.setattr(registry.state, "recover_record", track_registry_recovery)
+    monkeypatch.setattr(leases.state, "recover_record", track_workspace_recovery)
+
+    with leases.current_operation(
+        grant,
+        monotonic_ns=20_001,
+        deadline_ns=deadline_ns,
+    ):
+        pass
+
+    assert observed == [
+        ("registry", deadline_ns),
+        ("workspace", deadline_ns),
+        (f"staged-build:{REPO_UUID}", deadline_ns),
+    ]
+
+
+def test_record_recovery_honors_expired_deadline(tmp_path: Path) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+
+    with pytest.raises(LockTimeout):
+        state.recover_record(
+            label="counter",
+            current="counter.json",
+            previous="counter.previous.json",
+            pending="counter.pending.json",
+            decoder=json.loads,
+            revision=lambda value: int(value["revision"]),
+            deadline_ns=time.monotonic_ns(),
+        )
+
+
+def test_record_commit_does_not_become_visible_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "commit-state"
+    root.mkdir(mode=0o700)
+    syscalls = ExpireAfterFirstFsyncSyscalls()
+    state = DurableStateRoot(root, capabilities=SUPPORTED, syscalls=syscalls)
+    monkeypatch.setattr(
+        "graphify.workspace.persistence.time.monotonic_ns",
+        lambda: 2 if syscalls.expired else 0,
+    )
+
+    with pytest.raises(LockTimeout):
+        state.commit_record(
+            label="counter",
+            current="counter.json",
+            previous="counter.previous.json",
+            pending="counter.pending.json",
+            payload=canonical_json_bytes({"revision": 1}),
+            decoder=json.loads,
+            deadline_ns=1,
+        )
+
+    assert list(root.iterdir()) == []
+
+
+def test_record_recovery_does_not_become_visible_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "recovery-state"
+    stable = DurableStateRoot(root, capabilities=SUPPORTED)
+    current = canonical_json_bytes({"revision": 1})
+    pending = canonical_json_bytes({"revision": 2})
+    stable.atomic_replace_bytes("counter.json", current, label="counter:current")
+    stable.atomic_replace_bytes(
+        "counter.pending.json",
+        pending,
+        label="counter:pending",
+    )
+    syscalls = ExpireAfterFirstFsyncSyscalls()
+    state = DurableStateRoot(root, capabilities=SUPPORTED, syscalls=syscalls)
+    monkeypatch.setattr(
+        "graphify.workspace.persistence.time.monotonic_ns",
+        lambda: 2 if syscalls.expired else 0,
+    )
+
+    with pytest.raises(LockTimeout):
+        state.recover_record(
+            label="counter",
+            current="counter.json",
+            previous="counter.previous.json",
+            pending="counter.pending.json",
+            decoder=json.loads,
+            revision=lambda value: int(value["revision"]),
+            deadline_ns=1,
+        )
+
+    assert state.read_existing_bytes("counter.json") == current
+    assert state.read_existing_bytes("counter.pending.json") == pending
+    assert not state.path("counter.previous.json").exists()
+
+
+def test_unlink_and_sync_does_not_become_visible_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expired = False
+
+    def expire_before_unlink(event: str) -> None:
+        nonlocal expired
+        if event == "test:deadline:before_unlink":
+            expired = True
+
+    state = DurableStateRoot(
+        tmp_path / "unlink-state",
+        capabilities=SUPPORTED,
+        fault_hook=expire_before_unlink,
+    )
+    relative = Path("records") / "pending.json"
+    state.ensure_directory(relative.parent)
+    target = state.path(relative)
+    target.write_bytes(b"pending\n")
+    target.chmod(0o600)
+    monkeypatch.setattr(
+        "graphify.workspace.persistence.time.monotonic_ns",
+        lambda: 2 if expired else 0,
+    )
+
+    with pytest.raises(LockTimeout):
+        state.unlink_and_sync(
+            relative,
+            label="test:deadline",
+            deadline_ns=1,
+        )
+
+    assert target.read_bytes() == b"pending\n"
 
 
 def test_registry_and_lease_operations_never_write_source_checkouts(tmp_path: Path) -> None:

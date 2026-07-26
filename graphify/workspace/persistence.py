@@ -1147,6 +1147,7 @@ class DurableStateRoot:
         *,
         rank: int,
         name: str,
+        deadline_ns: int | None = None,
     ) -> Iterator[None]:
         self._ensure_root()
         stack = _LOCK_STACK.get()
@@ -1218,12 +1219,39 @@ class DurableStateRoot:
                     import fcntl
                 except ImportError as exc:  # pragma: no cover - rejected by capability gate
                     raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
+                operation = fcntl.LOCK_EX
+                if deadline_ns is not None:
+                    operation |= fcntl.LOCK_NB
                 while True:
+                    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                        raise LockTimeout(
+                            f"{name} lock acquisition timed out: {path}",
+                            phase="acquire",
+                            kind=name,
+                        )
                     try:
-                        fcntl.flock(descriptor, fcntl.LOCK_EX)
-                        break
+                        fcntl.flock(descriptor, operation)
                     except InterruptedError:
                         continue
+                    except BlockingIOError:
+                        if deadline_ns is None:  # pragma: no cover - blocking lock
+                            raise
+                        remaining_ns = deadline_ns - time.monotonic_ns()
+                        if remaining_ns <= 0:
+                            raise LockTimeout(
+                                f"{name} lock acquisition timed out: {path}",
+                                phase="acquire",
+                                kind=name,
+                            ) from None
+                        time.sleep(min(0.001, remaining_ns / 1_000_000_000))
+                        continue
+                    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                        raise LockTimeout(
+                            f"{name} lock acquisition timed out: {path}",
+                            phase="acquire",
+                            kind=name,
+                        )
+                    break
                 token = _LOCK_STACK.set((*stack, (rank, name)))
                 self.fault_hook(f"lock:{name}:acquired")
                 try:
@@ -1481,8 +1509,18 @@ class DurableStateRoot:
                     os.close(source_descriptor)
         return destination_path
 
-    def unlink_and_sync(self, relative: str | Path, *, label: str) -> None:
-        self._unlink_and_sync(self.path(relative), label=label)
+    def unlink_and_sync(
+        self,
+        relative: str | Path,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> None:
+        self._unlink_and_sync(
+            self.path(relative),
+            label=label,
+            deadline_ns=deadline_ns,
+        )
 
     def fsync_directory(self, relative: str | Path) -> None:
         with self.existing_private_directory(relative) as descriptor:
@@ -1516,6 +1554,7 @@ class DurableStateRoot:
         relative: str | Path,
         *,
         destination_name: str | None = None,
+        deadline_ns: int | None = None,
     ) -> tuple[Path, ...]:
         """Remove exact owned orphan files created by ``_atomic_replace``.
 
@@ -1524,6 +1563,10 @@ class DurableStateRoot:
         remain visible to the caller's ordinary directory validation.
         """
 
+        require_before_deadline(
+            deadline_ns,
+            "atomic-temp cleanup exceeded its deadline",
+        )
         directory = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
         relative_directory = (
             Path(".") if directory == self.root else directory.relative_to(self.root)
@@ -1542,6 +1585,10 @@ class DurableStateRoot:
                     f"atomic-temp parent cannot be enumerated safely: {directory}: {exc}"
                 ) from exc
             for name in names:
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic-temp cleanup exceeded its deadline",
+                )
                 match = _ATOMIC_TEMP_RE.fullmatch(name)
                 if match is None or (
                     destination_name is not None
@@ -1563,9 +1610,15 @@ class DurableStateRoot:
                     )
                 except StatePathError as exc:
                     raise StatePathError(f"atomic-temp orphan is unsafe: {entry}") from exc
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic-temp cleanup exceeded its deadline",
+                )
                 self.syscalls.unlink_at(name, dir_fd=descriptor)
                 removed.append(entry)
-            if removed:
+                if deadline_ns is not None:
+                    self.syscalls.fsync(descriptor)
+            if removed and deadline_ns is None:
                 self.syscalls.fsync(descriptor)
         return tuple(removed)
 
@@ -1600,6 +1653,7 @@ class DurableStateRoot:
         *,
         exclusive: bool,
         blocking: bool = True,
+        deadline_ns: int | None = None,
     ) -> Iterator[None]:
         ordered = list(locks)
         if ordered != sorted(ordered, key=lambda item: item[0]):
@@ -1614,6 +1668,7 @@ class DurableStateRoot:
                         generation_id=generation_id,
                         exclusive=exclusive,
                         blocking=blocking,
+                        deadline_ns=deadline_ns,
                     )
                 )
             yield
@@ -1778,9 +1833,14 @@ class DurableStateRoot:
         revision: Callable[[RecordT], int],
         allow_missing: bool = False,
         max_bytes: int | None = None,
+        deadline_ns: int | None = None,
     ) -> RecordT | None:
         if max_bytes is not None and max_bytes < 0:
             raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
         paths = {
             "current": self.path(current),
             "pending": self.path(pending),
@@ -1790,15 +1850,32 @@ class DurableStateRoot:
         if len(parents) != 1:
             raise StatePathError(f"{label} record paths must share one directory")
         parent = next(iter(parents))
-        self.cleanup_atomic_temps(parent.relative_to(self.root))
+        if deadline_ns is None:
+            self.cleanup_atomic_temps(parent.relative_to(self.root))
+        else:
+            self.cleanup_atomic_temps(
+                parent.relative_to(self.root),
+                deadline_ns=deadline_ns,
+            )
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
         candidates: dict[str, tuple[bytes, RecordT, int]] = {}
         invalid: dict[str, Exception] = {}
         for name, path in paths.items():
+            require_before_deadline(
+                deadline_ns,
+                "state record recovery exceeded its deadline",
+            )
             try:
                 data = self.read_optional_existing_bytes(
                     path.relative_to(self.root),
                     max_bytes=max_bytes,
+                    deadline_ns=deadline_ns,
                 )
+            except LockTimeout:
+                raise
             except Exception as exc:
                 invalid[name] = exc
                 continue
@@ -1809,6 +1886,11 @@ class DurableStateRoot:
                 candidates[name] = (data, record, revision(record))
             except Exception as exc:
                 invalid[name] = exc
+
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
 
         if not candidates:
             if allow_missing and not invalid:
@@ -1837,10 +1919,37 @@ class DurableStateRoot:
         current_candidate = candidates.get("current")
         if current_candidate is None or current_candidate[0] != selected[0]:
             if current_candidate is not None:
-                self._atomic_replace(paths["previous"], current_candidate[0])
-            self._atomic_replace(paths["current"], selected[0])
+                require_before_deadline(
+                    deadline_ns,
+                    "state record recovery exceeded its deadline",
+                )
+                self._atomic_replace(
+                    paths["previous"],
+                    current_candidate[0],
+                    deadline_ns=deadline_ns,
+                )
+            require_before_deadline(
+                deadline_ns,
+                "state record recovery exceeded its deadline",
+            )
+            self._atomic_replace(
+                paths["current"],
+                selected[0],
+                deadline_ns=deadline_ns,
+            )
             self.fault_hook(f"{label}:recovered")
-        self._unlink_and_sync(paths["pending"])
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
+        self._unlink_and_sync(
+            paths["pending"],
+            deadline_ns=deadline_ns,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
         return selected[1]
 
     def commit_record(
@@ -1852,7 +1961,12 @@ class DurableStateRoot:
         pending: str | Path,
         payload: bytes,
         decoder: Callable[[bytes], RecordT],
+        deadline_ns: int | None = None,
     ) -> RecordT:
+        require_before_deadline(
+            deadline_ns,
+            "state record commit exceeded its deadline",
+        )
         record = decoder(payload)
         current_path = self.path(current)
         previous_path = self.path(previous)
@@ -1861,7 +1975,13 @@ class DurableStateRoot:
         if len(parents) != 1:
             raise StatePathError(f"{label} record paths must share one directory")
         parent = next(iter(parents))
-        self.cleanup_atomic_temps(parent.relative_to(self.root))
+        if deadline_ns is None:
+            self.cleanup_atomic_temps(parent.relative_to(self.root))
+        else:
+            self.cleanup_atomic_temps(
+                parent.relative_to(self.root),
+                deadline_ns=deadline_ns,
+            )
         commit_may_recover = False
 
         def pending_replaced() -> None:
@@ -1872,7 +1992,12 @@ class DurableStateRoot:
             self.fault_hook(f"{label}:current_replaced")
 
         try:
-            self._atomic_replace(pending_path, payload, after_replace=pending_replaced)
+            self._atomic_replace(
+                pending_path,
+                payload,
+                after_replace=pending_replaced,
+                deadline_ns=deadline_ns,
+            )
             self.fault_hook(f"{label}:pending_durable")
 
             current_bytes = self.read_optional_existing_bytes(current)
@@ -1964,13 +2089,25 @@ class DurableStateRoot:
         data: bytes,
         *,
         after_replace: Callable[[], None] | None = None,
+        deadline_ns: int | None = None,
     ) -> None:
+        require_before_deadline(
+            deadline_ns,
+            "atomic state replacement exceeded its deadline",
+        )
         self._ensure_root()
         self._ensure_parent(destination)
-        self.cleanup_atomic_temps(
-            destination.parent.relative_to(self.root),
-            destination_name=destination.name,
-        )
+        if deadline_ns is None:
+            self.cleanup_atomic_temps(
+                destination.parent.relative_to(self.root),
+                destination_name=destination.name,
+            )
+        else:
+            self.cleanup_atomic_temps(
+                destination.parent.relative_to(self.root),
+                destination_name=destination.name,
+                deadline_ns=deadline_ns,
+            )
         parent_relative = destination.parent.relative_to(self.root)
         with self.existing_private_directory(parent_relative) as parent_descriptor:
             try:
@@ -1990,6 +2127,10 @@ class DurableStateRoot:
             temporary_name = f".{destination.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            require_before_deadline(
+                deadline_ns,
+                "atomic state replacement exceeded its deadline",
+            )
             descriptor = os.open(
                 temporary_name,
                 flags,
@@ -2004,6 +2145,12 @@ class DurableStateRoot:
                     self.syscalls.fsync(descriptor)
                 finally:
                     os.close(descriptor)
+                # Deadlines authorize visibility; once replacement succeeds,
+                # durability and verification must run to completion.
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic state replacement exceeded its deadline",
+                )
                 self.syscalls.replace_at(
                     temporary_name,
                     destination.name,
@@ -2049,7 +2196,13 @@ class DurableStateRoot:
                 raise OSError(errno.EIO, "write returned no progress")
             offset += written
 
-    def _unlink_and_sync(self, path: Path, *, label: str | None = None) -> None:
+    def _unlink_and_sync(
+        self,
+        path: Path,
+        *,
+        label: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> None:
         parent_relative = path.parent.relative_to(self.root)
         with self._existing_private_directory(
             parent_relative,
@@ -2076,6 +2229,12 @@ class DurableStateRoot:
             )
             if label is not None:
                 self.fault_hook(f"{label}:before_unlink")
+            # Gate the visible unlink, then complete its directory sync even if
+            # the cooperative deadline passes during that durability step.
+            require_before_deadline(
+                deadline_ns,
+                "state cleanup exceeded its deadline",
+            )
             visible = False
             try:
                 self.syscalls.unlink_at(path.name, dir_fd=parent_descriptor)

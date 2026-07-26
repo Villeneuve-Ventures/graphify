@@ -16,6 +16,8 @@ import sys
 import time
 from typing import Any, cast, Mapping, Sequence, TextIO
 
+import graphify.workspace.rollback as rollback_runtime
+
 from graphify.workspace.adapters import (
     QueryRejected,
     QueryRequest,
@@ -41,6 +43,7 @@ from graphify.workspace.generations import (
     GenerationError,
 )
 from graphify.workspace.freshness import FreshnessResult
+from graphify.workspace.journal import JournalError
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
@@ -58,8 +61,10 @@ from graphify.workspace.identity import (
 from graphify.workspace.persistence import (
     CommitUnknown,
     InjectedFault,
+    LockTimeout,
     StateCorrupt,
     StatePathError,
+    StateRecoveryRequired,
     UnsupportedRuntime,
 )
 from graphify.workspace.leases import (
@@ -68,7 +73,11 @@ from graphify.workspace.leases import (
     LeaseRecoveryRequired,
     StaleLease,
 )
-from graphify.workspace.pointers import PointerConflict
+from graphify.workspace.pointers import (
+    PointerConflict,
+    PointerCorrupt,
+    PointerRecoveryRequired,
+)
 from graphify.workspace.registry import (
     ActivationResult,
     RegistryStore,
@@ -155,6 +164,12 @@ _QUERY_REQUEST_SCHEMA_PATH = (
 _QUERY_RESULT_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "query-result.schema.json"
 )
+_ROLLBACK_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "rollback-request.schema.json"
+)
+_ROLLBACK_RECEIPT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "rollback-receipt.schema.json"
+)
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
@@ -162,6 +177,7 @@ _REGISTER_USAGE = (
 )
 _SYNC_USAGE = "graphify workspace sync --code-only --request-stdin"
 _QUERY_USAGE = "graphify workspace query --request-stdin"
+_ROLLBACK_USAGE = "graphify workspace rollback --request-stdin"
 _ACTIVATION_USAGE = (
     "graphify workspace activate --repo-uuid UUID "
     "--expected-registry-revision N --expected-active-source-revision N "
@@ -174,6 +190,7 @@ _USAGE = (
     f"       {_REGISTER_USAGE}\n"
     f"       {_SYNC_USAGE}\n"
     f"       {_QUERY_USAGE}\n"
+    f"       {_ROLLBACK_USAGE}\n"
     f"       {_ACTIVATION_USAGE}"
 )
 
@@ -757,6 +774,32 @@ def _emit_query_output(
         written = binary_stream.write(payload)
         if written != len(payload):
             raise OSError(errno.EIO, "incomplete workspace query output")
+    except (BrokenPipeError, OSError) as exc:
+        if not _silence_standard_streams_after_broken_pipe(stream, exc):
+            raise
+    return exit_code
+
+
+def _emit_rollback_output(
+    stream: TextIO,
+    payload: bytes,
+    *,
+    exit_code: int,
+) -> int:
+    """Write one canonical rollback receipt as exact UTF-8 bytes."""
+
+    binary_stream = getattr(stream, "buffer", None)
+    if binary_stream is None:
+        return _emit_text_payload(
+            stream,
+            payload.decode("utf-8"),
+            exit_code=exit_code,
+        )
+    try:
+        written = binary_stream.write(payload)
+        if written != len(payload):
+            raise OSError(errno.EIO, "incomplete workspace rollback receipt")
+        binary_stream.flush()
     except (BrokenPipeError, OSError) as exc:
         if not _silence_standard_streams_after_broken_pipe(stream, exc):
             raise
@@ -1357,6 +1400,96 @@ def _run_sync(
     return _emit_text_payload(stream, payload, exit_code=exit_code)
 
 
+def _read_rollback_request_bytes() -> bytes:
+    binary_input = getattr(sys.stdin, "buffer", None)
+    if binary_input is not None:
+        limit = rollback_runtime.ROLLBACK_REQUEST_MAX_BYTES + 1
+        raw = bytearray()
+        while len(raw) < limit:
+            remaining = limit - len(raw)
+            chunk = binary_input.read(remaining)
+            if not isinstance(chunk, bytes):
+                raise ValueError("rollback request input did not return bytes")
+            if len(chunk) > remaining:
+                raise ValueError("rollback request input exceeded its bounded read")
+            if chunk == b"":
+                break
+            raw.extend(chunk)
+        return bytes(raw)
+
+    raw = bytearray()
+    while len(raw) <= rollback_runtime.ROLLBACK_REQUEST_MAX_BYTES:
+        character = sys.stdin.read(1)
+        if not isinstance(character, str) or len(character) > 1:
+            raise ValueError("rollback request input did not return text")
+        if character == "":
+            break
+        try:
+            raw.extend(character.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ValueError("rollback request input is not UTF-8") from exc
+    return bytes(raw)
+
+
+def _run_rollback(
+    *,
+    inputs: WorkspaceRuntimeInputs | None,
+    output: TextIO,
+    errors: TextIO,
+) -> int:
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        if resolved_inputs is None:
+            failure = rollback_runtime.RollbackFailure.missing_authority()
+            return _emit_rollback_output(
+                errors,
+                failure.canonical,
+                exit_code=failure.exit_code,
+            )
+        runtime = compose_workspace_runtime(resolved_inputs)
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = rollback_runtime.classify_failure(exc)
+        return _emit_rollback_output(
+            errors,
+            failure.canonical,
+            exit_code=failure.exit_code,
+        )
+
+    try:
+        try:
+            raw_request = _read_rollback_request_bytes()
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            raise ValueError("rollback request input cannot be read") from exc
+        request = rollback_runtime.RollbackRequest.from_bytes(raw_request)
+        occurred_at = datetime.now(timezone.utc)
+        with (
+            redirect_stdout(_DISCARDED_ENGINE_OUTPUT),
+            redirect_stderr(_DISCARDED_ENGINE_OUTPUT),
+        ):
+            receipt = rollback_runtime.rollback(
+                runtime,
+                request,
+                occurred_at=occurred_at,
+                monotonic_clock=time.monotonic_ns,
+            )
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = rollback_runtime.classify_failure(exc)
+        return _emit_rollback_output(
+            errors,
+            failure.canonical,
+            exit_code=failure.exit_code,
+        )
+    return _emit_rollback_output(
+        output,
+        receipt.canonical,
+        exit_code=EXIT_READY,
+    )
+
+
 def _read_query_request_bytes() -> bytes:
     binary_input = getattr(sys.stdin, "buffer", None)
     if binary_input is not None:
@@ -1805,6 +1938,18 @@ def run_workspace_command(
             output=output,
             errors=errors,
         )
+    if command and command[0] == "rollback":
+        if command != ("rollback", "--request-stdin"):
+            return _emit_text_payload(
+                errors,
+                _ROLLBACK_USAGE + "\n",
+                exit_code=EXIT_USAGE,
+            )
+        return _run_rollback(
+            inputs=inputs,
+            output=output,
+            errors=errors,
+        )
     if command and command[0] == "query":
         if command != ("query", "--request-stdin"):
             return _emit_text_payload(
@@ -1913,12 +2058,32 @@ def load_query_result_schema() -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def load_rollback_request_schema() -> dict[str, Any]:
+    """Load the public canonical exact-last-good rollback request schema."""
+
+    value = _load_json(_ROLLBACK_REQUEST_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace rollback request schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+def load_rollback_receipt_schema() -> dict[str, Any]:
+    """Load the public redacted exact-last-good rollback receipt schema."""
+
+    value = _load_json(_ROLLBACK_RECEIPT_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace rollback receipt schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
 __all__ = [
     "load_activation_schema",
     "load_identity_maintenance_schema",
     "load_query_request_schema",
     "load_query_result_schema",
     "load_registration_schema",
+    "load_rollback_receipt_schema",
+    "load_rollback_request_schema",
     "load_sync_receipt_schema",
     "load_sync_request_schema",
     "run_workspace_command",

@@ -357,6 +357,30 @@ class PointerStore:
             raise PointerCorrupt("pointer source authority does not match its current receipt")
         return result
 
+    def verify_visible_pointer(
+        self,
+        pointer: PointerSet,
+        *,
+        expected_repo_uuid: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> dict[str, GenerationReceipt]:
+        """Verify generation receipts and the journal authority for a visible pointer."""
+
+        value = pointer.to_dict()
+        repo_uuid = str(value["repo_uuid"])
+        if expected_repo_uuid is not None and repo_uuid != expected_repo_uuid:
+            raise PointerCorrupt("pointer belongs to another workspace")
+        self._verify_visible_pointer_journal(
+            repo_uuid,
+            pointer,
+            deadline_ns=deadline_ns,
+        )
+        return self.verify_pointer(
+            pointer,
+            expected_repo_uuid=expected_repo_uuid,
+            deadline_ns=deadline_ns,
+        )
+
     def _verify_repair_refs(
         self,
         repo_uuid: str,
@@ -689,11 +713,13 @@ class PointerStore:
         allowed_operation: str,
         occurred_at: datetime,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> PointerSet:
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({allowed_operation}),
+            deadline_ns=deadline_ns,
         ) as operation:
             self._assert_no_gc_intent(operation.repo_uuid)
             preliminary = self._preliminary_pointer(operation.repo_uuid)
@@ -702,14 +728,33 @@ class PointerStore:
                 cas.candidate_generation_id,
                 preliminary,
             )
-            with self.state.existing_generation_locks(locks, exclusive=True):
+            with self.state.existing_generation_locks(
+                locks,
+                exclusive=True,
+                deadline_ns=deadline_ns,
+            ):
+                require_before_deadline(
+                    deadline_ns,
+                    "pointer movement exceeded its lease deadline",
+                )
                 current = self._preliminary_pointer(operation.repo_uuid)
                 candidate = self._verify_generation(
                     operation.repo_uuid,
                     cas.candidate_generation_id,
+                    deadline_ns=deadline_ns,
                 )
-                self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid))
-                snapshot = self.journal.recover_locked(operation)
+                require_before_deadline(
+                    deadline_ns,
+                    "pointer movement exceeded its lease deadline",
+                )
+                self.state.cleanup_atomic_temps(
+                    self._workspace(operation.repo_uuid),
+                    deadline_ns=deadline_ns,
+                )
+                snapshot = self.journal.recover_locked(
+                    operation,
+                    deadline_ns=deadline_ns,
+                )
                 if not self._journal_certifies(
                     snapshot,
                     generation_id=cas.candidate_generation_id,
@@ -728,6 +773,10 @@ class PointerStore:
                 except PointerSuperseded:
                     if current is None or candidate_is_current:
                         raise
+                    require_before_deadline(
+                        deadline_ns,
+                        "pointer movement exceeded its lease deadline",
+                    )
                     pointer_revision = int(current.to_dict()["pointer_revision"])
                     self.journal.append_pointer_locked(
                         operation,
@@ -746,7 +795,11 @@ class PointerStore:
                     current_value = current.to_dict()
                     current_ref = cast(dict[str, Any], current_value["current"])
                     try:
-                        old_receipt = self._verify_ref(operation.repo_uuid, current_ref)
+                        old_receipt = self._verify_ref(
+                            operation.repo_uuid,
+                            current_ref,
+                            deadline_ns=deadline_ns,
+                        )
                     except (GenerationError, PointerError):
                         corrupt_generations.add(str(current_ref["generation_id"]))
                         if current_value["last_good"] is not None:
@@ -755,6 +808,7 @@ class PointerStore:
                                 verified_last_good = self._verify_ref(
                                     operation.repo_uuid,
                                     last_good_ref,
+                                    deadline_ns=deadline_ns,
                                 )
                             except (GenerationError, PointerError):
                                 corrupt_generations.add(str(last_good_ref["generation_id"]))
@@ -768,6 +822,10 @@ class PointerStore:
                     revision=revision,
                     candidate=candidate,
                     last_good=last_good,
+                )
+                require_before_deadline(
+                    deadline_ns,
+                    "pointer movement exceeded its lease deadline",
                 )
                 return self._persist_move(
                     operation,
@@ -803,6 +861,7 @@ class PointerStore:
         *,
         occurred_at: datetime,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> PointerSet:
         return self._move(
             grant,
@@ -811,6 +870,7 @@ class PointerStore:
             allowed_operation="ROLLBACK",
             occurred_at=occurred_at,
             monotonic_ns=monotonic_ns,
+            deadline_ns=deadline_ns,
         )
 
     @staticmethod

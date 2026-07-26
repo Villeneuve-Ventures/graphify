@@ -112,11 +112,12 @@ class RegistryStore:
         )
 
     @contextmanager
-    def exclusive_lock(self) -> Iterator[None]:
+    def exclusive_lock(self, *, deadline_ns: int | None = None) -> Iterator[None]:
         with self.state.lock(
             self.LOCK,
             rank=REGISTRY_LOCK_RANK,
             name="registry",
+            deadline_ns=deadline_ns,
         ):
             yield
 
@@ -137,7 +138,13 @@ class RegistryStore:
             "allow_missing": allow_missing,
         }
         if recover:
-            result = self.state.recover_record(**kwargs)
+            if deadline_ns is None:
+                result = self.state.recover_record(**kwargs)
+            else:
+                result = self.state.recover_record(
+                    **kwargs,
+                    deadline_ns=deadline_ns,
+                )
         else:
             result = self.state.read_stable_record(
                 **kwargs,
@@ -146,11 +153,18 @@ class RegistryStore:
         return cast(Registry | None, result)
 
     @contextmanager
-    def recovered_snapshot(self) -> Iterator[Registry]:
+    def recovered_snapshot(
+        self,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[Registry]:
         """Hold the registry lock while exposing one recovered stable revision."""
 
-        with self.exclusive_lock():
-            document = self._load_locked()
+        with self.exclusive_lock(deadline_ns=deadline_ns):
+            if deadline_ns is None:
+                document = self._load_locked()
+            else:
+                document = self._load_locked(deadline_ns=deadline_ns)
             if document is None:  # pragma: no cover - narrowed by allow_missing=False
                 raise StateCorrupt("registry current record is missing")
             yield document

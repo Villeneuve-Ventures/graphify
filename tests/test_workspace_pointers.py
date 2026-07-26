@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 import hashlib
@@ -29,7 +30,12 @@ from graphify.workspace.generations import (
 from graphify.workspace.identity import discover_source
 from graphify.workspace.journal import JournalConflict, JournalStore
 from graphify.workspace.leases import LeaseRecoveryRequired
-from graphify.workspace.persistence import CommitUnknown, InjectedFault, LockOrderError
+from graphify.workspace.persistence import (
+    CommitUnknown,
+    InjectedFault,
+    LockOrderError,
+    LockTimeout,
+)
 from graphify.workspace.pointers import (
     PointerCAS,
     PointerConflict,
@@ -971,6 +977,146 @@ def test_pointer_promotion_retains_prior_before_visibility_and_loser_is_supersed
     assert rolled_back.to_dict()["pointer_revision"] == 3
     assert rolled_back.to_dict()["current"]["generation_id"] == "gen-a"
     assert rolled_back.to_dict()["last_good"]["generation_id"] == "gen-b"
+
+
+def test_rollback_rechecks_exact_lease_deadline_before_durable_write(
+    tmp_path: Path,
+) -> None:
+    harness, journal, _generations, pointers, promote, receipts = _promotion_runtime(
+        tmp_path
+    )
+    old = receipts["gen-old"]
+    new = receipts["gen-new"]
+    pointers.promote(
+        promote,
+        _cas(promote, old, revision=0, current_sha256=None),
+        occurred_at=START + timedelta(seconds=2),
+        monotonic_ns=20_001,
+    )
+    pointers.promote(
+        promote,
+        _cas(promote, new, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=3),
+        monotonic_ns=20_002,
+    )
+    harness.leases.release(promote)
+    rollback = acquire(harness, "ROLLBACK", tick=3)
+    deadline_ns = int(
+        rollback.lease.to_dict()["liveness_deadline_monotonic_ns"]
+    )
+    pointer_path = harness.state_root / "workspaces" / REPO_UUID / "pointers.json"
+    pointer_before = pointer_path.read_bytes()
+    journal_before = tuple(
+        event.to_dict() for event in journal.read_stable(REPO_UUID).events
+    )
+
+    with pytest.raises(LockTimeout):
+        pointers.rollback(
+            rollback,
+            _cas(rollback, old, revision=2, current_sha256=new.sha256),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=30_001,
+            deadline_ns=deadline_ns,
+        )
+
+    assert pointer_path.read_bytes() == pointer_before
+    assert tuple(
+        event.to_dict() for event in journal.read_stable(REPO_UUID).events
+    ) == journal_before
+
+
+def test_rollback_threads_deadline_through_generation_locks_and_receipt_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, journal, _generations, pointers, promote, receipts = _promotion_runtime(
+        tmp_path
+    )
+    old = receipts["gen-old"]
+    new = receipts["gen-new"]
+    pointers.promote(
+        promote,
+        _cas(promote, old, revision=0, current_sha256=None),
+        occurred_at=START + timedelta(seconds=2),
+        monotonic_ns=20_001,
+    )
+    pointers.promote(
+        promote,
+        _cas(promote, new, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=3),
+        monotonic_ns=20_002,
+    )
+    harness.leases.release(promote)
+    rollback = acquire(harness, "ROLLBACK", tick=3)
+    deadline_ns = 10**30
+    journal_deadlines: list[int | None] = []
+    lock_deadlines: list[int | None] = []
+    receipt_deadlines: list[int | None] = []
+    original_recover_locked = journal.recover_locked
+    original_generation_lock = pointers.state.existing_generation_lock
+    original_verify_generation = pointers._verify_generation
+
+    def record_journal_recovery(
+        operation: Any,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        journal_deadlines.append(deadline_ns)
+        return original_recover_locked(operation, deadline_ns=deadline_ns)
+
+    @contextmanager
+    def record_generation_lock(
+        relative: str | Path,
+        *,
+        generation_id: str,
+        exclusive: bool,
+        blocking: bool = True,
+        deadline_ns: int | None = None,
+    ):
+        lock_deadlines.append(deadline_ns)
+        with original_generation_lock(
+            relative,
+            generation_id=generation_id,
+            exclusive=exclusive,
+            blocking=blocking,
+            deadline_ns=deadline_ns,
+        ):
+            yield
+
+    def record_verify_generation(
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        deadline_ns: int | None = None,
+    ):
+        receipt_deadlines.append(deadline_ns)
+        return original_verify_generation(
+            repo_uuid,
+            generation_id,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(
+        pointers.state,
+        "existing_generation_lock",
+        record_generation_lock,
+    )
+    monkeypatch.setattr(journal, "recover_locked", record_journal_recovery)
+    monkeypatch.setattr(pointers, "_verify_generation", record_verify_generation)
+
+    pointers.rollback(
+        rollback,
+        _cas(rollback, old, revision=2, current_sha256=new.sha256),
+        occurred_at=START + timedelta(seconds=4),
+        monotonic_ns=30_001,
+        deadline_ns=deadline_ns,
+    )
+
+    assert journal_deadlines[0] == deadline_ns
+    assert lock_deadlines
+    assert set(lock_deadlines) == {deadline_ns}
+    assert receipt_deadlines
+    assert set(receipt_deadlines) == {deadline_ns}
 
 
 def test_shared_reader_is_nonmutating_and_holds_retained_generation_lock(tmp_path: Path) -> None:
