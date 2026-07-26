@@ -1,7 +1,7 @@
 # Graphify workspace contract v1
 
-Implemented contract scope through the narrow remaining-P5B2 identity-
-maintenance CLI, P5B2c one-shot certified workspace query,
+Implemented contract scope through the unnumbered P5B2 identity-maintenance
+CLI, P5B2c one-shot certified workspace query,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -42,9 +42,13 @@ registry revision, and a matching `OperatorAuthorization` JSON object on
 standard input. The command requires the current working directory itself to be
 the Git top level, ignores local Git replacement refs and legacy graft files,
 cross-checks its bounded no-follow `.graphify/workspace.toml`, and never infers
-adoption. It emits one canonical redacted receipt and writes only the existing
-P2 registry, workspace, lock, and evidence records beneath the configured
-external state root. The receipt's normative machine-readable schema is
+adoption. ADOPT also rejects a source whose persisted Git common-directory
+device/inode identity belongs to another repo UUID before new source or
+identity-action evidence is persisted or the requested registry mutation is
+committed, while same-UUID retained-inode adoption remains allowed. It emits
+one canonical redacted receipt and writes only the existing P2 registry,
+workspace, lock, and evidence records beneath the configured external state
+root. The receipt's normative machine-readable schema is
 `graphify/workspace/schemas/cli/v1/registration.schema.json`.
 The narrow identity-maintenance slice extends the same argv family with
 `graphify workspace register rebind` and
@@ -53,8 +57,10 @@ expected registry revision, installed authority, Git-top-level source proof,
 and bounded matching authorization. Rebind delegates shared-history or enrolled
 Git-common-directory policy to `RegistryStore.rebind()`; rotate delegates the
 explicitly-bound-source check to `RegistryStore.rotate_enrollment_evidence()`.
-Neither operation changes `active_source` or `active_source_revision`, and both
-emit the separate CLI-v1 receipt defined by
+Rebind rejects a source identity persisted under a different UUID before
+new source or identity-action evidence is persisted or the requested registry
+mutation is committed. Neither operation changes `active_source` or
+`active_source_revision`, and both emit the separate CLI-v1 receipt defined by
 `graphify/workspace/schemas/cli/v1/identity-maintenance.schema.json`.
 Activation, remaining mutation/query commands, repair, watch/service,
 performance certification, and candidate publication remain later P5 work.
@@ -145,7 +151,11 @@ authorization, source, state, runtime, or uncertain commit writes one redacted
 receipt to standard error and exits 20. Failure receipts omit the repo UUID and
 include the observed registry revision only for a safe deterministic revision
 conflict. Registration v1 remains limited to `enroll` and `adopt` and does not
-admit either maintenance action.
+admit either maintenance action. Rebind's cross-UUID persisted-source-identity
+check runs before new source or identity-action evidence is persisted or the
+requested registry mutation is committed; rotate retains the existing
+explicitly-bound-source requirement. Both preserve `active_source` and
+`active_source_revision`.
 
 ## Governance and deferred work ownership
 
@@ -163,7 +173,7 @@ sequencing. Direct operator instruction alone owns execution authorization.
 |---|---|---|
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
-| Identity maintenance | Narrow remaining-P5B2 implemented contract | `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, unchanged active-source state, and a dedicated receipt schema; governance status is unchanged by this implementation. |
+| Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
 | Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, activation, mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
