@@ -68,11 +68,11 @@ orientation only and cannot justify execution.
 | P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children are complete; remaining P5B2 and the broad P5C gate are not. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, P5B2c, identity maintenance, and active-source activation are complete; retained-source identity-continuity hardening is deferred and all other commands remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, P5B2c, identity maintenance, and active-source activation are complete. Retained-source identity-continuity hardening is deferred; all other commands remain waiting. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
-| P5B2 retained-source identity continuity | P5B2 identity maintenance, P5B2 active-source activation | DEFERRED | `rotate_enrollment_evidence()` and `resolve_active_source()` do not independently re-prove immutable enrollment continuity. One focused registry-hardening follow-up owns both nonclaims; it does not block the accepted activation boundary. |
+| P5B2 retained-source identity continuity | P5B2 identity maintenance, P5B2 active-source activation | DEFERRED | `rotate_enrollment_evidence()` and `resolve_active_source()` do not independently re-prove immutable enrollment continuity. Both nonclaims are deferred to one focused registry-hardening follow-up and do not block the accepted activation boundary. |
 | P5B2b0 | P5B2a | COMPLETE | Request-bound staged-build recovery prerequisite closed. |
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
 | P5B2c | P5C1 | COMPLETE | Accepted receipt: [`P5B2c`](receipts/p5b2c.md). One-shot certified `workspace query --request-stdin` transport only. |
@@ -160,8 +160,8 @@ top-level source twice, and delegates once to the existing fenced registry
 policy. The target must be explicitly bound, must still share an immutable
 enrollment history root or retain the enrolled Git common-directory identity,
 and must differ from the currently selected source. Success emits one redacted
-CLI-v1 receipt; denied, stale, and invalid paths preserve their frozen result
-and redaction behavior, while injected faults remain internal and are re-raised.
+CLI-v1 receipt. Denied, stale, and invalid paths preserve the documented exit
+and redaction behavior; injected faults remain internal and are re-raised.
 
 This acceptance does not claim that identity-evidence rotation or later
 active-source resolution independently re-proves immutable enrollment

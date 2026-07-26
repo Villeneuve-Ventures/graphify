@@ -26,9 +26,8 @@ The command:
 - requires the explicit repo UUID plus registry, active-source, operation, and
   migration CAS values while deriving lease owner, wall time, monotonic time,
   and the 30-second lease TTL from trusted runtime inputs;
-- requires the current working directory itself to be the Git top level,
-  rediscovers it twice, and exactly revalidates the source between discovery
-  passes;
+- requires the current working directory itself to be the Git top level and
+  exactly revalidates the source across two discovery passes;
 - requires an explicitly bound target that shares an immutable enrollment
   history root or retains the enrolled Git common-directory device/inode;
 - rejects reselecting the current active source under the registry lock before
@@ -44,7 +43,7 @@ lease, and evidence record shapes remain unchanged.
 
 ## Retained-source identity-continuity deferral
 
-Two inherited registry nonclaims are one focused P5B2 hardening follow-up:
+One focused P5B2 hardening follow-up covers two inherited registry nonclaims:
 
 - `RegistryStore.rotate_enrollment_evidence()` requires an explicitly bound
   locator but does not independently repeat the immutable enrollment-history
@@ -56,9 +55,8 @@ Two inherited registry nonclaims are one focused P5B2 hardening follow-up:
 
 The activation boundary itself performs the immutable enrollment-continuity
 check before mutation, so these retained-source nonclaims do not broaden or
-invalidate this receipt. Future work must harden them together without
-silently changing the accepted activation or registration contracts, including
-the identity-maintenance boundary.
+invalidate this receipt. The follow-up must preserve the accepted activation,
+registration, and identity-maintenance contracts.
 
 Additional sync modes, migrate, rollback, GC, repair, every mutation beyond
 accepted activation, every query authority beyond P5B2c's one-shot transport,
