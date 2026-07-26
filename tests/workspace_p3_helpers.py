@@ -29,6 +29,18 @@ COMPATIBILITY_MANIFEST = cast(
     ),
 )
 COMPATIBILITY_SHA256 = COMPATIBILITY_MANIFEST.sha256
+WORKSPACE_USAGE = (
+    "Usage: graphify workspace status --json\n"
+    "       graphify workspace doctor\n"
+    "       graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
+    "--expected-registry-revision N --authorization-stdin\n"
+    "       graphify workspace sync --code-only --request-stdin\n"
+    "       graphify workspace query --request-stdin\n"
+    "       graphify workspace activate --repo-uuid UUID "
+    "--expected-registry-revision N --expected-active-source-revision N "
+    "--expected-operation-epoch N --expected-migration-epoch N "
+    "--authorization-stdin\n"
+)
 
 
 class StaticObservationAdapter:
@@ -59,7 +71,7 @@ def trust_source_observations(
     return adapter
 
 
-def _run(repo: Path, *arguments: str) -> str:
+def git_output(repo: Path, *arguments: str) -> str:
     result = subprocess.run(
         ["git", *arguments],
         cwd=repo,
@@ -68,6 +80,15 @@ def _run(repo: Path, *arguments: str) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def clone_repo(source: Path, destination: Path, *, remote_url: str) -> Path:
+    subprocess.run(
+        ["git", "clone", "--quiet", str(source), str(destination)],
+        check=True,
+    )
+    git_output(destination, "remote", "set-url", "origin", remote_url)
+    return destination
 
 
 def _workspace_toml(repo_uuid: str) -> str:
@@ -86,16 +107,16 @@ def _workspace_toml(repo_uuid: str) -> str:
 
 def create_repo(root: Path, repo_uuid: str = REPO_UUID) -> Path:
     root.mkdir(parents=True)
-    _run(root, "init", "--quiet")
-    _run(root, "config", "user.email", "workspace-p3@example.com")
-    _run(root, "config", "user.name", "Workspace P3")
+    git_output(root, "init", "--quiet")
+    git_output(root, "config", "user.email", "workspace-p3@example.com")
+    git_output(root, "config", "user.name", "Workspace P3")
     config = root / ".graphify/workspace.toml"
     config.parent.mkdir()
     config.write_text(_workspace_toml(repo_uuid), encoding="utf-8")
     (root / "README.md").write_text("p3 fixture\n", encoding="utf-8")
-    _run(root, "add", ".")
-    _run(root, "commit", "--quiet", "-m", "p3 fixture")
-    _run(root, "remote", "add", "origin", REMOTE)
+    git_output(root, "add", ".")
+    git_output(root, "commit", "--quiet", "-m", "p3 fixture")
+    git_output(root, "remote", "add", "origin", REMOTE)
     return root
 
 

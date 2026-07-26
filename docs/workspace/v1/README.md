@@ -1,7 +1,8 @@
 # Graphify workspace contract v1
 
-Implemented contract scope through the unnumbered P5B2 identity-maintenance
-CLI, P5B2c one-shot certified workspace query,
+Implemented contract scope through the unnumbered P5B2 active-source activation
+CLI, the unnumbered P5B2 identity-maintenance CLI, P5B2c one-shot certified
+workspace query,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -62,8 +63,21 @@ new source or identity-action evidence is persisted or the requested registry
 mutation is committed. Neither operation changes `active_source` or
 `active_source_revision`, and both emit the separate CLI-v1 receipt defined by
 `graphify/workspace/schemas/cli/v1/identity-maintenance.schema.json`.
-Activation, remaining mutation/query commands, repair, watch/service,
-performance certification, and candidate publication remain later P5 work.
+The separate active-source activation slice exposes only standalone
+`graphify workspace activate` with the explicit repo UUID and registry,
+active-source, operation, and migration CAS values. It loads and composes
+installed runtime authority before consuming one canonical, duplicate-free,
+16 KiB `ACTIVATE` authorization object; rediscovers and exactly revalidates the
+current Git-top-level checkout; derives the trusted lease owner, UTC timestamp,
+monotonic timestamp, and 30-second TTL internally; and delegates exactly once
+to the existing `RegistryStore.activate_source()` policy. A target already
+selected as the active source is rejected under the registry lock before lease,
+evidence, or revision mutation. The canonical redacted receipt is defined by
+`graphify/workspace/schemas/cli/v1/activation.schema.json` and never exposes
+authorization, source paths, lease-owner identity, or raw errors. The existing
+`register activate` remains invalid. Remaining mutation/query commands, repair,
+watch/service, performance certification, and candidate publication remain
+later P5 work.
 P5B2b0 adds the internal request-bound staged-build and stale-abandonment
 recovery contract described in [State contracts](state-contract.md). P5B2b
 exposes only `graphify workspace sync --code-only --request-stdin`, using a
@@ -157,6 +171,46 @@ requested registry mutation is committed; rotate retains the existing
 explicitly-bound-source requirement. Both preserve `active_source` and
 `active_source_revision`.
 
+## Active-source activation CLI
+
+The exact activation form is:
+
+```text
+graphify workspace activate --repo-uuid UUID --expected-registry-revision N --expected-active-source-revision N --expected-operation-epoch N --expected-migration-epoch N --authorization-stdin
+```
+
+Malformed argv exits 64 before authority loading, standard-input reads, source
+discovery, or state access. Valid argv causes installed runtime authority to be
+loaded and composed before standard input is consumed. The authorization bytes
+must be canonical JSON, duplicate-free UTF-8, no larger than 16 KiB, and contain
+exactly the five existing operator-authorization fields with `action` set to
+`ACTIVATE`. Owner identity, wall time, monotonic time, and the bounded 30-second
+activation lease TTL are trusted runtime inputs and cannot be supplied by the
+caller.
+
+The current working directory must be the exact Git top level, its configured
+UUID must match `--repo-uuid`, and its source identity must remain stable across
+the existing two discovery passes and checkout revalidation. The source must
+already be explicitly bound in the registry and must still match immutable
+enrollment identity by sharing a recorded history root or retaining the
+enrolled Git common-directory device/inode. It must differ from the selected
+active source. The CLI calls `RegistryStore.activate_source()` once with all
+four caller-supplied CAS values; that method rejects active-source reselection
+under the registry lock before lease, evidence, or revision mutation and retains
+fencing, reservation and recovery barriers, alias normalization, and semantic
+active-source authority.
+
+Success writes one canonical `graphify.workspace.activation` v1 receipt to
+standard output and exits 0. A stale CAS, already active, unbound or mismatched
+source, live lease, or recovery barrier writes one redacted conflict receipt to
+standard error and exits 10. Invalid authority, authorization, source, runtime,
+state, or uncertain commit writes one redacted invalid receipt to standard error
+and exits 20. Only success includes the repo UUID and resulting active-source
+and epoch values; a safely observed stale registry revision may appear in its
+dedicated conflict result. No receipt includes authorization, paths, owner
+identity, or a raw exception. `InjectedFault` remains an internal test signal
+and is re-raised.
+
 ## Governance and deferred work ownership
 
 The publication gate in [Workspace governance](governance.md) requires one
@@ -174,7 +228,8 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is public. Semantic sync and any broader mode require separately reviewed authority, provider, redaction, and recovery contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
-| Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, activation, mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
+| Active-source activation | Unnumbered P5B2 activation slice | `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, exact bound-source proof, and one redacted CLI-v1 receipt. This implementation does not change governance status or accept a completion receipt. |
+| Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, every other mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
@@ -198,10 +253,11 @@ CLI verb:
 ```
 
 For `register adopt`, `rebind`, or `rotate`, replace `ENROLL` with `ADOPT`,
-`REBIND`, or `ROTATE` respectively. `issued_at` must be a real RFC 3339 UTC
-timestamp ending in `Z`; the other values must be non-empty and trimmed. Extra
-fields, duplicate fields, non-string values, and an action that does not match
-the explicit CLI verb are rejected before mutation.
+`REBIND`, or `ROTATE` respectively. For standalone `workspace activate`, use
+`ACTIVATE` and canonicalize the complete JSON bytes. `issued_at` must be a real
+RFC 3339 UTC timestamp ending in `Z`; the other values must be non-empty and
+trimmed. Extra fields, duplicate fields, non-string values, and an action that
+does not match the explicit CLI verb are rejected before mutation.
 
 The existing Graphify `0.9.16` extraction, cache, build, watch, export, and
 query implementation remains the only graph engine. A workspace-enabled build
@@ -216,8 +272,8 @@ or fork engine logic inside the package.
   `graphify/workspace/schemas/cli/v2/` are normative for the structural shape
   of durable documents, CLI requests and receipts, versioned status output,
   and the TOML-to-object representation of repo policy. Registration, identity-
-  maintenance, sync request/receipt, and one-shot query request/result contracts
-  are CLI v1; status JSON is schema v2.
+  maintenance, active-source activation, sync request/receipt, and one-shot
+  query request/result contracts are CLI v1; status JSON is schema v2.
 - `graphify.workspace` supplies dependency-free canonical reference models,
   exact v1 rejection, SHA-256 inputs, and journal frame encoding. Its
   cross-field and cross-document validation is normative where JSON Schema
@@ -234,8 +290,9 @@ or fork engine logic inside the package.
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
   P5B2a registration command plus the bounded rebind/rotation identity-
-  maintenance slice with bounded authority, authorization, policy, and Git-
-  discovery inputs, the P5B2b sync request/receipt transport, and the P5B2c
+  maintenance slice and standalone active-source activation with bounded
+  authority, authorization, policy, Git-discovery, and four-part CAS inputs,
+  the P5B2b sync request/receipt transport, and the P5B2c
   one-shot query transport; it reuses `.identity`, `.registry`, `.sync`, and
   `.freshness` without adding another persistence path. Lifecycle mutation
   fails closed outside

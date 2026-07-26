@@ -1258,8 +1258,28 @@ def test_rebind_allows_enrolled_common_directory_after_history_rewrite(
     assert evidence["action"] == "REBIND"
     assert evidence["history_roots"] == list(rewritten_source.history_roots)
 
+    leases = LeaseStore(tmp_path / "state", store, capabilities=SUPPORTED)
+    activation = store.activate_source(
+        rewritten_source,
+        _authorization(IdentityAction.ACTIVATE, "activate-rewritten-history"),
+        leases=leases,
+        owner=leases.current_owner(),
+        expected_registry_revision=2,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 1, tzinfo=timezone.utc),
+        monotonic_ns=100,
+        ttl_ns=50,
+    )
 
-def test_rebind_aliases_and_active_source_cas_fail_closed(tmp_path: Path) -> None:
+    activated_entry = _workspace_entry(activation.registry)
+    assert activation.registry.to_dict()["revision"] == 3
+    assert activated_entry["active_source_revision"] == 2
+    assert activated_entry["active_source"] == rewritten_source.registry_source
+
+
+def test_rebind_aliases_and_active_source_activation_cas_fail_closed(tmp_path: Path) -> None:
     original = _create_repo(tmp_path / "original", REPO_UUID)
     linked = _linked_worktree(original, tmp_path / "linked", "linked-source")
     clone = _clone_repo(original, tmp_path / "clone")

@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/activation.schema.json",
+  "title": "Graphify workspace active-source activation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "cli_contract_version",
+    "state",
+    "action",
+    "exit_code"
+  ],
+  "properties": {
+    "contract": {"const": "graphify.workspace.activation"},
+    "schema_version": {"const": 1},
+    "cli_contract_version": {"const": 1},
+    "state": {"enum": ["activated", "conflict", "invalid"]},
+    "action": {"const": "activate"},
+    "exit_code": {"enum": [0, 10, 20]},
+    "registry_revision": {"type": "integer", "minimum": 0},
+    "active_source_revision": {"type": "integer", "minimum": 1},
+    "operation_epoch": {"type": "integer", "minimum": 1},
+    "migration_epoch": {"type": "integer", "minimum": 0},
+    "repo_uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "reason_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "action_code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    }
+  },
+  "$defs": {
+    "redacted_failure": {
+      "not": {
+        "anyOf": [
+          {"required": ["registry_revision"]},
+          {"required": ["active_source_revision"]},
+          {"required": ["operation_epoch"]},
+          {"required": ["migration_epoch"]},
+          {"required": ["repo_uuid"]}
+        ]
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "state": {"const": "activated"},
+        "exit_code": {"const": 0}
+      },
+      "required": [
+        "registry_revision",
+        "active_source_revision",
+        "operation_epoch",
+        "migration_epoch",
+        "repo_uuid"
+      ],
+      "not": {
+        "anyOf": [
+          {"required": ["reason_code"]},
+          {"required": ["action_code"]}
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "registry_revision_conflict"},
+        "action_code": {"const": "refresh_activation_cas"}
+      },
+      "required": ["registry_revision", "reason_code", "action_code"],
+      "not": {
+        "anyOf": [
+          {"required": ["active_source_revision"]},
+          {"required": ["operation_epoch"]},
+          {"required": ["migration_epoch"]},
+          {"required": ["repo_uuid"]}
+        ]
+      }
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "activation_cas_conflict"},
+        "action_code": {"const": "refresh_activation_cas"}
+      },
+      "required": ["reason_code", "action_code"],
+      "$ref": "#/$defs/redacted_failure"
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "identity_mismatch"},
+        "action_code": {"const": "verify_activation_target"}
+      },
+      "required": ["reason_code", "action_code"],
+      "$ref": "#/$defs/redacted_failure"
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "source_not_bound"},
+        "action_code": {"const": "bind_activation_source"}
+      },
+      "required": ["reason_code", "action_code"],
+      "$ref": "#/$defs/redacted_failure"
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "source_already_active"},
+        "action_code": {"const": "select_inactive_source"}
+      },
+      "required": ["reason_code", "action_code"],
+      "$ref": "#/$defs/redacted_failure"
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "lease_busy"},
+        "action_code": {"const": "retry_activation"}
+      },
+      "required": ["reason_code", "action_code"],
+      "$ref": "#/$defs/redacted_failure"
+    },
+    {
+      "properties": {
+        "state": {"const": "conflict"},
+        "exit_code": {"const": 10},
+        "reason_code": {"const": "workspace_recovery_required"},
+        "action_code": {"const": "run_workspace_doctor"}
+      },
+      "required": ["reason_code", "action_code"],
+      "$ref": "#/$defs/redacted_failure"
+    },
+    {
+      "properties": {
+        "state": {"const": "invalid"},
+        "exit_code": {"const": 20}
+      },
+      "required": ["reason_code", "action_code"],
+      "$ref": "#/$defs/redacted_failure"
+    }
+  ]
+}

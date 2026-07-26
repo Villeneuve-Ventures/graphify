@@ -29,6 +29,7 @@ from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
     OperatorAuthorization,
+    SourceIdentity,
     SourceAmbiguousError,
     SourceDiscoveryTimeout,
     UUIDCollisionError,
@@ -38,7 +39,10 @@ from graphify.workspace.registry import RegistryStore, RevisionConflict
 from graphify.workspace.semantic_queue import SemanticQueuePolicy
 from tests.workspace_p3_helpers import (
     COMPATIBILITY_MANIFEST,
+    WORKSPACE_USAGE,
+    clone_repo,
     create_repo,
+    git_output as _git,
     metadata_snapshot,
     tree_snapshot,
 )
@@ -48,6 +52,7 @@ REPO_UUID = "11111111-1111-4111-8111-111111111111"
 SECOND_UUID = "22222222-2222-4222-8222-222222222222"
 SUPPORTED = RuntimeCapabilities.supported_test_fixture()
 POLICY = SemanticQueuePolicy(max_items=8, max_bytes=16 * 1024, retry_budget=1)
+REGISTRATION_REMOTE = "https://github.com/example/registration.git"
 _SUBPROCESS_LAUNCHER = """
 import runpy
 from graphify.workspace.persistence import RuntimeCapabilities
@@ -82,19 +87,6 @@ def _inputs(state_root: Path, *, fault_hook: Any = None) -> WorkspaceRuntimeInpu
         capabilities=SUPPORTED,
         fault_hook=fault_hook,
     )
-
-
-def _git(repo: Path, *arguments: str) -> str:
-    result = subprocess.run(
-        ["git", *arguments], cwd=repo, check=True, capture_output=True, text=True
-    )
-    return result.stdout.strip()
-
-
-def _clone(source: Path, destination: Path) -> Path:
-    subprocess.run(["git", "clone", "--quiet", str(source), str(destination)], check=True)
-    _git(destination, "remote", "set-url", "origin", "https://github.com/example/registration.git")
-    return destination
 
 
 def _run_register(
@@ -162,7 +154,7 @@ def _source_stub(root: Path) -> SimpleNamespace:
     remote_evidence = {
         "kind": "graphify.workspace.remote_evidence",
         "remote_name": "origin",
-        "url": "https://github.com/example/registration.git",
+        "url": REGISTRATION_REMOTE,
     }
     registry_source = {
         "git_common_dir": str(root / ".git"),
@@ -558,14 +550,7 @@ def test_register_usage_errors_do_not_read_stdin_or_discover_state(
 
     assert result == 64
     assert stdout.getvalue() == ""
-    assert stderr.getvalue() == (
-        "Usage: graphify workspace status --json\n"
-        "       graphify workspace doctor\n"
-        "       graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
-        "--expected-registry-revision N --authorization-stdin\n"
-        "       graphify workspace sync --code-only --request-stdin\n"
-        "       graphify workspace query --request-stdin\n"
-    )
+    assert stderr.getvalue() == WORKSPACE_USAGE
 
 
 def test_register_internal_dispatch_rejects_unsupported_action_before_authority_load(
@@ -714,7 +699,7 @@ def test_register_normalizes_unexpected_registry_result_failures(
 
         def enroll(
             self,
-            source: object,
+            source: SourceIdentity,
             authorization: OperatorAuthorization,
             *,
             expected_revision: int,
@@ -766,7 +751,7 @@ def test_register_preserves_injected_fault_from_revision_receipt(
 
         def enroll(
             self,
-            source: object,
+            source: SourceIdentity,
             authorization: OperatorAuthorization,
             *,
             expected_revision: int,
@@ -1336,7 +1321,11 @@ def test_register_real_enroll_then_clone_adopt_preserves_active_source(
     tmp_path: Path,
 ) -> None:
     source = create_repo(tmp_path / "source", REPO_UUID)
-    clone = _clone(source, tmp_path / "clone")
+    clone = clone_repo(
+        source,
+        tmp_path / "clone",
+        remote_url=REGISTRATION_REMOTE,
+    )
     inputs = _inputs(tmp_path / "external-state")
 
     first_exit, first_stdout, first_stderr = _run_register(
@@ -1612,7 +1601,11 @@ def test_registration_subprocess_uses_cwd_stdin_and_production_authority(
     tmp_path: Path,
 ) -> None:
     checkout = create_repo(tmp_path / "checkout", REPO_UUID)
-    clone = _clone(checkout, tmp_path / "clone")
+    clone = clone_repo(
+        checkout,
+        tmp_path / "clone",
+        remote_url=REGISTRATION_REMOTE,
+    )
     home = tmp_path / "home"
     codex_home = tmp_path / "codex-home"
     state_home = tmp_path / "state-home"
@@ -1707,14 +1700,7 @@ def test_registration_subprocess_uses_cwd_stdin_and_production_authority(
     assert enrolled.stderr == adopted.stderr == ""
     assert usage.returncode == 64
     assert usage.stdout == ""
-    assert usage.stderr == (
-        "Usage: graphify workspace status --json\n"
-        "       graphify workspace doctor\n"
-        "       graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
-        "--expected-registry-revision N --authorization-stdin\n"
-        "       graphify workspace sync --code-only --request-stdin\n"
-        "       graphify workspace query --request-stdin\n"
-    )
+    assert usage.stderr == WORKSPACE_USAGE
     assert json.loads(enrolled.stdout)["registry_revision"] == 1
     assert json.loads(adopted.stdout)["registry_revision"] == 2
     document = RegistryStore(state_root, capabilities=SUPPORTED).load().to_dict()
@@ -1734,7 +1720,11 @@ def test_register_limits_writes_to_private_external_state_paths(
     tmp_path: Path,
 ) -> None:
     checkout = create_repo(tmp_path / "checkout", REPO_UUID)
-    clone = _clone(checkout, tmp_path / "clone")
+    clone = clone_repo(
+        checkout,
+        tmp_path / "clone",
+        remote_url=REGISTRATION_REMOTE,
+    )
     state_root = tmp_path / "external-state"
     home = tmp_path / "private-home"
     codex_home = tmp_path / "private-codex-home"
@@ -2255,7 +2245,11 @@ def test_identity_maintenance_rebind_and_rotate_obey_registry_policy_without_sou
     tmp_path: Path,
 ) -> None:
     original = create_repo(tmp_path / "original", REPO_UUID)
-    clone = _clone(original, tmp_path / "clone")
+    clone = clone_repo(
+        original,
+        tmp_path / "clone",
+        remote_url=REGISTRATION_REMOTE,
+    )
     unrelated = create_repo(tmp_path / "unrelated", REPO_UUID)
     (unrelated / "README.md").write_text("unrelated identity history\n", encoding="utf-8")
     _git(unrelated, "add", "README.md")
@@ -2337,7 +2331,11 @@ def test_identity_maintenance_rebind_rejects_a_source_bound_to_another_uuid_with
     tmp_path: Path,
 ) -> None:
     first = create_repo(tmp_path / "first", REPO_UUID)
-    second = _clone(first, tmp_path / "second")
+    second = clone_repo(
+        first,
+        tmp_path / "second",
+        remote_url=REGISTRATION_REMOTE,
+    )
     second_config = second / ".graphify/workspace.toml"
     second_config.write_text(
         second_config.read_text(encoding="utf-8").replace(REPO_UUID, SECOND_UUID),
@@ -2530,7 +2528,7 @@ def test_identity_maintenance_preserves_injected_fault_from_revision_receipt(
 
         def rotate_enrollment_evidence(
             self,
-            source: object,
+            source: SourceIdentity,
             authorization: OperatorAuthorization,
             *,
             expected_revision: int,

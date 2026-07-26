@@ -1,9 +1,10 @@
-"""Narrow workspace identity, sync, query, status, and doctor commands."""
+"""Narrow workspace activation, identity, sync, query, status, and doctor commands."""
 
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import errno
 import hashlib
 import json
@@ -68,7 +69,12 @@ from graphify.workspace.leases import (
     StaleLease,
 )
 from graphify.workspace.pointers import PointerConflict
-from graphify.workspace.registry import RevisionConflict
+from graphify.workspace.registry import (
+    ActivationResult,
+    RegistryStore,
+    RevisionConflict,
+    SourceAlreadyActive,
+)
 from graphify.workspace.semantic_queue import SemanticQueueError
 from graphify.workspace.status import (
     EXIT_DEGRADED,
@@ -97,6 +103,8 @@ _REGISTRATION_CONTRACT = "graphify.workspace.registration"
 _REGISTRATION_SCHEMA_VERSION = 1
 _IDENTITY_MAINTENANCE_CONTRACT = "graphify.workspace.identity_maintenance"
 _IDENTITY_MAINTENANCE_SCHEMA_VERSION = 1
+_ACTIVATION_CONTRACT = "graphify.workspace.activation"
+_ACTIVATION_SCHEMA_VERSION = 1
 _AUTHORIZATION_MAX_BYTES = 16 * 1024
 
 
@@ -132,6 +140,9 @@ _IDENTITY_MAINTENANCE_SCHEMA_PATH = (
     / "v1"
     / "identity-maintenance.schema.json"
 )
+_ACTIVATION_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "activation.schema.json"
+)
 _SYNC_REQUEST_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "sync-request.schema.json"
 )
@@ -151,13 +162,22 @@ _REGISTER_USAGE = (
 )
 _SYNC_USAGE = "graphify workspace sync --code-only --request-stdin"
 _QUERY_USAGE = "graphify workspace query --request-stdin"
+_ACTIVATION_USAGE = (
+    "graphify workspace activate --repo-uuid UUID "
+    "--expected-registry-revision N --expected-active-source-revision N "
+    "--expected-operation-epoch N --expected-migration-epoch N "
+    "--authorization-stdin"
+)
 _USAGE = (
     "Usage: graphify workspace status --json\n"
     "       graphify workspace doctor\n"
     f"       {_REGISTER_USAGE}\n"
     f"       {_SYNC_USAGE}\n"
-    f"       {_QUERY_USAGE}"
+    f"       {_QUERY_USAGE}\n"
+    f"       {_ACTIVATION_USAGE}"
 )
+
+_ACTIVATION_LEASE_TTL_NS = 30_000_000_000
 
 _QUERY_REQUEST_CONTRACT = "graphify.workspace.query_request"
 _QUERY_RESULT_CONTRACT = "graphify.workspace.query_result"
@@ -188,6 +208,19 @@ class _RegisterRequest:
 
 
 @dataclass(frozen=True)
+class _ActivationRequest:
+    repo_uuid: str
+    expected_registry_revision: int
+    expected_active_source_revision: int
+    expected_operation_epoch: int
+    expected_migration_epoch: int
+
+    @property
+    def action(self) -> IdentityAction:
+        return IdentityAction.ACTIVATE
+
+
+@dataclass(frozen=True)
 class _RegistrationFailure:
     state: str
     exit_code: int
@@ -198,6 +231,15 @@ class _RegistrationFailure:
 
 @dataclass(frozen=True)
 class _IdentityMaintenanceFailure:
+    state: str
+    exit_code: int
+    reason_code: str
+    action_code: str
+    registry_revision: int | None = None
+
+
+@dataclass(frozen=True)
+class _ActivationFailure:
     state: str
     exit_code: int
     reason_code: str
@@ -305,6 +347,58 @@ def _parse_register_request(command: tuple[str, ...]) -> _RegisterRequest | None
     )
 
 
+def _parse_activation_request(command: tuple[str, ...]) -> _ActivationRequest | None:
+    if not command or command[0] != "activate":
+        return None
+    values: dict[str, str] = {}
+    authorization_stdin = False
+    index = 1
+    value_options = {
+        "--repo-uuid",
+        "--expected-registry-revision",
+        "--expected-active-source-revision",
+        "--expected-operation-epoch",
+        "--expected-migration-epoch",
+    }
+    while index < len(command):
+        argument = command[index]
+        if argument == "--authorization-stdin":
+            if authorization_stdin:
+                return None
+            authorization_stdin = True
+            index += 1
+            continue
+        if argument not in value_options or argument in values or index + 1 >= len(command):
+            return None
+        value = command[index + 1]
+        if value.startswith("--"):
+            return None
+        values[argument] = value
+        index += 2
+
+    if not authorization_stdin or set(values) != value_options:
+        return None
+    try:
+        repo_uuid = WorkspaceLeaseState.canonical_repo_uuid(values["--repo-uuid"])
+    except ContractError:
+        return None
+    revision_options = (
+        "--expected-registry-revision",
+        "--expected-active-source-revision",
+        "--expected-operation-epoch",
+        "--expected-migration-epoch",
+    )
+    if any(_REVISION_RE.fullmatch(values[option]) is None for option in revision_options):
+        return None
+    return _ActivationRequest(
+        repo_uuid=repo_uuid,
+        expected_registry_revision=int(values["--expected-registry-revision"]),
+        expected_active_source_revision=int(values["--expected-active-source-revision"]),
+        expected_operation_epoch=int(values["--expected-operation-epoch"]),
+        expected_migration_epoch=int(values["--expected-migration-epoch"]),
+    )
+
+
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -333,7 +427,11 @@ def _read_authorization_bytes() -> bytes:
     return bytes(raw)
 
 
-def _read_operator_authorization(request: _RegisterRequest) -> OperatorAuthorization:
+def _read_authorization(
+    request: _RegisterRequest | _ActivationRequest,
+    *,
+    require_canonical: bool,
+) -> OperatorAuthorization:
     try:
         raw_bytes = _read_authorization_bytes()
     except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
@@ -352,7 +450,7 @@ def _read_operator_authorization(request: _RegisterRequest) -> OperatorAuthoriza
         raise AuthorizationError("authorization fields must be strings")
     authorization = cast(dict[str, str], value)
     if authorization["action"] != request.action.value:
-        raise AuthorizationError("authorization action does not match registration intent")
+        raise AuthorizationError("authorization action does not match requested intent")
     result = OperatorAuthorization(
         action=request.action,
         operator_id=authorization["operator_id"],
@@ -361,12 +459,22 @@ def _read_operator_authorization(request: _RegisterRequest) -> OperatorAuthoriza
         nonce=authorization["nonce"],
     )
     try:
-        canonical_json_bytes(result.to_dict())
+        canonical = canonical_json_bytes(result.to_dict())
     except ContractError as exc:
         raise AuthorizationError(
             "authorization fields are not canonically encodable"
         ) from exc
+    if require_canonical and raw_bytes != canonical:
+        raise AuthorizationError("authorization input is not canonical")
     return result
+
+
+def _read_operator_authorization(request: _RegisterRequest) -> OperatorAuthorization:
+    return _read_authorization(request, require_canonical=False)
+
+
+def _read_activation_authorization(request: _ActivationRequest) -> OperatorAuthorization:
+    return _read_authorization(request, require_canonical=True)
 
 
 def _validate_registration_source(source: SourceIdentity) -> None:
@@ -405,6 +513,52 @@ def _validate_registration_source(source: SourceIdentity) -> None:
         or discovered_evidence != alias_evidence
     ):
         raise SourceDiscoveryError("source evidence does not match its registry record")
+
+
+def _discover_revalidated_source(
+    repo_uuid: str,
+    registry: RegistryStore,
+) -> SourceIdentity:
+    source_deadline_ns = time.monotonic_ns() + _REGISTRATION_SOURCE_TIMEOUT_NS
+    source_root = Path.cwd()
+    root_identity = source_root_identity(
+        source_root,
+        deadline_ns=source_deadline_ns,
+    )
+    source = discover_source(
+        source_root,
+        deadline_ns=source_deadline_ns,
+        max_bytes=_REGISTRATION_CONFIG_MAX_BYTES,
+    )
+    _validate_registration_source(source)
+    if source.repo_uuid != repo_uuid:
+        raise UUIDCollisionError(
+            "explicit workspace UUID does not match the source configuration"
+        )
+    refreshed_source = discover_source(
+        source_root,
+        deadline_ns=source_deadline_ns,
+        max_bytes=_REGISTRATION_CONFIG_MAX_BYTES,
+    )
+    _validate_registration_source(refreshed_source)
+    if refreshed_source != source:
+        raise SourceDiscoveryError("source identity changed during workspace operation")
+    git_common_dir = source.root / cast(
+        str,
+        source.registry_source["git_common_dir"],
+    )
+    registry.state.assert_external_to(git_common_dir)
+    verify_source_checkout(
+        source.root,
+        expected_git_common_dir=git_common_dir,
+        expected_worktree_id=cast(str, source.registry_source["worktree_id"]),
+        expected_git_common_device=source.git_common_device,
+        expected_git_common_inode=source.git_common_inode,
+        expected_root_identity=root_identity,
+        expected_head_commit=source.head_commit,
+        deadline_ns=source_deadline_ns,
+    )
+    return source
 
 
 def _registration_bytes(value: dict[str, object]) -> str:
@@ -480,6 +634,79 @@ def _identity_maintenance_failure(
         "exit_code": failure.exit_code,
         "reason_code": failure.reason_code,
         "schema_version": _IDENTITY_MAINTENANCE_SCHEMA_VERSION,
+        "state": failure.state,
+    }
+    if failure.registry_revision is not None:
+        receipt["registry_revision"] = failure.registry_revision
+    return canonical_json_bytes(receipt).decode("utf-8")
+
+
+def _activation_success(
+    request: _ActivationRequest,
+    result: ActivationResult,
+) -> str:
+    try:
+        document = result.registry.to_dict()
+        registry_revision = document["revision"]
+        matches = [
+            entry
+            for entry in document["workspaces"]
+            if entry["repo_uuid"] == request.repo_uuid
+        ]
+        if len(matches) != 1:
+            raise ValueError("activation result has no singular workspace entry")
+        active_source_revision = matches[0]["active_source_revision"]
+        operation_epoch = result.grant.operation_epoch
+        migration_epoch = result.grant.migration_epoch
+        values = (
+            registry_revision,
+            active_source_revision,
+            operation_epoch,
+            migration_epoch,
+        )
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("activation result revisions are invalid")
+        if (
+            registry_revision != request.expected_registry_revision + 1
+            or active_source_revision != request.expected_active_source_revision + 1
+            or operation_epoch != request.expected_operation_epoch + 1
+            or migration_epoch != request.expected_migration_epoch
+        ):
+            raise ValueError("activation result does not match requested CAS transition")
+        return canonical_json_bytes(
+            {
+                "action": "activate",
+                "active_source_revision": active_source_revision,
+                "cli_contract_version": CLI_CONTRACT_VERSION,
+                "contract": _ACTIVATION_CONTRACT,
+                "exit_code": EXIT_READY,
+                "migration_epoch": migration_epoch,
+                "operation_epoch": operation_epoch,
+                "registry_revision": registry_revision,
+                "repo_uuid": request.repo_uuid,
+                "schema_version": _ACTIVATION_SCHEMA_VERSION,
+                "state": "activated",
+            }
+        ).decode("utf-8")
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        raise CommitUnknown(
+            "activation completed without a valid canonical receipt"
+        ) from exc
+
+
+def _activation_failure(
+    failure: _ActivationFailure,
+) -> str:
+    receipt: dict[str, object] = {
+        "action": "activate",
+        "action_code": failure.action_code,
+        "cli_contract_version": CLI_CONTRACT_VERSION,
+        "contract": _ACTIVATION_CONTRACT,
+        "exit_code": failure.exit_code,
+        "reason_code": failure.reason_code,
+        "schema_version": _ACTIVATION_SCHEMA_VERSION,
         "state": failure.state,
     }
     if failure.registry_revision is not None:
@@ -661,6 +888,136 @@ def _classify_identity_maintenance_error(
     )
 
 
+def _classify_activation_error(error: Exception) -> _ActivationFailure:
+    if isinstance(error, RevisionConflict):
+        if error.actual_registry_revision is not None:
+            return _ActivationFailure(
+                "conflict",
+                EXIT_DEGRADED,
+                "registry_revision_conflict",
+                "refresh_activation_cas",
+                error.actual_registry_revision,
+            )
+        return _ActivationFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "activation_cas_conflict",
+            "refresh_activation_cas",
+        )
+    if isinstance(error, SourceAlreadyActive):
+        return _ActivationFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "source_already_active",
+            "select_inactive_source",
+        )
+    if isinstance(error, UUIDCollisionError):
+        return _ActivationFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "identity_mismatch",
+            "verify_activation_target",
+        )
+    if isinstance(error, SourceAmbiguousError):
+        return _ActivationFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "source_not_bound",
+            "bind_activation_source",
+        )
+    if isinstance(error, LeaseBusy):
+        return _ActivationFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "lease_busy",
+            "retry_activation",
+        )
+    if isinstance(error, LeaseRecoveryRequired):
+        return _ActivationFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "workspace_recovery_required",
+            "run_workspace_doctor",
+        )
+    if isinstance(error, WorkspaceAuthorityError):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            error.reason_code,
+            error.action_code,
+        )
+    if isinstance(error, AuthorizationError):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            "authorization_invalid",
+            "provide_valid_authorization",
+        )
+    if isinstance(error, SourceDiscoveryTimeout):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            error.code,
+            "retry_activation",
+        )
+    if isinstance(error, IdentityError):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            error.code,
+            "fix_workspace_source",
+        )
+    if isinstance(error, StatePathError):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsafe_state_path",
+            "configure_safe_state_root",
+        )
+    if isinstance(error, UnsupportedRuntime):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsupported_runtime",
+            "use_supported_runtime",
+        )
+    if isinstance(error, UnsupportedCompatibility):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsupported_compatibility",
+            "install_supported_candidate",
+        )
+    if isinstance(error, StateCorrupt):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            "state_corrupt",
+            "run_workspace_doctor",
+        )
+    if isinstance(error, CommitUnknown):
+        return _ActivationFailure(
+            "invalid",
+            EXIT_INVALID,
+            "commit_unknown",
+            "run_workspace_doctor",
+        )
+    return _ActivationFailure(
+        "invalid",
+        EXIT_INVALID,
+        "activation_failed",
+        "run_workspace_doctor",
+    )
+
+
+def _activation_timestamp() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _activation_monotonic_ns() -> int:
+    return time.monotonic_ns()
+
+
 def _run_registration(
     request: _RegisterRequest,
     *,
@@ -703,50 +1060,7 @@ def _run_registration(
         else:
             runtime = compose_workspace_runtime(resolved_inputs)
             authorization = _read_operator_authorization(request)
-            source_deadline_ns = (
-                time.monotonic_ns() + _REGISTRATION_SOURCE_TIMEOUT_NS
-            )
-            source_root = Path.cwd()
-            root_identity = source_root_identity(
-                source_root,
-                deadline_ns=source_deadline_ns,
-            )
-            source = discover_source(
-                source_root,
-                deadline_ns=source_deadline_ns,
-                max_bytes=_REGISTRATION_CONFIG_MAX_BYTES,
-            )
-            _validate_registration_source(source)
-            if source.repo_uuid != request.repo_uuid:
-                raise UUIDCollisionError(
-                    "explicit registration UUID does not match the source configuration"
-                )
-            refreshed_source = discover_source(
-                source_root,
-                deadline_ns=source_deadline_ns,
-                max_bytes=_REGISTRATION_CONFIG_MAX_BYTES,
-            )
-            _validate_registration_source(refreshed_source)
-            if refreshed_source != source:
-                raise SourceDiscoveryError(
-                    "source identity changed during registration"
-                )
-            source = refreshed_source
-            git_common_dir = source.root / cast(
-                str,
-                source.registry_source["git_common_dir"],
-            )
-            runtime.registry.state.assert_external_to(git_common_dir)
-            verify_source_checkout(
-                source.root,
-                expected_git_common_dir=git_common_dir,
-                expected_worktree_id=cast(str, source.registry_source["worktree_id"]),
-                expected_git_common_device=source.git_common_device,
-                expected_git_common_inode=source.git_common_inode,
-                expected_root_identity=root_identity,
-                expected_head_commit=source.head_commit,
-                deadline_ns=source_deadline_ns,
-            )
+            source = _discover_revalidated_source(request.repo_uuid, runtime.registry)
             if request.action is IdentityAction.ENROLL:
                 document = runtime.registry.enroll(
                     source,
@@ -804,6 +1118,54 @@ def _run_registration(
             registration_failure = _classify_registration_error(exc)
             receipt = _registration_failure(request, registration_failure)
             exit_code = registration_failure.exit_code
+    stream = output if exit_code == EXIT_READY else errors
+    return _emit_text_payload(stream, receipt, exit_code=exit_code)
+
+
+def _run_activation(
+    request: _ActivationRequest,
+    *,
+    inputs: WorkspaceRuntimeInputs | None,
+    output: TextIO,
+    errors: TextIO,
+) -> int:
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        if resolved_inputs is None:
+            failure = _ActivationFailure(
+                "invalid",
+                EXIT_INVALID,
+                "runtime_authority_missing",
+                "install_candidate_authority",
+            )
+            receipt = _activation_failure(failure)
+            exit_code = failure.exit_code
+        else:
+            runtime = compose_workspace_runtime(resolved_inputs)
+            authorization = _read_activation_authorization(request)
+            source = _discover_revalidated_source(request.repo_uuid, runtime.registry)
+            result = runtime.registry.activate_source(
+                source,
+                authorization,
+                leases=runtime.leases,
+                owner=runtime.leases.current_owner(),
+                expected_registry_revision=request.expected_registry_revision,
+                expected_active_source_revision=request.expected_active_source_revision,
+                expected_operation_epoch=request.expected_operation_epoch,
+                expected_migration_epoch=request.expected_migration_epoch,
+                acquired_at=_activation_timestamp(),
+                monotonic_ns=_activation_monotonic_ns(),
+                ttl_ns=_ACTIVATION_LEASE_TTL_NS,
+                require_source_change=True,
+            )
+            receipt = _activation_success(request, result)
+            exit_code = EXIT_READY
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = _classify_activation_error(exc)
+        receipt = _activation_failure(failure)
+        exit_code = failure.exit_code
     stream = output if exit_code == EXIT_READY else errors
     return _emit_text_payload(stream, receipt, exit_code=exit_code)
 
@@ -1403,6 +1765,20 @@ def run_workspace_command(
     output = sys.stdout if stdout is None else stdout
     errors = sys.stderr if stderr is None else stderr
     command = tuple(arguments)
+    if command and command[0] == "activate":
+        request = _parse_activation_request(command)
+        if request is None:
+            return _emit_text_payload(
+                errors,
+                _USAGE + "\n",
+                exit_code=EXIT_USAGE,
+            )
+        return _run_activation(
+            request,
+            inputs=inputs,
+            output=output,
+            errors=errors,
+        )
     if command and command[0] == "register":
         request = _parse_register_request(command)
         if request is None:
@@ -1492,6 +1868,15 @@ def load_identity_maintenance_schema() -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def load_activation_schema() -> dict[str, Any]:
+    """Load the public active-source activation receipt schema."""
+
+    value = _load_json(_ACTIVATION_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace activation schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
 def load_sync_request_schema() -> dict[str, Any]:
     """Load the public canonical code-only sync request schema."""
 
@@ -1529,6 +1914,7 @@ def load_query_result_schema() -> dict[str, Any]:
 
 
 __all__ = [
+    "load_activation_schema",
     "load_identity_maintenance_schema",
     "load_query_request_schema",
     "load_query_result_schema",
