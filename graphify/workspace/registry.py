@@ -65,6 +65,10 @@ class RevisionConflict(RegistryError):
         self.actual_registry_revision = actual_registry_revision
 
 
+class SourceAlreadyActive(RegistryError):
+    code = "source_already_active"
+
+
 @dataclass(frozen=True)
 class ActivationResult:
     registry: Registry
@@ -747,6 +751,7 @@ class RegistryStore:
         acquired_at: "datetime",
         monotonic_ns: int,
         ttl_ns: int,
+        require_source_change: bool = False,
     ) -> ActivationResult:
         authorization.require(IdentityAction.ACTIVATE)
         self.state.assert_external_to(source.root)
@@ -763,12 +768,21 @@ class RegistryStore:
             )
             if entry is None or not self._known_source(entry, source):
                 raise SourceAmbiguousError("activation target is not explicitly bound")
+            if not (
+                self._shares_enrollment_history(entry, source)
+                or self._matches_enrolled_common_directory(entry, source)
+            ):
+                raise SourceAmbiguousError(
+                    "activation target does not match enrollment identity"
+                )
             actual_active_revision = int(entry["active_source_revision"])
             if actual_active_revision != expected_active_source_revision:
                 raise RevisionConflict(
                     "active_source_revision expected "
                     f"{expected_active_source_revision}, found {actual_active_revision}"
                 )
+            if require_source_change and source.registry_source == entry["active_source"]:
+                raise SourceAlreadyActive("activation target is already selected")
             grant = leases._acquire_under_registry_lock(
                 current,
                 source.repo_uuid,
@@ -825,4 +839,5 @@ __all__ = [
     "RegistryError",
     "RegistryStore",
     "RevisionConflict",
+    "SourceAlreadyActive",
 ]

@@ -28,6 +28,7 @@ from graphify.workspace.persistence import (
     UnsupportedRuntime,
 )
 from graphify.workspace.sync import SyncReceipt, SyncRequest, SyncRequestInvalid
+from tests.workspace_p3_helpers import WORKSPACE_USAGE
 
 
 REPO_UUID = "11111111-1111-4111-8111-111111111111"
@@ -247,14 +248,7 @@ def test_sync_usage_errors_do_not_load_authority_or_read_stdin(
         workspace_cli.run_workspace_command(arguments, stdout=stdout, stderr=stderr) == 64
     )
     assert stdout.getvalue() == ""
-    assert stderr.getvalue() == (
-        "Usage: graphify workspace status --json\n"
-        "       graphify workspace doctor\n"
-        "       graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
-        "--expected-registry-revision N --authorization-stdin\n"
-        "       graphify workspace sync --code-only --request-stdin\n"
-        "       graphify workspace query --request-stdin\n"
-    )
+    assert stderr.getvalue() == WORKSPACE_USAGE
 
 
 def test_sync_missing_authority_is_reported_before_reading_stdin(

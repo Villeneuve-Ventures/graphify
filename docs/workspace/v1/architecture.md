@@ -47,16 +47,28 @@ discovered and exactly revalidated before the expected-revision registry CAS.
 The CLI delegates rebind history/common-directory and rotation binding policy to
 the existing `RegistryStore` methods. It adds only a dedicated versioned receipt
 contract; it does not change the durable registry format, duplicate policy, or
-modify `active_source` or `active_source_revision`. P5B2b0 adds the internal,
-request-bound staged structural-build lifecycle needed to recover crashes and
-close requests made stale by durable authority drift. P5B2b exposes only
-`graphify workspace sync --code-only --request-stdin`. The exact request is
-installed before `BUILD` lease acquisition; request-bound `BUILD`, `PROMOTE`,
-and `POINTER_RECOVERY` successors are constrained by the durable lifecycle and
-the caller attempt digest. The command builds one structural payload beneath
-external generation-owned staging, reconciles an empty semantic set with
-`semantic_required=false`, certifies immutable bytes, promotes through existing
-pointer CAS, and emits a canonical redacted receipt. It adds no provider
+modify `active_source` or `active_source_revision`. The separate unnumbered
+active-source slice adds only the standalone `workspace activate` argv and a
+CLI-v1 redacted receipt. It loads and composes installed authority before
+reading canonical `ACTIVATE` authorization, reuses the same two-pass source and
+Git checkout proof, derives lease identity and time inputs internally, and
+calls `RegistryStore.activate_source()` exactly once with all four explicit CAS
+values. Under the registry lock, activation requires both an explicit locator
+binding and continuity with immutable enrollment identity through a recorded
+history root or the enrolled Git common-directory device/inode. The standalone
+CLI also requires the target to differ from the selected active source and
+rejects reselection before lease, evidence, or revision mutation. The existing
+registry/lease implementation continues to own fencing, recovery and reservation
+barriers, alias changes, and semantic active-source authority. P5B2b0 adds the
+internal request-bound staged structural-build lifecycle needed to recover
+crashes and close requests made stale by durable authority drift. P5B2b exposes
+only `graphify workspace sync --code-only --request-stdin`. The exact request
+is installed before `BUILD` lease acquisition; request-bound `BUILD`,
+`PROMOTE`, and `POINTER_RECOVERY` successors are constrained by the durable
+lifecycle and the caller attempt digest. The command builds one structural
+payload beneath external generation-owned staging, reconciles an empty semantic
+set with `semantic_required=false`, certifies immutable bytes, promotes through
+existing pointer CAS, and emits a canonical redacted receipt. It adds no provider
 selection, network authority, pointer-policy change, or durable-state schema.
 Status schema v2 makes staged recovery barriers visible. P5B2c exposes only
 `graphify workspace query --request-stdin`: it loads and composes the installed
@@ -65,7 +77,7 @@ calls `WorkspaceRuntime.freshness.query()` exactly once. It performs no
 advisory status probe. The existing freshness authority owns query bounds,
 locks, two-sided observation, and release; the CLI releases raw native UTF-8
 output only for `release` / `observed_current` and otherwise withholds output.
-Activation, remaining mutation and broader query commands, repair,
+Remaining mutation and broader query commands, repair,
 watch/service, installation, performance certification, candidate publication,
 and live-cutover work remain deferred; retained production query/service
 authority remains P5C work.
@@ -82,7 +94,7 @@ The P2 global registry has one singular `active_source` per workspace plus
 a monotonic `active_source_revision`, UUID-enrollment evidence, and
 revision/source-bound active-source evidence. The active-source evidence stamps
 the distinct operation epoch and accepted workspace-operation fence token that
-a future activation CAS must revalidate. Paths, worktree coordinates, and
+the activation CAS revalidates. Paths, worktree coordinates, and
 normalized remote URLs remain discovery aliases, not stable identity. A query
 never guesses among aliases.
 Semantic claim capability is derived only from the validated configuration read

@@ -229,6 +229,41 @@ output remains ignored and must not widen the P1 product diff.
 - the existing registration v1 schema and enroll/adopt receipts remain
   unchanged and reject rebind/rotate actions.
 
+## Active-source activation CLI gates
+
+- the only new argv is standalone `workspace activate` with explicit repo UUID,
+  registry revision, active-source revision, operation epoch, migration epoch,
+  and `--authorization-stdin`; `register activate` remains invalid;
+- malformed argv exits 64 before installed-authority loading, standard-input
+  reads, source discovery, or state access, while valid argv loads and composes
+  installed authority before consuming authorization;
+- authorization is bounded to 16 KiB, duplicate-free canonical UTF-8 JSON, has
+  exactly the existing five fields, and names the exact `ACTIVATE` action;
+- the existing two-pass source discovery and exact Git-checkout revalidation
+  require the current Git top level and a matching explicit UUID; under the
+  registry lock, the source must be explicitly bound and must share an immutable
+  enrollment history root or retain the enrolled Git common-directory identity
+  before mutation;
+- lease owner identity, UTC and monotonic timestamps, and the bounded 30-second
+  TTL are derived internally and cannot be supplied through argv or standard
+  input;
+- the CLI calls `RegistryStore.activate_source()` exactly once with all four
+  CAS values; activation adds the durable enrollment-identity gate, rejects a
+  target that is already selected before lease, evidence, or revision mutation,
+  and retains its existing fencing, reservation, recovery, alias, and semantic-
+  authority behavior;
+- success, conflict, and invalid receipts are canonical and redacted under
+  `graphify.workspace.activation` CLI v1; failures omit repo UUID and result
+  epochs, and no outcome exposes authorization, paths, lease owner, or raw
+  errors;
+- partial durable writes recover without a duplicate registry revision,
+  commit-unknown remains an invalid doctor-required outcome, and a direct
+  `InjectedFault` is re-raised; and
+- registration v1, identity-maintenance v1, durable workspace schemas, and the
+  successful sync, query, status, and doctor contracts remain unchanged; the
+  shared usage emitted for malformed register, sync, status, and doctor argv now
+  includes the standalone activation form.
+
 ## P5B2b code-only sync and staged-recovery gates
 
 - the canonical internal staged-build record is limited to 64 KiB, uses the

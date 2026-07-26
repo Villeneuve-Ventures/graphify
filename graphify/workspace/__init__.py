@@ -13,8 +13,11 @@ adds internal request-bound staged-build and stale-abandonment recovery. P5B2b
 adds provider-neutral ``workspace sync --code-only`` plus truthful staged-build
 visibility in status schema v2. P5B2c adds only the one-shot certified
 ``workspace query --request-stdin`` transport over the existing two-sided
-freshness authority. All mutation commands, retained query/service operation,
-installation, and candidate publication remain deferred.
+freshness authority. The unnumbered P5B2 identity-maintenance slice adds only
+``workspace register rebind`` and ``workspace register rotate``; the unnumbered
+active-source slice adds only standalone ``workspace activate``. All remaining
+mutation commands, retained query/service operation, installation, and candidate
+publication remain deferred.
 """
 
 from graphify.workspace.adapters import (
@@ -136,6 +139,7 @@ from graphify.workspace.registry import (
     RegistryError,
     RegistryStore,
     RevisionConflict,
+    SourceAlreadyActive,
 )
 from graphify.workspace.pointers import (
     GenerationRead,
@@ -308,6 +312,7 @@ __all__ = [
     "RegistryError",
     "RegistryStore",
     "RevisionConflict",
+    "SourceAlreadyActive",
     "RuntimeCapabilities",
     "SemanticCapabilityDecision",
     "SemanticCapabilityUnavailable",
