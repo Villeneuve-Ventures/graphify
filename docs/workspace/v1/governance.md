@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-07-26T01:40:31Z`
+Ledger refresh: `2026-07-26T17:55:23Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -44,11 +44,10 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical checkout | Repository root; `workspace/v1` at `8b20216016a08da6620bd9fb9ad0a820c660a6ef`, tree `3536da7475c3034b6c3c2666e9ff05c0a9c9dc30`; clean and synchronized with `origin/workspace/v1` at upstream divergence `0/0` |
-| Worktrees | The canonical checkout was the only worktree at the fail-closed pre-edit preflight. One isolated governance-only proposal worktree now exists on local branch `codex/workspace-p5b2-registration-authority-closeout`; no delivery worktree or competing governance lane exists. |
-| GitHub | PR [#26](https://github.com/Villeneuve-Ventures/graphify/pull/26) and PR [#27](https://github.com/Villeneuve-Ventures/graphify/pull/27) are merged; the fork repository has no open pull requests. |
-| P5B2 identity-maintenance delivery | PR #26 exact delivery head `2e6da25323b78efd8bdc3ef78bb5180cf3c43053`; merge `50859ecb176c10a21f5caeb4112ccd7883b89d7d`; delivery/merge tree `1172478d370dba752b4ed277acd1caac6cbd839d`. The merge has sole parent `fde03397f16305a1cef8a5bf8d784dcd68f90b4e`, not the delivery head, so no delivery-head ancestry is claimed. The later current canonical tree is separately `3536da7475c3034b6c3c2666e9ff05c0a9c9dc30`. Exact-head CI `30172919995` passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded; the thread-aware closeout preflight found two resolved review threads and `0` unresolved. |
-| P5B2a ADOPT pre-write correction | PR #27 exact delivery head `d9cc4a72f1df3a8b938595eb3dcbd7daef4d0f82`; merge/current `8b20216016a08da6620bd9fb9ad0a820c660a6ef`; delivery/merge/current tree `3536da7475c3034b6c3c2666e9ff05c0a9c9dc30`. The delivery head is a direct parent of the merge. Exact-head CI `30181132421` passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded; the thread-aware closeout preflight found `0` review threads and therefore `0` unresolved. |
+| Canonical checkout | Repository root; `workspace/v1` at `0f46a86c03281d6ab3b52243f2881d2d18f1fad6`, tree `2afc7a1f3610ac712db3cdbe5fd9adb8c9150141`; clean and synchronized with `origin/workspace/v1` at upstream divergence `0/0` |
+| Worktrees | The canonical checkout was the only worktree at the fail-closed pre-edit preflight. One isolated governance-only proposal worktree now exists on local branch `codex/workspace-p5b2-activation-governance-closeout`; no delivery worktree or competing governance lane exists. |
+| GitHub | PR [#29](https://github.com/Villeneuve-Ventures/graphify/pull/29) is merged; the fork repository has no open pull requests. |
+| P5B2 active-source activation delivery | PR #29 exact delivery head `9f3b3b8af1e1d712d25febf81665d75feff96637`; merge/current `0f46a86c03281d6ab3b52243f2881d2d18f1fad6`; delivery/merge/current tree `2afc7a1f3610ac712db3cdbe5fd9adb8c9150141`. The delivery head is a direct parent of the merge. Exact-head CI `30212289087` passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded. |
 | Support baseline | Observed host CPython `3.14.3`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
@@ -69,13 +68,15 @@ orientation only and cannot justify execution.
 | P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children are complete; remaining P5B2 and the broad P5C gate are not. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, P5B2c, and the unnumbered identity-maintenance surface are complete; all other commands remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, P5B2c, identity maintenance, and active-source activation are complete; retained-source identity-continuity hardening is deferred and all other commands remain waiting. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
+| P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
+| P5B2 retained-source identity continuity | P5B2 identity maintenance, P5B2 active-source activation | DEFERRED | `rotate_enrollment_evidence()` and `resolve_active_source()` do not independently re-prove immutable enrollment continuity. One focused registry-hardening follow-up owns both nonclaims; it does not block the accepted activation boundary. |
 | P5B2b0 | P5B2a | COMPLETE | Request-bound staged-build recovery prerequisite closed. |
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
 | P5B2c | P5C1 | COMPLETE | Accepted receipt: [`P5B2c`](receipts/p5b2c.md). One-shot certified `workspace query --request-stdin` transport only. |
-| Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, migrate, rollback, GC, repair, activation, mutation, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
+| Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, migrate, rollback, GC, repair, every mutation beyond accepted activation, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
 | Remaining P5C concerns | P5C | WAITING | Watch/service, performance, shared-lock/root-traversal optimization, publication, retained query/service authority, and all other P5C work remain unchanged. |
@@ -146,6 +147,29 @@ Activation, additional sync, migrate, rollback, GC, repair, broader mutation
 or query authority, production installation, watch/service, performance or
 resource qualification, candidate publication, H3, P6+, and cleanup remain
 excluded. This acceptance promotes no later child to `READY`.
+
+## P5B2 active-source activation boundary freeze
+
+The unnumbered P5B2 active-source activation surface is limited to standalone
+`graphify workspace activate` under the accepted
+[`P5B2 active-source activation receipt`](receipts/p5b2-active-source-activation.md).
+It loads installed authority before one bounded canonical `ACTIVATE`
+authorization, requires the explicit repo UUID and four caller-supplied CAS
+values, derives lease identity and timing internally, revalidates the exact Git
+top-level source twice, and delegates once to the existing fenced registry
+policy. The target must be explicitly bound, must still share an immutable
+enrollment history root or retain the enrolled Git common-directory identity,
+and must differ from the currently selected source. Success emits one redacted
+CLI-v1 receipt; denied, stale, and invalid paths preserve their frozen result
+and redaction behavior, while injected faults remain internal and are re-raised.
+
+This acceptance does not claim that identity-evidence rotation or later
+active-source resolution independently re-proves immutable enrollment
+continuity. Those two retained-source nonclaims remain one deferred P5B2
+registry-hardening follow-up. Additional sync modes, migrate, rollback, GC,
+repair, broader mutation or query authority, production installation,
+watch/service, performance or resource qualification, candidate publication,
+H3, P6+, and cleanup remain excluded. No later child is promoted to `READY`.
 
 ## P5B2a ADOPT correction boundary freeze
 
