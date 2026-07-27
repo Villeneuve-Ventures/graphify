@@ -14,6 +14,7 @@ from the verified canonical branch.
 - [P5B2a ADOPT pre-write correction](p5b2a-adopt-prewrite-correction.md)
 - [P5B2 identity maintenance](p5b2-identity-maintenance.md)
 - [P5B2 active-source activation](p5b2-active-source-activation.md)
+- [P5B2 exact-last-good rollback](p5b2-exact-last-good-rollback.md)
 - [P5B2b provider-neutral structural sync](p5b2b.md)
 - [P5B2c one-shot certified workspace query](p5b2c.md)
 - [P5C1 candidate runtime authority and isolated installation proof](p5c1.md)
