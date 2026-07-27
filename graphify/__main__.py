@@ -533,6 +533,7 @@ def _run_cli() -> None:
         ("workspace", "sync"),
         ("workspace", "query"),
         ("workspace", "activate"),
+        ("workspace", "rollback"),
     }
     if not bounded_workspace_command and not any(arg in _silent_cmds for arg in sys.argv):
         # Resolve each platform's real user-scope destination so per-platform
@@ -556,6 +557,8 @@ def _run_cli() -> None:
         print("                            query one observed-current certified generation")
         print("  workspace activate --repo-uuid UUID ...")
         print("                            activate one identity-bound workspace source")
+        print("  workspace rollback --request-stdin")
+        print("                            roll back to the pointer's exact last-good generation")
         print("  workspace status --json  emit versioned read-only workspace status JSON")
         print("  workspace doctor         run read-only workspace diagnostics")
         print("  install [--platform P]  copy skill to platform config dir (claude|windows|codebuddy|codex|opencode|aider|amp|agents|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro|pi|devin)")
@@ -751,6 +754,7 @@ def _run_cli() -> None:
         ("workspace", "sync"),
         ("workspace", "query"),
         ("workspace", "activate"),
+        ("workspace", "rollback"),
     }
     if (
         cmd not in _FREE_TEXT_CMDS

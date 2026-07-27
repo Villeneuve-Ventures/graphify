@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/rollback-receipt.schema.json",
+  "title": "Graphify workspace exact last-good rollback receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "cli_contract_version",
+    "state",
+    "exit_code"
+  ],
+  "properties": {
+    "contract": {"const": "graphify.workspace.rollback"},
+    "schema_version": {"const": 1},
+    "cli_contract_version": {"const": 1},
+    "state": {"enum": ["rolled_back", "conflict", "invalid"]},
+    "exit_code": {"enum": [0, 10, 20]},
+    "repo_uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "request_sha256": {"$ref": "#/$defs/digest"},
+    "target_generation_id": {
+      "type": "string",
+      "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+    },
+    "target_receipt_sha256": {"$ref": "#/$defs/digest"},
+    "pointer_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "reason_code": {
+      "enum": [
+        "commit_unknown",
+        "lease_busy",
+        "rollback_authority_conflict",
+        "rollback_failed",
+        "rollback_request_invalid",
+        "rollback_request_unsupported",
+        "runtime_authority_invalid",
+        "runtime_authority_missing",
+        "runtime_authority_unsupported",
+        "state_corrupt",
+        "unsafe_state_path",
+        "unsupported_compatibility",
+        "unsupported_runtime",
+        "workspace_recovery_required"
+      ]
+    },
+    "action_code": {
+      "enum": [
+        "configure_safe_state_root",
+        "install_candidate_authority",
+        "install_supported_candidate",
+        "provide_valid_rollback_request",
+        "refresh_rollback_request",
+        "retry_workspace_rollback",
+        "run_workspace_doctor",
+        "run_workspace_repair",
+        "use_supported_rollback_contract",
+        "use_supported_runtime"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "rolled_back"}}, "required": ["state"]},
+      "then": {
+        "properties": {"exit_code": {"const": 0}},
+        "required": [
+          "repo_uuid",
+          "request_sha256",
+          "target_generation_id",
+          "target_receipt_sha256",
+          "pointer_revision"
+        ],
+        "not": {
+          "anyOf": [
+            {"required": ["reason_code"]},
+            {"required": ["action_code"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "conflict"}}, "required": ["state"]},
+      "then": {
+        "properties": {"exit_code": {"const": 10}},
+        "required": ["reason_code", "action_code"],
+        "$ref": "#/$defs/redacted_failure"
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "invalid"}}, "required": ["state"]},
+      "then": {
+        "properties": {"exit_code": {"const": 20}},
+        "required": ["reason_code", "action_code"],
+        "$ref": "#/$defs/redacted_failure"
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "redacted_failure": {
+      "not": {
+        "anyOf": [
+          {"required": ["repo_uuid"]},
+          {"required": ["request_sha256"]},
+          {"required": ["target_generation_id"]},
+          {"required": ["target_receipt_sha256"]},
+          {"required": ["pointer_revision"]}
+        ]
+      }
+    }
+  }
+}

@@ -16,6 +16,8 @@ visibility in status schema v2. P5B2c adds only the one-shot certified
 freshness authority. The unnumbered P5B2 identity-maintenance slice adds only
 ``workspace register rebind`` and ``workspace register rotate``; the unnumbered
 active-source slice adds only standalone ``workspace activate``. All remaining
+P5B2 rollback work adds only the one-step ``workspace rollback --request-stdin``
+move to the visible pointer's exact ``last_good`` reference. All other remaining
 mutation commands, retained query/service operation, installation, and candidate
 publication remain deferred.
 """
@@ -122,6 +124,7 @@ from graphify.workspace.journal import (
     JournalConflict,
     JournalCorrupt,
     JournalError,
+    JournalRecoveryRequired,
     JournalSnapshot,
     JournalStore,
 )
@@ -212,6 +215,17 @@ from graphify.workspace.sync import (
     WorkspaceSyncError,
     synchronize_code_only,
 )
+from graphify.workspace.rollback import (
+    ROLLBACK_RECEIPT_CONTRACT,
+    ROLLBACK_REQUEST_CONTRACT,
+    ROLLBACK_REQUEST_MAX_BYTES,
+    ROLLBACK_SCHEMA_VERSION,
+    RollbackReceipt,
+    RollbackRequest,
+    RollbackRequestInvalid,
+    RollbackRequestUnsupported,
+    rollback as rollback_workspace,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -229,6 +243,10 @@ __all__ = [
     "RUNTIME_AUTHORITY_CONTRACT",
     "RUNTIME_AUTHORITY_FILENAME",
     "RUNTIME_AUTHORITY_FORMAT_VERSION",
+    "ROLLBACK_RECEIPT_CONTRACT",
+    "ROLLBACK_REQUEST_CONTRACT",
+    "ROLLBACK_REQUEST_MAX_BYTES",
+    "ROLLBACK_SCHEMA_VERSION",
     "STATE_SCHEMA_VERSION",
     "STATUS_CONTRACT",
     "STATUS_SCHEMA_VERSION",
@@ -279,6 +297,7 @@ __all__ = [
     "JournalCorrupt",
     "JournalError",
     "JournalFrameTruncated",
+    "JournalRecoveryRequired",
     "JournalSnapshot",
     "JournalStore",
     "LeaseBusy",
@@ -312,6 +331,10 @@ __all__ = [
     "RegistryError",
     "RegistryStore",
     "RevisionConflict",
+    "RollbackReceipt",
+    "RollbackRequest",
+    "RollbackRequestInvalid",
+    "RollbackRequestUnsupported",
     "SourceAlreadyActive",
     "RuntimeCapabilities",
     "SemanticCapabilityDecision",
@@ -372,6 +395,7 @@ __all__ = [
     "load_schema",
     "load_status_schema",
     "parse_contract",
+    "rollback_workspace",
     "select_adapter",
     "synchronize_code_only",
     "validate_installer_compensation",

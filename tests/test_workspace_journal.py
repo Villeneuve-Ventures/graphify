@@ -9,7 +9,13 @@ from typing import cast
 
 import pytest
 
-from graphify.workspace.contracts import JournalEvent, encode_journal_frame
+import graphify.workspace.journal as journal_module
+
+from graphify.workspace.contracts import (
+    JournalEvent,
+    JournalFrameTruncated,
+    encode_journal_frame,
+)
 from graphify.workspace.journal import JournalConflict, JournalCorrupt, JournalStore
 from graphify.workspace.leases import LeaseGrant
 from graphify.workspace.persistence import (
@@ -375,6 +381,85 @@ def test_journal_discards_only_one_uncommitted_torn_tail(tmp_path: Path) -> None
 
     assert len(snapshot.events) == 1
     assert not tail.exists()
+
+
+def test_journal_recovery_does_not_discard_torn_tail_after_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    _append_allocated(store, grant)
+    tail = _segment(harness.state_root, 2)
+    tail.write_bytes(b"GWF1")
+    tail.chmod(0o600)
+    expired = False
+    original_decode_segment = store._decode_segment
+
+    def expire_on_torn_tail(
+        relative: Path,
+        *,
+        existing_only: bool = False,
+        deadline_ns: int | None = None,
+    ) -> tuple[bytes, JournalEvent]:
+        nonlocal expired
+        try:
+            return original_decode_segment(
+                relative,
+                existing_only=existing_only,
+                deadline_ns=deadline_ns,
+            )
+        except JournalFrameTruncated:
+            expired = True
+            raise
+
+    def enforce_test_deadline(deadline_ns: int | None, detail: str) -> None:
+        if deadline_ns is not None and expired:
+            raise LockTimeout(detail)
+
+    monkeypatch.setattr(store, "_decode_segment", expire_on_torn_tail)
+    monkeypatch.setattr(
+        journal_module,
+        "require_before_deadline",
+        enforce_test_deadline,
+    )
+
+    with harness.leases.current_operation(grant, monotonic_ns=10_002) as operation:
+        with pytest.raises(LockTimeout):
+            store.recover_locked(operation, deadline_ns=10**30)
+
+    assert tail.exists()
+
+
+def test_journal_recovery_head_commit_honors_deadline(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD", tick=1)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    _append_allocated(store, grant)
+    snapshot = store.read_stable(REPO_UUID)
+    assert snapshot.head is not None
+    current, _previous, _pending = store._head_paths(REPO_UUID)
+    current_path = store.state.path(current)
+    current_before = current_path.read_bytes()
+
+    with pytest.raises(LockTimeout):
+        store._commit_head(
+            REPO_UUID,
+            snapshot.head,
+            label="journal_head_recovery",
+            deadline_ns=0,
+        )
+
+    assert current_path.read_bytes() == current_before
 
 
 def test_journal_adopts_one_complete_hash_linked_uncommitted_segment(tmp_path: Path) -> None:

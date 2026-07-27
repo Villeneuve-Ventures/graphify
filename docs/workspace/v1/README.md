@@ -1,8 +1,8 @@
 # Graphify workspace contract v1
 
-Implemented contract scope through the unnumbered P5B2 active-source activation
-CLI, the unnumbered P5B2 identity-maintenance CLI, P5B2c one-shot certified
-workspace query,
+Implemented contract scope through the one-step P5B2 exact-last-good rollback
+CLI, the unnumbered P5B2 active-source activation CLI, the unnumbered P5B2
+identity-maintenance CLI, P5B2c one-shot certified workspace query,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -75,9 +75,30 @@ selected as the active source is rejected under the registry lock before lease,
 evidence, or revision mutation. The canonical redacted receipt is defined by
 `graphify/workspace/schemas/cli/v1/activation.schema.json` and never exposes
 authorization, source paths, lease-owner identity, or raw errors. The existing
-`register activate` remains invalid. Remaining mutation/query commands, repair,
-watch/service, performance certification, and candidate publication remain
-later P5 work.
+`register activate` remains invalid.
+The exact-last-good rollback slice exposes only
+`graphify workspace rollback --request-stdin`. It loads and composes installed
+runtime authority before reading one canonical, duplicate-free request of at
+most 16 KiB. The request binds the repo UUID, registry, active-source,
+operation, migration, and pointer revisions, the current receipt, the exact
+target generation and receipt recorded as the visible pointer's `last_good`,
+the target source epoch, and canonical `ROLLBACK` authorization. The command
+preflights and then revalidates that exact pointer target around acquisition of
+one trusted 30-second `ROLLBACK` lease, derives the accepted fence and operation
+authority from the grant, bounds post-acquisition target verification by the
+lease liveness deadline, samples monotonic time again at the mutation boundary,
+and delegates once to `PointerStore.rollback()`. That deadline is rechecked
+after mutation locks are held and immediately before beginning the durable
+pointer/journal commit.
+Success writes the canonical `graphify.workspace.rollback` v1 receipt; conflict
+and invalid outcomes write only redacted receipts. Commit uncertainty preserves
+the existing pointer-recovery barrier, release cannot mask the primary error,
+and `InjectedFault` is re-raised when it is the primary error or the only
+release error. The request and receipt schemas are
+`graphify/workspace/schemas/cli/v1/rollback-request.schema.json` and
+`rollback-receipt.schema.json`.
+Migrate, GC, repair, broader mutation/query commands, watch/service,
+performance certification, and candidate publication remain later P5 work.
 P5B2b0 adds the internal request-bound staged-build and stale-abandonment
 recovery contract described in [State contracts](state-contract.md). P5B2b
 exposes only `graphify workspace sync --code-only --request-stdin`, using a
@@ -211,6 +232,43 @@ dedicated conflict result. No receipt includes authorization, paths, owner
 identity, or a raw exception. `InjectedFault` remains an internal test signal
 and is re-raised.
 
+## Exact last-good rollback CLI
+
+The exact rollback form is:
+
+```text
+graphify workspace rollback --request-stdin
+```
+
+Malformed argv exits 64 before authority loading or standard-input reads. Valid
+argv loads and composes installed authority before consuming one canonical
+`graphify.workspace.rollback_request` v1 object. The request is bounded to
+16 KiB, uses canonical UTF-8 JSON with no duplicate or extra fields, includes
+all pre-acquisition lease and pointer CAS values, and carries the existing five
+operator-authorization fields with `action` fixed to `ROLLBACK`. It can name
+only the visible pointer's exact non-null `last_good` generation and receipt;
+arbitrary historical selection and current-generation reselection are not
+accepted.
+
+The runtime derives lease owner identity, UTC and monotonic timestamps, and the
+30-second TTL. It acquires one `ROLLBACK` lease, bounds post-acquisition target
+verification by the grant's liveness deadline, and samples monotonic time again
+immediately before mutation. The same deadline is rechecked under the mutation
+locks and immediately before beginning the durable pointer/journal commit.
+`PointerCAS` takes accepted active-source, operation, migration, and fence
+values from the grant; the frozen runtime
+`STATE_SCHEMA_VERSION` supplies the schema value; and the request supplies
+pointer and target evidence. The orchestration calls `PointerStore.rollback()`
+once. The existing pointer implementation owns
+generation and journal verification, `ROLLED_BACK` persistence, crash recovery,
+and commit-unknown barriers. Success exits 0 with one canonical receipt binding
+the request SHA-256, repo UUID, target generation and receipt, and resulting
+pointer revision. Stale authority or contention exits 10; invalid, corrupt,
+unsupported, or commit-uncertain state exits 20. Failure receipts omit all
+request identity, authorization, paths, owner data, environment values, and raw
+errors. Governance completion and a receipt remain separately owned; this
+implementation text does not change the live ledger.
+
 ## Governance and deferred work ownership
 
 The publication gate in [Workspace governance](governance.md) requires one
@@ -229,8 +287,9 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
 | Active-source activation | Unnumbered P5B2 activation (`COMPLETE`) | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, an immutable-enrollment continuity check, and one redacted CLI-v1 receipt. |
+| Exact last-good rollback | Remaining P5B2 delivery; governance acceptance pending | `workspace rollback --request-stdin` exposes one fenced move to the visible pointer's exact `last_good` reference with an explicit canonical request and redacted receipt. It does not authorize arbitrary historical selection, governance completion, or any later command. |
 | Retained-source identity continuity | P5B2 registry hardening (`DEFERRED`) | `rotate_enrollment_evidence()` accepts an explicitly bound locator without independently re-proving immutable enrollment continuity, while `resolve_active_source()` checks rediscovery against the recorded locator rather than immutable enrollment evidence. Both nonclaims are deferred to one focused follow-up and do not reopen or block accepted activation. |
-| Remaining workspace commands | Remaining P5B2/P5C | Migrate, rollback, GC, repair, every other mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
+| Remaining workspace commands | Remaining P5B2/P5C | Migrate, GC, repair, every other mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |

@@ -313,12 +313,18 @@ class LeaseStore:
         return Path("workspaces") / WorkspaceLeaseState.canonical_repo_uuid(repo_uuid)
 
     @contextmanager
-    def workspace_lock(self, repo_uuid: str) -> Iterator[None]:
+    def workspace_lock(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[None]:
         directory = self._directory(repo_uuid)
         with self.state.lock(
             directory / "workspace.lock",
             rank=WORKSPACE_LOCK_RANK,
             name="workspace",
+            deadline_ns=deadline_ns,
         ):
             yield
 
@@ -391,15 +397,21 @@ class LeaseStore:
         current, previous, pending = self._staged_build_paths(repo_uuid)
         try:
             if recover:
+                kwargs = {
+                    "label": f"staged-build:{repo_uuid}",
+                    "current": current,
+                    "previous": previous,
+                    "pending": pending,
+                    "decoder": StagedBuildState.from_json,
+                    "revision": lambda value: value.revision,
+                    "allow_missing": True,
+                    "max_bytes": _MAX_STAGED_BUILD_STATE_BYTES,
+                }
+                if deadline_ns is None:
+                    return self.state.recover_record(**kwargs)
                 return self.state.recover_record(
-                    label=f"staged-build:{repo_uuid}",
-                    current=current,
-                    previous=previous,
-                    pending=pending,
-                    decoder=StagedBuildState.from_json,
-                    revision=lambda value: value.revision,
-                    allow_missing=True,
-                    max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
+                    **kwargs,
+                    deadline_ns=deadline_ns,
                 )
             return self.state.read_stable_record(
                 label=f"staged-build:{repo_uuid}",
@@ -469,9 +481,23 @@ class LeaseStore:
             with self.workspace_lock(repo_uuid):
                 yield document, entry, self._load_state_locked(document, repo_uuid)
 
-    def _durable_record_exists(self, relative: Path) -> bool:
+    def _durable_record_exists(
+        self,
+        relative: Path,
+        *,
+        deadline_ns: int | None = None,
+    ) -> bool:
         try:
-            return self.state.private_file_exists(relative)
+            require_before_deadline(
+                deadline_ns,
+                "lease recovery barrier check exceeded its deadline",
+            )
+            exists = self.state.private_file_exists(relative)
+            require_before_deadline(
+                deadline_ns,
+                "lease recovery barrier check exceeded its deadline",
+            )
+            return exists
         except StatePathError as exc:
             raise LeaseRecoveryRequired(f"recovery barrier is unsafe: {relative}") from exc
 
@@ -482,18 +508,29 @@ class LeaseStore:
         *,
         recover: bool = True,
         allow_staged_abandonment: bool = False,
+        deadline_ns: int | None = None,
     ) -> None:
         workspace = self._directory(repo_uuid)
         gc_intent = workspace / "gc" / "intent.json"
-        if self._durable_record_exists(gc_intent) and operation not in {
+        if self._durable_record_exists(
+            gc_intent,
+            deadline_ns=deadline_ns,
+        ) and operation not in {
             "GC",
             "POINTER_RECOVERY",
         }:
             raise LeaseRecoveryRequired("unresolved GC intent requires fenced reconciliation")
         pointer_intent = workspace / "pointers.pending.json"
-        if self._durable_record_exists(pointer_intent) and operation != "POINTER_RECOVERY":
+        if self._durable_record_exists(
+            pointer_intent,
+            deadline_ns=deadline_ns,
+        ) and operation != "POINTER_RECOVERY":
             raise LeaseRecoveryRequired("unresolved pointer intent requires fenced recovery")
-        staged_build = self._load_staged_build_locked(repo_uuid, recover=recover)
+        staged_build = self._load_staged_build_locked(
+            repo_uuid,
+            recover=recover,
+            deadline_ns=deadline_ns,
+        )
         if (
             staged_build is not None
             and staged_build.abandonment_intent is not None
@@ -522,15 +559,19 @@ class LeaseStore:
                 if recover
                 else self.state.read_stable_record
             )
-            capacity = loader(
-                label="capacity",
-                current=Path("capacity.json"),
-                previous=Path("capacity.previous.json"),
-                pending=Path("capacity.pending.json"),
-                decoder=CapacityReservationState.from_json,
-                revision=lambda value: value.revision,
-                allow_missing=True,
-            )
+            kwargs = {
+                "label": "capacity",
+                "current": Path("capacity.json"),
+                "previous": Path("capacity.previous.json"),
+                "pending": Path("capacity.pending.json"),
+                "decoder": CapacityReservationState.from_json,
+                "revision": lambda value: value.revision,
+                "allow_missing": True,
+            }
+            if deadline_ns is None:
+                capacity = loader(**kwargs)
+            else:
+                capacity = loader(**kwargs, deadline_ns=deadline_ns)
         except StateCorrupt as exc:
             raise LeaseRecoveryRequired(
                 f"capacity reservation state requires recovery: {exc}"
@@ -562,7 +603,13 @@ class LeaseStore:
             "allow_missing": False,
         }
         if recover:
-            recovered = self.state.recover_record(**kwargs)
+            if deadline_ns is None:
+                recovered = self.state.recover_record(**kwargs)
+            else:
+                recovered = self.state.recover_record(
+                    **kwargs,
+                    deadline_ns=deadline_ns,
+                )
         else:
             recovered = self.state.read_stable_record(
                 **kwargs,
@@ -585,7 +632,12 @@ class LeaseStore:
             staged_attempt_sha256=recovered.staged_attempt_sha256,
         )
 
-    def _commit_state_locked(self, state: WorkspaceLeaseState) -> WorkspaceLeaseState:
+    def _commit_state_locked(
+        self,
+        state: WorkspaceLeaseState,
+        *,
+        deadline_ns: int | None = None,
+    ) -> WorkspaceLeaseState:
         current, previous, pending = self._paths(state.repo_uuid)
         return self.state.commit_record(
             label="workspace",
@@ -594,6 +646,7 @@ class LeaseStore:
             pending=pending,
             payload=state.canonical,
             decoder=WorkspaceLeaseState.from_json,
+            deadline_ns=deadline_ns,
         )
 
     @staticmethod
@@ -643,8 +696,14 @@ class LeaseStore:
         acquired_at: datetime,
         monotonic_ns: int,
         ttl_ns: int,
+        deadline_ns: int | None = None,
     ) -> LeaseGrant:
-        with self.registry.recovered_snapshot() as document:
+        snapshot = (
+            self.registry.recovered_snapshot()
+            if deadline_ns is None
+            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+        )
+        with snapshot as document:
             return self._acquire_under_registry_lock(
                 document,
                 repo_uuid,
@@ -658,6 +717,7 @@ class LeaseStore:
                 monotonic_ns=monotonic_ns,
                 ttl_ns=ttl_ns,
                 verify_active=True,
+                deadline_ns=deadline_ns,
             )
 
     def acquire_staged_request(
@@ -768,7 +828,12 @@ class LeaseStore:
         staged_request: tuple[str, StructuralBuildRequest] | None = None,
         staged_attempt_sha256: str | None = None,
         allow_stale_staged_authority: bool = False,
+        deadline_ns: int | None = None,
     ) -> LeaseGrant:
+        require_before_deadline(
+            deadline_ns,
+            "lease acquisition exceeded its deadline",
+        )
         owner = self._require_current_owner(owner)
         if staged_request is None:
             if staged_attempt_sha256 is not None:
@@ -787,9 +852,29 @@ class LeaseStore:
             else:
                 source_root = self._verify_selected_source(repo_uuid, entry)
                 self.state.assert_external_to(source_root)
-        with self.workspace_lock(repo_uuid):
-            state = self._load_state_locked(document, repo_uuid)
-            staged_build = self._load_staged_build_locked(repo_uuid)
+        require_before_deadline(
+            deadline_ns,
+            "lease acquisition exceeded its deadline",
+        )
+        lock = (
+            self.workspace_lock(repo_uuid)
+            if deadline_ns is None
+            else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+        )
+        with lock:
+            if deadline_ns is None:
+                state = self._load_state_locked(document, repo_uuid)
+                staged_build = self._load_staged_build_locked(repo_uuid)
+            else:
+                state = self._load_state_locked(
+                    document,
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+                staged_build = self._load_staged_build_locked(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
             if staged_request is None:
                 self._check_expected(
                     document,
@@ -824,6 +909,7 @@ class LeaseStore:
                 repo_uuid,
                 operation,
                 allow_staged_abandonment=allow_stale_staged_authority,
+                deadline_ns=deadline_ns,
             )
             domain = _lease_domain(operation)
             existing = state.leases.get(domain)
@@ -877,17 +963,19 @@ class LeaseStore:
             committed_staged_attempt = state.staged_attempt_sha256
             if domain == "workspace":
                 committed_staged_attempt = staged_attempt_sha256
+            next_state = WorkspaceLeaseState(
+                repo_uuid=repo_uuid,
+                revision=state.revision + 1,
+                fence_high_watermark=fence_token,
+                operation_epoch=operation_epoch,
+                migration_epoch=migration_epoch,
+                leases=leases,
+                lease_epochs=lease_epochs,
+                staged_attempt_sha256=committed_staged_attempt,
+            )
             committed = self._commit_state_locked(
-                WorkspaceLeaseState(
-                    repo_uuid=repo_uuid,
-                    revision=state.revision + 1,
-                    fence_high_watermark=fence_token,
-                    operation_epoch=operation_epoch,
-                    migration_epoch=migration_epoch,
-                    leases=leases,
-                    lease_epochs=lease_epochs,
-                    staged_attempt_sha256=committed_staged_attempt,
-                )
+                next_state,
+                deadline_ns=deadline_ns,
             )
             return LeaseGrant(
                 lease=committed.leases[domain],
@@ -1061,6 +1149,7 @@ class LeaseStore:
         monotonic_ns: int,
         allowed_operations: frozenset[str] | None = None,
         registry_required: bool = False,
+        deadline_ns: int | None = None,
     ) -> Iterator[LeaseOperation]:
         """Keep a grant current for one serialized P3 mutation.
 
@@ -1074,15 +1163,31 @@ class LeaseStore:
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
 
         def checked_operation(document: Registry) -> LeaseOperation:
+            require_before_deadline(
+                deadline_ns,
+                "lease operation exceeded its liveness deadline",
+            )
             self._check_active(document, grant)
-            state = self._load_state_locked(document, repo_uuid)
+            state = self._load_state_locked(
+                document,
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
             _domain, current = self._matching_lease(state, grant)
             operation = str(current.to_dict()["operation"])
             if allowed_operations is not None and operation not in allowed_operations:
                 raise StaleLease(f"operation {operation} is not authorized for this mutation")
             if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
                 raise LeaseExpired("liveness deadline has passed")
-            self._assert_recovery_barriers_locked(repo_uuid, operation)
+            self._assert_recovery_barriers_locked(
+                repo_uuid,
+                operation,
+                deadline_ns=deadline_ns,
+            )
+            require_before_deadline(
+                deadline_ns,
+                "lease operation exceeded its liveness deadline",
+            )
             return LeaseOperation(
                 registry=document,
                 state=state,
@@ -1090,16 +1195,26 @@ class LeaseStore:
                 grant=grant,
             )
 
+        def recovered_snapshot():
+            if deadline_ns is None:
+                return self.registry.recovered_snapshot()
+            return self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+
+        def operation_lock():
+            if deadline_ns is None:
+                return self.workspace_lock(repo_uuid)
+            return self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+
         if registry_required:
-            with self.registry.recovered_snapshot() as document:
-                with self.workspace_lock(repo_uuid):
+            with recovered_snapshot() as document:
+                with operation_lock():
                     yield checked_operation(document)
             return
 
-        with self.registry.recovered_snapshot() as document:
+        with recovered_snapshot() as document:
             self._check_active(document, grant)
             snapshot = document
-        with self.workspace_lock(repo_uuid):
+        with operation_lock():
             yield checked_operation(snapshot)
 
     @contextmanager

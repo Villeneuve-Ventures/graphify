@@ -81,6 +81,10 @@ class JournalConflict(JournalError):
     code = "journal_conflict"
 
 
+class JournalRecoveryRequired(JournalConflict):
+    """A stable read found one recoverable uncommitted journal suffix."""
+
+
 @dataclass(frozen=True)
 class JournalSnapshot:
     head: JournalHeadState | None
@@ -307,7 +311,14 @@ class JournalStore:
             }
         )
 
-    def _commit_head(self, repo_uuid: str, head: JournalHeadState, *, label: str) -> None:
+    def _commit_head(
+        self,
+        repo_uuid: str,
+        head: JournalHeadState,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> None:
         current, previous, pending = self._head_paths(repo_uuid)
         self.state.commit_record(
             label=label,
@@ -316,9 +327,15 @@ class JournalStore:
             pending=pending,
             payload=head.canonical,
             decoder=JournalHeadState.from_json,
+            deadline_ns=deadline_ns,
         )
 
-    def recover_locked(self, operation: LeaseOperation) -> JournalSnapshot:
+    def recover_locked(
+        self,
+        operation: LeaseOperation,
+        *,
+        deadline_ns: int | None = None,
+    ) -> JournalSnapshot:
         """Reconcile sealed segments while the caller holds the operation guard."""
 
         repo_uuid = operation.repo_uuid
@@ -332,14 +349,18 @@ class JournalStore:
                 decoder=JournalHeadState.from_json,
                 revision=lambda value: value.revision,
                 allow_missing=True,
+                deadline_ns=deadline_ns,
             )
         except StateCorrupt as exc:
             raise JournalCorrupt(str(exc)) from exc
         if head is not None and head.repo_uuid != repo_uuid:
             raise JournalCorrupt("journal head is installed under the wrong workspace")
 
-        self.state.cleanup_atomic_temps(self._segments_directory(repo_uuid))
-        segments = self._segment_names(repo_uuid)
+        self.state.cleanup_atomic_temps(
+            self._segments_directory(repo_uuid),
+            deadline_ns=deadline_ns,
+        )
+        segments = self._segment_names(repo_uuid, deadline_ns=deadline_ns)
         committed = 0 if head is None else head.sequence
         if len(segments) < committed:
             raise JournalCorrupt("journal head names a missing committed segment")
@@ -352,7 +373,10 @@ class JournalStore:
         for sequence, _path in segments[:committed]:
             relative = self._segment_path(repo_uuid, sequence)
             try:
-                frame, event = self._decode_segment(relative)
+                frame, event = self._decode_segment(
+                    relative,
+                    deadline_ns=deadline_ns,
+                )
             except JournalFrameTruncated as exc:
                 raise JournalCorrupt("committed journal segment is truncated") from exc
             value = event.to_dict()
@@ -376,9 +400,20 @@ class JournalStore:
             sequence = committed + 1
             relative = self._segment_path(repo_uuid, sequence)
             try:
-                frame, event = self._decode_segment(relative)
+                frame, event = self._decode_segment(
+                    relative,
+                    deadline_ns=deadline_ns,
+                )
             except JournalFrameTruncated:
-                self.state.unlink_and_sync(relative, label="journal:torn_tail")
+                require_before_deadline(
+                    deadline_ns,
+                    "journal recovery exceeded its deadline",
+                )
+                self.state.unlink_and_sync(
+                    relative,
+                    label="journal:torn_tail",
+                    deadline_ns=deadline_ns,
+                )
                 self.fault_hook("journal:torn_tail:discarded")
             else:
                 value = event.to_dict()
@@ -391,10 +426,15 @@ class JournalStore:
                 events.append(event)
                 frames.append(frame)
                 head = self._head_for(repo_uuid, event, frame)
-                self._commit_head(repo_uuid, head, label="journal_head_recovery")
+                self._commit_head(
+                    repo_uuid,
+                    head,
+                    label="journal_head_recovery",
+                    deadline_ns=deadline_ns,
+                )
                 self.fault_hook("journal:head_recovered")
 
-        self._validate_lifecycle(events)
+        self._validate_lifecycle(events, deadline_ns=deadline_ns)
         return JournalSnapshot(head=head, events=tuple(events))
 
     def read_stable(
@@ -433,7 +473,7 @@ class JournalStore:
         segments = self._segment_names(repo_uuid, deadline_ns=deadline_ns)
         committed = 0 if head is None else head.sequence
         if len(segments) != committed:
-            raise JournalConflict("journal requires recovery before stable read")
+            raise JournalRecoveryRequired("journal requires recovery before stable read")
 
         events: list[JournalEvent] = []
         frames: list[bytes] = []
@@ -716,6 +756,7 @@ __all__ = [
     "JournalConflict",
     "JournalCorrupt",
     "JournalError",
+    "JournalRecoveryRequired",
     "JournalSnapshot",
     "JournalStore",
 ]
