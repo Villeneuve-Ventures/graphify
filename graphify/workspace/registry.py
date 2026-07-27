@@ -616,6 +616,18 @@ class RegistryStore:
             and evidence.get("git_common_inode") == source.git_common_inode
         )
 
+    def _has_enrollment_continuity(
+        self,
+        entry: dict[str, Any],
+        source: SourceIdentity,
+    ) -> bool:
+        evidence = self.read_evidence(entry["uuid_enrollment"]["immutable_evidence_sha256"])
+        prior_roots = set(evidence.get("history_roots", []))
+        return bool(prior_roots.intersection(source.history_roots)) or (
+            evidence.get("git_common_device") == source.git_common_device
+            and evidence.get("git_common_inode") == source.git_common_inode
+        )
+
     @staticmethod
     def _known_source(entry: dict[str, Any], source: SourceIdentity) -> bool:
         return source.registry_source == entry["active_source"] or any(
@@ -739,6 +751,10 @@ class RegistryStore:
                 raise SourceAmbiguousError(
                     "evidence can rotate only for an explicitly bound source"
                 )
+            if not self._has_enrollment_continuity(entry, source):
+                raise SourceAmbiguousError(
+                    "rotation source does not match enrollment identity"
+                )
             active_evidence = entry["active_source_evidence"]
             evidence_digest = self._authorized_evidence(
                 source,
@@ -845,6 +861,10 @@ class RegistryStore:
             raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
         if source.repo_uuid != repo_uuid or source.registry_source != recorded:
             raise SourceAmbiguousError("selected active source no longer matches registry evidence")
+        if not self._has_enrollment_continuity(entry, source):
+            raise SourceAmbiguousError(
+                "selected active source does not match enrollment identity"
+            )
         return source
 
 

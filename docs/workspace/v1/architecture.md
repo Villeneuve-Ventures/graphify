@@ -44,11 +44,14 @@ P5B2 identity-maintenance slice adds explicit `register rebind` and
 `register rotate` forms on that same path. Installed authority is composed
 before their bounded matching authorization is read, and the source checkout is
 discovered and exactly revalidated before the expected-revision registry CAS.
-The CLI delegates rebind history/common-directory and rotation binding policy to
-the existing `RegistryStore` methods. It adds only a dedicated versioned receipt
-contract; it does not change the durable registry format, duplicate policy, or
-modify `active_source` or `active_source_revision`. The separate unnumbered
-active-source slice adds only the standalone `workspace activate` argv and a
+The CLI delegates rebind history/common-directory policy and rotation binding
+plus immutable-enrollment continuity to the existing `RegistryStore` methods.
+Later active-source resolution independently applies the same history-root or
+enrolled Git-common-directory identity rule. The CLI adds only a dedicated
+versioned receipt contract; it does not change the durable registry format,
+duplicate policy, or modify `active_source` or `active_source_revision`. The
+separate unnumbered active-source slice adds only the standalone
+`workspace activate` argv and a
 CLI-v1 redacted receipt. It loads and composes installed authority before
 reading canonical `ACTIVATE` authorization, reuses the same two-pass source and
 Git checkout proof, derives lease identity and time inputs internally, and
