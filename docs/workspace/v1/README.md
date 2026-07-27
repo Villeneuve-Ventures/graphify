@@ -266,8 +266,9 @@ the request SHA-256, repo UUID, target generation and receipt, and resulting
 pointer revision. Stale authority or contention exits 10; invalid, corrupt,
 unsupported, or commit-uncertain state exits 20. Failure receipts omit all
 request identity, authorization, paths, owner data, environment values, and raw
-errors. Governance completion and a receipt remain separately owned; this
-implementation text does not change the live ledger.
+errors. Governance completion is accepted separately under the
+[`P5B2 exact-last-good rollback` receipt](receipts/p5b2-exact-last-good-rollback.md);
+this implementation text alone does not expand live authority.
 
 ## Governance and deferred work ownership
 
@@ -287,7 +288,7 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
 | Active-source activation | Unnumbered P5B2 activation (`COMPLETE`) | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, an immutable-enrollment continuity check, and one redacted CLI-v1 receipt. |
-| Exact last-good rollback | Remaining P5B2 delivery; governance acceptance pending | `workspace rollback --request-stdin` exposes one fenced move to the visible pointer's exact `last_good` reference with an explicit canonical request and redacted receipt. It does not authorize arbitrary historical selection, governance completion, or any later command. |
+| Exact last-good rollback | P5B2 exact-last-good rollback (`COMPLETE`) | Accepted receipt: [`P5B2 exact-last-good rollback`](receipts/p5b2-exact-last-good-rollback.md). `workspace rollback --request-stdin` exposes one fenced move to the visible pointer's exact `last_good` reference with an explicit canonical request and redacted receipt. It does not authorize arbitrary historical selection or any later command. |
 | Retained-source identity continuity | P5B2 registry hardening (`DEFERRED`) | `rotate_enrollment_evidence()` accepts an explicitly bound locator without independently re-proving immutable enrollment continuity, while `resolve_active_source()` checks rediscovery against the recorded locator rather than immutable enrollment evidence. Both nonclaims are deferred to one focused follow-up and do not reopen or block accepted activation. |
 | Remaining workspace commands | Remaining P5B2/P5C | Migrate, GC, repair, every other mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
