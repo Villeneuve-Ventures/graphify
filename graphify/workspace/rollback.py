@@ -27,7 +27,7 @@ from graphify.workspace.identity import (
     OperatorAuthorization,
 )
 from graphify.workspace.generations import GenerationError
-from graphify.workspace.journal import JournalError
+from graphify.workspace.journal import JournalError, JournalRecoveryRequired
 from graphify.workspace.leases import (
     LeaseBusy,
     LeaseExpired,
@@ -460,11 +460,20 @@ def _verify_target_receipt_authority(
     *,
     deadline_ns: int | None = None,
 ) -> None:
-    receipts = runtime.pointers.verify_visible_pointer(
-        pointer,
-        expected_repo_uuid=request.repo_uuid,
-        deadline_ns=deadline_ns,
-    )
+    try:
+        receipts = runtime.pointers.verify_visible_pointer(
+            pointer,
+            expected_repo_uuid=request.repo_uuid,
+            deadline_ns=deadline_ns,
+        )
+    except PointerCorrupt as exc:
+        if not isinstance(exc.__cause__, JournalRecoveryRequired):
+            raise
+        receipts = runtime.pointers.verify_pointer(
+            pointer,
+            expected_repo_uuid=request.repo_uuid,
+            deadline_ns=deadline_ns,
+        )
     try:
         target_receipt = receipts["last_good"]
     except KeyError as exc:

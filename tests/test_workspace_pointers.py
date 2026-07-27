@@ -979,6 +979,60 @@ def test_pointer_promotion_retains_prior_before_visibility_and_loser_is_supersed
     assert rolled_back.to_dict()["last_good"]["generation_id"] == "gen-b"
 
 
+def test_rollback_preserves_exact_last_good_after_stale_promotion(
+    tmp_path: Path,
+) -> None:
+    harness, journal, _generations, pointers, promote, receipts = _promotion_runtime(
+        tmp_path
+    )
+    old = receipts["gen-old"]
+    new = receipts["gen-new"]
+    pointers.promote(
+        promote,
+        _cas(promote, old, revision=0, current_sha256=None),
+        occurred_at=START + timedelta(seconds=2),
+        monotonic_ns=20_001,
+    )
+    pointers.promote(
+        promote,
+        _cas(promote, new, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=3),
+        monotonic_ns=20_002,
+    )
+
+    with pytest.raises(PointerSuperseded):
+        pointers.promote(
+            promote,
+            _cas(promote, old, revision=1, current_sha256=old.sha256),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=20_003,
+        )
+
+    transitions = [
+        event.to_dict()["transition"]
+        for event in journal.read_stable(REPO_UUID).for_generation("gen-old")
+    ]
+    assert transitions[-1] == "SUPERSEDED"
+
+    harness.leases.release(promote)
+    rollback = acquire(harness, "ROLLBACK", tick=3)
+    rolled_back = pointers.rollback(
+        rollback,
+        _cas(rollback, old, revision=2, current_sha256=new.sha256),
+        occurred_at=START + timedelta(seconds=5),
+        monotonic_ns=30_001,
+    )
+
+    assert rolled_back.to_dict()["current"] == {
+        "generation_id": "gen-old",
+        "receipt_sha256": old.sha256,
+    }
+    assert rolled_back.to_dict()["last_good"] == {
+        "generation_id": "gen-new",
+        "receipt_sha256": new.sha256,
+    }
+
+
 def test_rollback_rechecks_exact_lease_deadline_before_durable_write(
     tmp_path: Path,
 ) -> None:

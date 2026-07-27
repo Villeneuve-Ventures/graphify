@@ -423,6 +423,7 @@ class PointerStore:
         *,
         generation_id: str,
         receipt_sha256: str,
+        allow_superseded: bool = False,
     ) -> bool:
         certified = False
         forbidden = False
@@ -430,7 +431,9 @@ class PointerStore:
             value = event.to_dict()
             if value["transition"] == "CERTIFIED" and value["receipt_sha256"] == receipt_sha256:
                 certified = True
-            if value["transition"] in {"FAILED", "SUPERSEDED"}:
+            if value["transition"] == "FAILED" or (
+                value["transition"] == "SUPERSEDED" and not allow_superseded
+            ):
                 forbidden = True
         return certified and not forbidden
 
@@ -751,23 +754,41 @@ class PointerStore:
                     self._workspace(operation.repo_uuid),
                     deadline_ns=deadline_ns,
                 )
-                snapshot = self.journal.recover_locked(
-                    operation,
-                    deadline_ns=deadline_ns,
-                )
-                if not self._journal_certifies(
-                    snapshot,
-                    generation_id=cas.candidate_generation_id,
-                    receipt_sha256=candidate.sha256,
-                ):
-                    raise PointerConflict("candidate is not eligible for pointer movement")
                 candidate_is_current = False
+                candidate_is_last_good = False
                 if current is not None:
-                    current_ref = cast(dict[str, Any], current.to_dict()["current"])
+                    current_value = current.to_dict()
+                    current_ref = cast(dict[str, Any], current_value["current"])
                     candidate_is_current = (
                         current_ref["generation_id"] == cas.candidate_generation_id
                         and current_ref["receipt_sha256"] == candidate.sha256
                     )
+                    last_good = current_value["last_good"]
+                    if last_good is not None:
+                        last_good_ref = cast(dict[str, Any], last_good)
+                        candidate_is_last_good = (
+                            transition == "ROLLED_BACK"
+                            and last_good_ref["generation_id"]
+                            == cas.candidate_generation_id
+                            and last_good_ref["receipt_sha256"] == candidate.sha256
+                        )
+                snapshot = self.journal.recover_locked(
+                    operation,
+                    deadline_ns=deadline_ns,
+                )
+                if transition == "ROLLED_BACK" and current is not None:
+                    self._verify_visible_pointer_journal(
+                        operation.repo_uuid,
+                        current,
+                        deadline_ns=deadline_ns,
+                    )
+                if not self._journal_certifies(
+                    snapshot,
+                    generation_id=cas.candidate_generation_id,
+                    receipt_sha256=candidate.sha256,
+                    allow_superseded=candidate_is_last_good,
+                ):
+                    raise PointerConflict("candidate is not eligible for pointer movement")
                 try:
                     self._validate_cas(operation, cas, current, candidate)
                 except PointerSuperseded:

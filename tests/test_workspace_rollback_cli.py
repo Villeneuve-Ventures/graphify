@@ -27,6 +27,7 @@ from graphify.workspace.composition import (
     WorkspaceAuthorityUnsupported,
 )
 from graphify.workspace.contracts import STATE_SCHEMA_VERSION, canonical_json_bytes
+from graphify.workspace.journal import JournalConflict
 from graphify.workspace.leases import LeaseBusy, LeaseExpired, LeaseRecoveryRequired
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -795,6 +796,55 @@ def test_rollback_persists_exact_two_generation_transition_and_journal(
         for event in journal.read_stable(REPO_UUID).for_generation("gen-old")
     ]
     assert transitions[-1] == "ROLLED_BACK"
+
+
+def test_rollback_recovers_valid_uncommitted_journal_tail_under_lease(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.workspace_p3_helpers import acquire
+
+    runtime, harness, journal, request_value = _real_rollback_fixture(tmp_path)
+    build = acquire(harness, "BUILD", tick=3)
+    armed = True
+
+    def interrupt_after_segment(event: str) -> None:
+        nonlocal armed
+        if armed and event == "journal:ALLOCATED:segment_durable":
+            armed = False
+            raise InjectedFault(event)
+
+    monkeypatch.setattr(journal, "fault_hook", interrupt_after_segment)
+    with pytest.raises(InjectedFault):
+        journal.append(
+            build,
+            transition="ALLOCATED",
+            generation_id="gen-uncommitted-tail",
+            receipt_sha256=None,
+            pointer_revision=None,
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=30_001,
+        )
+    harness.leases.release(build)
+    monkeypatch.setattr(journal, "fault_hook", lambda _event: None)
+
+    with pytest.raises(JournalConflict, match="requires recovery"):
+        journal.read_stable(REPO_UUID)
+
+    request_value["expected_operation_epoch"] = harness.leases.inspect(
+        REPO_UUID
+    ).operation_epoch
+    base_monotonic_ns = time.monotonic_ns()
+    receipt = _rollback().rollback(
+        runtime,
+        _parse_request(request_value),
+        occurred_at=START + timedelta(seconds=5),
+        monotonic_clock=_clock(base_monotonic_ns, base_monotonic_ns + 1),
+    )
+
+    assert receipt.to_dict()["state"] == "rolled_back"
+    transitions = [event.to_dict()["transition"] for event in journal.read_stable(REPO_UUID).events]
+    assert transitions[-2:] == ["ALLOCATED", "ROLLED_BACK"]
 
 
 def test_rollback_rejects_stale_visible_pointer_before_acquiring_lease(

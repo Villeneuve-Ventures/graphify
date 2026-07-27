@@ -81,6 +81,10 @@ class JournalConflict(JournalError):
     code = "journal_conflict"
 
 
+class JournalRecoveryRequired(JournalConflict):
+    """A stable read found one recoverable uncommitted journal suffix."""
+
+
 @dataclass(frozen=True)
 class JournalSnapshot:
     head: JournalHeadState | None
@@ -469,7 +473,7 @@ class JournalStore:
         segments = self._segment_names(repo_uuid, deadline_ns=deadline_ns)
         committed = 0 if head is None else head.sequence
         if len(segments) != committed:
-            raise JournalConflict("journal requires recovery before stable read")
+            raise JournalRecoveryRequired("journal requires recovery before stable read")
 
         events: list[JournalEvent] = []
         frames: list[bytes] = []
@@ -752,6 +756,7 @@ __all__ = [
     "JournalConflict",
     "JournalCorrupt",
     "JournalError",
+    "JournalRecoveryRequired",
     "JournalSnapshot",
     "JournalStore",
 ]

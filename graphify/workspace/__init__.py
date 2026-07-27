@@ -124,6 +124,7 @@ from graphify.workspace.journal import (
     JournalConflict,
     JournalCorrupt,
     JournalError,
+    JournalRecoveryRequired,
     JournalSnapshot,
     JournalStore,
 )
@@ -296,6 +297,7 @@ __all__ = [
     "JournalCorrupt",
     "JournalError",
     "JournalFrameTruncated",
+    "JournalRecoveryRequired",
     "JournalSnapshot",
     "JournalStore",
     "LeaseBusy",
