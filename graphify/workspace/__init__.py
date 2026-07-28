@@ -18,10 +18,9 @@ freshness authority. The unnumbered P5B2 identity-maintenance slice adds only
 active-source slice adds only standalone ``workspace activate``. All remaining
 P5B2 rollback work adds only the one-step ``workspace rollback --request-stdin``
 move to the visible pointer's exact ``last_good`` reference. The bounded GC
-slice adds only ``workspace gc --dry-run --request-stdin`` and returns an
-unfenced read-only preview without a lease or executable plan. All other
-remaining mutation commands, retained query/service operation, installation,
-and candidate publication remain deferred.
+lifecycle adds an unfenced read-only preview plus explicit, operator-authorized
+execute, reconcile, and purge commands. Retained query/service operation,
+installation, and candidate publication remain deferred.
 """
 
 from graphify.workspace.adapters import (
@@ -228,6 +227,26 @@ from graphify.workspace.rollback import (
     RollbackRequestUnsupported,
     rollback as rollback_workspace,
 )
+from graphify.workspace.gc_command import (
+    GC_EXECUTE_REQUEST_CONTRACT,
+    GC_EXECUTE_RESULT_CONTRACT,
+    GC_LIFECYCLE_REQUEST_MAX_BYTES,
+    GC_LIFECYCLE_SCHEMA_VERSION,
+    GC_PURGE_REQUEST_CONTRACT,
+    GC_PURGE_RESULT_CONTRACT,
+    GC_RECONCILE_REQUEST_CONTRACT,
+    GC_RECONCILE_RESULT_CONTRACT,
+    GcExecuteRequest,
+    GcExecuteResult,
+    GcPurgeRequest,
+    GcPurgeResult,
+    GcReconcileRequest,
+    GcReconcileResult,
+    execute_gc,
+    gc_preview_result_bytes,
+    purge_gc,
+    reconcile_gc,
+)
 
 __all__ = [
     "ADAPTER_CONTRACT_VERSION",
@@ -241,6 +260,14 @@ __all__ = [
     "EXIT_READY",
     "EXIT_USAGE",
     "EXTRACTOR_CACHE_ABI",
+    "GC_EXECUTE_REQUEST_CONTRACT",
+    "GC_EXECUTE_RESULT_CONTRACT",
+    "GC_LIFECYCLE_REQUEST_MAX_BYTES",
+    "GC_LIFECYCLE_SCHEMA_VERSION",
+    "GC_PURGE_REQUEST_CONTRACT",
+    "GC_PURGE_RESULT_CONTRACT",
+    "GC_RECONCILE_REQUEST_CONTRACT",
+    "GC_RECONCILE_RESULT_CONTRACT",
     "REQUIRED_COMPATIBILITY_ARTIFACTS",
     "RUNTIME_AUTHORITY_CONTRACT",
     "RUNTIME_AUTHORITY_FILENAME",
@@ -286,9 +313,15 @@ __all__ = [
     "GenerationStore",
     "CertificationRequest",
     "GcError",
+    "GcExecuteRequest",
+    "GcExecuteResult",
     "GcPlan",
     "GcPlanStale",
     "GcProtection",
+    "GcPurgeRequest",
+    "GcPurgeResult",
+    "GcReconcileRequest",
+    "GcReconcileResult",
     "GcRecoveryRequired",
     "GcStore",
     "InstallerTransaction",
@@ -393,10 +426,14 @@ __all__ = [
     "decode_journal_frame",
     "discover_source",
     "encode_journal_frame",
+    "execute_gc",
+    "gc_preview_result_bytes",
     "inspect_workspace_status",
     "load_schema",
     "load_status_schema",
     "parse_contract",
+    "purge_gc",
+    "reconcile_gc",
     "rollback_workspace",
     "select_adapter",
     "synchronize_code_only",

@@ -103,6 +103,7 @@ def test_workspace_contract_surface_ships_in_wheel(wheel_namelist: set[str]) -> 
     expected = {
         "graphify/workspace/__init__.py",
         "graphify/workspace/contracts.py",
+        "graphify/workspace/gc_command.py",
         "graphify/workspace/gc.py",
         "graphify/workspace/generations.py",
         "graphify/workspace/identity.py",
@@ -116,6 +117,12 @@ def test_workspace_contract_surface_ships_in_wheel(wheel_namelist: set[str]) -> 
         "graphify/workspace/schemas/cli/v1/rollback-receipt.schema.json",
         "graphify/workspace/schemas/cli/v1/gc-preview-request.schema.json",
         "graphify/workspace/schemas/cli/v1/gc-preview-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-execute-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-execute-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-reconcile-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-reconcile-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-purge-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-purge-result.schema.json",
         *{
             f"graphify/workspace/schemas/v1/{name}" for name in WORKSPACE_SCHEMA_FILES
         },

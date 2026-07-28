@@ -90,6 +90,7 @@ def _synthetic_repo(root: Path) -> tuple[Path, Path]:
     _write(root / "graphify/workspace/adapters/v0_9_16.py", "# 0.9.16 adapter\n")
     for module_name in (
         "gc.py",
+        "gc_command.py",
         "generations.py",
         "identity.py",
         "journal.py",
@@ -111,6 +112,12 @@ def _synthetic_repo(root: Path) -> tuple[Path, Path]:
     _write(root / "graphify/workspace/schemas/cli/v1/rollback-receipt.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/gc-preview-request.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/gc-preview-result.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/gc-execute-request.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/gc-execute-result.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/gc-reconcile-request.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/gc-reconcile-result.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/gc-purge-request.schema.json", "{}\n")
+    _write(root / "graphify/workspace/schemas/cli/v1/gc-purge-result.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/status.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/sync-request.schema.json", "{}\n")
     _write(root / "graphify/workspace/schemas/cli/v1/sync-receipt.schema.json", "{}\n")
@@ -180,6 +187,12 @@ def test_static_contract_fixture_skill_and_runtime_bundles_are_deterministic(
         assert "schemas/cli/v1/rollback-receipt.schema.json" in archive.namelist()
         assert "schemas/cli/v1/gc-preview-request.schema.json" in archive.namelist()
         assert "schemas/cli/v1/gc-preview-result.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/gc-execute-request.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/gc-execute-result.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/gc-reconcile-request.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/gc-reconcile-result.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/gc-purge-request.schema.json" in archive.namelist()
+        assert "schemas/cli/v1/gc-purge-result.schema.json" in archive.namelist()
         assert "schemas/cli/v1/status.schema.json" in archive.namelist()
         assert "schemas/cli/v1/sync-request.schema.json" in archive.namelist()
         assert "schemas/cli/v1/sync-receipt.schema.json" in archive.namelist()

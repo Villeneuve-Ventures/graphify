@@ -305,12 +305,18 @@ class GcStore:
         )
         return intent
 
-    def _generation_ids(self, repo_uuid: str) -> tuple[str, ...]:
+    def _generation_ids(
+        self,
+        repo_uuid: str,
+        *,
+        maximum_entries: int | None = None,
+    ) -> tuple[str, ...]:
         relative = self.generations._workspace(repo_uuid) / "generations"
         try:
             return self.state.list_existing_private_directories(
                 relative,
                 allow_missing=True,
+                maximum_entries=maximum_entries,
             )
         except StatePathError as exc:
             raise GcError(f"generations path is unsafe: {exc}") from exc
@@ -438,7 +444,10 @@ class GcStore:
                 PointerSet.from_mapping(prior.to_dict()["pointer_set"]),
             )
             self._add_pointer_reasons(reasons, prior_pointer, prefix="prior")
-        generations = self._generation_ids(repo_uuid)
+        generations = self._generation_ids(
+            repo_uuid,
+            maximum_entries=maximum_generations,
+        )
         if maximum_generations is not None and len(set(generations) | set(reasons)) > (
             maximum_generations
         ):
@@ -498,6 +507,7 @@ class GcStore:
             operation.repo_uuid,
             protections=protections,
             probe_locks=probe_locks,
+            maximum_generations=GC_PREVIEW_MAX_GENERATIONS,
         )
         plan = GcPlan(
             repo_uuid=operation.repo_uuid,
@@ -610,6 +620,138 @@ class GcStore:
                     candidates=second.candidates,
                     protected=second.protected,
                 )
+
+    def preflight_lifecycle(
+        self,
+        repo_uuid: str,
+        *,
+        expected_registry_revision: int,
+        expected_active_source_revision: int,
+        expected_operation_epoch: int,
+        expected_migration_epoch: int,
+        expected_pointer_revision: int,
+        expected_capacity_policy_sha256: str | None = None,
+        plan_sha256: str | None = None,
+        deadline_ns: int,
+    ) -> GcIntentState | GcPurgeState | None:
+        """Validate lifecycle CAS and durable selection without acquiring a lease."""
+
+        expected_pointer_revision = self._validate_expected_revision(
+            expected_pointer_revision,
+            "expected_pointer_revision",
+            minimum=0,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "GC lifecycle preflight exceeded its deadline",
+        )
+        with self.leases.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
+            entry = self._registry_entry(registry, repo_uuid)
+            with self.leases.read_only_workspace_lock(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            ):
+                lease_state = self.leases.read_only_snapshot_locked(
+                    registry,
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+                self._check_preview_authority(
+                    registry,
+                    entry,
+                    lease_state,
+                    expected_registry_revision=expected_registry_revision,
+                    expected_active_source_revision=expected_active_source_revision,
+                    expected_operation_epoch=expected_operation_epoch,
+                    expected_migration_epoch=expected_migration_epoch,
+                )
+                self.leases._assert_recovery_barriers_locked(
+                    repo_uuid,
+                    "GC",
+                    recover=False,
+                    deadline_ns=deadline_ns,
+                )
+                pointer = self.pointers.load(
+                    repo_uuid,
+                    allow_missing=True,
+                    deadline_ns=deadline_ns,
+                )
+                pointer_revision = 0
+                if pointer is not None:
+                    self.pointers.verify_pointer(
+                        pointer,
+                        expected_repo_uuid=repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
+                    pointer_revision = int(pointer.to_dict()["pointer_revision"])
+                if pointer_revision != expected_pointer_revision:
+                    raise GcPreviewAuthorityConflict(
+                        "GC lifecycle pointer revision changed"
+                    )
+                intent = self.read_only_intent_locked(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+                if (
+                    intent is not None
+                    and intent.pointer_revision != expected_pointer_revision
+                ):
+                    raise GcPlanStale(
+                        "durable GC intent has another pointer revision"
+                    )
+                if (
+                    intent is not None
+                    and expected_capacity_policy_sha256 is not None
+                    and intent.capacity_policy_sha256
+                    != expected_capacity_policy_sha256
+                ):
+                    raise GcRecoveryRequired(
+                        "capacity policy differs from durable GC intent"
+                    )
+                if plan_sha256 is None:
+                    return intent
+                if intent is not None:
+                    raise GcRecoveryRequired(
+                        "GC intent must be reconciled before purge"
+                    )
+                purge_data = self.state.read_optional_existing_bytes(
+                    self._purge_path(repo_uuid, plan_sha256),
+                    max_bytes=_MAX_GC_INTENT_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+                if purge_data is not None:
+                    try:
+                        purge = GcPurgeState.from_json(purge_data)
+                    except Exception as exc:
+                        raise GcError(f"GC purge record is invalid: {exc}") from exc
+                    if purge.repo_uuid != repo_uuid or purge.plan_sha256 != plan_sha256:
+                        raise GcError(
+                            "GC purge record belongs to another workspace or plan"
+                        )
+                    return purge
+                completion_data = self.state.read_optional_existing_bytes(
+                    self._completion_path(repo_uuid, plan_sha256),
+                    max_bytes=_MAX_GC_INTENT_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+                if completion_data is None:
+                    raise GcError("GC completion is unavailable")
+                try:
+                    completion = GcCompletionState.from_json(completion_data)
+                except Exception as exc:
+                    raise GcError(f"GC completion is unavailable: {exc}") from exc
+                if (
+                    completion.repo_uuid != repo_uuid
+                    or completion.plan_sha256 != plan_sha256
+                ):
+                    raise GcError(
+                        "GC completion belongs to another workspace or plan"
+                    )
+                require_before_deadline(
+                    deadline_ns,
+                    "GC lifecycle preflight exceeded its deadline",
+                )
+                return None
 
     def plan(
         self,
@@ -802,6 +944,7 @@ class GcStore:
         *,
         capacity_policy: CapacityPolicy,
         protections: GcProtection,
+        expected_pointer_revision: int | None = None,
         completed_at: datetime,
         monotonic_ns: int,
     ) -> GcCompletionState | None:
@@ -813,8 +956,26 @@ class GcStore:
         ) as operation:
             self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             intent = self._read_intent(operation.repo_uuid)
+            pointer = self.pointers.load(operation.repo_uuid, allow_missing=True)
+            pointer_revision = 0
+            if pointer is not None:
+                self.pointers.verify_pointer(
+                    pointer,
+                    expected_repo_uuid=operation.repo_uuid,
+                )
+                pointer_revision = int(pointer.to_dict()["pointer_revision"])
+            if (
+                expected_pointer_revision is not None
+                and pointer_revision != expected_pointer_revision
+            ):
+                raise GcPlanStale("GC reconcile pointer revision is stale")
             if intent is None:
                 return None
+            if (
+                expected_pointer_revision is not None
+                and intent.pointer_revision != expected_pointer_revision
+            ):
+                raise GcPlanStale("durable GC intent has another pointer revision")
             if intent.capacity_policy_sha256 != capacity_policy.sha256:
                 raise GcRecoveryRequired("capacity policy differs from durable GC intent")
             refreshed = self._plan_locked(
@@ -823,6 +984,11 @@ class GcStore:
                 protections=protections,
                 probe_locks=False,
             )
+            if (
+                expected_pointer_revision is not None
+                and refreshed.pointer_revision != expected_pointer_revision
+            ):
+                raise GcPlanStale("GC reconcile reachability has another pointer revision")
             protected = {generation_id for generation_id, _reasons in refreshed.protected}
             if any(generation_id in protected for generation_id in intent.candidates):
                 raise GcRecoveryRequired("a durable GC candidate became reachable")
@@ -863,6 +1029,7 @@ class GcStore:
         plan_sha256: str,
         capacity_policy: CapacityPolicy,
         protections: GcProtection,
+        expected_pointer_revision: int | None = None,
         completed_at: datetime,
         monotonic_ns: int,
     ) -> GcPurgeState:
@@ -875,6 +1042,19 @@ class GcStore:
             self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             if self._read_intent(operation.repo_uuid) is not None:
                 raise GcRecoveryRequired("GC intent must be reconciled before purge")
+            pointer = self.pointers.load(operation.repo_uuid, allow_missing=True)
+            pointer_revision = 0
+            if pointer is not None:
+                self.pointers.verify_pointer(
+                    pointer,
+                    expected_repo_uuid=operation.repo_uuid,
+                )
+                pointer_revision = int(pointer.to_dict()["pointer_revision"])
+            if (
+                expected_pointer_revision is not None
+                and pointer_revision != expected_pointer_revision
+            ):
+                raise GcPlanStale("GC purge pointer revision is stale")
             purge_relative = self._purge_path(operation.repo_uuid, plan_sha256)
             try:
                 purge_data = self.state.read_optional_existing_bytes(purge_relative)
@@ -908,6 +1088,11 @@ class GcStore:
                 protections=protections,
                 probe_locks=False,
             )
+            if (
+                expected_pointer_revision is not None
+                and refreshed.pointer_revision != expected_pointer_revision
+            ):
+                raise GcPlanStale("GC purge reachability has another pointer revision")
             protected = {generation_id for generation_id, _reasons in refreshed.protected}
             if any(generation_id in protected for generation_id in completion.quarantined):
                 raise GcPlanStale("quarantined generation became protected before purge")

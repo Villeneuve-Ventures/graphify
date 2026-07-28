@@ -808,9 +808,12 @@ class DurableStateRoot:
         relative: str | Path,
         *,
         allow_missing: bool = False,
+        maximum_entries: int | None = None,
     ) -> tuple[str, ...]:
         """List owned 0700 child directories without following any path component."""
 
+        if maximum_entries is not None and maximum_entries < 0:
+            raise ValueError("maximum_entries must be nonnegative")
         destination = self.path(relative)
         with self._existing_private_directory(
             destination.relative_to(self.root),
@@ -820,23 +823,29 @@ class DurableStateRoot:
                 return ()
             try:
                 with os.scandir(descriptor) as entries:
-                    names = sorted(entry.name for entry in entries)
+                    names: list[str] = []
+                    for entry in entries:
+                        name = entry.name
+                        child_path = destination / name
+                        child = self._open_directory_at(
+                            descriptor,
+                            name,
+                            child_path,
+                            allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                        )
+                        if child is None:  # pragma: no cover - allow_missing is false
+                            raise StatePathError(f"state directory is missing: {child_path}")
+                        os.close(child)
+                        if maximum_entries is not None and len(names) >= maximum_entries:
+                            raise StatePathError(
+                                f"state directory exceeds maximum entries: {destination}"
+                            )
+                        names.append(name)
             except OSError as exc:
                 raise StatePathError(
                     f"state directory cannot be enumerated safely: {destination}: {exc}"
                 ) from exc
-            for name in names:
-                child_path = destination / name
-                child = self._open_directory_at(
-                    descriptor,
-                    name,
-                    child_path,
-                    allowed_modes=_PRIVATE_DIRECTORY_MODES,
-                )
-                if child is None:  # pragma: no cover - allow_missing is false
-                    raise StatePathError(f"state directory is missing: {child_path}")
-                os.close(child)
-            return tuple(names)
+            return tuple(sorted(names))
 
     def private_directory_exists(self, relative: str | Path) -> bool:
         """Probe one private directory without following any path component."""

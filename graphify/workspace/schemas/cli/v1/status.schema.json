@@ -170,6 +170,7 @@
         "register_workspace",
         "restore_source",
         "retry_status",
+        "run_workspace_gc_reconcile",
         "run_workspace_repair",
         "run_workspace_sync",
         "use_supported_runtime",

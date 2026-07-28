@@ -343,6 +343,7 @@ def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
         "graphify/workspace/contracts.py",
         "graphify/workspace/freshness.py",
         "graphify/workspace/gc.py",
+        "graphify/workspace/gc_command.py",
         "graphify/workspace/generations.py",
         "graphify/workspace/identity.py",
         "graphify/workspace/journal.py",
@@ -359,6 +360,12 @@ def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
         "graphify/workspace/schemas/cli/v1/rollback-receipt.schema.json",
         "graphify/workspace/schemas/cli/v1/gc-preview-request.schema.json",
         "graphify/workspace/schemas/cli/v1/gc-preview-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-execute-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-execute-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-reconcile-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-reconcile-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-purge-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-purge-result.schema.json",
     }
     missing = required - names
     if missing:

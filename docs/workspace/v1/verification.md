@@ -340,7 +340,7 @@ output remains ignored and must not widen the P1 product diff.
   production typed rejections remain effective under optimized Python execution;
 - failpoints, restart schedules, deterministic races, and recursive before/after
   source snapshots cover every lifecycle and no-write boundary;
-- the only accepted public argv is
+- the code-only sync CLI accepts only
   `workspace sync --code-only --request-stdin`; stdin is at most 16 KiB,
   canonical, duplicate-free, schema-valid, complete, and rejected before
   orchestration when invalid;
@@ -466,7 +466,7 @@ generation, and freshness suites. P5A also requires the repository gates above,
 exact-head CI, a current Graphify graph, and independent code, architecture, and
 verification reviews.
 
-## P5B2 bounded GC preview CLI gates
+## P5B2 public offline-GC CLI gates
 
 - the only accepted public argv is
   `workspace gc --dry-run --request-stdin`; malformed, reordered, repeated, or
@@ -494,6 +494,30 @@ verification reviews.
   redaction, determinism, explicit-capacity/protection rejection, stale CAS,
   observation instability, coordination contention, and unchanged fenced P3
   `GcStore.plan()`, `execute()`, `reconcile()`, and `purge()` behavior.
+
+- `gc --execute --request-stdin`, `gc --reconcile --request-stdin`, and
+  `gc --purge --request-stdin` accept no alternative or reordered argv and
+  require their respective `GC_EXECUTE`, `GC_RECONCILE`, and `GC_PURGE`
+  authorizations before standard-input reads;
+- execute recomputes the frozen canonical preview result and verifies the
+  request's SHA-256 against those exact bytes before acquiring a fresh trusted
+  `GC` lease. A fresh plan must match the approved preview on repo UUID,
+  registry/active-source/migration/pointer revisions, capacity-policy digest,
+  candidates, and protected facts, while excluding the newly allocated fence
+  and operation epoch;
+- reconcile is an explicit existing-intent operation, including an explicit
+  `nothing_to_reconcile` no-op outcome; purge is an explicit idempotent
+  completed-plan operation selected by `expected_plan_sha256`, with pointer,
+  protection, and lock rechecks before deletion;
+- phase success and failure result schemas prove canonical redacted public
+  output and the 0/10/20 exit mapping. Receipts omit authorization, raw durable
+  lifecycle documents, fence/owner data, paths, timestamps, operation epochs,
+  environment values, and raw errors;
+- valid unresolved GC intent status and doctor output directs
+  `run_workspace_gc_reconcile`, without an automatic reconcile path; and
+- generation enumeration proves descriptor-relative no-follow validation and a
+  hard 4096-plus-one bound that raises before overflow is materialized. This is
+  a safety assertion, not performance or resource certification.
 
 ## P3 runtime gates
 

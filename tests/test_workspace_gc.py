@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -20,12 +21,19 @@ from graphify.workspace.contracts import (
     GcIntentState,
     payload_manifest_sha256,
 )
-from graphify.workspace.gc import GcError, GcProtection, GcRecoveryRequired, GcStore
+from graphify.workspace.gc import (
+    GC_PREVIEW_MAX_GENERATIONS,
+    GcError,
+    GcProtection,
+    GcRecoveryRequired,
+    GcStore,
+)
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import LeaseRecoveryRequired
 from graphify.workspace.persistence import (
     CommitUnknown,
+    DurableStateRoot,
     InjectedFault,
     PosixSyscalls,
     StateCorrupt,
@@ -39,6 +47,7 @@ from tests.workspace_p3_helpers import (
     COMPATIBILITY_SHA256,
     REPO_UUID,
     START,
+    SUPPORTED,
     acquire,
     create_harness,
     metadata_snapshot,
@@ -277,6 +286,150 @@ def _cas(grant: Any, receipt: Any) -> PointerCAS:
         candidate_receipt_sha256=receipt.sha256,
         expected_current_receipt_sha256=None,
     )
+
+
+class _BoundedScandir:
+    """A hostile directory iterator that fails if enumeration reads past a bound."""
+
+    def __init__(self, names: tuple[str, ...], *, maximum_entries: int) -> None:
+        self.names = names
+        self.maximum_entries = maximum_entries
+        self.consumed = 0
+
+    def __enter__(self) -> _BoundedScandir:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def __iter__(self) -> _BoundedScandir:
+        return self
+
+    def __next__(self) -> Any:
+        if self.consumed >= self.maximum_entries + 1:
+            raise AssertionError("generation enumeration consumed beyond maximum + 1")
+        if self.consumed >= len(self.names):
+            raise StopIteration
+        name = self.names[self.consumed]
+        self.consumed += 1
+        return type("Entry", (), {"name": name})()
+
+
+def test_private_generation_enumeration_stops_at_maximum_plus_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    generations = state.ensure_directory("generations")
+    names = tuple(f"generation-{index}" for index in range(4))
+    for name in names:
+        (generations / name).mkdir(mode=0o700)
+    maximum = 2
+    scandir = _BoundedScandir(names, maximum_entries=maximum)
+    monkeypatch.setattr("graphify.workspace.persistence.os.scandir", lambda _fd: scandir)
+
+    with pytest.raises(StatePathError):
+        state.list_existing_private_directories(
+            "generations",
+            maximum_entries=maximum,
+        )
+
+    assert scandir.consumed == maximum + 1
+
+
+@pytest.mark.parametrize("unsafe_child", ("linked", "wrong-mode", "unowned"))
+def test_private_generation_enumeration_rejects_unsafe_enumerated_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_child: str,
+) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    generations = state.ensure_directory("generations")
+    child = generations / unsafe_child
+    if unsafe_child == "linked":
+        target = tmp_path / "target"
+        target.mkdir(mode=0o700)
+        child.symlink_to(target, target_is_directory=True)
+    elif unsafe_child == "wrong-mode":
+        child.mkdir(mode=0o755)
+    else:
+        child.mkdir(mode=0o700)
+        original_require_owner = DurableStateRoot._require_owner
+
+        def reject_unowned(details: os.stat_result, path: Path) -> None:
+            if path == child:
+                raise StatePathError(f"state path is not owned by the current user: {path}")
+            original_require_owner(details, path)
+
+        monkeypatch.setattr(
+            DurableStateRoot,
+            "_require_owner",
+            staticmethod(reject_unowned),
+        )
+
+    with pytest.raises(StatePathError):
+        state.list_existing_private_directories(
+            "generations",
+            maximum_entries=2,
+        )
+
+
+def test_gc_preview_and_plan_apply_the_same_generation_enumeration_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    observed_bounds: list[int | None] = []
+    original_list = gc.state.list_existing_private_directories
+
+    def capture_bound(
+        relative: str | Path,
+        *,
+        allow_missing: bool = False,
+        maximum_entries: int | None = None,
+    ) -> tuple[str, ...]:
+        observed_bounds.append(maximum_entries)
+        return original_list(
+            relative,
+            allow_missing=allow_missing,
+            maximum_entries=maximum_entries,
+        )
+
+    monkeypatch.setattr(gc.state, "list_existing_private_directories", capture_bound)
+
+    gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    pointer = pointers.load(REPO_UUID)
+    assert pointer is not None
+    gc.preview(
+        REPO_UUID,
+        expected_registry_revision=gc_grant.registry_revision,
+        expected_active_source_revision=gc_grant.active_source_revision,
+        expected_operation_epoch=gc_grant.operation_epoch,
+        expected_migration_epoch=gc_grant.migration_epoch,
+        expected_pointer_revision=int(pointer.to_dict()["pointer_revision"]),
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        deadline_ns=time.monotonic_ns() + 5_000_000_000,
+    )
+
+    assert observed_bounds == [
+        GC_PREVIEW_MAX_GENERATIONS,
+        GC_PREVIEW_MAX_GENERATIONS,
+        GC_PREVIEW_MAX_GENERATIONS,
+    ]
 
 
 def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(

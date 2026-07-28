@@ -79,6 +79,27 @@ It creates no lease, fence, `GcPlan`, state, lock file, cleanup, quarantine,
 receipt, or log, including on failures. It neither infers capacity or protections nor
 changes the following fenced execution contract.
 
+The public lifecycle is explicit-only: `gc --execute --request-stdin`,
+`gc --reconcile --request-stdin`, and `gc --purge --request-stdin` each require
+a distinct canonical authorization action and a fresh trusted `GC` lease.
+Execute accepts an operator-approved SHA-256 of the exact canonical public
+preview-result bytes, recomputes that preview before leasing, then creates a
+fresh plan and requires its non-fence projection to equal the preview. The
+comparison includes identity revisions other than operation epoch, pointer
+revision, capacity-policy digest, candidates, and protected generation reasons;
+the newly allocated fence and operation epoch are excluded. Reconcile names no
+plan and touches only an existing GC intent, returning an explicit no-op when
+none exists. Purge requires an exact completed plan SHA-256 and remains
+idempotent while rechecking protections and locks. Public receipts are
+canonical and redacted; they never disclose authority, raw lifecycle documents,
+fences, owners, paths, timestamps, operation epochs, or raw errors.
+
+For preview, plan, and lifecycle observations, the public maximum is 4096
+generation IDs. Directory enumeration validates each candidate descriptor
+without following links and stops after the 4097th entry; it reports overflow
+before materializing the generation collection. This constrains traversal
+correctness only and makes no performance or resource claim.
+
 `GcStore.plan()`, `execute()`, `reconcile()`, and `purge()` require a live
 fenced `GC` operation and an explicit `GcProtection` set for migration,
 rollback, lease, fixture, proof, and rollback-artifact reachability that P3
@@ -94,6 +115,10 @@ deletion is a separate explicit purge; coordination lock identities remain
 retained. Purge deletion and parent-directory synchronization use the injected
 syscall seam so partial deletion, interruption, and uncertain sync are retried
 before one durable purge record is accepted.
+
+An unresolved valid GC intent remains visible to status and doctor as the
+operator action `run_workspace_gc_reconcile`. It does not cause the runtime to
+reconcile automatically.
 
 Capacity values used by tests are deterministic fixtures only. P3 deliberately
 defines no operational default or public v1 config field for those limits.

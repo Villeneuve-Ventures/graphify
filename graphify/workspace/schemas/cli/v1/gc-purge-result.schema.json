@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/gc-purge-result.schema.json",
+  "title": "Graphify workspace fenced GC purge result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cli_contract_version", "contract", "exit_code", "schema_version", "state"],
+  "properties": {
+    "action_code": {"type": "string", "minLength": 1}, "cli_contract_version": {"const": 1}, "contract": {"const": "graphify.workspace.gc_purge_result"}, "exit_code": {"enum": [0, 10, 20]}, "plan_sha256": {"$ref": "#/$defs/digest"}, "purged": {"$ref": "#/$defs/generation_ids"}, "reason_code": {"type": "string", "minLength": 1}, "repo_uuid": {"$ref": "#/$defs/uuid"}, "request_sha256": {"$ref": "#/$defs/digest"}, "schema_version": {"const": 1}, "state": {"enum": ["purged", "conflict", "invalid", "unsupported"]}
+  },
+  "allOf": [
+    {"if": {"properties": {"state": {"const": "purged"}}, "required": ["state"]}, "then": {"properties": {"exit_code": {"const": 0}}, "required": ["plan_sha256", "purged", "repo_uuid", "request_sha256"], "not": {"anyOf": [{"required": ["action_code"]}, {"required": ["reason_code"]}]}}},
+    {"if": {"properties": {"state": {"const": "conflict"}}, "required": ["state"]}, "then": {"properties": {"exit_code": {"const": 10}}, "required": ["action_code", "reason_code"], "$ref": "#/$defs/redacted_failure"}},
+    {"if": {"properties": {"state": {"enum": ["invalid", "unsupported"]}}, "required": ["state"]}, "then": {"properties": {"exit_code": {"const": 20}}, "required": ["action_code", "reason_code"], "$ref": "#/$defs/redacted_failure"}}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "generation_id": {"type": "string", "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"}, "generation_ids": {"type": "array", "maxItems": 4096, "uniqueItems": true, "items": {"$ref": "#/$defs/generation_id"}, "description": "Generation IDs are emitted in canonical sorted order."},
+    "redacted_failure": {"not": {"anyOf": [{"required": ["plan_sha256"]}, {"required": ["purged"]}, {"required": ["repo_uuid"]}, {"required": ["request_sha256"]}, {"required": ["authorization"]}, {"required": ["completion"]}, {"required": ["fence_token"]}, {"required": ["intent"]}]}},
+    "uuid": {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"}
+  }
+}
