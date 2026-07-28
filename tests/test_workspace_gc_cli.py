@@ -28,6 +28,7 @@ from graphify.workspace.composition import (
 )
 from graphify.workspace.contracts import GcIntentState, JsonValue, canonical_json_bytes
 from graphify.workspace.gc import (
+    GcError,
     GcPlanStale,
     GcPreviewAuthorityConflict,
     GcProtection,
@@ -1947,8 +1948,249 @@ def test_gc_reconcile_and_purge_reject_stale_pointer_before_lease_mutation(
     ) == before_purge
 
 
+def test_gc_public_purge_unknown_plan_requires_reselection_without_mutation(
+    tmp_path: Path,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    request = command.GcPurgeRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(
+                runtime,
+                "purge",
+                expected_plan_sha256="b" * 64,
+            )
+        )
+    )
+    before = (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    )
+
+    with pytest.raises(GcPlanStale, match="completion is unavailable") as raised:
+        command.purge_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+
+    failure = command.classify_failure(raised.value, "purge").to_dict()
+    assert failure["exit_code"] == 10
+    assert failure["reason_code"] == "gc_authority_conflict"
+    assert failure["action_code"] == "refresh_gc_purge_request"
+    assert (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    ) == before
+
+
+def test_gc_public_purge_malformed_terminal_record_remains_state_corrupt(
+    tmp_path: Path,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    executed = command.execute_gc(
+        runtime,
+        _approved_execute_request(runtime),
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    )
+    plan_sha256 = cast(str, executed.to_dict()["plan_sha256"])
+    request = command.GcPurgeRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(
+                runtime,
+                "purge",
+                expected_plan_sha256=plan_sha256,
+            )
+        )
+    )
+    purge_relative = runtime.gc._purge_path(REPO_UUID, plan_sha256)
+    runtime.gc.state.ensure_directory(purge_relative.parent)
+    purge_path = runtime.gc.state.path(purge_relative)
+    purge_path.write_bytes(b"{}\n")
+    purge_path.chmod(0o600)
+    before = (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    )
+
+    with pytest.raises(GcError, match="purge record is invalid") as raised:
+        command.purge_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+
+    failure = command.classify_failure(raised.value, "purge").to_dict()
+    assert failure["exit_code"] == 20
+    assert failure["reason_code"] == "state_corrupt"
+    assert failure["action_code"] == "run_workspace_repair"
+    assert (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    ) == before
+
+
+def test_gc_public_terminal_purge_read_timeout_remains_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    executed = command.execute_gc(
+        runtime,
+        _approved_execute_request(runtime),
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    )
+    plan_sha256 = cast(str, executed.to_dict()["plan_sha256"])
+    request = command.GcPurgeRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(
+                runtime,
+                "purge",
+                expected_plan_sha256=plan_sha256,
+            )
+        )
+    )
+    command.purge_gc(
+        runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    )
+    purge_relative = runtime.gc._purge_path(REPO_UUID, plan_sha256)
+    original_read = runtime.gc.state.read_optional_existing_bytes
+
+    def timeout_selected_purge(
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
+        if Path(relative) == purge_relative:
+            raise LockTimeout(
+                "terminal purge receipt read exceeded its deadline",
+                phase="acquire",
+                kind="workspace",
+            )
+        return original_read(
+            relative,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(
+        runtime.gc.state,
+        "read_optional_existing_bytes",
+        timeout_selected_purge,
+    )
+
+    with pytest.raises(LockTimeout) as raised:
+        command.purge_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+
+    failure = command.classify_failure(raised.value, "purge").to_dict()
+    assert failure["exit_code"] == 10
+    assert failure["reason_code"] == "gc_lease_busy"
+    assert failure["action_code"] == "retry_workspace_gc_purge"
+
+
+def test_gc_reconcile_lease_ttl_starts_after_preflight(tmp_path: Path) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    interrupted = False
+
+    def leave_durable_intent(event: str) -> None:
+        nonlocal interrupted
+        if event == "gc:intent_durable" and not interrupted:
+            interrupted = True
+            raise InjectedFault(event)
+
+    runtime = _gc_mutation_runtime(harness, fault_hook=leave_durable_intent)
+    with pytest.raises((CommitUnknown, InjectedFault)):
+        _gc_command().execute_gc(
+            runtime,
+            _approved_execute_request(runtime),
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    assert interrupted is True
+
+    recovery_runtime = _gc_mutation_runtime(harness)
+    request_value = _gc_live_lifecycle_request(recovery_runtime, "reconcile")
+    request_value["timeout_ms"] = 60_000
+    request = _gc_command().GcReconcileRequest.from_bytes(
+        canonical_json_bytes(request_value)
+    )
+    started_ns = time.monotonic_ns()
+    ticks = iter(
+        (
+            started_ns,
+            started_ns + 31_000_000_000,
+            started_ns + 31_000_000_001,
+        )
+    )
+
+    result = _gc_command().reconcile_gc(
+        recovery_runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=lambda: next(ticks),
+    )
+
+    assert result.to_dict()["state"] == "reconciled"
+
+
+def test_gc_purge_lease_ttl_starts_after_preflight(tmp_path: Path) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    executed = _gc_command().execute_gc(
+        runtime,
+        _approved_execute_request(runtime),
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    )
+    request_value = _gc_live_lifecycle_request(
+        runtime,
+        "purge",
+        expected_plan_sha256=cast(str, executed.to_dict()["plan_sha256"]),
+    )
+    request_value["timeout_ms"] = 60_000
+    request = _gc_command().GcPurgeRequest.from_bytes(
+        canonical_json_bytes(request_value)
+    )
+    started_ns = time.monotonic_ns()
+    ticks = iter(
+        (
+            started_ns,
+            started_ns + 31_000_000_000,
+            started_ns + 31_000_000_001,
+        )
+    )
+
+    result = _gc_command().purge_gc(
+        runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=lambda: next(ticks),
+    )
+
+    assert result.to_dict()["purged"] == ["gen-unused"]
+
+
 def test_gc_public_lifecycle_executes_reconciles_idempotently_and_purges_explicitly(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness, _generations, _pointers, _receipts = _runtime(tmp_path)
     runtime = _gc_mutation_runtime(harness)
@@ -2002,26 +2244,25 @@ def test_gc_public_lifecycle_executes_reconciles_idempotently_and_purges_explici
     )
     assert purged.to_dict()["purged"] == ["gen-unused"]
 
-    retry_request = command.GcPurgeRequest.from_bytes(
-        canonical_json_bytes(
-            _gc_live_lifecycle_request(
-                runtime,
-                "purge",
-                expected_plan_sha256=cast(str, execute_value["plan_sha256"]),
-            )
-        )
-    )
     before_retry = (
         tree_snapshot(harness.state_root),
         metadata_snapshot(harness.state_root),
     )
+    monkeypatch.setattr(
+        command,
+        "_acquire_gc",
+        lambda *_args, **_kwargs: pytest.fail(
+            "exact terminal purge replay must not acquire a lease"
+        ),
+    )
     retried = command.purge_gc(
         runtime,
-        retry_request,
+        purge_request,
         occurred_at=START,
         monotonic_clock=time.monotonic_ns,
     )
     assert retried.to_dict()["purged"] == ["gen-unused"]
+    assert retried.request_sha256 == purge_request.request_sha256
     assert (
         tree_snapshot(harness.state_root),
         metadata_snapshot(harness.state_root),

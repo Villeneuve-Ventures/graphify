@@ -76,20 +76,22 @@ it loads installed authority before one canonical request, accepts all capacity
 and six protection classes explicitly, uses read-only coordination and two
 matching reachability snapshots, and emits an unfenced deterministic result.
 It creates no lease, fence, `GcPlan`, state, lock file, cleanup, quarantine,
-receipt, or log, including on failures. It neither infers capacity or protections nor
-changes the following fenced execution contract.
+receipt, or log, including on failures. It neither infers capacity nor protections
+and does not change the following fenced execution contract.
 
 The public lifecycle is explicit-only: `gc --execute --request-stdin`,
 `gc --reconcile --request-stdin`, and `gc --purge --request-stdin` each require
-a distinct canonical authorization action and a fresh trusted `GC` lease.
+a distinct canonical authorization action. Execute and first-time reconcile or
+purge mutation acquire a fresh trusted `GC` lease; reconcile with no intent and
+exact terminal purge replay return no-write results without acquiring one.
 Execute accepts an operator-approved SHA-256 of the exact canonical public
 preview-result bytes, recomputes that preview before leasing, then creates a
 fresh plan and requires its non-fence projection to equal the preview. The
-comparison includes identity revisions other than operation epoch, pointer
-revision, capacity-policy digest, candidates, and protected generation reasons;
-the newly allocated fence and operation epoch are excluded. Reconcile names no
-plan and touches only an existing GC intent, returning an explicit no-op when
-none exists. Purge requires an exact completed plan SHA-256 and remains
+comparison includes repo UUID, registry and active-source revisions, migration
+epoch, pointer revision, capacity-policy digest, candidates, and protected
+generation reasons. The newly allocated fence and operation epoch are excluded.
+Reconcile names no plan and touches only an existing GC intent, returning an
+explicit no-op when none exists. Purge requires an exact completed plan SHA-256 and remains
 idempotent while rechecking protections and locks. Public receipts are
 canonical and redacted; they never disclose authority, raw lifecycle documents,
 fences, owners, paths, timestamps, operation epochs, or raw errors.

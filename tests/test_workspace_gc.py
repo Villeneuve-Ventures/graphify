@@ -352,6 +352,7 @@ def test_private_generation_enumeration_rejects_unsafe_enumerated_children(
         child.symlink_to(target, target_is_directory=True)
     elif unsafe_child == "wrong-mode":
         child.mkdir(mode=0o755)
+        child.chmod(0o755)
     else:
         child.mkdir(mode=0o700)
         original_require_owner = DurableStateRoot._require_owner

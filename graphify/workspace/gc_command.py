@@ -994,7 +994,7 @@ def reconcile_gc(
         runtime,
         request,
         occurred_at=occurred_at,
-        monotonic_ns=started_ns,
+        monotonic_ns=monotonic_clock(),
         deadline_ns=deadline_ns,
     )
     primary: tuple[BaseException, TracebackType | None] | None = None
@@ -1064,7 +1064,7 @@ def purge_gc(
         runtime,
         request,
         occurred_at=occurred_at,
-        monotonic_ns=started_ns,
+        monotonic_ns=monotonic_clock(),
         deadline_ns=deadline_ns,
     )
     primary: tuple[BaseException, TracebackType | None] | None = None

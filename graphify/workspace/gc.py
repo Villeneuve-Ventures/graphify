@@ -345,6 +345,48 @@ class GcStore:
             raise GcPreviewAuthorityConflict(f"{name} is invalid")
         return value
 
+    def _verified_pointer_revision(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> int:
+        pointer = self.pointers.load(
+            repo_uuid,
+            allow_missing=True,
+            deadline_ns=deadline_ns,
+        )
+        if pointer is None:
+            return 0
+        self.pointers.verify_pointer(
+            pointer,
+            expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
+        )
+        return int(pointer.to_dict()["pointer_revision"])
+
+    def _read_purge_state_locked(
+        self,
+        repo_uuid: str,
+        plan_sha256: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GcPurgeState | None:
+        purge_data = self.state.read_optional_existing_bytes(
+            self._purge_path(repo_uuid, plan_sha256),
+            max_bytes=_MAX_GC_INTENT_BYTES,
+            deadline_ns=deadline_ns,
+        )
+        if purge_data is None:
+            return None
+        try:
+            purge = GcPurgeState.from_json(purge_data)
+        except Exception as exc:
+            raise GcError(f"GC purge record is invalid: {exc}") from exc
+        if purge.repo_uuid != repo_uuid or purge.plan_sha256 != plan_sha256:
+            raise GcError("GC purge record belongs to another workspace or plan")
+        return purge
+
     @classmethod
     def _check_preview_authority(
         cls,
@@ -651,6 +693,14 @@ class GcStore:
                 repo_uuid,
                 deadline_ns=deadline_ns,
             ):
+                if plan_sha256 is not None:
+                    purge = self._read_purge_state_locked(
+                        repo_uuid,
+                        plan_sha256,
+                        deadline_ns=deadline_ns,
+                    )
+                    if purge is not None:
+                        return purge
                 lease_state = self.leases.read_only_snapshot_locked(
                     registry,
                     repo_uuid,
@@ -671,19 +721,10 @@ class GcStore:
                     recover=False,
                     deadline_ns=deadline_ns,
                 )
-                pointer = self.pointers.load(
+                pointer_revision = self._verified_pointer_revision(
                     repo_uuid,
-                    allow_missing=True,
                     deadline_ns=deadline_ns,
                 )
-                pointer_revision = 0
-                if pointer is not None:
-                    self.pointers.verify_pointer(
-                        pointer,
-                        expected_repo_uuid=repo_uuid,
-                        deadline_ns=deadline_ns,
-                    )
-                    pointer_revision = int(pointer.to_dict()["pointer_revision"])
                 if pointer_revision != expected_pointer_revision:
                     raise GcPreviewAuthorityConflict(
                         "GC lifecycle pointer revision changed"
@@ -714,28 +755,13 @@ class GcStore:
                     raise GcRecoveryRequired(
                         "GC intent must be reconciled before purge"
                     )
-                purge_data = self.state.read_optional_existing_bytes(
-                    self._purge_path(repo_uuid, plan_sha256),
-                    max_bytes=_MAX_GC_INTENT_BYTES,
-                    deadline_ns=deadline_ns,
-                )
-                if purge_data is not None:
-                    try:
-                        purge = GcPurgeState.from_json(purge_data)
-                    except Exception as exc:
-                        raise GcError(f"GC purge record is invalid: {exc}") from exc
-                    if purge.repo_uuid != repo_uuid or purge.plan_sha256 != plan_sha256:
-                        raise GcError(
-                            "GC purge record belongs to another workspace or plan"
-                        )
-                    return purge
                 completion_data = self.state.read_optional_existing_bytes(
                     self._completion_path(repo_uuid, plan_sha256),
                     max_bytes=_MAX_GC_INTENT_BYTES,
                     deadline_ns=deadline_ns,
                 )
                 if completion_data is None:
-                    raise GcError("GC completion is unavailable")
+                    raise GcPlanStale("GC completion is unavailable for selected plan")
                 try:
                     completion = GcCompletionState.from_json(completion_data)
                 except Exception as exc:
@@ -956,14 +982,7 @@ class GcStore:
         ) as operation:
             self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             intent = self._read_intent(operation.repo_uuid)
-            pointer = self.pointers.load(operation.repo_uuid, allow_missing=True)
-            pointer_revision = 0
-            if pointer is not None:
-                self.pointers.verify_pointer(
-                    pointer,
-                    expected_repo_uuid=operation.repo_uuid,
-                )
-                pointer_revision = int(pointer.to_dict()["pointer_revision"])
+            pointer_revision = self._verified_pointer_revision(operation.repo_uuid)
             if (
                 expected_pointer_revision is not None
                 and pointer_revision != expected_pointer_revision
@@ -1042,14 +1061,7 @@ class GcStore:
             self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
             if self._read_intent(operation.repo_uuid) is not None:
                 raise GcRecoveryRequired("GC intent must be reconciled before purge")
-            pointer = self.pointers.load(operation.repo_uuid, allow_missing=True)
-            pointer_revision = 0
-            if pointer is not None:
-                self.pointers.verify_pointer(
-                    pointer,
-                    expected_repo_uuid=operation.repo_uuid,
-                )
-                pointer_revision = int(pointer.to_dict()["pointer_revision"])
+            pointer_revision = self._verified_pointer_revision(operation.repo_uuid)
             if (
                 expected_pointer_revision is not None
                 and pointer_revision != expected_pointer_revision
@@ -1057,17 +1069,15 @@ class GcStore:
                 raise GcPlanStale("GC purge pointer revision is stale")
             purge_relative = self._purge_path(operation.repo_uuid, plan_sha256)
             try:
-                purge_data = self.state.read_optional_existing_bytes(purge_relative)
-                purge = (
-                    None
-                    if purge_data is None
-                    else GcPurgeState.from_json(purge_data)
+                purge = self._read_purge_state_locked(
+                    operation.repo_uuid,
+                    plan_sha256,
                 )
+            except GcError:
+                raise
             except Exception as exc:
                 raise GcError(f"GC purge record is invalid: {exc}") from exc
             if purge is not None:
-                if purge.repo_uuid != operation.repo_uuid or purge.plan_sha256 != plan_sha256:
-                    raise GcError("GC purge record belongs to another workspace or plan")
                 return purge
             completion_relative = self._completion_path(operation.repo_uuid, plan_sha256)
             self.state.cleanup_atomic_temps(completion_relative.parent)

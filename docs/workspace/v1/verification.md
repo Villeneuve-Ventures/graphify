@@ -468,7 +468,7 @@ verification reviews.
 
 ## P5B2 public offline-GC CLI gates
 
-- the only accepted public argv is
+- the only accepted preview argv is
   `workspace gc --dry-run --request-stdin`; malformed, reordered, repeated, or
   extended argv exits 64 before authority loading or standard-input reads;
 - installed runtime authority loads and composes before one bounded canonical
@@ -507,8 +507,9 @@ verification reviews.
   and operation epoch;
 - reconcile is an explicit existing-intent operation, including an explicit
   `nothing_to_reconcile` no-op outcome; purge is an explicit idempotent
-  completed-plan operation selected by `expected_plan_sha256`, with pointer,
-  protection, and lock rechecks before deletion;
+  completed-plan operation selected by `expected_plan_sha256`. Exact terminal
+  replay returns its durable no-write result before mutation admission; a
+  first-time deletion performs pointer, protection, and lock rechecks;
 - phase success and failure result schemas prove canonical redacted public
   output and the 0/10/20 exit mapping. Receipts omit authorization, raw durable
   lifecycle documents, fence/owner data, paths, timestamps, operation epochs,
