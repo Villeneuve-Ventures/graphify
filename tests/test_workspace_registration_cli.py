@@ -33,6 +33,7 @@ from graphify.workspace.identity import (
     SourceAmbiguousError,
     SourceDiscoveryTimeout,
     UUIDCollisionError,
+    discover_source,
 )
 from graphify.workspace.persistence import InjectedFault, RuntimeCapabilities, UnsupportedRuntime
 from graphify.workspace.registry import RegistryStore, RevisionConflict
@@ -2324,6 +2325,88 @@ def test_identity_maintenance_rebind_and_rotate_obey_registry_policy_without_sou
     assert _active_source_state(store.load().to_dict()["workspaces"][0]) == active_before
     assert {root: tree_snapshot(root) for root in protected} == snapshots
     _assert_external_state_allowlist(inputs.state_root, includes_authority=False)
+
+
+def test_identity_maintenance_rotate_rejects_bound_locator_replaced_by_unrelated_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    enrolled = create_repo(tmp_path / "enrolled", REPO_UUID)
+    enrolled_source = discover_source(enrolled)
+    inputs = _inputs(tmp_path / "external-state")
+    assert (
+        _run_register(
+            monkeypatch,
+            cwd=enrolled,
+            action="enroll",
+            expected_revision=0,
+            inputs=inputs,
+        )[0]
+        == 0
+    )
+
+    replacement = create_repo(tmp_path / "replacement", REPO_UUID)
+    workspace_config = (replacement / ".graphify/workspace.toml").read_text(
+        encoding="utf-8"
+    )
+    _git(replacement, "checkout", "--quiet", "--orphan", "unrelated-root")
+    _git(replacement, "rm", "--quiet", "-rf", ".")
+    (replacement / ".graphify").mkdir()
+    (replacement / ".graphify/workspace.toml").write_text(
+        workspace_config,
+        encoding="utf-8",
+    )
+    (replacement / "README.md").write_text("unrelated replacement\n", encoding="utf-8")
+    _git(replacement, "add", ".")
+    _git(replacement, "commit", "--quiet", "-m", "unrelated root")
+    retired = tmp_path / "retired"
+    enrolled.rename(retired)
+    replacement.rename(enrolled)
+    replacement_source = discover_source(enrolled)
+    assert replacement_source.registry_source == enrolled_source.registry_source
+    assert not set(replacement_source.history_roots).intersection(
+        enrolled_source.history_roots
+    )
+    assert (
+        replacement_source.git_common_device,
+        replacement_source.git_common_inode,
+    ) != (
+        enrolled_source.git_common_device,
+        enrolled_source.git_common_inode,
+    )
+
+    state_root = inputs.state_root
+    registry_path = state_root / "registry.json"
+    workspace_path = state_root / "workspaces" / REPO_UUID / "workspace.json"
+    evidence_dir = state_root / "evidence"
+    before_registry = registry_path.read_bytes()
+    before_evidence = {
+        path.name: path.read_bytes() for path in sorted(evidence_dir.glob("*.json"))
+    }
+    before_workspace = workspace_path.read_bytes()
+    before_state = tree_snapshot(state_root)
+    before_sources = {path: tree_snapshot(path) for path in (retired, enrolled)}
+
+    exit_code, stdout, stderr = _run_register(
+        monkeypatch,
+        cwd=enrolled,
+        action="rotate",
+        expected_revision=1,
+        inputs=inputs,
+    )
+
+    assert exit_code == 10
+    assert stdout.getvalue() == ""
+    payload = _identity_maintenance_payload(stderr)
+    assert payload["reason_code"] == "source_not_bound"
+    assert payload["action_code"] == "enroll_or_adopt_source"
+    assert registry_path.read_bytes() == before_registry
+    assert {
+        path.name: path.read_bytes() for path in sorted(evidence_dir.glob("*.json"))
+    } == before_evidence
+    assert workspace_path.read_bytes() == before_workspace
+    assert tree_snapshot(state_root) == before_state
+    assert {path: tree_snapshot(path) for path in (retired, enrolled)} == before_sources
 
 
 def test_identity_maintenance_rebind_rejects_a_source_bound_to_another_uuid_without_writes(

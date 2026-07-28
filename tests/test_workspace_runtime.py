@@ -30,6 +30,7 @@ from graphify.workspace.identity import (
     OperatorAuthorization,
     SourceAmbiguousError,
     SourceDiscoveryError,
+    SourceIdentity,
     UUIDCollisionError,
     discover_source,
 )
@@ -129,6 +130,44 @@ def _commit_change(repo: Path, name: str) -> str:
     _run(repo, "add", f"{name}.txt")
     _run(repo, "commit", "--quiet", "-m", name)
     return _run(repo, "rev-parse", "HEAD")
+
+
+def _replace_bound_locator_with_unrelated_history(
+    enrolled: Path,
+    enrolled_source: SourceIdentity,
+    tmp_path: Path,
+) -> tuple[Path, SourceIdentity]:
+    replacement = _create_repo(tmp_path / "replacement", REPO_UUID, marker="replacement")
+    workspace_config = (replacement / ".graphify/workspace.toml").read_text(
+        encoding="utf-8"
+    )
+    _run(replacement, "checkout", "--quiet", "--orphan", "unrelated-root")
+    _run(replacement, "rm", "--quiet", "-rf", ".")
+    (replacement / ".graphify").mkdir()
+    (replacement / ".graphify/workspace.toml").write_text(
+        workspace_config,
+        encoding="utf-8",
+    )
+    (replacement / "README.md").write_text("unrelated replacement\n", encoding="utf-8")
+    _run(replacement, "add", ".")
+    _run(replacement, "commit", "--quiet", "-m", "unrelated root")
+
+    retired = tmp_path / "retired"
+    enrolled.rename(retired)
+    replacement.rename(enrolled)
+    replacement_source = discover_source(enrolled)
+    assert replacement_source.registry_source == enrolled_source.registry_source
+    assert not set(replacement_source.history_roots).intersection(
+        enrolled_source.history_roots
+    )
+    assert (
+        replacement_source.git_common_device,
+        replacement_source.git_common_inode,
+    ) != (
+        enrolled_source.git_common_device,
+        enrolled_source.git_common_inode,
+    )
+    return retired, replacement_source
 
 
 def _authorization(action: IdentityAction, nonce: str) -> OperatorAuthorization:
@@ -1010,7 +1049,7 @@ def test_uuid_collision_adoption_and_enrollment_evidence_rotation(tmp_path: Path
     }
 
     rotated = store.rotate_enrollment_evidence(
-        discover_source(original),
+        discover_source(clone),
         _authorization(IdentityAction.ROTATE, "rotate-current-evidence"),
         expected_revision=3,
     )
@@ -1023,10 +1062,146 @@ def test_uuid_collision_adoption_and_enrollment_evidence_rotation(tmp_path: Path
         immutable_digest,
         current_digest,
     }
-    assert (
-        store.read_evidence(rotated_entry["uuid_enrollment"]["current_evidence_sha256"])["action"]
-        == "ROTATE"
+    rotation_evidence = store.read_evidence(
+        rotated_entry["uuid_enrollment"]["current_evidence_sha256"]
     )
+    assert rotation_evidence["action"] == "ROTATE"
+    assert rotation_evidence["source"]["path"] == str(clone.resolve())
+
+
+def test_rotate_rejects_bound_locator_replaced_by_unrelated_history_without_writes(
+    tmp_path: Path,
+) -> None:
+    enrolled = _create_repo(tmp_path / "enrolled", REPO_UUID, marker="enrolled")
+    enrolled_source = discover_source(enrolled)
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        enrolled_source,
+        _authorization(IdentityAction.ENROLL, "replacement-enroll"),
+        expected_revision=0,
+    )
+    retired, replacement_source = _replace_bound_locator_with_unrelated_history(
+        enrolled,
+        enrolled_source,
+        tmp_path,
+    )
+    registry_path = state_root / "registry.json"
+    workspace_path = state_root / "workspaces" / REPO_UUID / "workspace.json"
+    evidence_dir = state_root / "evidence"
+    before_registry = registry_path.read_bytes()
+    before_evidence = {
+        path.name: path.read_bytes() for path in sorted(evidence_dir.glob("*.json"))
+    }
+    before_workspace = workspace_path.read_bytes()
+    before_state = _tree_snapshot(state_root)
+    before_sources = {path: _tree_snapshot(path) for path in (retired, enrolled)}
+
+    with pytest.raises(SourceAmbiguousError, match="source_ambiguous"):
+        store.rotate_enrollment_evidence(
+            replacement_source,
+            _authorization(IdentityAction.ROTATE, "reject-replacement"),
+            expected_revision=1,
+        )
+
+    assert registry_path.read_bytes() == before_registry
+    assert {
+        path.name: path.read_bytes() for path in sorted(evidence_dir.glob("*.json"))
+    } == before_evidence
+    assert workspace_path.read_bytes() == before_workspace
+    assert _tree_snapshot(state_root) == before_state
+    assert {path: _tree_snapshot(path) for path in (retired, enrolled)} == before_sources
+
+
+def test_resolve_active_source_rejects_bound_locator_replaced_by_unrelated_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enrolled = _create_repo(tmp_path / "enrolled", REPO_UUID, marker="enrolled")
+    enrolled_source = discover_source(enrolled)
+    state_root = tmp_path / "state"
+    store = RegistryStore(state_root, capabilities=SUPPORTED)
+    store.enroll(
+        enrolled_source,
+        _authorization(IdentityAction.ENROLL, "replacement-enroll"),
+        expected_revision=0,
+    )
+    retired, _replacement_source = _replace_bound_locator_with_unrelated_history(
+        enrolled,
+        enrolled_source,
+        tmp_path,
+    )
+    before_state = _tree_snapshot(state_root)
+    before_sources = {path: _tree_snapshot(path) for path in (retired, enrolled)}
+    read_evidence = store.read_evidence
+    evidence_reads = 0
+
+    def counted_read_evidence(digest: str) -> dict[str, Any]:
+        nonlocal evidence_reads
+        evidence_reads += 1
+        return read_evidence(digest)
+
+    monkeypatch.setattr(store, "read_evidence", counted_read_evidence)
+    store.load()
+    registry_load_reads = evidence_reads
+    evidence_reads = 0
+
+    with pytest.raises(SourceAmbiguousError, match="source_ambiguous"):
+        store.resolve_active_source(REPO_UUID)
+
+    assert evidence_reads == registry_load_reads + 1
+    assert _tree_snapshot(state_root) == before_state
+    assert {path: _tree_snapshot(path) for path in (retired, enrolled)} == before_sources
+
+
+def test_rotate_allows_enrolled_common_directory_after_history_rewrite(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    enrolled_source = discover_source(repo)
+    store = RegistryStore(tmp_path / "state", capabilities=SUPPORTED)
+    enrolled = store.enroll(
+        enrolled_source,
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    enrolled_entry = _workspace_entry(enrolled)
+    rewritten_head = _run(
+        repo,
+        "commit-tree",
+        _run(repo, "write-tree"),
+        "-m",
+        "rewritten-root",
+    )
+    _run(repo, "update-ref", "HEAD", rewritten_head)
+    rewritten_source = discover_source(repo)
+    assert (
+        rewritten_source.git_common_device,
+        rewritten_source.git_common_inode,
+    ) == (
+        enrolled_source.git_common_device,
+        enrolled_source.git_common_inode,
+    )
+    assert not set(enrolled_source.history_roots).intersection(
+        rewritten_source.history_roots
+    )
+
+    rotated = store.rotate_enrollment_evidence(
+        rewritten_source,
+        _authorization(IdentityAction.ROTATE, "rotate-rewritten-history"),
+        expected_revision=1,
+    )
+
+    rotated_entry = _workspace_entry(rotated)
+    assert rotated.to_dict()["revision"] == 2
+    assert rotated_entry["uuid_enrollment"]["immutable_evidence_sha256"] == (
+        enrolled_entry["uuid_enrollment"]["immutable_evidence_sha256"]
+    )
+    evidence = store.read_evidence(
+        rotated_entry["uuid_enrollment"]["current_evidence_sha256"]
+    )
+    assert evidence["action"] == "ROTATE"
+    assert evidence["history_roots"] == list(rewritten_source.history_roots)
 
 
 def test_same_git_common_directory_cannot_be_reenrolled_under_a_new_uuid(
@@ -1312,6 +1487,9 @@ def test_rebind_allows_enrolled_common_directory_after_history_rewrite(
     assert activation.registry.to_dict()["revision"] == 3
     assert activated_entry["active_source_revision"] == 2
     assert activated_entry["active_source"] == rewritten_source.registry_source
+    assert store.resolve_active_source(REPO_UUID).registry_source == (
+        rewritten_source.registry_source
+    )
 
 
 def test_rebind_aliases_and_active_source_activation_cas_fail_closed(tmp_path: Path) -> None:

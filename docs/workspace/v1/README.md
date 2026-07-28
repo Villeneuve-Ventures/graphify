@@ -56,8 +56,10 @@ The narrow identity-maintenance slice extends the same argv family with
 `graphify workspace register rotate`. Both require the same explicit UUID,
 expected registry revision, installed authority, Git-top-level source proof,
 and bounded matching authorization. Rebind delegates shared-history or enrolled
-Git-common-directory policy to `RegistryStore.rebind()`; rotate delegates the
-explicitly-bound-source check to `RegistryStore.rotate_enrollment_evidence()`.
+Git-common-directory policy to `RegistryStore.rebind()`; rotate requires both an
+explicit binding and continuity with the immutable enrollment history root or
+enrolled Git common-directory identity before evidence or registry persistence.
+Active-source resolution independently repeats that immutable continuity check.
 Rebind rejects a source identity persisted under a different UUID before
 new source or identity-action evidence is persisted or the requested registry
 mutation is committed. Neither operation changes `active_source` or
@@ -289,7 +291,7 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
 | Active-source activation | Unnumbered P5B2 activation (`COMPLETE`) | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, an immutable-enrollment continuity check, and one redacted CLI-v1 receipt. |
 | Exact last-good rollback | P5B2 exact-last-good rollback (`COMPLETE`) | Accepted receipt: [`P5B2 exact-last-good rollback`](receipts/p5b2-exact-last-good-rollback.md). `workspace rollback --request-stdin` exposes one fenced move to the visible pointer's exact `last_good` reference with an explicit canonical request and redacted receipt. It does not authorize arbitrary historical selection or any later command. |
-| Retained-source identity continuity | P5B2 registry hardening (`DEFERRED`) | `rotate_enrollment_evidence()` accepts an explicitly bound locator without independently re-proving immutable enrollment continuity, while `resolve_active_source()` checks rediscovery against the recorded locator rather than immutable enrollment evidence. Both nonclaims are deferred to one focused follow-up and do not reopen or block accepted activation. |
+| Retained-source identity continuity | P5B2 registry hardening (`DEFERRED`) | `rotate_enrollment_evidence()` and `resolve_active_source()` now independently require a shared immutable enrollment history root or the enrolled Git common-directory identity. Rejected rotation precedes source evidence, identity-action evidence, and registry persistence. This implementation does not accept its own receipt or change the ledger status. |
 | Remaining workspace commands | Remaining P5B2/P5C | Migrate, GC, repair, every other mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |

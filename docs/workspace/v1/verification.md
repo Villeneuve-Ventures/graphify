@@ -212,8 +212,12 @@ output remains ignored and must not widen the P1 product diff.
   revision CAS remain the existing registration path;
 - the CLI calls `RegistryStore.rebind()` and
   `RegistryStore.rotate_enrollment_evidence()` directly: shared enrollment
-  history or the enrolled Git common directory is required for rebind, and an
-  explicitly bound source is required for rotation;
+  history or the enrolled Git common directory is required for rebind, while
+  rotation requires both an explicit binding and that same immutable enrollment
+  continuity; `resolve_active_source()` independently enforces the same rule;
+- rotation rejects a locator-compatible unrelated replacement before source
+  evidence, identity-action evidence, or a registry revision is persisted, with
+  registry, evidence, workspace, and source checkout bytes unchanged;
 - neither successful operation changes `active_source`,
   `active_source_revision`, or active-source evidence; recursive source and Git
   snapshots remain byte-identical, and durable writes stay within the existing
