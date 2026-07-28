@@ -193,13 +193,21 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
             f"gc_{operation}_request_invalid",
             f"provide_valid_gc_{operation}_request",
         )
-    if isinstance(error, (LeaseBusy, LockTimeout, GcCoordinationUnavailable)):
+    if isinstance(error, (LeaseBusy, LockTimeout)):
         return GcLifecycleFailure(
             operation,
             "conflict",
             EXIT_DEGRADED,
             "gc_lease_busy",
             f"retry_workspace_gc_{operation}",
+        )
+    if isinstance(error, GcCoordinationUnavailable):
+        return GcLifecycleFailure(
+            operation,
+            "invalid",
+            EXIT_INVALID,
+            "gc_coordination_unavailable",
+            "run_workspace_repair",
         )
     if isinstance(
         error,
@@ -223,6 +231,14 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
             f"refresh_gc_{operation}_request",
         )
     if isinstance(error, GcRecoveryRequired):
+        if operation == "reconcile":
+            return GcLifecycleFailure(
+                operation,
+                "invalid",
+                EXIT_INVALID,
+                "gc_recovery_required",
+                "run_workspace_repair",
+            )
         return GcLifecycleFailure(
             operation,
             "conflict",
@@ -243,9 +259,9 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
         )
     if isinstance(error, CommitUnknown):
         action = (
-            "run_workspace_gc_reconcile"
-            if operation in {"execute", "reconcile"}
-            else "run_workspace_doctor"
+            "retry_workspace_gc_purge"
+            if operation == "purge"
+            else "run_workspace_gc_reconcile"
         )
         return GcLifecycleFailure(
             operation,
@@ -870,7 +886,10 @@ def _release_grant(
 ) -> None:
     try:
         runtime.leases.release(grant)
-    except (CommitUnknown, InjectedFault):
+    except CommitUnknown:
+        if primary is None and operation == "purge":
+            raise
+    except InjectedFault:
         if primary is None:
             raise
     except Exception as exc:

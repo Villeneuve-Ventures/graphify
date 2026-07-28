@@ -498,7 +498,8 @@ verification reviews.
 - `gc --execute --request-stdin`, `gc --reconcile --request-stdin`, and
   `gc --purge --request-stdin` accept no alternative or reordered argv and
   require their respective `GC_EXECUTE`, `GC_RECONCILE`, and `GC_PURGE`
-  authorizations before standard-input reads;
+  authorizations after one bounded standard-input request is read and parsed,
+  before any lease acquisition or mutation;
 - execute recomputes the frozen canonical preview result and verifies the
   request's SHA-256 against those exact bytes before acquiring a fresh trusted
   `GC` lease. A fresh plan must match the approved preview on repo UUID,

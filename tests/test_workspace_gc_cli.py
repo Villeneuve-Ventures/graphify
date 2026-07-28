@@ -28,6 +28,7 @@ from graphify.workspace.composition import (
 )
 from graphify.workspace.contracts import GcIntentState, JsonValue, canonical_json_bytes
 from graphify.workspace.gc import (
+    GcCoordinationUnavailable,
     GcError,
     GcPlanStale,
     GcPreviewAuthorityConflict,
@@ -1649,6 +1650,46 @@ def test_gc_lifecycle_failures_are_stable_redacted_and_schema_valid(
 
 
 @pytest.mark.parametrize(
+    ("operation", "error", "expected"),
+    [
+        (
+            "execute",
+            GcCoordinationUnavailable("/private/coordination provider-secret"),
+            ("invalid", 20, "gc_coordination_unavailable", "run_workspace_repair"),
+        ),
+        (
+            "execute",
+            GcRecoveryRequired("/private/intent provider-secret"),
+            ("conflict", 10, "gc_recovery_required", "run_workspace_gc_reconcile"),
+        ),
+        (
+            "reconcile",
+            GcRecoveryRequired("/private/intent provider-secret"),
+            ("invalid", 20, "gc_recovery_required", "run_workspace_repair"),
+        ),
+        (
+            "purge",
+            CommitUnknown("/private/purge provider-secret"),
+            ("invalid", 20, "commit_unknown", "retry_workspace_gc_purge"),
+        ),
+    ],
+)
+def test_gc_lifecycle_recovery_actions_match_the_failure_boundary(
+    operation: str,
+    error: Exception,
+    expected: tuple[str, int, str, str],
+) -> None:
+    value = _gc_command().classify_failure(error, operation).to_dict()
+
+    assert (
+        value["state"],
+        value["exit_code"],
+        value["reason_code"],
+        value["action_code"],
+    ) == expected
+
+
+@pytest.mark.parametrize(
     ("operation", "result_loader", "state", "operation_field"),
     [
         ("execute", "load_gc_execute_result_schema", "quarantined", "quarantined"),
@@ -2582,6 +2623,154 @@ def test_gc_public_lifecycle_single_disposable_proof_boundary(
         label: (tree_snapshot(root), metadata_snapshot(root))
         for label, root in outside_roots.items()
     } == outside_before
+
+
+def test_gc_execute_preserves_receipt_across_release_commit_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    request = _approved_execute_request(runtime)
+    original_release = runtime.leases.release
+
+    def release_then_unknown(grant: Any) -> Never:
+        original_release(grant)
+        raise CommitUnknown("GC execute lease release acknowledgement was lost")
+
+    monkeypatch.setattr(runtime.leases, "release", release_then_unknown)
+
+    result = command.execute_gc(
+        runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    )
+
+    value = result.to_dict()
+    assert value["state"] == "quarantined"
+    assert value["quarantined"] == ["gen-unused"]
+    assert not runtime.gc.state.path(runtime.gc._intent_path(REPO_UUID)).exists()
+    plan_sha256 = cast(str, value["plan_sha256"])
+    purge_runtime = _gc_mutation_runtime(harness)
+    purge_request = command.GcPurgeRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(
+                purge_runtime,
+                "purge",
+                expected_plan_sha256=plan_sha256,
+            )
+        )
+    )
+    assert command.purge_gc(
+        purge_runtime,
+        purge_request,
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    ).to_dict()["purged"] == ["gen-unused"]
+
+
+def test_gc_reconcile_preserves_receipt_across_release_commit_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    interrupted = False
+
+    def leave_durable_intent(event: str) -> None:
+        nonlocal interrupted
+        if event == "gc:intent_durable" and not interrupted:
+            interrupted = True
+            raise InjectedFault(event)
+
+    interrupted_runtime = _gc_mutation_runtime(
+        harness,
+        fault_hook=leave_durable_intent,
+    )
+    with pytest.raises((CommitUnknown, InjectedFault)):
+        _gc_command().execute_gc(
+            interrupted_runtime,
+            _approved_execute_request(interrupted_runtime),
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    assert interrupted is True
+
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    request = command.GcReconcileRequest.from_bytes(
+        canonical_json_bytes(_gc_live_lifecycle_request(runtime, "reconcile"))
+    )
+    original_release = runtime.leases.release
+
+    def release_then_unknown(grant: Any) -> Never:
+        original_release(grant)
+        raise CommitUnknown("GC reconcile lease release acknowledgement was lost")
+
+    monkeypatch.setattr(runtime.leases, "release", release_then_unknown)
+
+    result = command.reconcile_gc(
+        runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    )
+
+    value = result.to_dict()
+    assert value["state"] == "reconciled"
+    assert value["quarantined"] == ["gen-unused"]
+    assert not runtime.gc.state.path(runtime.gc._intent_path(REPO_UUID)).exists()
+
+
+def test_gc_purge_release_commit_unknown_requests_exact_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    executed = command.execute_gc(
+        runtime,
+        _approved_execute_request(runtime),
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    )
+    request = command.GcPurgeRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(
+                runtime,
+                "purge",
+                expected_plan_sha256=cast(str, executed.to_dict()["plan_sha256"]),
+            )
+        )
+    )
+    original_release = runtime.leases.release
+
+    def release_then_unknown(grant: Any) -> Never:
+        original_release(grant)
+        raise CommitUnknown("GC purge lease release acknowledgement was lost")
+
+    monkeypatch.setattr(runtime.leases, "release", release_then_unknown)
+
+    with pytest.raises(CommitUnknown) as raised:
+        command.purge_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+
+    failure = command.classify_failure(raised.value, "purge").to_dict()
+    assert failure["exit_code"] == 20
+    assert failure["reason_code"] == "commit_unknown"
+    assert failure["action_code"] == "retry_workspace_gc_purge"
+    assert command.purge_gc(
+        runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    ).to_dict()["purged"] == ["gen-unused"]
 
 
 @pytest.mark.parametrize("phase", GC_RECOVERY_PHASES)
