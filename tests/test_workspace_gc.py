@@ -356,6 +356,8 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     assert all(orphan.read_bytes() == b"orphan" for orphan in orphans)
     assert plan.candidates == ("gen-unused",)
     assert "gen-current" in dict(plan.protected)
+    assert plan.fence_token == int(gc_grant.lease.to_dict()["fence_token"])
+    assert "fence_token" in plan.to_dict()
 
     completion = gc.execute(
         gc_grant,
@@ -668,6 +670,37 @@ def test_gc_plan_rejects_unsafe_state_directory_chains_without_mutation(
     if external is not None:
         assert tree_snapshot(external) == before_external_tree
         assert metadata_snapshot(external) == before_external_metadata
+
+
+def test_gc_plan_preserves_legacy_error_for_missing_candidate_lock(
+    tmp_path: Path,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    lock = generations.state.path(generations._lock(REPO_UUID, "gen-unused"))
+    lock.unlink()
+    before_tree = tree_snapshot(harness.state_root)
+    before_metadata = metadata_snapshot(harness.state_root)
+
+    with pytest.raises(GcError) as raised:
+        gc.plan(
+            gc_grant,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            monotonic_ns=30_001,
+        )
+
+    assert type(raised.value) is GcError
+    assert raised.value.code == "gc_error"
+    assert tree_snapshot(harness.state_root) == before_tree
+    assert metadata_snapshot(harness.state_root) == before_metadata
 
 
 @pytest.mark.parametrize(

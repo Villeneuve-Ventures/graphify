@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/gc-preview-result.schema.json",
+  "title": "Graphify workspace GC preview result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cli_contract_version",
+    "contract",
+    "decision",
+    "exit_code",
+    "observation_boundary",
+    "reason_code",
+    "schema_version",
+    "state"
+  ],
+  "properties": {
+    "action_code": {"type": "string"},
+    "candidates": {"$ref": "#/$defs/generation_ids"},
+    "capacity_policy_sha256": {"$ref": "#/$defs/digest"},
+    "cli_contract_version": {"const": 1},
+    "contract": {"const": "graphify.workspace.gc_preview_result"},
+    "decision": {"enum": ["preview", "withhold"]},
+    "exit_code": {"enum": [0, 10, 20]},
+    "observation_boundary": {"enum": ["locked_double_snapshot", "not_observed", "unstable"]},
+    "observed": {"$ref": "#/$defs/observed"},
+    "protected": {"$ref": "#/$defs/protected"},
+    "reason_code": {"type": "string"},
+    "repo_uuid": {"$ref": "#/$defs/uuid"},
+    "schema_version": {"const": 1},
+    "state": {"enum": ["previewed", "conflict", "withheld", "invalid", "unsupported"]}
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/success"},
+    {"$ref": "#/$defs/failure_authority_conflict"},
+    {"$ref": "#/$defs/failure_observation_unstable"},
+    {"$ref": "#/$defs/failure_coordination_contended"},
+    {"$ref": "#/$defs/failure_coordination_unavailable"},
+    {"$ref": "#/$defs/failure_recovery_required"},
+    {"$ref": "#/$defs/failure_state_corrupt"},
+    {"$ref": "#/$defs/failure_request_invalid"},
+    {"$ref": "#/$defs/failure_runtime_authority_missing"},
+    {"$ref": "#/$defs/failure_runtime_authority_invalid"},
+    {"$ref": "#/$defs/failure_unsafe_state_path"},
+    {"$ref": "#/$defs/failure_preview_failed"},
+    {"$ref": "#/$defs/failure_result_invalid"},
+    {"$ref": "#/$defs/failure_request_unsupported"},
+    {"$ref": "#/$defs/failure_runtime_authority_unsupported"},
+    {"$ref": "#/$defs/failure_unsupported_compatibility"},
+    {"$ref": "#/$defs/failure_unsupported_runtime"}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "generation_id": {"type": "string", "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"},
+    "generation_ids": {
+      "type": "array",
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/generation_id"},
+      "description": "Generation IDs are emitted in canonical sorted order."
+    },
+    "nonnegative_integer": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "positive_integer": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "observed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active_source_revision", "migration_epoch", "operation_epoch", "pointer_revision", "registry_revision"],
+      "properties": {
+        "active_source_revision": {"$ref": "#/$defs/positive_integer"},
+        "migration_epoch": {"$ref": "#/$defs/nonnegative_integer"},
+        "operation_epoch": {"$ref": "#/$defs/nonnegative_integer"},
+        "pointer_revision": {"$ref": "#/$defs/nonnegative_integer"},
+        "registry_revision": {"$ref": "#/$defs/positive_integer"}
+      }
+    },
+    "protected": {
+      "type": "array",
+      "maxItems": 4096,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["generation_id", "reasons"],
+        "properties": {
+          "generation_id": {"$ref": "#/$defs/generation_id"},
+          "reasons": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"$ref": "#/$defs/protection_reason"},
+            "description": "Reasons are emitted in canonical sorted order."
+          }
+        }
+      }
+    },
+    "protection_reason": {
+      "enum": [
+        "migration_source", "rollback_source", "active_lease", "fixture", "proof",
+        "rollback_artifact", "visible_current", "visible_last_good", "prior_current",
+        "prior_last_good", "shared_lock"
+      ]
+    },
+    "redacted_failure": {
+      "not": {
+        "anyOf": [
+          {"required": ["repo_uuid"]}, {"required": ["observed"]},
+          {"required": ["capacity_policy_sha256"]}, {"required": ["candidates"]},
+          {"required": ["protected"]}
+        ]
+      }
+    },
+    "success": {
+      "properties": {
+        "decision": {"const": "preview"}, "exit_code": {"const": 0},
+        "observation_boundary": {"const": "locked_double_snapshot"},
+        "reason_code": {"const": "preview_ready"}, "state": {"const": "previewed"}
+      },
+      "required": ["repo_uuid", "observed", "capacity_policy_sha256", "candidates", "protected"],
+      "not": {"required": ["action_code"]}
+    },
+    "uuid": {
+      "type": "string", "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "failure_authority_conflict": {"$ref": "#/$defs/failure_authority_conflict_body"},
+    "failure_observation_unstable": {"$ref": "#/$defs/failure_observation_unstable_body"},
+    "failure_coordination_contended": {"$ref": "#/$defs/failure_coordination_contended_body"},
+    "failure_coordination_unavailable": {"$ref": "#/$defs/failure_coordination_unavailable_body"},
+    "failure_recovery_required": {"$ref": "#/$defs/failure_recovery_required_body"},
+    "failure_state_corrupt": {"$ref": "#/$defs/failure_state_corrupt_body"},
+    "failure_request_invalid": {"$ref": "#/$defs/failure_request_invalid_body"},
+    "failure_runtime_authority_missing": {"$ref": "#/$defs/failure_runtime_authority_missing_body"},
+    "failure_runtime_authority_invalid": {"$ref": "#/$defs/failure_runtime_authority_invalid_body"},
+    "failure_unsafe_state_path": {"$ref": "#/$defs/failure_unsafe_state_path_body"},
+    "failure_preview_failed": {"$ref": "#/$defs/failure_preview_failed_body"},
+    "failure_result_invalid": {"$ref": "#/$defs/failure_result_invalid_body"},
+    "failure_request_unsupported": {"$ref": "#/$defs/failure_request_unsupported_body"},
+    "failure_runtime_authority_unsupported": {"$ref": "#/$defs/failure_runtime_authority_unsupported_body"},
+    "failure_unsupported_compatibility": {"$ref": "#/$defs/failure_unsupported_compatibility_body"},
+    "failure_unsupported_runtime": {"$ref": "#/$defs/failure_unsupported_runtime_body"},
+    "failure_authority_conflict_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "refresh_gc_request"}, "decision": {"const": "withhold"}, "exit_code": {"const": 10}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_authority_conflict"}, "state": {"const": "conflict"}}, "required": ["action_code"]}]},
+    "failure_observation_unstable_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "retry_gc_preview"}, "decision": {"const": "withhold"}, "exit_code": {"const": 10}, "observation_boundary": {"const": "unstable"}, "reason_code": {"const": "gc_observation_unstable"}, "state": {"const": "withheld"}}, "required": ["action_code"]}]},
+    "failure_coordination_contended_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "retry_gc_preview"}, "decision": {"const": "withhold"}, "exit_code": {"const": 10}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_coordination_contended"}, "state": {"const": "withheld"}}, "required": ["action_code"]}]},
+    "failure_coordination_unavailable_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "run_workspace_repair"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_coordination_unavailable"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_recovery_required_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "run_workspace_repair"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_recovery_required"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_state_corrupt_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "run_workspace_repair"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "state_corrupt"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_request_invalid_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "provide_valid_gc_request"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_request_invalid"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_runtime_authority_missing_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "install_candidate_authority"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "runtime_authority_missing"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_runtime_authority_invalid_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "install_candidate_authority"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "runtime_authority_invalid"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_unsafe_state_path_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "configure_safe_state_root"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "unsafe_state_path"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_preview_failed_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "run_workspace_doctor"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_preview_failed"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_result_invalid_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "run_workspace_doctor"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_result_invalid"}, "state": {"const": "invalid"}}, "required": ["action_code"]}]},
+    "failure_request_unsupported_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "use_supported_gc_contract"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "gc_request_unsupported"}, "state": {"const": "unsupported"}}, "required": ["action_code"]}]},
+    "failure_runtime_authority_unsupported_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "install_supported_candidate"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "runtime_authority_unsupported"}, "state": {"const": "unsupported"}}, "required": ["action_code"]}]},
+    "failure_unsupported_compatibility_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "install_supported_candidate"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "unsupported_compatibility"}, "state": {"const": "unsupported"}}, "required": ["action_code"]}]},
+    "failure_unsupported_runtime_body": {"allOf": [{"$ref": "#/$defs/redacted_failure"}, {"properties": {"action_code": {"const": "use_supported_runtime"}, "decision": {"const": "withhold"}, "exit_code": {"const": 20}, "observation_boundary": {"const": "not_observed"}, "reason_code": {"const": "unsupported_runtime"}, "state": {"const": "unsupported"}}, "required": ["action_code"]}]}
+  }
+}

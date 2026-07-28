@@ -37,6 +37,7 @@ WORKSPACE_USAGE = (
     "       graphify workspace sync --code-only --request-stdin\n"
     "       graphify workspace query --request-stdin\n"
     "       graphify workspace rollback --request-stdin\n"
+    "       graphify workspace gc --dry-run --request-stdin\n"
     "       graphify workspace activate --repo-uuid UUID "
     "--expected-registry-revision N --expected-active-source-revision N "
     "--expected-operation-epoch N --expected-migration-epoch N "

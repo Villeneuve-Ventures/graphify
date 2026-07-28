@@ -357,6 +357,8 @@ def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
         "graphify/workspace/schemas/v1/common.schema.json",
         "graphify/workspace/schemas/cli/v1/rollback-request.schema.json",
         "graphify/workspace/schemas/cli/v1/rollback-receipt.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-preview-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-preview-result.schema.json",
     }
     missing = required - names
     if missing:

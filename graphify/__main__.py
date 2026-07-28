@@ -532,6 +532,7 @@ def _run_cli() -> None:
         ("workspace", "register"),
         ("workspace", "sync"),
         ("workspace", "query"),
+        ("workspace", "gc"),
         ("workspace", "activate"),
         ("workspace", "rollback"),
     }
@@ -555,6 +556,8 @@ def _run_cli() -> None:
         print("                            build and promote one structural generation")
         print("  workspace query --request-stdin")
         print("                            query one observed-current certified generation")
+        print("  workspace gc --dry-run --request-stdin")
+        print("                            preview offline GC reachability without writes")
         print("  workspace activate --repo-uuid UUID ...")
         print("                            activate one identity-bound workspace source")
         print("  workspace rollback --request-stdin")
@@ -753,6 +756,7 @@ def _run_cli() -> None:
     bounded_workspace_transport = tuple(sys.argv[1:3]) in {
         ("workspace", "sync"),
         ("workspace", "query"),
+        ("workspace", "gc"),
         ("workspace", "activate"),
         ("workspace", "rollback"),
     }

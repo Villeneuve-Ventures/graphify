@@ -466,6 +466,35 @@ generation, and freshness suites. P5A also requires the repository gates above,
 exact-head CI, a current Graphify graph, and independent code, architecture, and
 verification reviews.
 
+## P5B2 bounded GC preview CLI gates
+
+- the only accepted public argv is
+  `workspace gc --dry-run --request-stdin`; malformed, reordered, repeated, or
+  extended argv exits 64 before authority loading or standard-input reads;
+- installed runtime authority loads and composes before one bounded canonical
+  request is read. The CLI-v1 request and result schemas freeze every field;
+  the request requires the explicit repo UUID, all five expected revisions,
+  timeout, complete `CapacityPolicy`, and all six `GcProtection` classes;
+- the runtime receives only those explicit values, performs read-only
+  registry/workspace coordination and generation-lock probes, and accepts a
+  preview only after two matching reachability snapshots. It creates no
+  `LeaseGrant`, fence, or executable `GcPlan`;
+- success emits one deterministic unfenced canonical preview result with the
+  candidates, protected generations and stable reasons, observed revisions, and
+  capacity-policy SHA-256. Stable conflict, withholding, invalid, unsupported,
+  corrupt, recovery, and contention failures are redacted and use the frozen
+  10/20 exit interpretation;
+- command-level recursive bytes/metadata snapshots plus a write-rejecting
+  durable-state syscall seam prove zero writes across success and concrete
+  failure families over source, Git, external state, `HOME`, `XDG_STATE_HOME`,
+  and `CODEX_HOME`, including no lease, recovery, temporary cleanup, directory,
+  mode, lock-file, registry, intent, quarantine, receipt, or query-log mutation;
+  and
+- focused tests cover request/result schemas, canonicalization and bounds,
+  redaction, determinism, explicit-capacity/protection rejection, stale CAS,
+  observation instability, coordination contention, and unchanged fenced P3
+  `GcStore.plan()`, `execute()`, `reconcile()`, and `purge()` behavior.
+
 ## P3 runtime gates
 
 - capacity limits and the filesystem reserve fail before allocation mutation,
@@ -499,7 +528,7 @@ verification reviews.
   verified references;
 - shared readers open retained locks read-only, perform no durable write, and
   exclude GC's exclusive counterpart;
-- offline GC proves a no-write dry run, writes a durable intent, rechecks under
+- fenced offline GC proves a no-write dry run, writes a durable intent, rechecks under
   lexical generation locks, quarantines with both directories synced, records
   completion, reconciles `commit_unknown`, and purges only by a separate
   explicit operation;
