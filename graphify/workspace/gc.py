@@ -10,6 +10,7 @@ from typing import Any, cast
 from graphify.workspace.contracts import (
     CapacityPolicy,
     ContractError,
+    GcCompletionIndexState,
     GcCompletionState,
     GcIntentState,
     GcPurgeState,
@@ -250,6 +251,15 @@ class GcStore:
         return cls._workspace(repo_uuid) / "gc" / "completions" / f"{plan_sha256}.json"
 
     @classmethod
+    def _operation_completion_path(cls, repo_uuid: str, operation_epoch: int) -> Path:
+        return (
+            cls._workspace(repo_uuid)
+            / "gc"
+            / "operation-completions"
+            / f"{operation_epoch}.json"
+        )
+
+    @classmethod
     def _purge_path(cls, repo_uuid: str, plan_sha256: str) -> Path:
         return cls._workspace(repo_uuid) / "gc" / "purges" / f"{plan_sha256}.json"
 
@@ -386,6 +396,60 @@ class GcStore:
         if purge.repo_uuid != repo_uuid or purge.plan_sha256 != plan_sha256:
             raise GcError("GC purge record belongs to another workspace or plan")
         return purge
+
+    def _read_operation_completion_locked(
+        self,
+        repo_uuid: str,
+        operation_epoch: int,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GcCompletionState | None:
+        if operation_epoch < 1:
+            return None
+        index_data = self.state.read_optional_existing_bytes(
+            self._operation_completion_path(repo_uuid, operation_epoch),
+            max_bytes=_MAX_GC_INTENT_BYTES,
+            deadline_ns=deadline_ns,
+        )
+        if index_data is None:
+            return None
+        try:
+            index = GcCompletionIndexState.from_json(index_data)
+        except Exception as exc:
+            raise GcRecoveryRequired(
+                f"GC operation completion index is invalid: {exc}"
+            ) from exc
+        if (
+            index.repo_uuid != repo_uuid
+            or index.operation_epoch != operation_epoch
+        ):
+            raise GcRecoveryRequired(
+                "GC operation completion index belongs to another workspace or epoch"
+            )
+        completion_data = self.state.read_optional_existing_bytes(
+            self._completion_path(repo_uuid, index.plan_sha256),
+            max_bytes=_MAX_GC_INTENT_BYTES,
+            deadline_ns=deadline_ns,
+        )
+        if completion_data is None:
+            raise GcRecoveryRequired(
+                "GC operation completion is unavailable"
+            )
+        try:
+            completion = GcCompletionState.from_json(completion_data)
+        except Exception as exc:
+            raise GcRecoveryRequired(
+                f"GC operation completion is invalid: {exc}"
+            ) from exc
+        if (
+            completion.repo_uuid != repo_uuid
+            or completion.plan_sha256 != index.plan_sha256
+            or canonical_sha256(completion.to_dict()) != index.completion_sha256
+        ):
+            raise GcRecoveryRequired(
+                "GC operation completion index does not bind its completion"
+            )
+        return completion
 
     @classmethod
     def _check_preview_authority(
@@ -675,7 +739,7 @@ class GcStore:
         expected_capacity_policy_sha256: str | None = None,
         plan_sha256: str | None = None,
         deadline_ns: int,
-    ) -> GcIntentState | GcPurgeState | None:
+    ) -> GcIntentState | GcCompletionState | GcPurgeState | None:
         """Validate lifecycle CAS and durable selection without acquiring a lease."""
 
         expected_pointer_revision = self._validate_expected_revision(
@@ -750,7 +814,13 @@ class GcStore:
                         "capacity policy differs from durable GC intent"
                     )
                 if plan_sha256 is None:
-                    return intent
+                    if intent is not None:
+                        return intent
+                    return self._read_operation_completion_locked(
+                        repo_uuid,
+                        expected_operation_epoch,
+                        deadline_ns=deadline_ns,
+                    )
                 if intent is not None:
                     raise GcRecoveryRequired(
                         "GC intent must be reconciled before purge"
@@ -872,12 +942,32 @@ class GcStore:
         self,
         intent: GcIntentState,
         completion: GcCompletionState,
+        *,
+        receipt_operation_epoch: int,
     ) -> None:
         self.state.install_once_bytes(
             self._completion_path(intent.repo_uuid, intent.plan_sha256),
             completion.canonical,
             label="gc:completion",
         )
+        for operation_epoch in sorted(
+            {intent.operation_epoch, receipt_operation_epoch}
+        ):
+            index = GcCompletionIndexState.from_mapping(
+                {
+                    "completion_sha256": canonical_sha256(completion.to_dict()),
+                    "contract": "graphify.workspace.gc_completion_index.internal",
+                    "format_version": 1,
+                    "operation_epoch": operation_epoch,
+                    "plan_sha256": completion.plan_sha256,
+                    "repo_uuid": completion.repo_uuid,
+                }
+            )
+            self.state.install_once_bytes(
+                self._operation_completion_path(intent.repo_uuid, operation_epoch),
+                index.canonical,
+                label="gc:completion_epoch",
+            )
         self.fault_hook("gc:completion_durable")
 
     def _read_completion(self, intent: GcIntentState) -> GcCompletionState | None:
@@ -956,7 +1046,11 @@ class GcStore:
                 self._rename_candidates(intent)
             if completion is None:
                 completion = self._completion(intent, completed_at=occurred_at)
-                self._write_completion(intent, completion)
+            self._write_completion(
+                intent,
+                completion,
+                receipt_operation_epoch=operation.grant.operation_epoch,
+            )
             self.state.unlink_and_sync(
                 self._intent_path(operation.repo_uuid),
                 label="gc:intent_clear",
@@ -1023,7 +1117,11 @@ class GcStore:
                 self._rename_candidates(intent)
             if completion is None:
                 completion = self._completion(intent, completed_at=completed_at)
-                self._write_completion(intent, completion)
+            self._write_completion(
+                intent,
+                completion,
+                receipt_operation_epoch=operation.grant.operation_epoch,
+            )
             self.state.unlink_and_sync(
                 self._intent_path(operation.repo_uuid),
                 label="gc:reconcile_clear",

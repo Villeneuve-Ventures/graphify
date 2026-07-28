@@ -82,16 +82,18 @@ and does not change the following fenced execution contract.
 The public lifecycle is explicit-only: `gc --execute --request-stdin`,
 `gc --reconcile --request-stdin`, and `gc --purge --request-stdin` each require
 a distinct canonical authorization action. Execute and first-time reconcile or
-purge mutation acquire a fresh trusted `GC` lease; reconcile with no intent and
-exact terminal purge replay return no-write results without acquiring one.
+purge mutation acquire a fresh trusted `GC` lease; matching current-epoch
+completion recovery, reconcile with no recovery state, and exact terminal purge
+replay return no-write results without acquiring one.
 Execute accepts an operator-approved SHA-256 of the exact canonical public
 preview-result bytes, recomputes that preview before leasing, then creates a
 fresh plan and requires its non-fence projection to equal the preview. The
 comparison includes repo UUID, registry and active-source revisions, migration
 epoch, pointer revision, capacity-policy digest, candidates, and protected
 generation reasons. The newly allocated fence and operation epoch are excluded.
-Reconcile names no plan and touches only an existing GC intent, returning an
-explicit no-op when none exists. Purge requires an exact completed plan SHA-256 and remains
+Reconcile names no plan, mutates only an existing GC intent, and otherwise
+replays the completion indexed by its still-current operation epoch or returns
+an explicit no-op. Purge requires an exact completed plan SHA-256 and remains
 idempotent while rechecking protections and locks. Public receipts are
 canonical and redacted; they never disclose authority, raw lifecycle documents,
 fences, owners, paths, timestamps, operation epochs, or raw errors.

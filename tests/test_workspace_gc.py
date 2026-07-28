@@ -103,6 +103,7 @@ GC_RECOVERY_PHASES = (
     "gc:gen-unused:quarantine:source_parent_durable",
     "gc:gen-unused:quarantine:destination_parent_durable",
     "gc:completion:installed",
+    "gc:completion_epoch:installed",
     "gc:completion_durable",
     "gc:intent_clear:unlinked",
     "gc:complete",

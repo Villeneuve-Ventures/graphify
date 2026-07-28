@@ -506,11 +506,13 @@ verification reviews.
   registry/active-source/migration/pointer revisions, capacity-policy digest,
   candidates, and protected facts, while excluding the newly allocated fence
   and operation epoch;
-- reconcile is an explicit existing-intent operation, including an explicit
-  `nothing_to_reconcile` no-op outcome; purge is an explicit idempotent
-  completed-plan operation selected by `expected_plan_sha256`. Exact terminal
-  replay returns its durable no-write result before mutation admission; a
-  first-time deletion performs pointer, protection, and lock rechecks;
+- reconcile mutates only an existing intent. A completion indexed by the
+  request's still-current operation epoch replays without a lease or write;
+  otherwise no recovery state returns `nothing_to_reconcile`. Purge is an
+  explicit idempotent completed-plan operation selected by
+  `expected_plan_sha256`. Exact terminal replay returns its durable no-write
+  result before mutation admission; a first-time deletion performs pointer,
+  protection, and lock rechecks;
 - phase success and failure result schemas prove canonical redacted public
   output and the 0/10/20 exit mapping. Receipts omit authorization, raw durable
   lifecycle documents, fence/owner data, paths, timestamps, operation epochs,

@@ -358,11 +358,13 @@ quarantines only the approved plan's candidates and returns a canonical redacted
 receipt with request SHA-256, approved-preview SHA-256, plan SHA-256, and the
 quarantined generation IDs.
 
-Reconcile is never automatic. It uses a fresh `GC` lease and only reconciles an
-already-existing durable GC intent. It has no plan-digest selector, so it can
-recover an interruption that occurred after durable intent creation but before
-a public execute receipt. If no intent exists, its explicit no-op result is
-`nothing_to_reconcile`; it does not invent a plan or mutate an unrelated
+Reconcile is never automatic. It uses a fresh `GC` lease only to reconcile an
+already-existing durable GC intent. Each durable completion is also indexed by
+its operation epoch before the intent is cleared. If execute completed but its
+public receipt was lost, a reconcile request matching that still-current epoch
+returns the immutable completion without a lease or write. With neither an
+intent nor a matching current-epoch completion, the result is
+`nothing_to_reconcile`; reconcile does not invent a plan or mutate an unrelated
 lifecycle phase.
 
 Purge is likewise explicit and idempotent. Its request carries
@@ -413,7 +415,7 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Active-source activation | Unnumbered P5B2 activation (`COMPLETE`) | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, an immutable-enrollment continuity check, and one redacted CLI-v1 receipt. |
 | Exact last-good rollback | P5B2 exact-last-good rollback (`COMPLETE`) | Accepted receipt: [`P5B2 exact-last-good rollback`](receipts/p5b2-exact-last-good-rollback.md). `workspace rollback --request-stdin` exposes one fenced move to the visible pointer's exact `last_good` reference with an explicit canonical request and redacted receipt. It does not authorize arbitrary historical selection or any later command. |
 | Bounded GC preview | P5B2 bounded offline-GC preview (`COMPLETE`) | Accepted receipt: [`P5B2 bounded offline-GC preview`](receipts/p5b2-offline-gc-preview.md). `workspace gc --dry-run --request-stdin` exposes only an unfenced, read-only, canonical preview with explicit authority, capacity, and protection inputs. It does not authorize GC mutation or make performance/resource or bounded pre-enumeration traversal claims. The published CLI-v1 capacity-policy fields remain frozen; any compatibility change requires separate versioned review. |
-| Public fenced offline-GC lifecycle | P5B2 lifecycle implementation delivered; governance acceptance pending | `workspace gc --execute`, `--reconcile`, and `--purge` each require `--request-stdin` and phase-specific authorization. Execute and first-time reconcile or purge mutation acquire fresh fenced `GC` authority; reconcile with no intent and exact terminal purge replay are no-write results. Execute binds an approved exact preview-result SHA-256 to a fresh non-fence-equivalent plan; reconcile and purge remain explicit-only. This row records implementation delivery, not lifecycle completion or governance acceptance. |
+| Public fenced offline-GC lifecycle | P5B2 lifecycle implementation delivered; governance acceptance pending | `workspace gc --execute`, `--reconcile`, and `--purge` each require `--request-stdin` and phase-specific authorization. Execute and first-time reconcile or purge mutation acquire fresh fenced `GC` authority; matching current-epoch completion recovery, reconcile with no recovery state, and exact terminal purge replay are no-write results. Execute binds an approved exact preview-result SHA-256 to a fresh non-fence-equivalent plan; reconcile and purge remain explicit-only. This row records implementation delivery, not lifecycle completion or governance acceptance. |
 | Retained-source identity continuity | P5B2 registry hardening (`COMPLETE`) | `rotate_enrollment_evidence()` and `resolve_active_source()` now independently require a shared immutable enrollment history root or the enrolled Git common-directory identity. Rejected rotation occurs before the requested source evidence, identity-action evidence, or registry revision is persisted. Accepted receipt: [`P5B2 retained-source identity continuity`](receipts/p5b2-retained-source-identity-continuity.md). |
 | Remaining workspace commands | Remaining P5B2/P5C | Migrate, repair, every mutation beyond the delivered explicit GC lifecycle, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |

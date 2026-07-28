@@ -863,6 +863,7 @@ def _acquire_gc(
     monotonic_ns: int,
     deadline_ns: int,
 ) -> LeaseGrant:
+    ttl_ns = max(_GC_LEASE_TTL_NS, deadline_ns - monotonic_ns)
     return runtime.leases.acquire(
         request.repo_uuid,
         "GC",
@@ -873,7 +874,7 @@ def _acquire_gc(
         expected_migration_epoch=request.expected_migration_epoch,
         acquired_at=occurred_at,
         monotonic_ns=monotonic_ns,
-        ttl_ns=_GC_LEASE_TTL_NS,
+        ttl_ns=ttl_ns,
         deadline_ns=deadline_ns,
     )
 
@@ -1002,6 +1003,13 @@ def reconcile_gc(
         expected_capacity_policy_sha256=request.capacity_policy.sha256,
         deadline_ns=deadline_ns,
     )
+    if isinstance(preflight, GcCompletionState):
+        return GcReconcileResult(
+            repo_uuid=request.repo_uuid,
+            request_sha256=request.request_sha256,
+            plan_sha256=preflight.plan_sha256,
+            quarantined=preflight.quarantined,
+        )
     if preflight is None:
         return GcReconcileResult(
             repo_uuid=request.repo_uuid,

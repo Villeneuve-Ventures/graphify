@@ -2229,6 +2229,35 @@ def test_gc_purge_lease_ttl_starts_after_preflight(tmp_path: Path) -> None:
     assert result.to_dict()["purged"] == ["gen-unused"]
 
 
+def test_gc_execute_lease_ttl_covers_request_deadline_after_acquisition_wait(
+    tmp_path: Path,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    request_value = json.loads(_approved_execute_request(runtime).canonical)
+    request_value["timeout_ms"] = 60_000
+    request = command.GcExecuteRequest.from_bytes(canonical_json_bytes(request_value))
+    started_ns = time.monotonic_ns()
+    ticks = iter(
+        (
+            started_ns,
+            started_ns + 1,
+            started_ns + 31_000_000_000,
+            started_ns + 31_000_000_001,
+        )
+    )
+
+    result = command.execute_gc(
+        runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=lambda: next(ticks),
+    )
+
+    assert result.to_dict()["quarantined"] == ["gen-unused"]
+
+
 def test_gc_public_lifecycle_executes_reconciles_idempotently_and_purges_explicitly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2262,7 +2291,10 @@ def test_gc_public_lifecycle_executes_reconciles_idempotently_and_purges_explici
         occurred_at=START,
         monotonic_clock=time.monotonic_ns,
     )
-    assert reconciled.to_dict()["state"] == "nothing_to_reconcile"
+    reconcile_value = reconciled.to_dict()
+    assert reconcile_value["state"] == "reconciled"
+    assert reconcile_value["plan_sha256"] == execute_value["plan_sha256"]
+    assert reconcile_value["quarantined"] == execute_value["quarantined"]
     assert (
         tree_snapshot(harness.state_root),
         metadata_snapshot(harness.state_root),
@@ -2364,7 +2396,9 @@ def test_gc_lifecycle_cli_dispatches_canonical_success_receipts(
         workspace_cli.load_gc_reconcile_result_schema(),
         format_checker=FormatChecker(),
     ).validate(reconcile_value)
-    assert reconcile_value["state"] == "nothing_to_reconcile"
+    assert reconcile_value["state"] == "reconciled"
+    assert reconcile_value["plan_sha256"] == execute_value["plan_sha256"]
+    assert reconcile_value["quarantined"] == execute_value["quarantined"]
 
     purge_request = _gc_command().GcPurgeRequest.from_bytes(
         canonical_json_bytes(
@@ -2773,6 +2807,150 @@ def test_gc_purge_release_commit_unknown_requests_exact_retry(
     ).to_dict()["purged"] == ["gen-unused"]
 
 
+def test_gc_reconcile_replays_current_epoch_completion_after_lost_execute_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    receipt_lost = False
+
+    def lose_receipt_after_completion(event: str) -> None:
+        nonlocal receipt_lost
+        if event == "gc:complete" and not receipt_lost:
+            receipt_lost = True
+            raise InjectedFault(event)
+
+    runtime = _gc_mutation_runtime(
+        harness,
+        fault_hook=lose_receipt_after_completion,
+    )
+    command = _gc_command()
+    with pytest.raises(InjectedFault):
+        command.execute_gc(
+            runtime,
+            _approved_execute_request(runtime),
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    assert receipt_lost is True
+    assert not runtime.gc.state.path(runtime.gc._intent_path(REPO_UUID)).exists()
+
+    recovery_runtime = _gc_mutation_runtime(harness)
+    request = command.GcReconcileRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(recovery_runtime, "reconcile")
+        )
+    )
+    before = (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    )
+    monkeypatch.setattr(
+        command,
+        "_acquire_gc",
+        lambda *_args, **_kwargs: pytest.fail(
+            "current-epoch completion replay must not acquire a lease"
+        ),
+    )
+
+    result = command.reconcile_gc(
+        recovery_runtime,
+        request,
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    ).to_dict()
+
+    assert result["state"] == "reconciled"
+    assert result["quarantined"] == ["gen-unused"]
+    assert isinstance(result["plan_sha256"], str)
+    assert (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    ) == before
+
+
+def test_gc_reconcile_replays_current_epoch_completion_after_lost_reconcile_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    intent_left = False
+
+    def leave_durable_intent(event: str) -> None:
+        nonlocal intent_left
+        if event == "gc:intent_durable" and not intent_left:
+            intent_left = True
+            raise InjectedFault(event)
+
+    interrupted_runtime = _gc_mutation_runtime(
+        harness,
+        fault_hook=leave_durable_intent,
+    )
+    command = _gc_command()
+    with pytest.raises((CommitUnknown, InjectedFault)):
+        command.execute_gc(
+            interrupted_runtime,
+            _approved_execute_request(interrupted_runtime),
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    assert intent_left is True
+
+    receipt_lost = False
+
+    def lose_reconcile_receipt(event: str) -> None:
+        nonlocal receipt_lost
+        if event == "gc:reconciled" and not receipt_lost:
+            receipt_lost = True
+            raise InjectedFault(event)
+
+    recovery_runtime = _gc_mutation_runtime(
+        harness,
+        fault_hook=lose_reconcile_receipt,
+    )
+    recovery_request = command.GcReconcileRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(recovery_runtime, "reconcile")
+        )
+    )
+    with pytest.raises(InjectedFault):
+        command.reconcile_gc(
+            recovery_runtime,
+            recovery_request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    assert receipt_lost is True
+    assert not recovery_runtime.gc.state.path(
+        recovery_runtime.gc._intent_path(REPO_UUID)
+    ).exists()
+
+    replay_runtime = _gc_mutation_runtime(harness)
+    replay_request = command.GcReconcileRequest.from_bytes(
+        canonical_json_bytes(
+            _gc_live_lifecycle_request(replay_runtime, "reconcile")
+        )
+    )
+    monkeypatch.setattr(
+        command,
+        "_acquire_gc",
+        lambda *_args, **_kwargs: pytest.fail(
+            "current-epoch completion replay must not acquire a lease"
+        ),
+    )
+
+    result = command.reconcile_gc(
+        replay_runtime,
+        replay_request,
+        occurred_at=START,
+        monotonic_clock=time.monotonic_ns,
+    ).to_dict()
+
+    assert result["state"] == "reconciled"
+    assert result["quarantined"] == ["gen-unused"]
+    assert isinstance(result["plan_sha256"], str)
+
+
 @pytest.mark.parametrize("phase", GC_RECOVERY_PHASES)
 def test_every_durable_execute_interruption_requires_explicit_public_reconcile(
     tmp_path: Path,
@@ -2810,4 +2988,4 @@ def test_every_durable_execute_interruption_requires_explicit_public_reconcile(
         occurred_at=START,
         monotonic_clock=time.monotonic_ns,
     )
-    assert result.to_dict()["state"] in {"reconciled", "nothing_to_reconcile"}
+    assert result.to_dict()["state"] == "reconciled"
