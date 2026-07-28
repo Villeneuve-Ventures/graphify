@@ -41,7 +41,6 @@ from graphify.workspace.contracts import (
 from graphify.workspace.gc import (
     GC_PREVIEW_MAX_GENERATIONS,
     GcCoordinationUnavailable,
-    GcError,
     GcPreview,
     GcPreviewAuthorityConflict,
     GcPreviewUnstable,
@@ -2192,6 +2191,15 @@ def _gc_preview_request_from_mapping(
         field: _gc_protection_ids(protection_value[field], field)
         for field in _GC_PROTECTION_FIELDS
     }
+    protection_ids = {
+        generation_id
+        for generation_ids in protections.values()
+        for generation_id in generation_ids
+    }
+    if len(protection_ids) > GC_PREVIEW_MAX_GENERATIONS:
+        raise _GcPreviewRequestInvalid(
+            "GC preview request protections exceed the public bound"
+        )
     return _GcPreviewRequest(
         repo_uuid=repo_uuid,
         expected_registry_revision=expected_registry_revision,
@@ -2462,13 +2470,6 @@ def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
             EXIT_INVALID,
             "state_corrupt",
             "run_workspace_repair",
-        )
-    if isinstance(error, GcError):
-        return _GcPreviewFailure(
-            "invalid",
-            EXIT_INVALID,
-            "gc_preview_failed",
-            "run_workspace_doctor",
         )
     return _GcPreviewFailure(
         "invalid",

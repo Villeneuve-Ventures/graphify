@@ -526,6 +526,52 @@ def test_gc_preview_rejects_invalid_stdin_before_runtime_preview(
     assert "graphify.workspace.gc_preview_request" not in stderr.getvalue()
 
 
+def test_gc_preview_rejects_oversized_protection_union_before_runtime_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_cli = _cli()
+    maximum = _gc_module().GC_PREVIEW_MAX_GENERATIONS
+    first_count = maximum // 2
+    protections = _protection_value()
+    protections["fixture_generations"] = cast(
+        JsonValue,
+        [f"gen-fixture-{index:04x}" for index in range(first_count)],
+    )
+    protections["proof_generations"] = cast(
+        JsonValue,
+        [f"gen-proof-{index:04x}" for index in range(maximum - first_count + 1)],
+    )
+    payload = _request_bytes(
+        {
+            **_request_value(),
+            "protections": protections,
+        }
+    )
+    assert len(payload) <= workspace_cli._GC_PREVIEW_REQUEST_MAX_BYTES
+
+    class ForbiddenGc:
+        def preview(self, *_args: object, **_kwargs: object) -> object:
+            pytest.fail("oversized protection union must not reach the runtime")
+
+    monkeypatch.setattr(
+        workspace_cli,
+        "compose_workspace_runtime",
+        lambda _inputs: SimpleNamespace(gc=ForbiddenGc()),
+    )
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(payload)))
+    stdout, stderr = StringIO(), StringIO()
+    assert workspace_cli.run_workspace_command(
+        ("gc", "--dry-run", "--request-stdin"),
+        inputs=object(),
+        stdout=stdout,
+        stderr=stderr,
+    ) == 20
+    assert stdout.getvalue() == ""
+    result = _result_payload(stderr)
+    assert result["reason_code"] == "gc_request_invalid"
+    assert result["action_code"] == "provide_valid_gc_request"
+
+
 def test_gc_preview_stdin_is_bounded_before_decode_or_runtime_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
