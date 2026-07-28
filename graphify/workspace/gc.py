@@ -14,6 +14,8 @@ from graphify.workspace.contracts import (
     GcIntentState,
     GcPurgeState,
     PointerSet,
+    Registry,
+    WorkspaceLeaseState,
     canonical_json_bytes,
     canonical_sha256,
 )
@@ -34,6 +36,7 @@ from graphify.workspace.semantic_queue import SemanticQueueStore
 _PURGE_ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
 _PURGE_ALLOWED_FILE_MODES = frozenset({0o600, 0o644, 0o755})
 _MAX_GC_INTENT_BYTES = 1024 * 1024
+GC_PREVIEW_MAX_GENERATIONS = 4096
 
 
 class GcError(RuntimeError):
@@ -51,6 +54,24 @@ class GcPlanStale(GcError):
 
 class GcRecoveryRequired(GcError):
     code = "gc_recovery_required"
+
+
+class GcPreviewAuthorityConflict(GcError):
+    """The caller's read-only preview CAS no longer matches durable authority."""
+
+    code = "gc_preview_authority_conflict"
+
+
+class GcPreviewUnstable(GcError):
+    """Two read-only reachability observations did not match."""
+
+    code = "gc_preview_unstable"
+
+
+class GcCoordinationUnavailable(GcError):
+    """A retained coordination object cannot be inspected safely."""
+
+    code = "gc_coordination_unavailable"
 
 
 @dataclass(frozen=True)
@@ -116,6 +137,61 @@ class GcPlan:
     @property
     def sha256(self) -> str:
         return canonical_sha256(self.to_dict())
+
+
+@dataclass(frozen=True)
+class GcPreview:
+    """Unfenced read-only GC reachability; never executable as a ``GcPlan``."""
+
+    repo_uuid: str
+    registry_revision: int
+    active_source_revision: int
+    operation_epoch: int
+    migration_epoch: int
+    pointer_revision: int
+    capacity_policy_sha256: str
+    candidates: tuple[str, ...]
+    protected: tuple[tuple[str, tuple[str, ...]], ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "repo_uuid": self.repo_uuid,
+            "registry_revision": self.registry_revision,
+            "active_source_revision": self.active_source_revision,
+            "operation_epoch": self.operation_epoch,
+            "migration_epoch": self.migration_epoch,
+            "pointer_revision": self.pointer_revision,
+            "capacity_policy_sha256": self.capacity_policy_sha256,
+            "candidates": list(self.candidates),
+            "protected": [
+                {"generation_id": generation_id, "reasons": list(reasons)}
+                for generation_id, reasons in self.protected
+            ],
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+
+@dataclass(frozen=True)
+class _GcReachability:
+    pointer_revision: int
+    candidates: tuple[str, ...]
+    protected: tuple[tuple[str, tuple[str, ...]], ...]
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(
+            {
+                "candidates": list(self.candidates),
+                "pointer_revision": self.pointer_revision,
+                "protected": [
+                    {"generation_id": generation_id, "reasons": list(reasons)}
+                    for generation_id, reasons in self.protected
+                ],
+            }
+        )
 
 
 def _timestamp(value: datetime) -> str:
@@ -240,6 +316,76 @@ class GcStore:
             raise GcError(f"generations path is unsafe: {exc}") from exc
 
     @staticmethod
+    def _registry_entry(document: Registry, repo_uuid: str) -> dict[str, Any]:
+        entries = [
+            cast(dict[str, Any], item)
+            for item in document.to_dict()["workspaces"]
+            if item["repo_uuid"] == repo_uuid
+        ]
+        if len(entries) != 1:
+            raise GcPreviewAuthorityConflict(
+                "GC preview request does not name one registered workspace"
+            )
+        return entries[0]
+
+    @staticmethod
+    def _validate_expected_revision(
+        value: int,
+        name: str,
+        *,
+        minimum: int,
+    ) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise GcPreviewAuthorityConflict(f"{name} is invalid")
+        return value
+
+    @classmethod
+    def _check_preview_authority(
+        cls,
+        document: Registry,
+        entry: dict[str, Any],
+        state: WorkspaceLeaseState,
+        *,
+        expected_registry_revision: int,
+        expected_active_source_revision: int,
+        expected_operation_epoch: int,
+        expected_migration_epoch: int,
+    ) -> None:
+        actual = {
+            "registry_revision": int(document.to_dict()["revision"]),
+            "active_source_revision": int(entry["active_source_revision"]),
+            "operation_epoch": state.operation_epoch,
+            "migration_epoch": state.migration_epoch,
+        }
+        expected = {
+            "registry_revision": cls._validate_expected_revision(
+                expected_registry_revision,
+                "expected_registry_revision",
+                minimum=1,
+            ),
+            "active_source_revision": cls._validate_expected_revision(
+                expected_active_source_revision,
+                "expected_active_source_revision",
+                minimum=1,
+            ),
+            "operation_epoch": cls._validate_expected_revision(
+                expected_operation_epoch,
+                "expected_operation_epoch",
+                minimum=0,
+            ),
+            "migration_epoch": cls._validate_expected_revision(
+                expected_migration_epoch,
+                "expected_migration_epoch",
+                minimum=0,
+            ),
+        }
+        mismatches = [name for name in expected if expected[name] != actual[name]]
+        if mismatches:
+            raise GcPreviewAuthorityConflict(
+                "GC preview authority changed: " + ", ".join(sorted(mismatches))
+            )
+
+    @staticmethod
     def _add_pointer_reasons(
         reasons: dict[str, set[str]],
         pointer: PointerSet,
@@ -253,34 +399,59 @@ class GcStore:
             last_good = cast(dict[str, Any], value["last_good"])
             reasons.setdefault(str(last_good["generation_id"]), set()).add(f"{prefix}_last_good")
 
-    def _plan_locked(
+    def _reachability_locked(
         self,
-        operation: LeaseOperation,
+        repo_uuid: str,
         *,
-        capacity_policy: CapacityPolicy,
         protections: GcProtection,
         probe_locks: bool,
-    ) -> GcPlan:
-        pointer = self.pointers.load(operation.repo_uuid, allow_missing=True)
+        inspect_protected_locks: bool = False,
+        deadline_ns: int | None = None,
+        maximum_generations: int | None = None,
+    ) -> _GcReachability:
+        require_before_deadline(
+            deadline_ns,
+            "GC reachability inspection exceeded its deadline",
+        )
+        pointer = self.pointers.load(
+            repo_uuid,
+            allow_missing=True,
+            deadline_ns=deadline_ns,
+        )
         reasons = protections.reasons()
         pointer_revision = 0
         if pointer is not None:
-            self.pointers.verify_pointer(pointer, expected_repo_uuid=operation.repo_uuid)
+            self.pointers.verify_pointer(
+                pointer,
+                expected_repo_uuid=repo_uuid,
+                deadline_ns=deadline_ns,
+            )
             pointer_revision = int(pointer.to_dict()["pointer_revision"])
             self._add_pointer_reasons(reasons, pointer, prefix="visible")
-        prior = self.pointers.retained_prior(operation.repo_uuid)
+        prior = self.pointers.retained_prior(
+            repo_uuid,
+            deadline_ns=deadline_ns,
+        )
         if prior is not None:
             prior_pointer = cast(
                 PointerSet,
                 PointerSet.from_mapping(prior.to_dict()["pointer_set"]),
             )
             self._add_pointer_reasons(reasons, prior_pointer, prefix="prior")
-        generations = self._generation_ids(operation.repo_uuid)
+        generations = self._generation_ids(repo_uuid)
+        if maximum_generations is not None and len(set(generations) | set(reasons)) > (
+            maximum_generations
+        ):
+            raise GcError("GC preview generation set exceeds its public bound")
         if probe_locks:
             for generation_id in generations:
-                if generation_id in reasons:
+                require_before_deadline(
+                    deadline_ns,
+                    "GC reachability inspection exceeded its deadline",
+                )
+                if generation_id in reasons and not inspect_protected_locks:
                     continue
-                lock = self.generations._lock(operation.repo_uuid, generation_id)
+                lock = self.generations._lock(repo_uuid, generation_id)
                 try:
                     with self.state.existing_generation_lock(
                         lock,
@@ -292,13 +463,41 @@ class GcStore:
                 except BlockingIOError:
                     reasons.setdefault(generation_id, set()).add("shared_lock")
                 except (OSError, StatePathError) as exc:
-                    raise GcError(f"generation coordination lock is unavailable: {exc}") from exc
+                    detail = f"generation coordination lock is unavailable: {exc}"
+                    if inspect_protected_locks:
+                        raise GcCoordinationUnavailable(detail) from exc
+                    raise GcError(detail) from exc
         candidates = tuple(
             generation_id for generation_id in generations if generation_id not in reasons
         )
         protected = tuple(
             (generation_id, tuple(sorted(names)))
             for generation_id, names in sorted(reasons.items())
+        )
+        require_before_deadline(
+            deadline_ns,
+            "GC reachability inspection exceeded its deadline",
+        )
+        reachability = _GcReachability(
+            pointer_revision=pointer_revision,
+            candidates=candidates,
+            protected=protected,
+        )
+        self.fault_hook("gc:reachability_enumerated")
+        return reachability
+
+    def _plan_locked(
+        self,
+        operation: LeaseOperation,
+        *,
+        capacity_policy: CapacityPolicy,
+        protections: GcProtection,
+        probe_locks: bool,
+    ) -> GcPlan:
+        reachability = self._reachability_locked(
+            operation.repo_uuid,
+            protections=protections,
+            probe_locks=probe_locks,
         )
         plan = GcPlan(
             repo_uuid=operation.repo_uuid,
@@ -307,13 +506,110 @@ class GcStore:
             operation_epoch=operation.grant.operation_epoch,
             migration_epoch=operation.grant.migration_epoch,
             fence_token=operation.fence_token,
-            pointer_revision=pointer_revision,
+            pointer_revision=reachability.pointer_revision,
             capacity_policy_sha256=capacity_policy.sha256,
-            candidates=candidates,
-            protected=protected,
+            candidates=reachability.candidates,
+            protected=reachability.protected,
         )
-        self.fault_hook("gc:reachability_enumerated")
         return plan
+
+    def preview(
+        self,
+        repo_uuid: str,
+        *,
+        expected_registry_revision: int,
+        expected_active_source_revision: int,
+        expected_operation_epoch: int,
+        expected_migration_epoch: int,
+        expected_pointer_revision: int,
+        capacity_policy: CapacityPolicy,
+        protections: GcProtection,
+        deadline_ns: int,
+    ) -> GcPreview:
+        """Return one bounded unfenced preview under existing read-only locks."""
+
+        capacity_policy = self._validated_capacity_policy(capacity_policy)
+        expected_pointer_revision = self._validate_expected_revision(
+            expected_pointer_revision,
+            "expected_pointer_revision",
+            minimum=0,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "GC preview exceeded its deadline",
+        )
+        with self.leases.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
+            entry = self._registry_entry(registry, repo_uuid)
+            with self.leases.read_only_workspace_lock(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            ):
+                lease_state = self.leases.read_only_snapshot_locked(
+                    registry,
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+                self._check_preview_authority(
+                    registry,
+                    entry,
+                    lease_state,
+                    expected_registry_revision=expected_registry_revision,
+                    expected_active_source_revision=expected_active_source_revision,
+                    expected_operation_epoch=expected_operation_epoch,
+                    expected_migration_epoch=expected_migration_epoch,
+                )
+                self.leases._assert_recovery_barriers_locked(
+                    repo_uuid,
+                    "GC",
+                    recover=False,
+                    deadline_ns=deadline_ns,
+                )
+                if self.read_only_intent_locked(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                ) is not None:
+                    raise GcRecoveryRequired(
+                        "an unresolved GC intent must be reconciled"
+                    )
+                first = self._reachability_locked(
+                    repo_uuid,
+                    protections=protections,
+                    probe_locks=True,
+                    inspect_protected_locks=True,
+                    deadline_ns=deadline_ns,
+                    maximum_generations=GC_PREVIEW_MAX_GENERATIONS,
+                )
+                if first.pointer_revision != expected_pointer_revision:
+                    raise GcPreviewAuthorityConflict(
+                        "GC preview pointer revision changed"
+                    )
+                second = self._reachability_locked(
+                    repo_uuid,
+                    protections=protections,
+                    probe_locks=True,
+                    inspect_protected_locks=True,
+                    deadline_ns=deadline_ns,
+                    maximum_generations=GC_PREVIEW_MAX_GENERATIONS,
+                )
+                if first.canonical != second.canonical:
+                    raise GcPreviewUnstable(
+                        "GC reachability changed between read-only observations"
+                    )
+                require_before_deadline(
+                    deadline_ns,
+                    "GC preview exceeded its deadline",
+                )
+                return GcPreview(
+                    repo_uuid=repo_uuid,
+                    registry_revision=int(registry.to_dict()["revision"]),
+                    active_source_revision=int(entry["active_source_revision"]),
+                    operation_epoch=lease_state.operation_epoch,
+                    migration_epoch=lease_state.migration_epoch,
+                    pointer_revision=second.pointer_revision,
+                    capacity_policy_sha256=capacity_policy.sha256,
+                    candidates=second.candidates,
+                    protected=second.protected,
+                )
 
     def plan(
         self,
@@ -668,9 +964,14 @@ class GcStore:
 
 
 __all__ = [
+    "GC_PREVIEW_MAX_GENERATIONS",
+    "GcCoordinationUnavailable",
     "GcError",
     "GcPlan",
     "GcPlanStale",
+    "GcPreview",
+    "GcPreviewAuthorityConflict",
+    "GcPreviewUnstable",
     "GcProtection",
     "GcRecoveryRequired",
     "GcStore",

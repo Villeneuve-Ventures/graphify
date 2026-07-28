@@ -190,15 +190,28 @@ class PointerStore:
             )
         return pointer
 
-    def retained_prior(self, repo_uuid: str) -> PriorPointerRecord | None:
+    def retained_prior(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> PriorPointerRecord | None:
         relative = self._prior(repo_uuid)
         if not self._exists(relative):
             return None
         try:
             prior = cast(
                 PriorPointerRecord,
-                PriorPointerRecord.from_json(self.state.read_existing_bytes(relative)),
+                PriorPointerRecord.from_json(
+                    self.state.read_existing_bytes(
+                        relative,
+                        max_bytes=_MAX_POINTER_RECORD_BYTES,
+                        deadline_ns=deadline_ns,
+                    )
+                ),
             )
+        except LockTimeout:
+            raise
         except Exception as exc:
             raise PointerCorrupt(f"prior pointer record is invalid: {exc}") from exc
         if prior.to_dict()["pointer_set"]["repo_uuid"] != repo_uuid:

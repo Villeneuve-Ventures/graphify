@@ -17,9 +17,11 @@ freshness authority. The unnumbered P5B2 identity-maintenance slice adds only
 ``workspace register rebind`` and ``workspace register rotate``; the unnumbered
 active-source slice adds only standalone ``workspace activate``. All remaining
 P5B2 rollback work adds only the one-step ``workspace rollback --request-stdin``
-move to the visible pointer's exact ``last_good`` reference. All other remaining
-mutation commands, retained query/service operation, installation, and candidate
-publication remain deferred.
+move to the visible pointer's exact ``last_good`` reference. The bounded GC
+slice adds only ``workspace gc --dry-run --request-stdin`` and returns an
+unfenced read-only preview without a lease or executable plan. All other
+remaining mutation commands, retained query/service operation, installation,
+and candidate publication remain deferred.
 """
 
 from graphify.workspace.adapters import (

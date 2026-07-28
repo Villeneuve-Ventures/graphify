@@ -89,7 +89,14 @@ operation epoch and fence token from the grant, and delegates once to
 `PointerStore.rollback()`. The existing pointer, journal, lease, generation,
 and recovery layers continue to own durable mutation and commit-unknown
 barriers; the CLI adds no historical-generation selector or durable format.
-Remaining mutation and broader query commands, repair,
+The bounded GC slice exposes only `graphify workspace gc --dry-run
+--request-stdin`. It composes installed authority before its one canonical
+request and passes only caller-supplied identity revisions, timeout, complete
+capacity policy, and six-class protection set to existing read-only GC
+coordination. Two matching reachability snapshots produce one deterministic
+unfenced preview result; the CLI creates no lease, fence, executable plan, or
+durable state. Existing fenced GC execution remains in P3. Remaining mutation
+and broader query commands, repair,
 watch/service, installation, performance certification, candidate publication,
 and live-cutover work remain deferred; retained production query/service
 authority remains P5C work.
@@ -133,7 +140,8 @@ P5B1 additionally reserves `runtime-manifest.json` at the root above as an
 internal format-version-1 read authority containing the complete frozen
 compatibility manifest and explicit semantic-queue policy. Status, doctor,
 P5B2a registration, identity maintenance, P5B2b code-only sync, P5B2c one-shot
-query, and exact-last-good rollback authority loading read it through the same
+query, exact-last-good rollback, and bounded GC preview authority loading read
+it through the same
 private-directory,
 singular-regular-file, 0600, no-follow, bounded-read rules used for durable
 state. Registration and identity maintenance then write only the P2 paths
@@ -253,4 +261,7 @@ one-shot exact-`last_good` transport and reuses the existing fenced pointer
 domain; it adds no retained service, repair, GC, migration, or arbitrary
 historical selection authority. Later P5 slices remain responsible for all
 other orchestration, concurrent in-process services, commands, installation,
-and publication.
+and publication. The GC preview slice is outside that fenced operation domain:
+it performs only bounded read-only coordination and two matching reachability
+snapshots, produces no `LeaseGrant`, fence, or `GcPlan`, and leaves P3
+`GcStore.plan()`, `execute()`, `reconcile()`, and `purge()` unchanged.

@@ -1,4 +1,4 @@
-"""Narrow workspace activation, identity, sync, query, status, and doctor commands."""
+"""Narrow workspace activation, identity, sync, query, GC, status, and doctor commands."""
 
 from __future__ import annotations
 
@@ -31,11 +31,21 @@ from graphify.workspace.composition import (
 )
 from graphify.workspace.contracts import (
     CLI_CONTRACT_VERSION,
+    CapacityPolicy,
     ContractError,
     WorkspaceLeaseState,
     canonical_json_bytes,
     canonical_registry_source,
     canonical_sha256,
+)
+from graphify.workspace.gc import (
+    GC_PREVIEW_MAX_GENERATIONS,
+    GcCoordinationUnavailable,
+    GcPreview,
+    GcPreviewAuthorityConflict,
+    GcPreviewUnstable,
+    GcProtection,
+    GcRecoveryRequired,
 )
 from graphify.workspace.generations import (
     CapacityExceeded,
@@ -69,6 +79,7 @@ from graphify.workspace.persistence import (
 )
 from graphify.workspace.leases import (
     LeaseBusy,
+    LeaseError,
     LeaseExpired,
     LeaseRecoveryRequired,
     StaleLease,
@@ -170,6 +181,12 @@ _ROLLBACK_REQUEST_SCHEMA_PATH = (
 _ROLLBACK_RECEIPT_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "rollback-receipt.schema.json"
 )
+_GC_PREVIEW_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-preview-request.schema.json"
+)
+_GC_PREVIEW_RESULT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-preview-result.schema.json"
+)
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
@@ -178,6 +195,7 @@ _REGISTER_USAGE = (
 _SYNC_USAGE = "graphify workspace sync --code-only --request-stdin"
 _QUERY_USAGE = "graphify workspace query --request-stdin"
 _ROLLBACK_USAGE = "graphify workspace rollback --request-stdin"
+_GC_PREVIEW_USAGE = "graphify workspace gc --dry-run --request-stdin"
 _ACTIVATION_USAGE = (
     "graphify workspace activate --repo-uuid UUID "
     "--expected-registry-revision N --expected-active-source-revision N "
@@ -191,6 +209,7 @@ _USAGE = (
     f"       {_SYNC_USAGE}\n"
     f"       {_QUERY_USAGE}\n"
     f"       {_ROLLBACK_USAGE}\n"
+    f"       {_GC_PREVIEW_USAGE}\n"
     f"       {_ACTIVATION_USAGE}"
 )
 
@@ -213,6 +232,54 @@ _QUERY_REQUEST_FIELDS = frozenset(
         "token_budget",
         "context_filters",
         "timeout_ms",
+    }
+)
+
+_GC_PREVIEW_REQUEST_CONTRACT = "graphify.workspace.gc_preview_request"
+_GC_PREVIEW_RESULT_CONTRACT = "graphify.workspace.gc_preview_result"
+_GC_PREVIEW_SCHEMA_VERSION = 1
+_GC_PREVIEW_REQUEST_MAX_BYTES = 128 * 1024
+_GC_PREVIEW_TIMEOUT_MAX_MS = 60_000
+_GC_PREVIEW_REQUEST_FIELDS = frozenset(
+    {
+        "capacity_policy",
+        "cli_contract_version",
+        "contract",
+        "expected_active_source_revision",
+        "expected_migration_epoch",
+        "expected_operation_epoch",
+        "expected_pointer_revision",
+        "expected_registry_revision",
+        "protections",
+        "repo_uuid",
+        "schema_version",
+        "timeout_ms",
+    }
+)
+_GC_PROTECTION_FIELDS = (
+    "active_lease_generations",
+    "fixture_generations",
+    "migration_sources",
+    "proof_generations",
+    "rollback_artifact_generations",
+    "rollback_sources",
+)
+_GC_GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_SIGNED_REVISION = 9_223_372_036_854_775_807
+_GC_PROTECTION_REASONS = frozenset(
+    {
+        "active_lease",
+        "fixture",
+        "migration_source",
+        "prior_current",
+        "prior_last_good",
+        "proof",
+        "rollback_artifact",
+        "rollback_source",
+        "shared_lock",
+        "visible_current",
+        "visible_last_good",
     }
 )
 
@@ -303,12 +370,69 @@ class _QueryFailure:
     observation_boundary: str = "not_observed"
 
 
+@dataclass(frozen=True)
+class _GcPreviewRequest:
+    repo_uuid: str
+    expected_registry_revision: int
+    expected_active_source_revision: int
+    expected_operation_epoch: int
+    expected_migration_epoch: int
+    expected_pointer_revision: int
+    timeout_ms: int
+    capacity_policy: CapacityPolicy
+    protections: GcProtection
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "capacity_policy": self.capacity_policy.to_dict(),
+            "cli_contract_version": CLI_CONTRACT_VERSION,
+            "contract": _GC_PREVIEW_REQUEST_CONTRACT,
+            "expected_active_source_revision": self.expected_active_source_revision,
+            "expected_migration_epoch": self.expected_migration_epoch,
+            "expected_operation_epoch": self.expected_operation_epoch,
+            "expected_pointer_revision": self.expected_pointer_revision,
+            "expected_registry_revision": self.expected_registry_revision,
+            "protections": {
+                "active_lease_generations": sorted(
+                    self.protections.active_lease_generations
+                ),
+                "fixture_generations": sorted(self.protections.fixture_generations),
+                "migration_sources": sorted(self.protections.migration_sources),
+                "proof_generations": sorted(self.protections.proof_generations),
+                "rollback_artifact_generations": sorted(
+                    self.protections.rollback_artifact_generations
+                ),
+                "rollback_sources": sorted(self.protections.rollback_sources),
+            },
+            "repo_uuid": self.repo_uuid,
+            "schema_version": _GC_PREVIEW_SCHEMA_VERSION,
+            "timeout_ms": self.timeout_ms,
+        }
+
+
+@dataclass(frozen=True)
+class _GcPreviewFailure:
+    state: str
+    exit_code: int
+    reason_code: str
+    action_code: str
+    observation_boundary: str = "not_observed"
+
+
 class _QueryRequestInvalid(ValueError):
     """The query CLI request cannot be accepted safely."""
 
 
 class _QueryRequestUnsupported(_QueryRequestInvalid):
     """The query CLI request names an unsupported public contract."""
+
+
+class _GcPreviewRequestInvalid(ValueError):
+    """The GC preview request cannot be accepted safely."""
+
+
+class _GcPreviewRequestUnsupported(_GcPreviewRequestInvalid):
+    """The GC preview request names an unsupported public contract."""
 
 
 def _parse_register_request(command: tuple[str, ...]) -> _RegisterRequest | None:
@@ -799,6 +923,32 @@ def _emit_rollback_output(
         written = binary_stream.write(payload)
         if written != len(payload):
             raise OSError(errno.EIO, "incomplete workspace rollback receipt")
+        binary_stream.flush()
+    except (BrokenPipeError, OSError) as exc:
+        if not _silence_standard_streams_after_broken_pipe(stream, exc):
+            raise
+    return exit_code
+
+
+def _emit_gc_preview_output(
+    stream: TextIO,
+    payload: bytes,
+    *,
+    exit_code: int,
+) -> int:
+    """Write one canonical GC preview result as exact UTF-8 bytes."""
+
+    binary_stream = getattr(stream, "buffer", None)
+    if binary_stream is None:
+        return _emit_text_payload(
+            stream,
+            payload.decode("utf-8"),
+            exit_code=exit_code,
+        )
+    try:
+        written = binary_stream.write(payload)
+        if written != len(payload):
+            raise OSError(errno.EIO, "incomplete workspace GC preview result")
         binary_stream.flush()
     except (BrokenPipeError, OSError) as exc:
         if not _silence_standard_streams_after_broken_pipe(stream, exc):
@@ -1869,6 +2019,561 @@ def _run_query(
     return _emit_query_failure(errors, failure)
 
 
+def _read_gc_preview_request_bytes() -> bytes:
+    binary_input = getattr(sys.stdin, "buffer", None)
+    if binary_input is not None:
+        limit = _GC_PREVIEW_REQUEST_MAX_BYTES + 1
+        raw = bytearray()
+        while len(raw) < limit:
+            remaining = limit - len(raw)
+            chunk = binary_input.read(remaining)
+            if not isinstance(chunk, bytes):
+                raise _GcPreviewRequestInvalid(
+                    "GC preview request input did not return bytes"
+                )
+            if len(chunk) > remaining:
+                raise _GcPreviewRequestInvalid(
+                    "GC preview request input exceeded its bounded read"
+                )
+            if chunk == b"":
+                break
+            raw.extend(chunk)
+        return bytes(raw)
+
+    raw = bytearray()
+    while len(raw) <= _GC_PREVIEW_REQUEST_MAX_BYTES:
+        character = sys.stdin.read(1)
+        if not isinstance(character, str) or len(character) > 1:
+            raise _GcPreviewRequestInvalid(
+                "GC preview request input did not return text"
+            )
+        if character == "":
+            break
+        try:
+            raw.extend(character.encode("utf-8"))
+        except UnicodeError as exc:
+            raise _GcPreviewRequestInvalid(
+                "GC preview request input is not UTF-8"
+            ) from exc
+    return bytes(raw)
+
+
+def _gc_preview_integer(
+    value: object,
+    field: str,
+    *,
+    minimum: int,
+) -> int:
+    if (
+        type(value) is not int
+        or value < minimum
+        or value > _MAX_SIGNED_REVISION
+    ):
+        raise _GcPreviewRequestInvalid(f"GC preview request {field} is invalid")
+    return value
+
+
+def _gc_protection_ids(value: object, field: str) -> frozenset[str]:
+    if not isinstance(value, list) or len(value) > GC_PREVIEW_MAX_GENERATIONS:
+        raise _GcPreviewRequestInvalid(
+            f"GC preview request protection {field} is invalid"
+        )
+    result: list[str] = []
+    for generation_id in value:
+        if not isinstance(generation_id, str) or _GC_GENERATION_RE.fullmatch(
+            generation_id
+        ) is None:
+            raise _GcPreviewRequestInvalid(
+                f"GC preview request protection {field} is invalid"
+            )
+        result.append(generation_id)
+    if result != sorted(result) or len(result) != len(set(result)):
+        raise _GcPreviewRequestInvalid(
+            f"GC preview request protection {field} must be unique and sorted"
+        )
+    return frozenset(result)
+
+
+def _gc_preview_request_from_mapping(
+    value: Mapping[str, object],
+) -> _GcPreviewRequest:
+    if set(value) != _GC_PREVIEW_REQUEST_FIELDS:
+        raise _GcPreviewRequestInvalid("GC preview request fields are invalid")
+
+    contract = value.get("contract")
+    if not isinstance(contract, str):
+        raise _GcPreviewRequestInvalid("GC preview request contract is invalid")
+    if contract != _GC_PREVIEW_REQUEST_CONTRACT:
+        raise _GcPreviewRequestUnsupported(
+            "GC preview request contract is unsupported"
+        )
+    for field, expected in (
+        ("schema_version", _GC_PREVIEW_SCHEMA_VERSION),
+        ("cli_contract_version", CLI_CONTRACT_VERSION),
+    ):
+        version = value.get(field)
+        if type(version) is not int:
+            raise _GcPreviewRequestInvalid(
+                f"GC preview request {field} is invalid"
+            )
+        if version != expected:
+            raise _GcPreviewRequestUnsupported(
+                f"GC preview request {field} is unsupported"
+            )
+
+    try:
+        repo_uuid = WorkspaceLeaseState.canonical_repo_uuid(value.get("repo_uuid"))
+    except ContractError as exc:
+        raise _GcPreviewRequestInvalid(
+            "GC preview request repo UUID is invalid"
+        ) from exc
+    expected_registry_revision = _gc_preview_integer(
+        value.get("expected_registry_revision"),
+        "expected_registry_revision",
+        minimum=1,
+    )
+    expected_active_source_revision = _gc_preview_integer(
+        value.get("expected_active_source_revision"),
+        "expected_active_source_revision",
+        minimum=1,
+    )
+    expected_operation_epoch = _gc_preview_integer(
+        value.get("expected_operation_epoch"),
+        "expected_operation_epoch",
+        minimum=0,
+    )
+    expected_migration_epoch = _gc_preview_integer(
+        value.get("expected_migration_epoch"),
+        "expected_migration_epoch",
+        minimum=0,
+    )
+    expected_pointer_revision = _gc_preview_integer(
+        value.get("expected_pointer_revision"),
+        "expected_pointer_revision",
+        minimum=0,
+    )
+    timeout_ms = _gc_preview_integer(
+        value.get("timeout_ms"),
+        "timeout_ms",
+        minimum=1,
+    )
+    if timeout_ms > _GC_PREVIEW_TIMEOUT_MAX_MS:
+        raise _GcPreviewRequestInvalid("GC preview request timeout_ms is invalid")
+
+    capacity_value = value.get("capacity_policy")
+    if not isinstance(capacity_value, Mapping):
+        raise _GcPreviewRequestInvalid(
+            "GC preview request capacity policy is invalid"
+        )
+    try:
+        capacity_policy = CapacityPolicy.from_mapping(capacity_value)
+    except (ContractError, TypeError, ValueError) as exc:
+        raise _GcPreviewRequestInvalid(
+            "GC preview request capacity policy is invalid"
+        ) from exc
+    for field in (
+        "global_max_bytes",
+        "global_max_generations",
+        "reserve_bytes",
+        "workspace_max_bytes",
+        "workspace_max_generations",
+    ):
+        _gc_preview_integer(capacity_policy.to_dict()[field], field, minimum=1)
+
+    protection_value = value.get("protections")
+    if not isinstance(protection_value, Mapping) or set(protection_value) != set(
+        _GC_PROTECTION_FIELDS
+    ):
+        raise _GcPreviewRequestInvalid(
+            "GC preview request protection fields are invalid"
+        )
+    protections = {
+        field: _gc_protection_ids(protection_value[field], field)
+        for field in _GC_PROTECTION_FIELDS
+    }
+    protection_ids = {
+        generation_id
+        for generation_ids in protections.values()
+        for generation_id in generation_ids
+    }
+    if len(protection_ids) > GC_PREVIEW_MAX_GENERATIONS:
+        raise _GcPreviewRequestInvalid(
+            "GC preview request protections exceed the public bound"
+        )
+    return _GcPreviewRequest(
+        repo_uuid=repo_uuid,
+        expected_registry_revision=expected_registry_revision,
+        expected_active_source_revision=expected_active_source_revision,
+        expected_operation_epoch=expected_operation_epoch,
+        expected_migration_epoch=expected_migration_epoch,
+        expected_pointer_revision=expected_pointer_revision,
+        timeout_ms=timeout_ms,
+        capacity_policy=capacity_policy,
+        protections=GcProtection(
+            migration_sources=protections["migration_sources"],
+            rollback_sources=protections["rollback_sources"],
+            active_lease_generations=protections["active_lease_generations"],
+            fixture_generations=protections["fixture_generations"],
+            proof_generations=protections["proof_generations"],
+            rollback_artifact_generations=protections[
+                "rollback_artifact_generations"
+            ],
+        ),
+    )
+
+
+def _parse_gc_preview_request(raw: bytes) -> _GcPreviewRequest:
+    if len(raw) > _GC_PREVIEW_REQUEST_MAX_BYTES:
+        raise _GcPreviewRequestInvalid(
+            "GC preview request exceeds the byte limit"
+        )
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (RecursionError, TypeError, UnicodeError, ValueError) as exc:
+        raise _GcPreviewRequestInvalid(
+            "GC preview request is not valid JSON"
+        ) from exc
+    if not isinstance(value, Mapping):
+        raise _GcPreviewRequestInvalid("GC preview request must be an object")
+    request = _gc_preview_request_from_mapping(value)
+    try:
+        canonical = canonical_json_bytes(request.to_dict())
+    except ContractError as exc:
+        raise _GcPreviewRequestInvalid(
+            "GC preview request is not canonically encodable"
+        ) from exc
+    if canonical != raw:
+        raise _GcPreviewRequestInvalid("GC preview request is not canonical")
+    return request
+
+
+def _gc_preview_failure_payload(failure: _GcPreviewFailure) -> bytes:
+    return canonical_json_bytes(
+        {
+            "action_code": failure.action_code,
+            "cli_contract_version": CLI_CONTRACT_VERSION,
+            "contract": _GC_PREVIEW_RESULT_CONTRACT,
+            "decision": "withhold",
+            "exit_code": failure.exit_code,
+            "observation_boundary": failure.observation_boundary,
+            "reason_code": failure.reason_code,
+            "schema_version": _GC_PREVIEW_SCHEMA_VERSION,
+            "state": failure.state,
+        }
+    )
+
+
+def _gc_preview_is_valid(
+    result: GcPreview,
+    request: _GcPreviewRequest,
+) -> bool:
+    try:
+        repo_uuid = WorkspaceLeaseState.canonical_repo_uuid(result.repo_uuid)
+    except ContractError:
+        return False
+    revisions = (
+        (result.registry_revision, 1),
+        (result.active_source_revision, 1),
+        (result.operation_epoch, 0),
+        (result.migration_epoch, 0),
+        (result.pointer_revision, 0),
+    )
+    if repo_uuid != result.repo_uuid or any(
+        type(value) is not int
+        or value < minimum
+        or value > _MAX_SIGNED_REVISION
+        for value, minimum in revisions
+    ):
+        return False
+    if (
+        result.repo_uuid != request.repo_uuid
+        or result.registry_revision != request.expected_registry_revision
+        or result.active_source_revision != request.expected_active_source_revision
+        or result.operation_epoch != request.expected_operation_epoch
+        or result.migration_epoch != request.expected_migration_epoch
+        or result.pointer_revision != request.expected_pointer_revision
+        or result.capacity_policy_sha256 != request.capacity_policy.sha256
+    ):
+        return False
+    if not isinstance(
+        result.capacity_policy_sha256,
+        str,
+    ) or _DIGEST_RE.fullmatch(result.capacity_policy_sha256) is None:
+        return False
+    candidates = result.candidates
+    if (
+        not isinstance(candidates, tuple)
+        or len(candidates) > GC_PREVIEW_MAX_GENERATIONS
+        or list(candidates) != sorted(candidates)
+        or len(candidates) != len(set(candidates))
+        or any(
+            not isinstance(generation_id, str)
+            or _GC_GENERATION_RE.fullmatch(generation_id) is None
+            for generation_id in candidates
+        )
+    ):
+        return False
+    protected = result.protected
+    if not isinstance(protected, tuple) or len(protected) > GC_PREVIEW_MAX_GENERATIONS:
+        return False
+    protected_ids: list[str] = []
+    for item in protected:
+        if not isinstance(item, tuple) or len(item) != 2:
+            return False
+        generation_id, reasons = item
+        if (
+            not isinstance(generation_id, str)
+            or _GC_GENERATION_RE.fullmatch(generation_id) is None
+            or not isinstance(reasons, tuple)
+            or not reasons
+            or list(reasons) != sorted(reasons)
+            or len(reasons) != len(set(reasons))
+            or any(reason not in _GC_PROTECTION_REASONS for reason in reasons)
+        ):
+            return False
+        protected_ids.append(generation_id)
+    return (
+        protected_ids == sorted(protected_ids)
+        and len(protected_ids) == len(set(protected_ids))
+        and not set(candidates).intersection(protected_ids)
+        and len(set(candidates) | set(protected_ids)) <= GC_PREVIEW_MAX_GENERATIONS
+    )
+
+
+def _gc_preview_success_payload(result: GcPreview) -> bytes:
+    return canonical_json_bytes(
+        {
+            "capacity_policy_sha256": result.capacity_policy_sha256,
+            "candidates": list(result.candidates),
+            "cli_contract_version": CLI_CONTRACT_VERSION,
+            "contract": _GC_PREVIEW_RESULT_CONTRACT,
+            "decision": "preview",
+            "exit_code": EXIT_READY,
+            "observation_boundary": "locked_double_snapshot",
+            "observed": {
+                "active_source_revision": result.active_source_revision,
+                "migration_epoch": result.migration_epoch,
+                "operation_epoch": result.operation_epoch,
+                "pointer_revision": result.pointer_revision,
+                "registry_revision": result.registry_revision,
+            },
+            "protected": [
+                {"generation_id": generation_id, "reasons": list(reasons)}
+                for generation_id, reasons in result.protected
+            ],
+            "reason_code": "preview_ready",
+            "repo_uuid": result.repo_uuid,
+            "schema_version": _GC_PREVIEW_SCHEMA_VERSION,
+            "state": "previewed",
+        }
+    )
+
+
+def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
+    if isinstance(error, _GcPreviewRequestUnsupported):
+        return _GcPreviewFailure(
+            "unsupported",
+            EXIT_INVALID,
+            "gc_request_unsupported",
+            "use_supported_gc_contract",
+        )
+    if isinstance(error, _GcPreviewRequestInvalid):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "gc_request_invalid",
+            "provide_valid_gc_request",
+        )
+    if isinstance(error, WorkspaceAuthorityError):
+        state = (
+            "unsupported"
+            if error.reason_code == "runtime_authority_unsupported"
+            else "invalid"
+        )
+        return _GcPreviewFailure(
+            state,
+            EXIT_INVALID,
+            error.reason_code,
+            error.action_code,
+        )
+    if isinstance(error, GcPreviewAuthorityConflict):
+        return _GcPreviewFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "gc_authority_conflict",
+            "refresh_gc_request",
+        )
+    if isinstance(error, GcPreviewUnstable):
+        return _GcPreviewFailure(
+            "withheld",
+            EXIT_DEGRADED,
+            "gc_observation_unstable",
+            "retry_gc_preview",
+            observation_boundary="unstable",
+        )
+    if isinstance(error, LockTimeout):
+        return _GcPreviewFailure(
+            "withheld",
+            EXIT_DEGRADED,
+            "gc_coordination_contended",
+            "retry_gc_preview",
+        )
+    if isinstance(error, GcCoordinationUnavailable):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "gc_coordination_unavailable",
+            "run_workspace_repair",
+        )
+    if isinstance(
+        error,
+        (
+            GcRecoveryRequired,
+            LeaseRecoveryRequired,
+            PointerRecoveryRequired,
+            StateRecoveryRequired,
+        ),
+    ):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "gc_recovery_required",
+            "run_workspace_repair",
+        )
+    if isinstance(error, StatePathError):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "unsafe_state_path",
+            "configure_safe_state_root",
+        )
+    if isinstance(error, UnsupportedRuntime):
+        return _GcPreviewFailure(
+            "unsupported",
+            EXIT_INVALID,
+            "unsupported_runtime",
+            "use_supported_runtime",
+        )
+    if isinstance(error, UnsupportedCompatibility):
+        return _GcPreviewFailure(
+            "unsupported",
+            EXIT_INVALID,
+            "unsupported_compatibility",
+            "install_supported_candidate",
+        )
+    if isinstance(
+        error,
+        (StateCorrupt, PointerCorrupt, ContractError, GenerationError, LeaseError),
+    ):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "state_corrupt",
+            "run_workspace_repair",
+        )
+    return _GcPreviewFailure(
+        "invalid",
+        EXIT_INVALID,
+        "gc_preview_failed",
+        "run_workspace_doctor",
+    )
+
+
+def _emit_gc_preview_failure(
+    errors: TextIO,
+    failure: _GcPreviewFailure,
+) -> int:
+    return _emit_gc_preview_output(
+        errors,
+        _gc_preview_failure_payload(failure),
+        exit_code=failure.exit_code,
+    )
+
+
+def _run_gc_preview(
+    *,
+    inputs: WorkspaceRuntimeInputs | None,
+    output: TextIO,
+    errors: TextIO,
+) -> int:
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        if resolved_inputs is None:
+            return _emit_gc_preview_failure(
+                errors,
+                _GcPreviewFailure(
+                    "invalid",
+                    EXIT_INVALID,
+                    "runtime_authority_missing",
+                    "install_candidate_authority",
+                ),
+            )
+        runtime = compose_workspace_runtime(resolved_inputs)
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        return _emit_gc_preview_failure(
+            errors,
+            _classify_gc_preview_error(exc),
+        )
+
+    try:
+        try:
+            raw_request = _read_gc_preview_request_bytes()
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            if isinstance(exc, _GcPreviewRequestInvalid):
+                raise
+            raise _GcPreviewRequestInvalid(
+                "GC preview request input cannot be read"
+            ) from exc
+        request = _parse_gc_preview_request(raw_request)
+    except Exception as exc:
+        return _emit_gc_preview_failure(
+            errors,
+            _classify_gc_preview_error(exc),
+        )
+
+    try:
+        deadline_ns = time.monotonic_ns() + request.timeout_ms * 1_000_000
+        with (
+            redirect_stdout(_DISCARDED_ENGINE_OUTPUT),
+            redirect_stderr(_DISCARDED_ENGINE_OUTPUT),
+        ):
+            result = runtime.gc.preview(
+                request.repo_uuid,
+                expected_registry_revision=request.expected_registry_revision,
+                expected_active_source_revision=request.expected_active_source_revision,
+                expected_operation_epoch=request.expected_operation_epoch,
+                expected_migration_epoch=request.expected_migration_epoch,
+                expected_pointer_revision=request.expected_pointer_revision,
+                capacity_policy=request.capacity_policy,
+                protections=request.protections,
+                deadline_ns=deadline_ns,
+            )
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        return _emit_gc_preview_failure(
+            errors,
+            _classify_gc_preview_error(exc),
+        )
+    if not isinstance(result, GcPreview) or not _gc_preview_is_valid(result, request):
+        return _emit_gc_preview_failure(
+            errors,
+            _GcPreviewFailure(
+                "invalid",
+                EXIT_INVALID,
+                "gc_result_invalid",
+                "run_workspace_doctor",
+            ),
+        )
+    return _emit_gc_preview_output(
+        output,
+        _gc_preview_success_payload(result),
+        exit_code=EXIT_READY,
+    )
+
+
 def _doctor_text(report: WorkspaceStatusReport) -> str:
     value = report.to_dict()
     lines = [
@@ -1934,6 +2639,18 @@ def run_workspace_command(
                 exit_code=EXIT_USAGE,
             )
         return _run_sync(
+            inputs=inputs,
+            output=output,
+            errors=errors,
+        )
+    if command and command[0] == "gc":
+        if command != ("gc", "--dry-run", "--request-stdin"):
+            return _emit_text_payload(
+                errors,
+                _GC_PREVIEW_USAGE + "\n",
+                exit_code=EXIT_USAGE,
+            )
+        return _run_gc_preview(
             inputs=inputs,
             output=output,
             errors=errors,
@@ -2076,8 +2793,28 @@ def load_rollback_receipt_schema() -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def load_gc_preview_request_schema() -> dict[str, Any]:
+    """Load the public canonical offline-GC preview request schema."""
+
+    value = _load_json(_GC_PREVIEW_REQUEST_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace GC preview request schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+def load_gc_preview_result_schema() -> dict[str, Any]:
+    """Load the public deterministic offline-GC preview result schema."""
+
+    value = _load_json(_GC_PREVIEW_RESULT_SCHEMA_PATH.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError("workspace GC preview result schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
 __all__ = [
     "load_activation_schema",
+    "load_gc_preview_request_schema",
+    "load_gc_preview_result_schema",
     "load_identity_maintenance_schema",
     "load_query_request_schema",
     "load_query_result_schema",

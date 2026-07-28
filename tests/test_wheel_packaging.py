@@ -114,6 +114,8 @@ def test_workspace_contract_surface_ships_in_wheel(wheel_namelist: set[str]) -> 
         "graphify/workspace/rollback.py",
         "graphify/workspace/schemas/cli/v1/rollback-request.schema.json",
         "graphify/workspace/schemas/cli/v1/rollback-receipt.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-preview-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/gc-preview-result.schema.json",
         *{
             f"graphify/workspace/schemas/v1/{name}" for name in WORKSPACE_SCHEMA_FILES
         },

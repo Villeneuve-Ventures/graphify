@@ -71,10 +71,19 @@ pointer revision; a visible-pointer-only crash boundary still fails closed. A
 residual pending intent remains a mutation barrier until fenced recovery. The
 reader acquires no writer lease and calls no mutating persistence primitive.
 
-GC requires a live fenced `GC` operation and an explicit `GcProtection` set for
-migration, rollback, lease, fixture, proof, and rollback-artifact reachability
-that P3 cannot infer. The dry run writes nothing. Execute persists an intent,
-takes exclusive generation locks in lexical order, rechecks pointer and caller
+`graphify workspace gc --dry-run --request-stdin` is a separate public preview:
+it loads installed authority before one canonical request, accepts all capacity
+and six protection classes explicitly, uses read-only coordination and two
+matching reachability snapshots, and emits an unfenced deterministic result.
+It creates no lease, fence, `GcPlan`, state, lock file, cleanup, quarantine,
+receipt, or log, including on failures. It neither infers capacity or protections nor
+changes the following fenced execution contract.
+
+`GcStore.plan()`, `execute()`, `reconcile()`, and `purge()` require a live
+fenced `GC` operation and an explicit `GcProtection` set for migration,
+rollback, lease, fixture, proof, and rollback-artifact reachability that P3
+cannot infer. Their dry run writes nothing. Execute persists an intent, takes
+exclusive generation locks in lexical order, rechecks pointer and caller
 protections, atomically renames only unreachable generations to quarantine,
 syncs both directories, and persists completion. An unresolved GC intent is a
 workspace-wide mutation barrier until a successor `GC` or `POINTER_RECOVERY`

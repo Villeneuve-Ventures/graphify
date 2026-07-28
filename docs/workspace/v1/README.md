@@ -2,7 +2,8 @@
 
 Implemented contract scope through the one-step P5B2 exact-last-good rollback
 CLI, the unnumbered P5B2 active-source activation CLI, the unnumbered P5B2
-identity-maintenance CLI, P5B2c one-shot certified workspace query,
+identity-maintenance CLI, P5B2c one-shot certified workspace query, the
+bounded P5B2 GC preview CLI,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -100,8 +101,10 @@ and `InjectedFault` is re-raised when it is the primary error or the only
 release error. The request and receipt schemas are
 `graphify/workspace/schemas/cli/v1/rollback-request.schema.json` and
 `rollback-receipt.schema.json`.
-Migrate, GC, repair, broader mutation/query commands, watch/service,
+Migrate, GC mutation, repair, broader mutation/query commands, watch/service,
 performance certification, and candidate publication remain later P5 work.
+The bounded GC preview below is a read-only delivery, not GC mutation or
+acceptance.
 P5B2b0 adds the internal request-bound staged-build and stale-abandonment
 recovery contract described in [State contracts](state-contract.md). P5B2b
 exposes only `graphify workspace sync --code-only --request-stdin`, using a
@@ -273,6 +276,54 @@ errors. Governance completion is accepted separately under the
 [`P5B2 exact-last-good rollback` receipt](receipts/p5b2-exact-last-good-rollback.md);
 this implementation text alone does not expand live authority.
 
+## Bounded GC preview CLI
+
+The exact and only public GC argv is:
+
+```text
+graphify workspace gc --dry-run --request-stdin
+```
+
+Malformed, reordered, repeated, or extended argv exits 64 before authority
+loading or standard-input reads. For the exact argv, the CLI loads and composes
+installed runtime authority before consuming one bounded canonical CLI-v1
+request. The caller supplies the repo UUID; expected registry, active-source,
+operation, migration, and pointer revisions; `timeout_ms`; the entire
+`CapacityPolicy`; and every `GcProtection` class: active-lease generations,
+fixture generations, migration sources, proof generations, rollback-artifact
+generations, and rollback sources. It infers no capacity, protection, path,
+provider, or environment-backed value while parsing that request. Before the
+request read, the unchanged installed-authority locator selects external state
+through its existing `XDG_STATE_HOME`/`HOME` contract; that read-only location
+authority is not a request default and creates nothing.
+
+The composed runtime uses existing read-only registry/workspace coordination and
+generation-lock probes, then requires two matching reachability snapshots. On
+success it writes exactly one canonical deterministic unfenced
+`graphify.workspace.gc_preview_result` v1 object to standard output. The result
+contains candidates, protected generations with stable reasons, observed
+revisions, and the capacity-policy SHA-256. It does not create a `LeaseGrant`, a
+fence, or an executable `GcPlan`.
+
+The preview makes zero durable writes on success and failure: it does not create
+or clean leases, recovery state, temporary files, directories, modes, locks,
+registry records, intents, quarantine records, receipts, query logs, sources, or
+Git data. It also leaves `HOME`, `XDG_STATE_HOME`, and `CODEX_HOME` untouched.
+The existing fenced `GcStore.plan()`, `execute()`, `reconcile()`, and `purge()`
+semantics are unchanged and remain outside this command.
+
+| Exit | Result | Standard output |
+|---:|---|---|
+| 0 | Stable preview | One canonical preview result |
+| 10 | Stale authority, unstable observation, or coordination contention | Empty; a canonical redacted failure result is written to standard error |
+| 20 | Invalid, unsupported, unsafe, corrupt, or recovery-required state | Empty; a canonical redacted failure result is written to standard error |
+| 64 | Invalid argv | Empty; deterministic usage text is written to standard error |
+
+This delivery excludes quarantine, reconciliation, purge, repair, migration,
+semantic sync, service/watch, publication, performance or resource proof, H3,
+P6+, and governance acceptance. A governance or receipt closeout, if any,
+remains separate from this implementation documentation.
+
 ## Governance and deferred work ownership
 
 The publication gate in [Workspace governance](governance.md) requires one
@@ -292,8 +343,9 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
 | Active-source activation | Unnumbered P5B2 activation (`COMPLETE`) | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, an immutable-enrollment continuity check, and one redacted CLI-v1 receipt. |
 | Exact last-good rollback | P5B2 exact-last-good rollback (`COMPLETE`) | Accepted receipt: [`P5B2 exact-last-good rollback`](receipts/p5b2-exact-last-good-rollback.md). `workspace rollback --request-stdin` exposes one fenced move to the visible pointer's exact `last_good` reference with an explicit canonical request and redacted receipt. It does not authorize arbitrary historical selection or any later command. |
+| Bounded GC preview | P5B2 implementation delivery | `workspace gc --dry-run --request-stdin` exposes only an unfenced, read-only, canonical preview with explicit authority, capacity, and protection inputs. It neither authorizes GC mutation nor records governance acceptance. |
 | Retained-source identity continuity | P5B2 registry hardening (`COMPLETE`) | `rotate_enrollment_evidence()` and `resolve_active_source()` now independently require a shared immutable enrollment history root or the enrolled Git common-directory identity. Rejected rotation occurs before the requested source evidence, identity-action evidence, or registry revision is persisted. Accepted receipt: [`P5B2 retained-source identity continuity`](receipts/p5b2-retained-source-identity-continuity.md). |
-| Remaining workspace commands | Remaining P5B2/P5C | Migrate, GC, repair, every other mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
+| Remaining workspace commands | Remaining P5B2/P5C | Migrate, GC mutation, repair, every other mutation, and all query authority beyond P5B2c's one-shot certified transport require separately reviewed contracts and explicit operator intent. |
 | Candidate runtime authority | P5C1 (`COMPLETE`) | Generates canonical `runtime-manifest.json` from the existing compatibility manifest plus explicit `SemanticQueuePolicy`, binds its exact bytes/hash to the immutable candidate, installs it atomically only in isolated external-state fixtures, proves deterministic-failure compensation, and preserves P5B1's read-only loader unchanged. |
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
@@ -336,8 +388,9 @@ or fork engine logic inside the package.
   `graphify/workspace/schemas/cli/v2/` are normative for the structural shape
   of durable documents, CLI requests and receipts, versioned status output,
   and the TOML-to-object representation of repo policy. Registration, identity-
-  maintenance, active-source activation, sync request/receipt, and one-shot
-  query request/result contracts are CLI v1; status JSON is schema v2.
+  maintenance, active-source activation, sync request/receipt, one-shot query
+  request/result, and GC preview request/result contracts are CLI v1; status
+  JSON is schema v2.
 - `graphify.workspace` supplies dependency-free canonical reference models,
   exact v1 rejection, SHA-256 inputs, and journal frame encoding. Its
   cross-field and cross-document validation is normative where JSON Schema
@@ -356,9 +409,10 @@ or fork engine logic inside the package.
   P5B2a registration command plus the bounded rebind/rotation identity-
   maintenance slice and standalone active-source activation with bounded
   authority, authorization, policy, Git-discovery, and four-part CAS inputs,
-  the P5B2b sync request/receipt transport, and the P5B2c
-  one-shot query transport; it reuses `.identity`, `.registry`, `.sync`, and
-  `.freshness` without adding another persistence path. Lifecycle mutation
+  the P5B2b sync request/receipt transport, the P5B2c one-shot query transport,
+  and the bounded read-only GC preview transport; it reuses `.identity`,
+  `.registry`, `.sync`, `.freshness`, and `.gc` without adding another
+  persistence path. Lifecycle mutation
   fails closed outside
   non-elevated macOS on local APFS; tests use an explicit injected capability
   seam and disposable external state roots.
