@@ -103,12 +103,15 @@ Each consumes a phase-specific canonical authorization and caller-supplied
 identity CAS, capacity, and protections. Execute recomputes the frozen public
 preview result, verifies its exact canonical-byte SHA-256 approval, acquires a
 fresh trusted `GC` lease, and permits the existing P3 execution only when a
-fresh plan matches the preview's non-fence projection. Reconcile mutates only
-an existing GC intent and can replay the immutable completion indexed by a
-matching current operation epoch without a lease; purge names one exact plan
-digest and rechecks pointer, protection, and lock conditions. These transports
-expose redacted results, not raw durable lifecycle records. They do not add
-automatic GC, online/service
+fresh plan matches the preview's semantically equivalent non-fence projection.
+Redundant `shared_lock` detail on an otherwise protected generation does not
+change that projection, while a sole lock reason remains material. One absolute
+request deadline bounds planning, blocking generation-lock acquisition, and
+fenced mutation. Reconcile mutates only an existing GC intent and can replay the
+immutable completion indexed by a matching current operation epoch without a
+lease; purge names one exact plan digest and rechecks pointer, protection, and
+lock conditions. These transports expose redacted results, not raw durable
+lifecycle records. They do not add automatic GC, online/service
 behavior, installation, performance certification, candidate publication, or
 live-cutover authority; retained production query/service authority remains
 P5C work.

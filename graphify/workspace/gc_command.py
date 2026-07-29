@@ -842,6 +842,22 @@ def gc_preview_result_bytes(result: GcPreview) -> bytes:
     )
 
 
+def _equivalent_protected_projection(
+    protected: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return tuple(
+        (
+            generation_id,
+            tuple(
+                reason
+                for reason in reasons
+                if reason != "shared_lock" or len(reasons) == 1
+            ),
+        )
+        for generation_id, reasons in protected
+    )
+
+
 def _preview_plan_projection(value: GcPreview | GcPlan) -> tuple[object, ...]:
     return (
         value.repo_uuid,
@@ -851,7 +867,7 @@ def _preview_plan_projection(value: GcPreview | GcPlan) -> tuple[object, ...]:
         value.pointer_revision,
         value.capacity_policy_sha256,
         value.candidates,
-        value.protected,
+        _equivalent_protected_projection(value.protected),
     )
 
 
@@ -947,6 +963,7 @@ def execute_gc(
             capacity_policy=request.capacity_policy,
             protections=request.protections,
             monotonic_ns=monotonic_clock(),
+            deadline_ns=deadline_ns,
         )
         if _preview_plan_projection(preview) != _preview_plan_projection(plan):
             raise GcPreviewPlanMismatch(
@@ -959,6 +976,7 @@ def execute_gc(
             protections=request.protections,
             occurred_at=occurred_at,
             monotonic_ns=monotonic_clock(),
+            deadline_ns=deadline_ns,
         )
         if (
             not isinstance(completion, GcCompletionState)
@@ -1033,6 +1051,7 @@ def reconcile_gc(
             expected_pointer_revision=request.expected_pointer_revision,
             completed_at=occurred_at,
             monotonic_ns=monotonic_clock(),
+            deadline_ns=deadline_ns,
         )
         if completion is None:
             return GcReconcileResult(
@@ -1104,6 +1123,7 @@ def purge_gc(
             expected_pointer_revision=request.expected_pointer_revision,
             completed_at=occurred_at,
             monotonic_ns=monotonic_clock(),
+            deadline_ns=deadline_ns,
         )
         if (
             not isinstance(purge, GcPurgeState)

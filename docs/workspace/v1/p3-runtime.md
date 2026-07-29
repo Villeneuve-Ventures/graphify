@@ -90,7 +90,11 @@ preview-result bytes, recomputes that preview before leasing, then creates a
 fresh plan and requires its non-fence projection to equal the preview. The
 comparison includes repo UUID, registry and active-source revisions, migration
 epoch, pointer revision, capacity-policy digest, candidates, and protected
-generation reasons. The newly allocated fence and operation epoch are excluded.
+generation reasons. A `shared_lock` reason is redundant only when another reason
+already protects that generation; a sole lock reason remains material. The
+newly allocated fence and operation epoch are excluded. The request's absolute
+deadline continues through planning, blocking generation-lock acquisition, and
+the fenced mutation.
 Reconcile names no plan, mutates only an existing GC intent, and otherwise
 replays the completion indexed by its still-current operation epoch or returns
 an explicit no-op. Purge requires an exact completed plan SHA-256 and remains

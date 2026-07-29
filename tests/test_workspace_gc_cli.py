@@ -1916,6 +1916,46 @@ def test_gc_execute_rejects_fresh_plan_non_fence_projection_drift(
     assert (tree_snapshot(generation_root), tree_snapshot(quarantine_root)) == before
 
 
+def test_gc_execute_normalizes_redundant_shared_lock_protection_reason(
+    tmp_path: Path,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    runtime = _gc_mutation_runtime(harness)
+    command = _gc_command()
+    lock = runtime.gc.state.path(
+        runtime.gc.generations._lock(REPO_UUID, "gen-current")
+    )
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys; fd=os.open(sys.argv[1], os.O_RDONLY); "
+                "fcntl.flock(fd, fcntl.LOCK_SH); print('READY', flush=True); input()"
+            ),
+            str(lock),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout is not None and holder.stdout.readline().strip() == "READY"
+    try:
+        result = command.execute_gc(
+            runtime,
+            _approved_execute_request(runtime),
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    finally:
+        assert holder.stdin is not None
+        holder.stdin.write("\n")
+        holder.stdin.flush()
+        holder.wait(timeout=5)
+
+    assert result.to_dict()["quarantined"] == ["gen-unused"]
+
+
 def test_gc_reconcile_and_purge_reject_stale_pointer_before_lease_mutation(
     tmp_path: Path,
 ) -> None:
@@ -2256,6 +2296,111 @@ def test_gc_execute_lease_ttl_covers_request_deadline_after_acquisition_wait(
     )
 
     assert result.to_dict()["quarantined"] == ["gen-unused"]
+
+
+@pytest.mark.parametrize("operation", ["execute", "reconcile", "purge"])
+def test_gc_public_lifecycle_propagates_one_request_deadline_to_store_operations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    command = _gc_command()
+    runtime = _gc_mutation_runtime(harness)
+    method_names: tuple[str, ...]
+
+    if operation == "execute":
+        request = _approved_execute_request(runtime)
+        method_names = ("plan", "execute")
+        invoke = lambda: command.execute_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    elif operation == "reconcile":
+        interrupted = False
+
+        def leave_durable_intent(event: str) -> None:
+            nonlocal interrupted
+            if event == "gc:intent_durable" and not interrupted:
+                interrupted = True
+                raise InjectedFault(event)
+
+        interrupted_runtime = _gc_mutation_runtime(
+            harness,
+            fault_hook=leave_durable_intent,
+        )
+        with pytest.raises((CommitUnknown, InjectedFault)):
+            command.execute_gc(
+                interrupted_runtime,
+                _approved_execute_request(interrupted_runtime),
+                occurred_at=START,
+                monotonic_clock=time.monotonic_ns,
+            )
+        assert interrupted is True
+        runtime = _gc_mutation_runtime(harness)
+        request = command.GcReconcileRequest.from_bytes(
+            canonical_json_bytes(_gc_live_lifecycle_request(runtime, "reconcile"))
+        )
+        method_names = ("reconcile",)
+        invoke = lambda: command.reconcile_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    else:
+        executed = command.execute_gc(
+            runtime,
+            _approved_execute_request(runtime),
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+        request = command.GcPurgeRequest.from_bytes(
+            canonical_json_bytes(
+                _gc_live_lifecycle_request(
+                    runtime,
+                    "purge",
+                    expected_plan_sha256=cast(
+                        str,
+                        executed.to_dict()["plan_sha256"],
+                    ),
+                )
+            )
+        )
+        method_names = ("purge",)
+        invoke = lambda: command.purge_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+
+    observed: dict[str, list[int | None]] = {name: [] for name in method_names}
+    for name in method_names:
+        original = getattr(runtime.gc, name)
+
+        def capture_deadline(
+            *args: object,
+            _name: str = name,
+            _original: Any = original,
+            deadline_ns: int | None = None,
+            **kwargs: object,
+        ) -> object:
+            observed[_name].append(deadline_ns)
+            if deadline_ns is not None:
+                kwargs["deadline_ns"] = deadline_ns
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(runtime.gc, name, capture_deadline)
+
+    invoke()
+
+    deadlines = [deadline for values in observed.values() for deadline in values]
+    assert deadlines
+    assert all(isinstance(deadline, int) for deadline in deadlines)
+    assert len(set(deadlines)) == 1
 
 
 def test_gc_public_lifecycle_executes_reconciles_idempotently_and_purges_explicitly(

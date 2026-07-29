@@ -504,8 +504,11 @@ verification reviews.
   request's SHA-256 against those exact bytes before acquiring a fresh trusted
   `GC` lease. A fresh plan must match the approved preview on repo UUID,
   registry/active-source/migration/pointer revisions, capacity-policy digest,
-  candidates, and protected facts, while excluding the newly allocated fence
-  and operation epoch;
+  candidates, and semantically equivalent protected facts, while excluding the
+  newly allocated fence and operation epoch. `shared_lock` is ignored only when
+  another reason already protects the same generation; a sole lock reason
+  remains material. The one request deadline continues through plan validation,
+  blocking generation-lock acquisition, and fenced store mutation;
 - reconcile mutates only an existing intent. A completion indexed by the
   request's still-current operation epoch replays without a lease or write;
   otherwise no recovery state returns `nothing_to_reconcile`. Purge is an

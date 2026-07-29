@@ -320,16 +320,26 @@ class GcStore:
         repo_uuid: str,
         *,
         maximum_entries: int | None = None,
+        deadline_ns: int | None = None,
     ) -> tuple[str, ...]:
+        require_before_deadline(
+            deadline_ns,
+            "GC generation enumeration exceeded its deadline",
+        )
         relative = self.generations._workspace(repo_uuid) / "generations"
         try:
-            return self.state.list_existing_private_directories(
+            generation_ids = self.state.list_existing_private_directories(
                 relative,
                 allow_missing=True,
                 maximum_entries=maximum_entries,
             )
         except StatePathError as exc:
             raise GcError(f"generations path is unsafe: {exc}") from exc
+        require_before_deadline(
+            deadline_ns,
+            "GC generation enumeration exceeded its deadline",
+        )
+        return generation_ids
 
     @staticmethod
     def _registry_entry(document: Registry, repo_uuid: str) -> dict[str, Any]:
@@ -553,6 +563,7 @@ class GcStore:
         generations = self._generation_ids(
             repo_uuid,
             maximum_entries=maximum_generations,
+            deadline_ns=deadline_ns,
         )
         if maximum_generations is not None and len(set(generations) | set(reasons)) > (
             maximum_generations
@@ -608,11 +619,13 @@ class GcStore:
         capacity_policy: CapacityPolicy,
         protections: GcProtection,
         probe_locks: bool,
+        deadline_ns: int | None = None,
     ) -> GcPlan:
         reachability = self._reachability_locked(
             operation.repo_uuid,
             protections=protections,
             probe_locks=probe_locks,
+            deadline_ns=deadline_ns,
             maximum_generations=GC_PREVIEW_MAX_GENERATIONS,
         )
         plan = GcPlan(
@@ -856,20 +869,26 @@ class GcStore:
         capacity_policy: CapacityPolicy,
         protections: GcProtection,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> GcPlan:
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation_read_only(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
+            deadline_ns=deadline_ns,
         ) as operation:
-            if self._read_intent(operation.repo_uuid) is not None:
+            if self._read_intent(
+                operation.repo_uuid,
+                deadline_ns=deadline_ns,
+            ) is not None:
                 raise GcRecoveryRequired("an unresolved GC intent must be reconciled")
             return self._plan_locked(
                 operation,
                 capacity_policy=capacity_policy,
                 protections=protections,
                 probe_locks=True,
+                deadline_ns=deadline_ns,
             )
 
     def _intent(
@@ -915,8 +934,17 @@ class GcStore:
             }
         )
 
-    def _rename_candidates(self, intent: GcIntentState) -> None:
+    def _rename_candidates(
+        self,
+        intent: GcIntentState,
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
         for generation_id in intent.candidates:
+            require_before_deadline(
+                deadline_ns,
+                "GC candidate quarantine exceeded its deadline",
+            )
             source = self.generations._generation(intent.repo_uuid, generation_id)
             destination = self._quarantine(
                 intent.repo_uuid,
@@ -931,12 +959,20 @@ class GcStore:
                     f"source={source_exists} quarantine={destination_exists}"
                 )
             if source_exists:
+                require_before_deadline(
+                    deadline_ns,
+                    "GC candidate quarantine exceeded its deadline",
+                )
                 self.state.rename_contained(
                     source,
                     destination,
                     label=f"gc:{generation_id}:quarantine",
                 )
                 self.fault_hook(f"gc:{generation_id}:quarantined")
+            require_before_deadline(
+                deadline_ns,
+                "GC candidate quarantine exceeded its deadline",
+            )
 
     def _write_completion(
         self,
@@ -944,7 +980,12 @@ class GcStore:
         completion: GcCompletionState,
         *,
         receipt_operation_epoch: int,
+        deadline_ns: int | None = None,
     ) -> None:
+        require_before_deadline(
+            deadline_ns,
+            "GC completion persistence exceeded its deadline",
+        )
         self.state.install_once_bytes(
             self._completion_path(intent.repo_uuid, intent.plan_sha256),
             completion.canonical,
@@ -953,6 +994,10 @@ class GcStore:
         for operation_epoch in sorted(
             {intent.operation_epoch, receipt_operation_epoch}
         ):
+            require_before_deadline(
+                deadline_ns,
+                "GC completion persistence exceeded its deadline",
+            )
             index = GcCompletionIndexState.from_mapping(
                 {
                     "completion_sha256": canonical_sha256(completion.to_dict()),
@@ -968,13 +1013,28 @@ class GcStore:
                 index.canonical,
                 label="gc:completion_epoch",
             )
+        require_before_deadline(
+            deadline_ns,
+            "GC completion persistence exceeded its deadline",
+        )
         self.fault_hook("gc:completion_durable")
 
-    def _read_completion(self, intent: GcIntentState) -> GcCompletionState | None:
+    def _read_completion(
+        self,
+        intent: GcIntentState,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GcCompletionState | None:
         relative = self._completion_path(intent.repo_uuid, intent.plan_sha256)
-        self.state.cleanup_atomic_temps(relative.parent)
+        self.state.cleanup_atomic_temps(
+            relative.parent,
+            deadline_ns=deadline_ns,
+        )
         try:
-            data = self.state.read_optional_existing_bytes(relative)
+            data = self.state.read_optional_existing_bytes(
+                relative,
+                deadline_ns=deadline_ns,
+            )
             if data is None:
                 return None
             completion = GcCompletionState.from_json(data)
@@ -988,6 +1048,10 @@ class GcStore:
             or completion.quarantined != intent.candidates
         ):
             raise GcRecoveryRequired("GC completion does not bind the durable intent")
+        require_before_deadline(
+            deadline_ns,
+            "GC completion inspection exceeded its deadline",
+        )
         return completion
 
     def execute(
@@ -999,26 +1063,42 @@ class GcStore:
         protections: GcProtection,
         occurred_at: datetime,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> GcCompletionState:
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
+            deadline_ns=deadline_ns,
         ) as operation:
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
-            if self._read_intent(operation.repo_uuid) is not None:
+            self.state.cleanup_atomic_temps(
+                self._workspace(operation.repo_uuid) / "gc",
+                deadline_ns=deadline_ns,
+            )
+            if self._read_intent(
+                operation.repo_uuid,
+                deadline_ns=deadline_ns,
+            ) is not None:
                 raise GcRecoveryRequired("an unresolved GC intent must be reconciled")
             refreshed = self._plan_locked(
                 operation,
                 capacity_policy=capacity_policy,
                 protections=protections,
                 probe_locks=True,
+                deadline_ns=deadline_ns,
             )
             if refreshed.canonical != plan.canonical:
                 raise GcPlanStale("GC dry-run plan no longer matches reachability")
             intent = self._intent(operation, plan, occurred_at=occurred_at)
-            completion = self._read_completion(intent)
+            completion = self._read_completion(
+                intent,
+                deadline_ns=deadline_ns,
+            )
+            require_before_deadline(
+                deadline_ns,
+                "GC execute exceeded its deadline",
+            )
             self.state.install_once_bytes(
                 self._intent_path(operation.repo_uuid),
                 intent.canonical,
@@ -1032,28 +1112,38 @@ class GcStore:
                 )
                 for generation_id in plan.candidates
             ]
-            with self.state.existing_generation_locks(locks, exclusive=True):
+            with self.state.existing_generation_locks(
+                locks,
+                exclusive=True,
+                deadline_ns=deadline_ns,
+            ):
                 self.fault_hook("gc:generation_locks_acquired")
                 locked_plan = self._plan_locked(
                     operation,
                     capacity_policy=capacity_policy,
                     protections=protections,
                     probe_locks=False,
+                    deadline_ns=deadline_ns,
                 )
                 if locked_plan.canonical != plan.canonical:
                     raise GcRecoveryRequired("GC reachability changed after durable intent")
                 self.fault_hook("gc:reachability_rechecked")
-                self._rename_candidates(intent)
+                self._rename_candidates(
+                    intent,
+                    deadline_ns=deadline_ns,
+                )
             if completion is None:
                 completion = self._completion(intent, completed_at=occurred_at)
             self._write_completion(
                 intent,
                 completion,
                 receipt_operation_epoch=operation.grant.operation_epoch,
+                deadline_ns=deadline_ns,
             )
             self.state.unlink_and_sync(
                 self._intent_path(operation.repo_uuid),
                 label="gc:intent_clear",
+                deadline_ns=deadline_ns,
             )
             self.fault_hook("gc:complete")
             return completion
@@ -1067,16 +1157,27 @@ class GcStore:
         expected_pointer_revision: int | None = None,
         completed_at: datetime,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> GcCompletionState | None:
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC", "POINTER_RECOVERY"}),
+            deadline_ns=deadline_ns,
         ) as operation:
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
-            intent = self._read_intent(operation.repo_uuid)
-            pointer_revision = self._verified_pointer_revision(operation.repo_uuid)
+            self.state.cleanup_atomic_temps(
+                self._workspace(operation.repo_uuid) / "gc",
+                deadline_ns=deadline_ns,
+            )
+            intent = self._read_intent(
+                operation.repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+            pointer_revision = self._verified_pointer_revision(
+                operation.repo_uuid,
+                deadline_ns=deadline_ns,
+            )
             if (
                 expected_pointer_revision is not None
                 and pointer_revision != expected_pointer_revision
@@ -1096,6 +1197,7 @@ class GcStore:
                 capacity_policy=capacity_policy,
                 protections=protections,
                 probe_locks=False,
+                deadline_ns=deadline_ns,
             )
             if (
                 expected_pointer_revision is not None
@@ -1105,7 +1207,10 @@ class GcStore:
             protected = {generation_id for generation_id, _reasons in refreshed.protected}
             if any(generation_id in protected for generation_id in intent.candidates):
                 raise GcRecoveryRequired("a durable GC candidate became reachable")
-            completion = self._read_completion(intent)
+            completion = self._read_completion(
+                intent,
+                deadline_ns=deadline_ns,
+            )
             locks = [
                 (
                     generation_id,
@@ -1113,31 +1218,54 @@ class GcStore:
                 )
                 for generation_id in intent.candidates
             ]
-            with self.state.existing_generation_locks(locks, exclusive=True):
-                self._rename_candidates(intent)
+            with self.state.existing_generation_locks(
+                locks,
+                exclusive=True,
+                deadline_ns=deadline_ns,
+            ):
+                self._rename_candidates(
+                    intent,
+                    deadline_ns=deadline_ns,
+                )
             if completion is None:
                 completion = self._completion(intent, completed_at=completed_at)
             self._write_completion(
                 intent,
                 completion,
                 receipt_operation_epoch=operation.grant.operation_epoch,
+                deadline_ns=deadline_ns,
             )
             self.state.unlink_and_sync(
                 self._intent_path(operation.repo_uuid),
                 label="gc:reconcile_clear",
+                deadline_ns=deadline_ns,
             )
             self.fault_hook("gc:reconciled")
             return completion
 
-    def _remove_quarantine(self, relative: Path) -> bool:
+    def _remove_quarantine(
+        self,
+        relative: Path,
+        *,
+        deadline_ns: int | None = None,
+    ) -> bool:
+        require_before_deadline(
+            deadline_ns,
+            "GC quarantine purge exceeded its deadline",
+        )
         try:
-            return self.state.remove_private_tree(
+            removed = self.state.remove_private_tree(
                 relative,
                 allowed_directory_modes=_PURGE_ALLOWED_DIRECTORY_MODES,
                 allowed_file_modes=_PURGE_ALLOWED_FILE_MODES,
             )
         except StatePathError as exc:
             raise GcError(f"quarantine path is unsafe: {exc}") from exc
+        require_before_deadline(
+            deadline_ns,
+            "GC quarantine purge exceeded its deadline",
+        )
+        return removed
 
     def purge(
         self,
@@ -1149,17 +1277,28 @@ class GcStore:
         expected_pointer_revision: int | None = None,
         completed_at: datetime,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> GcPurgeState:
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
             allowed_operations=frozenset({"GC"}),
+            deadline_ns=deadline_ns,
         ) as operation:
-            self.state.cleanup_atomic_temps(self._workspace(operation.repo_uuid) / "gc")
-            if self._read_intent(operation.repo_uuid) is not None:
+            self.state.cleanup_atomic_temps(
+                self._workspace(operation.repo_uuid) / "gc",
+                deadline_ns=deadline_ns,
+            )
+            if self._read_intent(
+                operation.repo_uuid,
+                deadline_ns=deadline_ns,
+            ) is not None:
                 raise GcRecoveryRequired("GC intent must be reconciled before purge")
-            pointer_revision = self._verified_pointer_revision(operation.repo_uuid)
+            pointer_revision = self._verified_pointer_revision(
+                operation.repo_uuid,
+                deadline_ns=deadline_ns,
+            )
             if (
                 expected_pointer_revision is not None
                 and pointer_revision != expected_pointer_revision
@@ -1170,6 +1309,7 @@ class GcStore:
                 purge = self._read_purge_state_locked(
                     operation.repo_uuid,
                     plan_sha256,
+                    deadline_ns=deadline_ns,
                 )
             except GcError:
                 raise
@@ -1178,10 +1318,16 @@ class GcStore:
             if purge is not None:
                 return purge
             completion_relative = self._completion_path(operation.repo_uuid, plan_sha256)
-            self.state.cleanup_atomic_temps(completion_relative.parent)
+            self.state.cleanup_atomic_temps(
+                completion_relative.parent,
+                deadline_ns=deadline_ns,
+            )
             try:
                 completion = GcCompletionState.from_json(
-                    self.state.read_existing_bytes(completion_relative)
+                    self.state.read_existing_bytes(
+                        completion_relative,
+                        deadline_ns=deadline_ns,
+                    )
                 )
             except Exception as exc:
                 raise GcError(f"GC completion is unavailable: {exc}") from exc
@@ -1195,6 +1341,7 @@ class GcStore:
                 capacity_policy=capacity_policy,
                 protections=protections,
                 probe_locks=False,
+                deadline_ns=deadline_ns,
             )
             if (
                 expected_pointer_revision is not None
@@ -1211,16 +1358,31 @@ class GcStore:
                 )
                 for generation_id in completion.quarantined
             ]
-            with self.state.existing_generation_locks(locks, exclusive=True):
+            with self.state.existing_generation_locks(
+                locks,
+                exclusive=True,
+                deadline_ns=deadline_ns,
+            ):
                 for generation_id in completion.quarantined:
+                    require_before_deadline(
+                        deadline_ns,
+                        "GC purge exceeded its deadline",
+                    )
                     quarantine = self._quarantine(
                         operation.repo_uuid,
                         generation_id,
                         completion.operation_epoch,
                     )
-                    if self._remove_quarantine(quarantine):
+                    if self._remove_quarantine(
+                        quarantine,
+                        deadline_ns=deadline_ns,
+                    ):
                         self.fault_hook(f"gc:{generation_id}:purged")
                     else:
+                        require_before_deadline(
+                            deadline_ns,
+                            "GC purge exceeded its deadline",
+                        )
                         self.state.fsync_directory(quarantine.parent)
                     binding = SemanticQueueStore._certification_binding_path(
                         operation.repo_uuid,
@@ -1229,13 +1391,22 @@ class GcStore:
                     self.state.unlink_and_sync(
                         binding,
                         label=f"gc:{generation_id}:semantic_binding",
+                        deadline_ns=deadline_ns,
                     )
                     if self.state.private_directory_exists(binding.parent):
+                        require_before_deadline(
+                            deadline_ns,
+                            "GC purge exceeded its deadline",
+                        )
                         self.state.fsync_directory(binding.parent)
                         self.fault_hook(
                             f"gc:{generation_id}:semantic_binding_parent_durable"
                         )
                     self.fault_hook(f"gc:{generation_id}:semantic_binding_removed")
+            require_before_deadline(
+                deadline_ns,
+                "GC purge exceeded its deadline",
+            )
             purge = GcPurgeState.from_mapping(
                 {
                     "contract": "graphify.workspace.gc_purge.internal",
@@ -1247,10 +1418,18 @@ class GcStore:
                     "completed_at": _timestamp(completed_at),
                 }
             )
+            require_before_deadline(
+                deadline_ns,
+                "GC purge exceeded its deadline",
+            )
             self.state.install_once_bytes(
                 purge_relative,
                 purge.canonical,
                 label="gc:purge",
+            )
+            require_before_deadline(
+                deadline_ns,
+                "GC purge exceeded its deadline",
             )
             self.fault_hook("gc:purge_complete")
             return purge

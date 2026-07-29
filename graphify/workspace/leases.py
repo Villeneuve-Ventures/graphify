@@ -1224,15 +1224,28 @@ class LeaseStore:
         *,
         monotonic_ns: int,
         allowed_operations: frozenset[str] | None = None,
+        deadline_ns: int | None = None,
     ) -> Iterator[LeaseOperation]:
         """Validate a grant under existing locks without repairing durable state."""
 
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        with self.registry.read_only_snapshot() as document:
-            with self.read_only_workspace_lock(repo_uuid):
+        require_before_deadline(
+            deadline_ns,
+            "read-only lease operation exceeded its deadline",
+        )
+        with self.registry.read_only_snapshot(deadline_ns=deadline_ns) as document:
+            with self.read_only_workspace_lock(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            ):
                 self._check_active(document, grant)
-                state = self._load_state_locked(document, repo_uuid, recover=False)
+                state = self._load_state_locked(
+                    document,
+                    repo_uuid,
+                    recover=False,
+                    deadline_ns=deadline_ns,
+                )
                 _domain, current = self._matching_lease(state, grant)
                 operation = str(current.to_dict()["operation"])
                 if allowed_operations is not None and operation not in allowed_operations:
@@ -1247,6 +1260,11 @@ class LeaseStore:
                     repo_uuid,
                     operation,
                     recover=False,
+                    deadline_ns=deadline_ns,
+                )
+                require_before_deadline(
+                    deadline_ns,
+                    "read-only lease operation exceeded its deadline",
                 )
                 yield LeaseOperation(
                     registry=document,

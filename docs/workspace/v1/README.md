@@ -352,8 +352,12 @@ then acquires a fresh trusted `GC` lease, creates a fresh fenced plan, and
 requires the preview and plan to match on their non-fence projection: repo UUID,
 registry revision, active-source revision, migration epoch, pointer revision,
 capacity-policy SHA-256, candidates, and protected generations/reasons. The
-operation epoch and fence are intentionally excluded from that comparison
-because the new lease advances lifecycle authority. A successful execute
+comparison ignores `shared_lock` only when another reason already protects the
+same generation; a sole `shared_lock` remains material. The operation epoch and
+fence are intentionally excluded because the new lease advances lifecycle
+authority. The request's absolute timeout remains in force through lease
+acquisition, planning, blocking generation-lock acquisition, and fenced store
+mutation. A successful execute
 quarantines only the approved plan's candidates and returns a canonical redacted
 receipt with request SHA-256, approved-preview SHA-256, plan SHA-256, and the
 quarantined generation IDs.

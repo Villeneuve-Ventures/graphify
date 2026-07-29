@@ -554,6 +554,59 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     assert retained_lock.stat().st_ino == inode
 
 
+def test_gc_execute_propagates_deadline_to_candidate_lock_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: list[int | None] = []
+    original_locks = gc.state.existing_generation_locks
+
+    def capture_deadline(
+        locks: list[tuple[str, Path]],
+        *,
+        exclusive: bool,
+        blocking: bool = True,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        observed.append(deadline_ns)
+        return original_locks(
+            locks,
+            exclusive=exclusive,
+            blocking=blocking,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(gc.state, "existing_generation_locks", capture_deadline)
+
+    gc.execute(
+        gc_grant,
+        plan,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        occurred_at=START,
+        monotonic_ns=30_002,
+        deadline_ns=deadline_ns,
+    )
+
+    assert observed == [deadline_ns]
+
+
 def test_gc_execute_rejects_dangling_completion_before_quarantine(
     tmp_path: Path,
 ) -> None:
