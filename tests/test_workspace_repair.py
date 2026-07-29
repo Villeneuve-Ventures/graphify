@@ -24,7 +24,9 @@ from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import (
     GcIntentRecoveryRequired,
     LeaseGrant,
+    LeaseOwner,
     StagedBuildLeaseRecoveryRequired,
+    SystemLeaseIdentityProvider,
 )
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -859,6 +861,37 @@ def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
     lease_state = harness.leases.inspect(REPO_UUID)
     assert lease_state.operation_epoch == before_epoch + 1
     assert lease_state.leases.get("workspace") is None
+
+
+def test_execute_does_not_recover_registry_after_repair_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = LeaseOwner(boot_id="boot-repair", pid=700, process_start_id="700:1")
+    monkeypatch.setattr(
+        SystemLeaseIdentityProvider,
+        "current_owner",
+        lambda _provider: owner,
+    )
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness, timeout_ns=10_000_000_000)
+    preview = repair.preview(request, monotonic_ns=30_001)
+
+    def reject_registry_recovery(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("REPAIR recovered global registry state after acquiring its fence")
+
+    monkeypatch.setattr(harness.registry, "recovered_snapshot", reject_registry_recovery)
+    result = repair.execute(
+        request,
+        approved_preview_sha256=_approved_preview_sha256(request, preview),
+        authorization=_authorization(),
+        occurred_at=START + timedelta(seconds=4),
+        monotonic_ns=40_001,
+    )
+
+    assert result.plan.classification == "no_op"
 
 
 def test_post_fence_timeout_requires_status_and_a_fresh_preview(

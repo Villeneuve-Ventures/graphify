@@ -2246,6 +2246,7 @@ class DurableStateRoot:
         pending: str | Path,
         payload: bytes,
         decoder: Callable[[bytes], RecordT],
+        cleanup_parent_atomic_temps: bool = True,
         deadline_ns: int | None = None,
     ) -> RecordT:
         require_before_deadline(
@@ -2260,13 +2261,14 @@ class DurableStateRoot:
         if len(parents) != 1:
             raise StatePathError(f"{label} record paths must share one directory")
         parent = next(iter(parents))
-        if deadline_ns is None:
-            self.cleanup_atomic_temps(parent.relative_to(self.root))
-        else:
-            self.cleanup_atomic_temps(
-                parent.relative_to(self.root),
-                deadline_ns=deadline_ns,
-            )
+        if cleanup_parent_atomic_temps:
+            if deadline_ns is None:
+                self.cleanup_atomic_temps(parent.relative_to(self.root))
+            else:
+                self.cleanup_atomic_temps(
+                    parent.relative_to(self.root),
+                    deadline_ns=deadline_ns,
+                )
         commit_may_recover = False
 
         def pending_replaced() -> None:

@@ -74,6 +74,39 @@ def _request_bytes(value: dict[str, Any]) -> bytes:
 
 
 def _preview_result_value(*, classification: str = "repairable") -> dict[str, Any]:
+    if classification == "irreparable":
+        plan: dict[str, Any] = {
+            "candidate": None,
+            "decision_sha256": "d" * 64,
+            "journal_actions": [],
+            "last_good": None,
+            "next_pointer_revision": 0,
+            "pointer_action": "none",
+            "quarantine": [],
+            "selected_from": "none",
+        }
+    elif classification == "no_op":
+        plan = {
+            "candidate": {"generation_id": "gen-candidate", "receipt_sha256": "b" * 64},
+            "decision_sha256": "d" * 64,
+            "journal_actions": [],
+            "last_good": {"generation_id": "gen-last-good", "receipt_sha256": "c" * 64},
+            "next_pointer_revision": 3,
+            "pointer_action": "none",
+            "quarantine": [],
+            "selected_from": "current",
+        }
+    else:
+        plan = {
+            "candidate": {"generation_id": "gen-candidate", "receipt_sha256": "b" * 64},
+            "decision_sha256": "d" * 64,
+            "journal_actions": ["append_repair"],
+            "last_good": {"generation_id": "gen-last-good", "receipt_sha256": "c" * 64},
+            "next_pointer_revision": 3,
+            "pointer_action": "replace",
+            "quarantine": ["gen-invalid"],
+            "selected_from": "last_good",
+        }
     return {
         "classification": classification,
         "cli_contract_version": 1,
@@ -84,16 +117,7 @@ def _preview_result_value(*, classification: str = "repairable") -> dict[str, An
             "operation_epoch": 7,
             "registry_revision": 2,
         },
-        "plan": {
-            "candidate": {"generation_id": "gen-candidate", "receipt_sha256": "b" * 64},
-            "decision_sha256": "d" * 64,
-            "journal_actions": ["append_repair"],
-            "last_good": {"generation_id": "gen-last-good", "receipt_sha256": "c" * 64},
-            "next_pointer_revision": 3,
-            "pointer_action": "replace",
-            "quarantine": ["gen-invalid"],
-            "selected_from": "last_good",
-        },
+        "plan": plan,
         "repo_uuid": REPO_UUID,
         "request_sha256": hashlib.sha256(_request_bytes(_preview_request_value())).hexdigest(),
         "schema_version": 1,
@@ -235,6 +259,15 @@ def test_repair_result_schemas_admit_only_redacted_bounded_public_shapes() -> No
     assert list(preview_validator.iter_errors({**preview, "absolute_path": "/private/state"}))
     assert list(execute_validator.iter_errors({**execute, "authorization": _authorization()}))
     assert list(execute_validator.iter_errors({**execute, "pointer_revision": 0}))
+    contradictory_irreparable = _preview_result_value(classification="irreparable")
+    contradictory_irreparable["plan"] = _preview_result_value()["plan"]
+    contradictory_no_op = _preview_result_value(classification="no_op")
+    contradictory_no_op["plan"]["candidate"] = None
+    contradictory_repairable = _preview_result_value()
+    contradictory_repairable["plan"]["pointer_action"] = "unsupported"
+    assert list(preview_validator.iter_errors(contradictory_irreparable))
+    assert list(preview_validator.iter_errors(contradictory_no_op))
+    assert list(preview_validator.iter_errors(contradictory_repairable))
     bounded_quarantine = _preview_result_value()
     bounded_quarantine["plan"]["quarantine"] = [f"gen-quarantine-{index}" for index in range(8)]
     oversized_quarantine = _preview_result_value()

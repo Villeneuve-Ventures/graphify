@@ -441,10 +441,18 @@ class LeaseStore:
             raise LeaseRecoveryRequired(f"staged build state requires recovery: {exc}") from exc
 
     @staticmethod
-    def _verify_selected_source(repo_uuid: str, entry: dict[str, Any]) -> Path:
+    def _verify_selected_source(
+        repo_uuid: str,
+        entry: dict[str, Any],
+        *,
+        deadline_ns: int | None = None,
+    ) -> Path:
         recorded_source = entry["active_source"]
         try:
-            discovered = discover_source(Path(recorded_source["path"]))
+            discovered = discover_source(
+                Path(recorded_source["path"]),
+                deadline_ns=deadline_ns,
+            )
         except (OSError, RuntimeError) as exc:
             raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
         if discovered.repo_uuid != repo_uuid or discovered.registry_source != recorded_source:
@@ -651,6 +659,7 @@ class LeaseStore:
         self,
         state: WorkspaceLeaseState,
         *,
+        cleanup_parent_atomic_temps: bool = True,
         deadline_ns: int | None = None,
     ) -> WorkspaceLeaseState:
         current, previous, pending = self._paths(state.repo_uuid)
@@ -661,6 +670,7 @@ class LeaseStore:
             pending=pending,
             payload=state.canonical,
             decoder=WorkspaceLeaseState.from_json,
+            cleanup_parent_atomic_temps=cleanup_parent_atomic_temps,
             deadline_ns=deadline_ns,
         )
 
@@ -871,7 +881,11 @@ class LeaseStore:
             if allow_stale_staged_authority:
                 self._assert_staged_recovery_source_boundary(repo_uuid, entry)
             else:
-                source_root = self._verify_selected_source(repo_uuid, entry)
+                source_root = self._verify_selected_source(
+                    repo_uuid,
+                    entry,
+                    deadline_ns=deadline_ns,
+                )
                 self.state.assert_external_to(source_root)
         require_before_deadline(
             deadline_ns,
@@ -1012,6 +1026,7 @@ class LeaseStore:
             )
             committed = self._commit_state_locked(
                 next_state,
+                cleanup_parent_atomic_temps=not existing_only,
                 deadline_ns=deadline_ns,
             )
             return LeaseGrant(
@@ -1360,16 +1375,21 @@ class LeaseStore:
         *,
         deadline_ns: int | None = None,
     ) -> WorkspaceLeaseState:
-        snapshot = (
-            self.registry.recovered_snapshot()
-            if deadline_ns is None
-            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
-        )
+        existing_only = str(grant.lease.to_dict()["operation"]) == "REPAIR"
+        if existing_only:
+            snapshot = self.registry.read_only_snapshot(deadline_ns=deadline_ns)
+        else:
+            snapshot = (
+                self.registry.recovered_snapshot()
+                if deadline_ns is None
+                else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+            )
         with snapshot as document:
             return self._release_under_registry_lock(
                 grant,
                 document,
                 validate_active=False,
+                existing_only=existing_only,
                 deadline_ns=deadline_ns,
             )
 
@@ -1379,21 +1399,29 @@ class LeaseStore:
         document: Registry,
         *,
         validate_active: bool,
+        existing_only: bool = False,
         deadline_ns: int | None = None,
     ) -> WorkspaceLeaseState:
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        lock = (
-            self.workspace_lock(repo_uuid)
-            if deadline_ns is None
-            else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
-        )
+        if existing_only:
+            lock = self.read_only_workspace_lock(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+        else:
+            lock = (
+                self.workspace_lock(repo_uuid)
+                if deadline_ns is None
+                else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+            )
         with lock:
             if validate_active:
                 self._check_active(document, grant)
             state = self._load_state_locked(
                 document,
                 repo_uuid,
+                recover=not existing_only,
                 deadline_ns=deadline_ns,
             )
             domain, _current = self._matching_lease(state, grant, require_epochs=False)
@@ -1415,6 +1443,7 @@ class LeaseStore:
                     lease_epochs=lease_epochs,
                     staged_attempt_sha256=staged_attempt_sha256,
                 ),
+                cleanup_parent_atomic_temps=not existing_only,
                 deadline_ns=deadline_ns,
             )
 

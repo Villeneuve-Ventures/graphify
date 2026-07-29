@@ -202,20 +202,25 @@ class JournalStore:
                         dir_fd=descriptor,
                         follow_symlinks=False,
                     )
-                    if (
-                        match is None
-                        or not stat.S_ISREG(entry_details.st_mode)
-                        or entry_details.st_nlink != 1
-                    ):
+                    if match is None:
                         raise JournalCorrupt(
                             f"unexpected journal segment entry: {name}"
+                        )
+                    if (
+                        not stat.S_ISREG(entry_details.st_mode)
+                        or entry_details.st_nlink != 1
+                    ):
+                        raise StatePathError(
+                            f"journal segment entry is unsafe: {directory / name}"
                         )
                     result.append(
                         (int(match.group("sequence")), directory / name)
                     )
         except JournalCorrupt:
             raise
-        except (OSError, StatePathError) as exc:
+        except StatePathError:
+            raise
+        except OSError as exc:
             raise JournalCorrupt(
                 f"journal segments cannot be enumerated safely: {directory}: {exc}"
             ) from exc

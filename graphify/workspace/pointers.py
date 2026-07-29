@@ -1633,12 +1633,23 @@ class PointerStore:
         expected_plan: PointerRepairPlan | None = None,
         deadline_ns: int | None = None,
     ) -> PointerSet:
-        with self.leases.current_operation(
-            grant,
-            monotonic_ns=monotonic_ns,
-            allowed_operations=frozenset({"POINTER_RECOVERY", "REPAIR"}),
-            deadline_ns=deadline_ns,
-        ) as operation:
+        operation_name = str(grant.lease.to_dict()["operation"])
+        operation_context = (
+            self.leases.current_operation_read_only(
+                grant,
+                monotonic_ns=monotonic_ns,
+                allowed_operations=frozenset({"REPAIR"}),
+                deadline_ns=deadline_ns,
+            )
+            if operation_name == "REPAIR"
+            else self.leases.current_operation(
+                grant,
+                monotonic_ns=monotonic_ns,
+                allowed_operations=frozenset({"POINTER_RECOVERY"}),
+                deadline_ns=deadline_ns,
+            )
+        )
+        with operation_context as operation:
             self._assert_no_gc_intent(
                 operation.repo_uuid,
                 deadline_ns=deadline_ns,

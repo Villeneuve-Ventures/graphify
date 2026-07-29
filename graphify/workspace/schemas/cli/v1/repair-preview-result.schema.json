@@ -85,6 +85,64 @@
     "success": {
       "properties": {"state": {"const": "previewed"}},
       "required": ["classification", "observed_authority", "plan", "repo_uuid", "request_sha256"],
+      "allOf": [
+        {
+          "if": {"properties": {"classification": {"const": "irreparable"}}, "required": ["classification"]},
+          "then": {
+            "properties": {
+              "plan": {
+                "properties": {
+                  "candidate": {"type": "null"},
+                  "journal_actions": {"maxItems": 0},
+                  "last_good": {"type": "null"},
+                  "next_pointer_revision": {"const": 0},
+                  "pointer_action": {"const": "none"},
+                  "quarantine": {"maxItems": 0},
+                  "selected_from": {"const": "none"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"classification": {"const": "no_op"}}, "required": ["classification"]},
+          "then": {
+            "properties": {
+              "plan": {
+                "properties": {
+                  "candidate": {"type": "object"},
+                  "journal_actions": {"maxItems": 0},
+                  "next_pointer_revision": {"$ref": "#/$defs/positive_integer"},
+                  "pointer_action": {"const": "none"},
+                  "quarantine": {"maxItems": 0},
+                  "selected_from": {"const": "current"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"classification": {"const": "repairable"}}, "required": ["classification"]},
+          "then": {
+            "properties": {
+              "plan": {
+                "properties": {
+                  "candidate": {"type": "object"},
+                  "next_pointer_revision": {"$ref": "#/$defs/positive_integer"},
+                  "pointer_action": {"enum": ["none", "replace", "finalize_pending", "resume_pending"]},
+                  "selected_from": {"enum": ["current", "pending", "prior", "last_good"]}
+                },
+                "allOf": [
+                  {
+                    "if": {"properties": {"pointer_action": {"const": "none"}}, "required": ["pointer_action"]},
+                    "then": {"properties": {"journal_actions": {"minItems": 1}}}
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
       "not": {"anyOf": [{"required": ["action_code"]}, {"required": ["exit_code"]}, {"required": ["reason_code"]}]}
     },
     "failure": {

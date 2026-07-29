@@ -24,6 +24,7 @@ from graphify.workspace.persistence import (
     InjectedFault,
     LockTimeout,
     PosixSyscalls,
+    StatePathError,
 )
 
 from tests.workspace_p3_helpers import REPO_UUID, START, acquire, create_harness
@@ -219,6 +220,24 @@ def test_read_stable_honors_deadline_during_segment_traversal(
         store.read_stable(REPO_UUID, deadline_ns=8)
 
     assert decoded < 20
+
+
+def test_project_recovery_preserves_unsafe_segment_path_classification(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    store = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    segments = store.state.ensure_directory(store._segments_directory(REPO_UUID))
+    external = tmp_path / "external.gwf"
+    external.write_bytes(b"")
+    (segments / "00000000000000000001.gwf").symlink_to(external)
+
+    with pytest.raises(StatePathError, match="journal segment entry is unsafe"):
+        store.project_recovery(REPO_UUID)
 
 
 def test_read_stable_preserves_lock_timeout_metadata(
