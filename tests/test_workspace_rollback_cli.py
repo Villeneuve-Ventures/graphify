@@ -40,7 +40,12 @@ from graphify.workspace.persistence import (
     LockTimeout,
     StateCorrupt,
 )
-from graphify.workspace.pointers import PointerCAS, PointerConflict, PointerCorrupt
+from graphify.workspace.pointers import (
+    PointerCAS,
+    PointerConflict,
+    PointerCorrupt,
+    PointerRecoveryRequired,
+)
 from graphify.workspace.registry import RevisionConflict
 from graphify.workspace.status import EXIT_READY
 from tests.workspace_p3_helpers import REPO_UUID, START, tree_snapshot
@@ -1061,6 +1066,12 @@ def test_rollback_fails_closed_for_every_stale_cas_dimension(field: str, value: 
             10,
             "workspace_recovery_required",
             "inspect_workspace_state",
+        ),
+        (
+            PointerRecoveryRequired("private pointer recovery"),
+            10,
+            "workspace_recovery_required",
+            "run_workspace_repair",
         ),
         (
             PointerCorrupt("private pointer"),

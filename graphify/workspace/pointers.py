@@ -1327,7 +1327,7 @@ class PointerStore:
             chosen_name = "current"
         else:
             chosen_name = "prior"
-        chosen_pointer, chosen_receipts = by_name[chosen_name]
+        _, chosen_receipts = by_name[chosen_name]
         candidate = chosen_receipts["current"]
         if not self._journal_certifies(
             snapshot,
