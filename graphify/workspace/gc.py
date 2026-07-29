@@ -823,7 +823,7 @@ class GcStore:
                     and intent.capacity_policy_sha256
                     != expected_capacity_policy_sha256
                 ):
-                    raise GcRecoveryRequired(
+                    raise GcPlanStale(
                         "capacity policy differs from durable GC intent"
                     )
                 if plan_sha256 is None:
@@ -1033,6 +1033,7 @@ class GcStore:
         try:
             data = self.state.read_optional_existing_bytes(
                 relative,
+                max_bytes=_MAX_GC_INTENT_BYTES,
                 deadline_ns=deadline_ns,
             )
             if data is None:
@@ -1191,7 +1192,7 @@ class GcStore:
             ):
                 raise GcPlanStale("durable GC intent has another pointer revision")
             if intent.capacity_policy_sha256 != capacity_policy.sha256:
-                raise GcRecoveryRequired("capacity policy differs from durable GC intent")
+                raise GcPlanStale("capacity policy differs from durable GC intent")
             refreshed = self._plan_locked(
                 operation,
                 capacity_policy=capacity_policy,

@@ -23,6 +23,7 @@ from graphify.workspace.contracts import (
 )
 from graphify.workspace.gc import (
     GC_PREVIEW_MAX_GENERATIONS,
+    _MAX_GC_INTENT_BYTES,
     GcError,
     GcProtection,
     GcRecoveryRequired,
@@ -728,6 +729,66 @@ def test_gc_execute_rejects_dangling_completion_before_quarantine(
     assert not gc.state.path(
         gc._quarantine(REPO_UUID, "gen-unused", gc_grant.operation_epoch)
     ).exists()
+
+
+def test_gc_reconcile_rejects_oversized_completion_before_quarantine(
+    tmp_path: Path,
+) -> None:
+    intent_left = False
+
+    def leave_durable_intent(event: str) -> None:
+        nonlocal intent_left
+        if event == "gc:intent_durable" and not intent_left:
+            intent_left = True
+            raise InjectedFault(event)
+
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=leave_durable_intent,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    with pytest.raises(InjectedFault):
+        gc.execute(
+            gc_grant,
+            plan,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        )
+    harness.leases.release(gc_grant)
+    assert intent_left is True
+
+    completion_relative = gc._completion_path(REPO_UUID, plan.sha256)
+    gc.state.ensure_directory(completion_relative.parent)
+    completion_path = gc.state.path(completion_relative)
+    completion_path.write_bytes(b"x" * (_MAX_GC_INTENT_BYTES + 1))
+    completion_path.chmod(0o600)
+    recovery = acquire(harness, "POINTER_RECOVERY", tick=4)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(GcRecoveryRequired, match="read limit"):
+        gc.reconcile(
+            recovery,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=40_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+    harness.leases.release(recovery)
 
 
 def test_gc_purge_rejects_dangling_record_before_quarantine_deletion(

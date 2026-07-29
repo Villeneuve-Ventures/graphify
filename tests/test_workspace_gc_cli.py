@@ -2031,6 +2031,62 @@ def test_gc_reconcile_and_purge_reject_stale_pointer_before_lease_mutation(
     ) == before_purge
 
 
+def test_gc_public_reconcile_policy_mismatch_requires_refreshed_request(
+    tmp_path: Path,
+) -> None:
+    harness, _generations, _pointers, _receipts = _runtime(tmp_path)
+    intent_left = False
+
+    def leave_durable_intent(event: str) -> None:
+        nonlocal intent_left
+        if event == "gc:intent_durable" and not intent_left:
+            intent_left = True
+            raise InjectedFault(event)
+
+    interrupted_runtime = _gc_mutation_runtime(
+        harness,
+        fault_hook=leave_durable_intent,
+    )
+    command = _gc_command()
+    with pytest.raises((CommitUnknown, InjectedFault)):
+        command.execute_gc(
+            interrupted_runtime,
+            _approved_execute_request(interrupted_runtime),
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+    assert intent_left is True
+
+    runtime = _gc_mutation_runtime(harness)
+    request_value = _gc_live_lifecycle_request(runtime, "reconcile")
+    capacity_policy = cast(dict[str, JsonValue], request_value["capacity_policy"])
+    capacity_policy["reserve_bytes"] = cast(int, capacity_policy["reserve_bytes"]) + 1
+    request = command.GcReconcileRequest.from_bytes(
+        canonical_json_bytes(request_value)
+    )
+    before = (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    )
+
+    with pytest.raises(GcPlanStale, match="capacity policy differs") as raised:
+        command.reconcile_gc(
+            runtime,
+            request,
+            occurred_at=START,
+            monotonic_clock=time.monotonic_ns,
+        )
+
+    failure = command.classify_failure(raised.value, "reconcile").to_dict()
+    assert failure["exit_code"] == 10
+    assert failure["reason_code"] == "gc_authority_conflict"
+    assert failure["action_code"] == "refresh_gc_reconcile_request"
+    assert (
+        tree_snapshot(harness.state_root),
+        metadata_snapshot(harness.state_root),
+    ) == before
+
+
 def test_gc_public_purge_unknown_plan_requires_reselection_without_mutation(
     tmp_path: Path,
 ) -> None:
