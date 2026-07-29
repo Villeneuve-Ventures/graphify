@@ -207,7 +207,7 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
             "invalid",
             EXIT_INVALID,
             "gc_coordination_unavailable",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         )
     if isinstance(
         error,
@@ -237,7 +237,7 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
                 "invalid",
                 EXIT_INVALID,
                 "gc_recovery_required",
-                "inspect_workspace_state",
+                "run_workspace_repair",
             )
         return GcLifecycleFailure(
             operation,
@@ -246,21 +246,16 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
             "gc_recovery_required",
             "run_workspace_gc_reconcile",
         )
-    if isinstance(error, PointerRecoveryRequired):
+    if isinstance(
+        error,
+        (LeaseRecoveryRequired, PointerRecoveryRequired, StateRecoveryRequired),
+    ):
         return GcLifecycleFailure(
             operation,
             "conflict",
             EXIT_DEGRADED,
             "workspace_recovery_required",
-            "run_workspace_repair",
-        )
-    if isinstance(error, (LeaseRecoveryRequired, StateRecoveryRequired)):
-        return GcLifecycleFailure(
-            operation,
-            "conflict",
-            EXIT_DEGRADED,
-            "workspace_recovery_required",
-            "inspect_workspace_state",
+            "run_workspace_doctor",
         )
     if isinstance(error, CommitUnknown):
         action = (
@@ -299,24 +294,24 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
             "unsupported_compatibility",
             "install_supported_candidate",
         )
-    if isinstance(error, (PointerCorrupt, JournalRecoveryRequired)):
-        return GcLifecycleFailure(
-            operation,
-            "invalid",
-            EXIT_INVALID,
-            "state_corrupt",
-            "run_workspace_repair",
-        )
     if isinstance(
         error,
-        (GenerationError, JournalError, StateCorrupt, ContractError, LeaseError, GcError),
+        (
+            ContractError,
+            GcError,
+            GenerationError,
+            JournalError,
+            LeaseError,
+            PointerCorrupt,
+            StateCorrupt,
+        ),
     ):
         return GcLifecycleFailure(
             operation,
             "invalid",
             EXIT_INVALID,
             "state_corrupt",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         )
     return GcLifecycleFailure(
         operation,

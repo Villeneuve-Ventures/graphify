@@ -1065,13 +1065,13 @@ def test_rollback_fails_closed_for_every_stale_cas_dimension(field: str, value: 
             LeaseRecoveryRequired("private recovery"),
             10,
             "workspace_recovery_required",
-            "inspect_workspace_state",
+            "run_workspace_doctor",
         ),
         (
             PointerRecoveryRequired("private pointer recovery"),
             10,
             "workspace_recovery_required",
-            "run_workspace_repair",
+            "run_workspace_doctor",
         ),
         (
             PointerCorrupt("private pointer"),
@@ -1089,19 +1089,19 @@ def test_rollback_fails_closed_for_every_stale_cas_dimension(field: str, value: 
             GenerationError("private generation"),
             20,
             "state_corrupt",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         ),
         (
             JournalCorrupt("private journal"),
             20,
             "state_corrupt",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         ),
         (
             StateCorrupt("private state"),
             20,
             "state_corrupt",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         ),
         (
             CommitUnknown("private uncertain commit"),

@@ -114,7 +114,7 @@
             {"properties": {"state": {"const": "unsupported"}, "reason_code": {"enum": ["runtime_authority_unsupported", "unsupported_compatibility"]}, "action_code": {"const": "install_supported_candidate"}}},
             {"properties": {"state": {"const": "invalid"}, "reason_code": {"const": "unsafe_state_path"}, "action_code": {"const": "configure_safe_state_root"}}},
             {"properties": {"state": {"const": "unsupported"}, "reason_code": {"const": "unsupported_runtime"}, "action_code": {"const": "use_supported_runtime"}}},
-            {"properties": {"state": {"const": "invalid"}, "reason_code": {"const": "state_corrupt"}, "action_code": {"const": "inspect_workspace_state"}}},
+            {"properties": {"state": {"const": "invalid"}, "reason_code": {"const": "state_corrupt"}, "action_code": {"const": "run_workspace_repair"}}},
             {"properties": {"state": {"const": "invalid"}, "reason_code": {"enum": ["query_failed", "query_result_invalid"]}, "action_code": {"const": "run_workspace_doctor"}}}
           ]
         },

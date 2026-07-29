@@ -823,17 +823,17 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
             lambda module: module.GcCoordinationUnavailable(
                 "/private/lock provider-secret"
             ),
-            (20, "invalid", "gc_coordination_unavailable", "inspect_workspace_state", "not_observed"),
+            (20, "invalid", "gc_coordination_unavailable", "run_workspace_repair", "not_observed"),
         ),
         (
             lambda _module: GcRecoveryRequired(
                 "/private/intent provider-secret"
             ),
-            (20, "invalid", "gc_recovery_required", "run_workspace_gc_reconcile", "not_observed"),
+            (20, "invalid", "gc_recovery_required", "run_workspace_repair", "not_observed"),
         ),
         (
             lambda _module: StateCorrupt("/private/state provider-secret"),
-            (20, "invalid", "state_corrupt", "inspect_workspace_state", "not_observed"),
+            (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
         ),
         (
             lambda _module: PointerCorrupt("/private/pointer provider-secret"),
@@ -847,13 +847,13 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
         ),
         (
             lambda _module: JournalCorrupt("/private/journal provider-secret"),
-            (20, "invalid", "state_corrupt", "inspect_workspace_state", "not_observed"),
+            (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
         ),
         (
             lambda _module: GenerationError(
                 "/private/generation provider-secret"
             ),
-            (20, "invalid", "state_corrupt", "inspect_workspace_state", "not_observed"),
+            (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
         ),
     ],
 )
@@ -1628,7 +1628,7 @@ def test_gc_lifecycle_authorizations_are_operation_specific(
             "conflict",
             10,
             "workspace_recovery_required",
-            "inspect_workspace_state",
+            "run_workspace_doctor",
         ),
         (
             CommitUnknown("/private/commit provider-secret"),
@@ -1642,7 +1642,7 @@ def test_gc_lifecycle_authorizations_are_operation_specific(
             "invalid",
             20,
             "state_corrupt",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         ),
     ],
 )
@@ -1680,7 +1680,7 @@ def test_gc_lifecycle_failures_are_stable_redacted_and_schema_valid(
         (
             "execute",
             GcCoordinationUnavailable("/private/coordination provider-secret"),
-            ("invalid", 20, "gc_coordination_unavailable", "inspect_workspace_state"),
+            ("invalid", 20, "gc_coordination_unavailable", "run_workspace_repair"),
         ),
         (
             "execute",
@@ -1690,7 +1690,7 @@ def test_gc_lifecycle_failures_are_stable_redacted_and_schema_valid(
         (
             "reconcile",
             GcRecoveryRequired("/private/intent provider-secret"),
-            ("invalid", 20, "gc_recovery_required", "inspect_workspace_state"),
+            ("invalid", 20, "gc_recovery_required", "run_workspace_repair"),
         ),
         (
             "purge",
@@ -2193,7 +2193,7 @@ def test_gc_public_purge_malformed_terminal_record_remains_state_corrupt(
     failure = command.classify_failure(raised.value, "purge").to_dict()
     assert failure["exit_code"] == 20
     assert failure["reason_code"] == "state_corrupt"
-    assert failure["action_code"] == "inspect_workspace_state"
+    assert failure["action_code"] == "run_workspace_repair"
     assert (
         tree_snapshot(harness.state_root),
         metadata_snapshot(harness.state_root),

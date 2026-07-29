@@ -1224,6 +1224,7 @@ class PointerStore:
         )
         snapshot = journal.snapshot
         valid: list[tuple[str, PointerSet, dict[str, GenerationReceipt]]] = []
+        last_good_candidates: list[GenerationReceipt] = []
         verified_by_name: dict[str, dict[str, GenerationReceipt]] = {}
         corrupt_generations: set[str] = set()
         for name, pointer in (
@@ -1251,6 +1252,15 @@ class PointerStore:
                 == active_source_revision
             ):
                 valid.append((name, pointer, receipts))
+            last_good_receipt = receipts.get("last_good")
+            if (
+                last_good_receipt is not None
+                and int(pointer.to_dict()["active_source_revision"])
+                == active_source_revision
+                and int(last_good_receipt.to_dict()["active_source_revision"])
+                == active_source_revision
+            ):
+                last_good_candidates.append(last_good_receipt)
 
         by_name = {name: (pointer, receipts) for name, pointer, receipts in valid}
         journal_revisions = [
@@ -1320,20 +1330,36 @@ class PointerStore:
                     journal=journal,
                 )
 
-        if not valid:
-            raise PointerCorrupt("no fully verified pointer source can be repaired")
-        if "pending" in by_name:
-            chosen_name = "pending"
-        elif "current" in by_name:
-            chosen_name = "current"
+        if valid:
+            if "pending" in by_name:
+                chosen_name = "pending"
+            elif "current" in by_name:
+                chosen_name = "current"
+            else:
+                chosen_name = "prior"
+            candidate = by_name[chosen_name][1]["current"]
         else:
-            chosen_name = "prior"
-        _, chosen_receipts = by_name[chosen_name]
-        candidate = chosen_receipts["current"]
+            candidate = next(
+                (
+                    receipt
+                    for receipt in last_good_candidates
+                    if self._journal_certifies(
+                        snapshot,
+                        generation_id=str(receipt.to_dict()["generation_id"]),
+                        receipt_sha256=receipt.sha256,
+                        allow_superseded=True,
+                    )
+                ),
+                None,
+            )
+            if candidate is None:
+                raise PointerCorrupt("no fully verified pointer source can be repaired")
+            chosen_name = "last_good"
         if not self._journal_certifies(
             snapshot,
             generation_id=str(candidate.to_dict()["generation_id"]),
             receipt_sha256=candidate.sha256,
+            allow_superseded=chosen_name == "last_good",
         ):
             raise PointerCorrupt("repair candidate is failed, superseded, or uncertified")
 

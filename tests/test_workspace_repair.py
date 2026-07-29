@@ -240,6 +240,67 @@ def test_preview_reports_irreparable_when_no_pointer_reference_verifies(tmp_path
     assert tree_snapshot(harness.state_root) == before_tree
 
 
+def test_repair_uses_verified_last_good_when_current_is_corrupt_and_prior_is_missing(
+    tmp_path: Path,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    promote = acquire(harness, "PROMOTE", tick=3)
+    pointers.promote(
+        promote,
+        _cas(promote, receipts[1], revision=1, current_sha256=receipts[0].sha256),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=30_001,
+    )
+    harness.leases.release(promote)
+    pointers.state.path(pointers._prior(REPO_UUID)).unlink()
+    corrupt = pointers.state.path(
+        generations._generation(REPO_UUID, "gen-new")
+    ) / "graphify-out" / "graph.json"
+    corrupt.write_text("corrupt\n", encoding="utf-8")
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(request, monotonic_ns=40_001)
+
+    payload = preview.to_dict()
+    decision_sha256 = payload.pop("decision_sha256")
+    assert isinstance(decision_sha256, str) and len(decision_sha256) == 64
+    assert payload == {
+        "classification": "repairable",
+        "candidate": {
+            "generation_id": "gen-old",
+            "receipt_sha256": receipts[0].sha256,
+        },
+        "last_good": None,
+        "next_pointer_revision": 3,
+        "selected_from": "last_good",
+        "pointer_action": "replace",
+        "journal_actions": ["append_repair"],
+        "quarantine": ["gen-new"],
+    }
+    assert tree_snapshot(harness.state_root) == before_tree
+
+    result = repair.execute(
+        request,
+        approved_preview_sha256=_approved_preview_sha256(request, preview),
+        authorization=_authorization(),
+        occurred_at=START + timedelta(seconds=4),
+        monotonic_ns=50_001,
+    )
+
+    repaired = result.pointer
+    assert repaired is not None
+    assert repaired.to_dict()["current"] == {
+        "generation_id": "gen-old",
+        "receipt_sha256": receipts[0].sha256,
+    }
+    assert repaired.to_dict()["last_good"] is None
+    assert pointers.verify_pointer(repaired)["current"].sha256 == receipts[0].sha256
+    assert not pointers.state.path(generations._generation(REPO_UUID, "gen-new")).exists()
+
+
 def test_preview_routes_gc_intent_outside_pointer_repair_without_writes(
     tmp_path: Path,
 ) -> None:
@@ -783,6 +844,43 @@ def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
     assert len(recover_calls) == 1
     assert recover_deadlines == [deadline_ns]
     assert recover_calls[0].lease.to_dict()["operation"] == "REPAIR"
+    lease_state = harness.leases.inspect(REPO_UUID)
+    assert lease_state.operation_epoch == before_epoch + 1
+    assert lease_state.leases.get("workspace") is None
+
+
+def test_post_fence_timeout_requires_status_and_a_fresh_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    before_epoch = harness.leases.inspect(REPO_UUID).operation_epoch
+
+    def timeout_after_fence(*_args: object, **_kwargs: object) -> PointerSet:
+        raise LockTimeout(
+            "private generation lock timeout",
+            phase="acquire",
+            kind="generation",
+        )
+
+    monkeypatch.setattr(pointers, "recover", timeout_after_fence)
+    with pytest.raises(Exception) as raised:
+        repair.execute(
+            request,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    failure = classify_failure(raised.value, "execute")
+    assert failure.state == "conflict"
+    assert failure.reason_code == "repair_authority_conflict"
+    assert failure.action_code == "run_workspace_status_then_repair_dry_run"
     lease_state = harness.leases.inspect(REPO_UUID)
     assert lease_state.operation_epoch == before_epoch + 1
     assert lease_state.leases.get("workspace") is None

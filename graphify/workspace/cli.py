@@ -1533,7 +1533,7 @@ def _classify_sync_error(error: Exception) -> _SyncFailure:
             "invalid",
             EXIT_INVALID,
             "state_corrupt",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         )
     if isinstance(error, SemanticQueueError):
         return _SyncFailure(
@@ -1868,7 +1868,7 @@ def _classify_query_error(error: Exception) -> _QueryFailure:
             "invalid",
             EXIT_INVALID,
             "state_corrupt",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         )
     return _QueryFailure(
         "invalid",
@@ -2446,28 +2446,22 @@ def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
             "invalid",
             EXIT_INVALID,
             "gc_coordination_unavailable",
-            "inspect_workspace_state",
+            "run_workspace_repair",
         )
-    if isinstance(error, GcRecoveryRequired):
-        return _GcPreviewFailure(
-            "invalid",
-            EXIT_INVALID,
-            "gc_recovery_required",
-            "run_workspace_gc_reconcile",
-        )
-    if isinstance(error, PointerRecoveryRequired):
+    if isinstance(
+        error,
+        (
+            GcRecoveryRequired,
+            LeaseRecoveryRequired,
+            PointerRecoveryRequired,
+            StateRecoveryRequired,
+        ),
+    ):
         return _GcPreviewFailure(
             "invalid",
             EXIT_INVALID,
             "gc_recovery_required",
             "run_workspace_repair",
-        )
-    if isinstance(error, (LeaseRecoveryRequired, StateRecoveryRequired)):
-        return _GcPreviewFailure(
-            "invalid",
-            EXIT_INVALID,
-            "gc_recovery_required",
-            "inspect_workspace_state",
         )
     if isinstance(error, StatePathError):
         return _GcPreviewFailure(
@@ -2490,19 +2484,22 @@ def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
             "unsupported_compatibility",
             "install_supported_candidate",
         )
-    if isinstance(error, (PointerCorrupt, JournalRecoveryRequired)):
+    if isinstance(
+        error,
+        (
+            ContractError,
+            GenerationError,
+            JournalError,
+            LeaseError,
+            PointerCorrupt,
+            StateCorrupt,
+        ),
+    ):
         return _GcPreviewFailure(
             "invalid",
             EXIT_INVALID,
             "state_corrupt",
             "run_workspace_repair",
-        )
-    if isinstance(error, (GenerationError, JournalError, StateCorrupt, ContractError, LeaseError)):
-        return _GcPreviewFailure(
-            "invalid",
-            EXIT_INVALID,
-            "state_corrupt",
-            "inspect_workspace_state",
         )
     return _GcPreviewFailure(
         "invalid",

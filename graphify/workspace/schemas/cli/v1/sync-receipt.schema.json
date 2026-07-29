@@ -104,7 +104,6 @@
         "configure_safe_state_root",
         "install_candidate_authority",
         "install_supported_candidate",
-        "inspect_workspace_state",
         "provide_valid_sync_request",
         "refresh_sync_request",
         "resume_exact_workspace_sync",

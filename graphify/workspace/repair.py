@@ -158,6 +158,10 @@ class _RepairBoundaryUnsupported(RepairError):
         self.action_code = action_code
 
 
+class _RepairFenceConsumed(RepairConflict):
+    """The repair fence advanced authority, so the old approval cannot be retried."""
+
+
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -928,6 +932,14 @@ def classify_failure(error: Exception, operation: str) -> RepairFailure:
             "repair_irreparable",
             "inspect_workspace_state",
         )
+    if isinstance(error, _RepairFenceConsumed):
+        return RepairFailure(
+            operation,
+            "conflict",
+            EXIT_DEGRADED,
+            "repair_authority_conflict",
+            "run_workspace_status_then_repair_dry_run",
+        )
     if isinstance(
         error,
         (
@@ -1289,6 +1301,10 @@ class WorkspaceRepair:
                     expected_plan=plan.decision,
                     deadline_ns=deadline_ns,
                 )
+            except LockTimeout as exc:
+                raise _RepairFenceConsumed(
+                    "repair authority advanced before pointer recovery completed"
+                ) from exc
             except PointerRecoveryRequired as exc:
                 raise _RepairBoundaryUnsupported(
                     "GC reconciliation is required before pointer repair",

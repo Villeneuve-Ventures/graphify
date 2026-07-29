@@ -334,18 +334,19 @@ repair. A nonterminal staged build routes to `resume_exact_workspace_sync`; a
 corrupt staged build and registry/lease corruption route to
 `inspect_workspace_state`; semantic-queue corruption routes to
 `inspect_semantic_queue`; and unsafe state paths route to
-`configure_safe_state_root`. Committed-journal corruption and generation errors
-encountered while GC or rollback inspects state route to
-`inspect_workspace_state`; only the recoverable journal suffix and pointer
-recovery classes route to repair. None of the unsupported classes is repair
-authority. `graphify workspace doctor` remains existing-only and read-only; it
-does not invoke either form.
+`configure_safe_state_root`. Existing query, sync, rollback, and GC CLI-v1
+reason/action pairs remain frozen for compatibility; more specific guidance for
+those already-published results requires a new contract version. None of the
+unsupported classes is repair authority. `graphify workspace doctor` remains
+existing-only and read-only; it does not invoke either form.
 
 Success exits 0 with a canonical redacted `repaired` or `no_op` result bound to
 the request and approved-preview digests. Stale authority or contention exits
 10; malformed, unsupported, unsafe, corrupt, irreparable, or commit-unknown
 state exits 20 after valid argv. Commit uncertainty is not a replay token:
-inspect status, then produce a fresh preview and a fresh execute request. A
+inspect status, then produce a fresh preview and a fresh execute request. The
+same refresh is required when a timeout occurs after the fresh repair fence has
+advanced the operation epoch; only pre-acquisition contention is retryable. A
 completed execute advances the operation epoch, so its exact request cannot
 apply a second repair.
 

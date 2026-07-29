@@ -457,7 +457,7 @@ def test_sync_accepts_canonical_request_and_emits_one_canonical_success_receipt(
         ),
         (
             StateCorrupt("/private/operator-state provider-secret"),
-            (20, "state_corrupt", "inspect_workspace_state"),
+            (20, "state_corrupt", "run_workspace_repair"),
         ),
         (
             GenerationError("/private/operator-state provider-secret"),
