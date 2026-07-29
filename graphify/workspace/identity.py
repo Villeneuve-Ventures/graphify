@@ -64,6 +64,9 @@ class IdentityAction(str, Enum):
     REBIND = "REBIND"
     ACTIVATE = "ACTIVATE"
     ROLLBACK = "ROLLBACK"
+    GC_EXECUTE = "GC_EXECUTE"
+    GC_RECONCILE = "GC_RECONCILE"
+    GC_PURGE = "GC_PURGE"
 
 
 @dataclass(frozen=True)

@@ -76,8 +76,37 @@ it loads installed authority before one canonical request, accepts all capacity
 and six protection classes explicitly, uses read-only coordination and two
 matching reachability snapshots, and emits an unfenced deterministic result.
 It creates no lease, fence, `GcPlan`, state, lock file, cleanup, quarantine,
-receipt, or log, including on failures. It neither infers capacity or protections nor
-changes the following fenced execution contract.
+receipt, or log, including on failures. It neither infers capacity nor protections
+and does not change the following fenced execution contract.
+
+The public lifecycle is explicit-only: `gc --execute --request-stdin`,
+`gc --reconcile --request-stdin`, and `gc --purge --request-stdin` each require
+a distinct canonical authorization action. Execute and first-time reconcile or
+purge mutation acquire a fresh trusted `GC` lease; matching current-epoch
+completion recovery, reconcile with no recovery state, and exact terminal purge
+replay return no-write results without acquiring one.
+Execute accepts an operator-approved SHA-256 of the exact canonical public
+preview-result bytes, recomputes that preview before leasing, then creates a
+fresh plan and requires its non-fence projection to equal the preview. The
+comparison includes repo UUID, registry and active-source revisions, migration
+epoch, pointer revision, capacity-policy digest, candidates, and protected
+generation reasons. A `shared_lock` reason is redundant only when another reason
+already protects that generation; a sole lock reason remains material. The
+newly allocated fence and operation epoch are excluded. The request's absolute
+deadline continues through planning, blocking generation-lock acquisition, and
+the fenced mutation.
+Reconcile names no plan, mutates only an existing GC intent, and otherwise
+replays the completion indexed by its still-current operation epoch or returns
+an explicit no-op. Purge requires an exact completed plan SHA-256 and remains
+idempotent while rechecking protections and locks. Public receipts are
+canonical and redacted; they never disclose authority, raw lifecycle documents,
+fences, owners, paths, timestamps, operation epochs, or raw errors.
+
+For preview, plan, and lifecycle observations, the public maximum is 4096
+generation IDs. Directory enumeration validates each candidate descriptor
+without following links and stops after the 4097th entry; it reports overflow
+before materializing the generation collection. This constrains traversal
+correctness only and makes no performance or resource claim.
 
 `GcStore.plan()`, `execute()`, `reconcile()`, and `purge()` require a live
 fenced `GC` operation and an explicit `GcProtection` set for migration,
@@ -94,6 +123,10 @@ deletion is a separate explicit purge; coordination lock identities remain
 retained. Purge deletion and parent-directory synchronization use the injected
 syscall seam so partial deletion, interruption, and uncertain sync are retried
 before one durable purge record is accepted.
+
+An unresolved valid GC intent remains visible to status and doctor as the
+operator action `run_workspace_gc_reconcile`. It does not cause the runtime to
+reconcile automatically.
 
 Capacity values used by tests are deterministic fixtures only. P3 deliberately
 defines no operational default or public v1 config field for those limits.

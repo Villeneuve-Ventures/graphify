@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -20,13 +21,22 @@ from graphify.workspace.contracts import (
     GcIntentState,
     payload_manifest_sha256,
 )
-from graphify.workspace.gc import GcError, GcProtection, GcRecoveryRequired, GcStore
+from graphify.workspace.gc import (
+    GC_PREVIEW_MAX_GENERATIONS,
+    _MAX_GC_INTENT_BYTES,
+    GcError,
+    GcProtection,
+    GcRecoveryRequired,
+    GcStore,
+)
 from graphify.workspace.generations import CertificationRequest, GenerationStore
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import LeaseRecoveryRequired
 from graphify.workspace.persistence import (
     CommitUnknown,
+    DurableStateRoot,
     InjectedFault,
+    LockTimeout,
     PosixSyscalls,
     StateCorrupt,
     StatePathError,
@@ -39,6 +49,7 @@ from tests.workspace_p3_helpers import (
     COMPATIBILITY_SHA256,
     REPO_UUID,
     START,
+    SUPPORTED,
     acquire,
     create_harness,
     metadata_snapshot,
@@ -94,6 +105,7 @@ GC_RECOVERY_PHASES = (
     "gc:gen-unused:quarantine:source_parent_durable",
     "gc:gen-unused:quarantine:destination_parent_durable",
     "gc:completion:installed",
+    "gc:completion_epoch:installed",
     "gc:completion_durable",
     "gc:intent_clear:unlinked",
     "gc:complete",
@@ -148,6 +160,19 @@ class _FailOncePurgeSyscalls(PosixSyscalls):
     def fsync(self, descriptor: int) -> None:
         self._fail("fsync")
         super().fsync(descriptor)
+
+
+class _ExpireAfterFirstPurgeUnlinkSyscalls(PosixSyscalls):
+    def __init__(self) -> None:
+        self.armed = False
+        self.expired = False
+        self.unlinked: list[str] = []
+
+    def unlink_at(self, path: str, *, dir_fd: int) -> None:
+        super().unlink_at(path, dir_fd=dir_fd)
+        if self.armed and not self.expired:
+            self.unlinked.append(path)
+            self.expired = True
 
 
 def _runtime(tmp_path: Path):
@@ -279,6 +304,151 @@ def _cas(grant: Any, receipt: Any) -> PointerCAS:
     )
 
 
+class _BoundedScandir:
+    """A hostile directory iterator that fails if enumeration reads past a bound."""
+
+    def __init__(self, names: tuple[str, ...], *, maximum_entries: int) -> None:
+        self.names = names
+        self.maximum_entries = maximum_entries
+        self.consumed = 0
+
+    def __enter__(self) -> _BoundedScandir:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def __iter__(self) -> _BoundedScandir:
+        return self
+
+    def __next__(self) -> Any:
+        if self.consumed >= self.maximum_entries + 1:
+            raise AssertionError("generation enumeration consumed beyond maximum + 1")
+        if self.consumed >= len(self.names):
+            raise StopIteration
+        name = self.names[self.consumed]
+        self.consumed += 1
+        return type("Entry", (), {"name": name})()
+
+
+def test_private_generation_enumeration_stops_at_maximum_plus_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    generations = state.ensure_directory("generations")
+    names = tuple(f"generation-{index}" for index in range(4))
+    for name in names:
+        (generations / name).mkdir(mode=0o700)
+    maximum = 2
+    scandir = _BoundedScandir(names, maximum_entries=maximum)
+    monkeypatch.setattr("graphify.workspace.persistence.os.scandir", lambda _fd: scandir)
+
+    with pytest.raises(StatePathError):
+        state.list_existing_private_directories(
+            "generations",
+            maximum_entries=maximum,
+        )
+
+    assert scandir.consumed == maximum + 1
+
+
+@pytest.mark.parametrize("unsafe_child", ("linked", "wrong-mode", "unowned"))
+def test_private_generation_enumeration_rejects_unsafe_enumerated_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_child: str,
+) -> None:
+    state = DurableStateRoot(tmp_path / "state", capabilities=SUPPORTED)
+    generations = state.ensure_directory("generations")
+    child = generations / unsafe_child
+    if unsafe_child == "linked":
+        target = tmp_path / "target"
+        target.mkdir(mode=0o700)
+        child.symlink_to(target, target_is_directory=True)
+    elif unsafe_child == "wrong-mode":
+        child.mkdir(mode=0o755)
+        child.chmod(0o755)
+    else:
+        child.mkdir(mode=0o700)
+        original_require_owner = DurableStateRoot._require_owner
+
+        def reject_unowned(details: os.stat_result, path: Path) -> None:
+            if path == child:
+                raise StatePathError(f"state path is not owned by the current user: {path}")
+            original_require_owner(details, path)
+
+        monkeypatch.setattr(
+            DurableStateRoot,
+            "_require_owner",
+            staticmethod(reject_unowned),
+        )
+
+    with pytest.raises(StatePathError):
+        state.list_existing_private_directories(
+            "generations",
+            maximum_entries=2,
+        )
+
+
+def test_gc_preview_and_plan_apply_the_same_generation_enumeration_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    observed_bounds: list[int | None] = []
+    original_list = gc.state.list_existing_private_directories
+
+    def capture_bound(
+        relative: str | Path,
+        *,
+        allow_missing: bool = False,
+        maximum_entries: int | None = None,
+    ) -> tuple[str, ...]:
+        observed_bounds.append(maximum_entries)
+        return original_list(
+            relative,
+            allow_missing=allow_missing,
+            maximum_entries=maximum_entries,
+        )
+
+    monkeypatch.setattr(gc.state, "list_existing_private_directories", capture_bound)
+
+    gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    pointer = pointers.load(REPO_UUID)
+    assert pointer is not None
+    gc.preview(
+        REPO_UUID,
+        expected_registry_revision=gc_grant.registry_revision,
+        expected_active_source_revision=gc_grant.active_source_revision,
+        expected_operation_epoch=gc_grant.operation_epoch,
+        expected_migration_epoch=gc_grant.migration_epoch,
+        expected_pointer_revision=int(pointer.to_dict()["pointer_revision"]),
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        deadline_ns=time.monotonic_ns() + 5_000_000_000,
+    )
+
+    assert observed_bounds == [
+        GC_PREVIEW_MAX_GENERATIONS,
+        GC_PREVIEW_MAX_GENERATIONS,
+        GC_PREVIEW_MAX_GENERATIONS,
+    ]
+
+
 def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     tmp_path: Path,
 ) -> None:
@@ -399,6 +569,126 @@ def test_gc_is_dry_run_first_protects_reader_then_quarantines_and_purges(
     assert retained_lock.stat().st_ino == inode
 
 
+def test_gc_execute_propagates_deadline_to_candidate_lock_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: list[int | None] = []
+    original_locks = gc.state.existing_generation_locks
+
+    def capture_deadline(
+        locks: list[tuple[str, Path]],
+        *,
+        exclusive: bool,
+        blocking: bool = True,
+        deadline_ns: int | None = None,
+    ) -> Any:
+        observed.append(deadline_ns)
+        return original_locks(
+            locks,
+            exclusive=exclusive,
+            blocking=blocking,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(gc.state, "existing_generation_locks", capture_deadline)
+
+    gc.execute(
+        gc_grant,
+        plan,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        occurred_at=START,
+        monotonic_ns=30_002,
+        deadline_ns=deadline_ns,
+    )
+
+    assert observed == [deadline_ns]
+
+
+def test_gc_purge_stops_recursive_deletion_at_request_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    syscalls = _ExpireAfterFirstPurgeUnlinkSyscalls()
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        syscalls=syscalls,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    completion = gc.execute(
+        gc_grant,
+        plan,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        occurred_at=START,
+        monotonic_ns=30_002,
+    )
+    quarantine = gc.state.path(
+        gc._quarantine(REPO_UUID, "gen-unused", completion.operation_epoch)
+    )
+    syscalls.armed = True
+    monkeypatch.setattr(
+        "graphify.workspace.persistence.time.monotonic_ns",
+        lambda: 2 if syscalls.expired else 1,
+    )
+
+    with pytest.raises(LockTimeout, match="private tree operation"):
+        gc.purge(
+            gc_grant,
+            plan_sha256=plan.sha256,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=30_003,
+            deadline_ns=2,
+        )
+
+    assert syscalls.unlinked
+    assert quarantine.is_dir()
+    assert not gc.state.path(gc._purge_path(REPO_UUID, plan.sha256)).exists()
+
+    syscalls.armed = False
+    syscalls.expired = False
+    purge = gc.purge(
+        gc_grant,
+        plan_sha256=plan.sha256,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        completed_at=START,
+        monotonic_ns=30_004,
+        deadline_ns=2,
+    )
+    assert purge.purged == ("gen-unused",)
+
+
 def test_gc_execute_rejects_dangling_completion_before_quarantine(
     tmp_path: Path,
 ) -> None:
@@ -439,6 +729,66 @@ def test_gc_execute_rejects_dangling_completion_before_quarantine(
     assert not gc.state.path(
         gc._quarantine(REPO_UUID, "gen-unused", gc_grant.operation_epoch)
     ).exists()
+
+
+def test_gc_reconcile_rejects_oversized_completion_before_quarantine(
+    tmp_path: Path,
+) -> None:
+    intent_left = False
+
+    def leave_durable_intent(event: str) -> None:
+        nonlocal intent_left
+        if event == "gc:intent_durable" and not intent_left:
+            intent_left = True
+            raise InjectedFault(event)
+
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=leave_durable_intent,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    with pytest.raises(InjectedFault):
+        gc.execute(
+            gc_grant,
+            plan,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            occurred_at=START,
+            monotonic_ns=30_002,
+        )
+    harness.leases.release(gc_grant)
+    assert intent_left is True
+
+    completion_relative = gc._completion_path(REPO_UUID, plan.sha256)
+    gc.state.ensure_directory(completion_relative.parent)
+    completion_path = gc.state.path(completion_relative)
+    completion_path.write_bytes(b"x" * (_MAX_GC_INTENT_BYTES + 1))
+    completion_path.chmod(0o600)
+    recovery = acquire(harness, "POINTER_RECOVERY", tick=4)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(GcRecoveryRequired, match="read limit"):
+        gc.reconcile(
+            recovery,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=40_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+    harness.leases.release(recovery)
 
 
 def test_gc_purge_rejects_dangling_record_before_quarantine_deletion(

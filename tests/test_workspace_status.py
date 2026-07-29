@@ -1296,7 +1296,7 @@ def test_status_reports_unresolved_gc_intent_as_repair_required(tmp_path: Path) 
     assert report.exit_code == 20
     assert gc_check["state"] == "invalid"
     assert gc_check["reason_code"] == "workspace_state_invalid"
-    assert gc_check["action_code"] == "run_workspace_repair"
+    assert gc_check["action_code"] == "run_workspace_gc_reconcile"
     assert value["workspaces"][0]["repair"]["required"] is True
     assert tree_snapshot(runtime.state_root) == before
 
@@ -1587,7 +1587,7 @@ def test_status_revalidates_gc_intent_after_freshness(
             "component": f"workspace:{REPO_UUID}:gc",
             "state": "invalid",
             "reason_code": "workspace_state_invalid",
-            "action_code": "run_workspace_repair",
+            "action_code": "run_workspace_gc_reconcile",
         }
         for check in value["checks"]
     )

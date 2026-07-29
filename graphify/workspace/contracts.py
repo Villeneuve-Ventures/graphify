@@ -2840,6 +2840,73 @@ class GcCompletionState:
 
 
 @dataclass(frozen=True)
+class GcCompletionIndexState:
+    """Immutable recovery index from one public operation to its completion."""
+
+    repo_uuid: str
+    operation_epoch: int
+    plan_sha256: str
+    completion_sha256: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "completion_sha256": self.completion_sha256,
+            "contract": "graphify.workspace.gc_completion_index.internal",
+            "format_version": 1,
+            "operation_epoch": self.operation_epoch,
+            "plan_sha256": self.plan_sha256,
+            "repo_uuid": self.repo_uuid,
+        }
+
+    @property
+    def canonical(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, object]) -> "GcCompletionIndexState":
+        data = _mapping(value, "$")
+        _exact_keys(
+            data,
+            "$",
+            {
+                "completion_sha256",
+                "contract",
+                "format_version",
+                "operation_epoch",
+                "plan_sha256",
+                "repo_uuid",
+            },
+        )
+        if data["contract"] != "graphify.workspace.gc_completion_index.internal":
+            raise ContractError("$.contract: unsupported internal GC completion index")
+        _exact_version(data["format_version"], "$.format_version")
+        return cls(
+            repo_uuid=_uuid(data["repo_uuid"], "$.repo_uuid"),
+            operation_epoch=_integer(
+                data["operation_epoch"],
+                "$.operation_epoch",
+                minimum=1,
+            ),
+            plan_sha256=_digest(data["plan_sha256"], "$.plan_sha256"),
+            completion_sha256=_digest(
+                data["completion_sha256"],
+                "$.completion_sha256",
+            ),
+        )
+
+    @classmethod
+    def from_json(cls, value: str | bytes) -> "GcCompletionIndexState":
+        parsed = _parse_json(value)
+        if not isinstance(parsed, Mapping):
+            raise ContractError("$: expected object")
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: internal GC completion index is not canonical JSON")
+        return document
+
+
+@dataclass(frozen=True)
 class GcPurgeState:
     """Immutable durable audit record for explicit quarantine deletion."""
 

@@ -89,17 +89,32 @@ operation epoch and fence token from the grant, and delegates once to
 `PointerStore.rollback()`. The existing pointer, journal, lease, generation,
 and recovery layers continue to own durable mutation and commit-unknown
 barriers; the CLI adds no historical-generation selector or durable format.
-The bounded GC slice exposes only `graphify workspace gc --dry-run
+The bounded GC preview slice remains `graphify workspace gc --dry-run
 --request-stdin`. It composes installed authority before its one canonical
 request and passes only caller-supplied identity revisions, timeout, complete
 capacity policy, and six-class protection set to existing read-only GC
 coordination. Two matching reachability snapshots produce one deterministic
 unfenced preview result; the CLI creates no lease, fence, executable plan, or
-durable state. Existing fenced GC execution remains in P3. Remaining mutation
-and broader query commands, repair,
-watch/service, installation, performance certification, candidate publication,
-and live-cutover work remain deferred; retained production query/service
-authority remains P5C work.
+durable state.
+
+The public fenced lifecycle adds only exact `gc --execute --request-stdin`,
+`gc --reconcile --request-stdin`, and `gc --purge --request-stdin` transports.
+Each consumes a phase-specific canonical authorization and caller-supplied
+identity CAS, capacity, and protections. Execute recomputes the frozen public
+preview result, verifies its exact canonical-byte SHA-256 approval, acquires a
+fresh trusted `GC` lease, and permits the existing P3 execution only when a
+fresh plan matches the preview's semantically equivalent non-fence projection.
+Redundant `shared_lock` detail on an otherwise protected generation does not
+change that projection, while a sole lock reason remains material. One absolute
+request deadline bounds planning, blocking generation-lock acquisition, and
+fenced mutation. Reconcile mutates only an existing GC intent and can replay the
+immutable completion indexed by a matching current operation epoch without a
+lease; purge names one exact plan digest and rechecks pointer, protection, and
+lock conditions. These transports expose redacted results, not raw durable
+lifecycle records. They do not add automatic GC, online/service
+behavior, installation, performance certification, candidate publication, or
+live-cutover authority; retained production query/service authority remains
+P5C work.
 
 ## Authority split
 
@@ -263,5 +278,9 @@ historical selection authority. Later P5 slices remain responsible for all
 other orchestration, concurrent in-process services, commands, installation,
 and publication. The GC preview slice is outside that fenced operation domain:
 it performs only bounded read-only coordination and two matching reachability
-snapshots, produces no `LeaseGrant`, fence, or `GcPlan`, and leaves P3
-`GcStore.plan()`, `execute()`, `reconcile()`, and `purge()` unchanged.
+snapshots and produces no `LeaseGrant`, fence, or `GcPlan`. The separate public
+lifecycle transport is inside the existing P3 fenced domain: it creates a
+fresh `GC` lease only after execute has revalidated the exact public preview
+bytes, and delegates plan, execute, reconcile, and purge to the existing store.
+Its public comparison intentionally excludes the newly granted operation epoch
+and fence; all other authority and candidate/protection facts must match.

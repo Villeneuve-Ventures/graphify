@@ -118,6 +118,7 @@ ACTION_CODES = frozenset(
         "restore_source",
         "retry_status",
         "resume_exact_workspace_sync",
+        "run_workspace_gc_reconcile",
         "run_workspace_repair",
         "run_workspace_sync",
         "use_supported_runtime",
@@ -959,7 +960,7 @@ def _inspect_workspace(
                     component=f"{prefix}:gc",
                     state="invalid",
                     reason_code="workspace_state_invalid",
-                    action_code="run_workspace_repair",
+                    action_code="run_workspace_gc_reconcile",
                     repair_required=True,
                 )
             checks.append(_check(f"{prefix}:gc", "ready", "ready", "none"))
@@ -1783,7 +1784,7 @@ def inspect_workspace_status(
                                                 component=f"workspace:{repo_uuid}:gc",
                                                 state="invalid",
                                                 reason_code="workspace_state_invalid",
-                                                action_code="run_workspace_repair",
+                                                action_code="run_workspace_gc_reconcile",
                                                 repair_required=True,
                                             )
                                         elif not _queue_snapshot_is_current_locked(

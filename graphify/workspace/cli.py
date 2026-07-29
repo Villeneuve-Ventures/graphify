@@ -17,6 +17,7 @@ import time
 from typing import Any, cast, Mapping, Sequence, TextIO
 
 import graphify.workspace.rollback as rollback_runtime
+import graphify.workspace.gc_command as gc_command_runtime
 
 from graphify.workspace.adapters import (
     QueryRejected,
@@ -187,6 +188,24 @@ _GC_PREVIEW_REQUEST_SCHEMA_PATH = (
 _GC_PREVIEW_RESULT_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-preview-result.schema.json"
 )
+_GC_EXECUTE_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-execute-request.schema.json"
+)
+_GC_EXECUTE_RESULT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-execute-result.schema.json"
+)
+_GC_RECONCILE_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-reconcile-request.schema.json"
+)
+_GC_RECONCILE_RESULT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-reconcile-result.schema.json"
+)
+_GC_PURGE_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-purge-request.schema.json"
+)
+_GC_PURGE_RESULT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-purge-result.schema.json"
+)
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
@@ -196,6 +215,9 @@ _SYNC_USAGE = "graphify workspace sync --code-only --request-stdin"
 _QUERY_USAGE = "graphify workspace query --request-stdin"
 _ROLLBACK_USAGE = "graphify workspace rollback --request-stdin"
 _GC_PREVIEW_USAGE = "graphify workspace gc --dry-run --request-stdin"
+_GC_EXECUTE_USAGE = "graphify workspace gc --execute --request-stdin"
+_GC_RECONCILE_USAGE = "graphify workspace gc --reconcile --request-stdin"
+_GC_PURGE_USAGE = "graphify workspace gc --purge --request-stdin"
 _ACTIVATION_USAGE = (
     "graphify workspace activate --repo-uuid UUID "
     "--expected-registry-revision N --expected-active-source-revision N "
@@ -210,6 +232,9 @@ _USAGE = (
     f"       {_QUERY_USAGE}\n"
     f"       {_ROLLBACK_USAGE}\n"
     f"       {_GC_PREVIEW_USAGE}\n"
+    f"       {_GC_EXECUTE_USAGE}\n"
+    f"       {_GC_RECONCILE_USAGE}\n"
+    f"       {_GC_PURGE_USAGE}\n"
     f"       {_ACTIVATION_USAGE}"
 )
 
@@ -2341,32 +2366,7 @@ def _gc_preview_is_valid(
 
 
 def _gc_preview_success_payload(result: GcPreview) -> bytes:
-    return canonical_json_bytes(
-        {
-            "capacity_policy_sha256": result.capacity_policy_sha256,
-            "candidates": list(result.candidates),
-            "cli_contract_version": CLI_CONTRACT_VERSION,
-            "contract": _GC_PREVIEW_RESULT_CONTRACT,
-            "decision": "preview",
-            "exit_code": EXIT_READY,
-            "observation_boundary": "locked_double_snapshot",
-            "observed": {
-                "active_source_revision": result.active_source_revision,
-                "migration_epoch": result.migration_epoch,
-                "operation_epoch": result.operation_epoch,
-                "pointer_revision": result.pointer_revision,
-                "registry_revision": result.registry_revision,
-            },
-            "protected": [
-                {"generation_id": generation_id, "reasons": list(reasons)}
-                for generation_id, reasons in result.protected
-            ],
-            "reason_code": "preview_ready",
-            "repo_uuid": result.repo_uuid,
-            "schema_version": _GC_PREVIEW_SCHEMA_VERSION,
-            "state": "previewed",
-        }
-    )
+    return gc_command_runtime.gc_preview_result_bytes(result)
 
 
 def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
@@ -2574,6 +2574,134 @@ def _run_gc_preview(
     )
 
 
+def _read_gc_lifecycle_request_bytes() -> bytes:
+    binary_input = getattr(sys.stdin, "buffer", None)
+    if binary_input is not None:
+        limit = gc_command_runtime.GC_LIFECYCLE_REQUEST_MAX_BYTES + 1
+        raw = bytearray()
+        while len(raw) < limit:
+            remaining = limit - len(raw)
+            chunk = binary_input.read(remaining)
+            if not isinstance(chunk, bytes):
+                raise gc_command_runtime.GcLifecycleRequestInvalid(
+                    "GC lifecycle request input did not return bytes"
+                )
+            if len(chunk) > remaining:
+                raise gc_command_runtime.GcLifecycleRequestInvalid(
+                    "GC lifecycle request input exceeded its bounded read"
+                )
+            if chunk == b"":
+                break
+            raw.extend(chunk)
+        return bytes(raw)
+
+    raw = bytearray()
+    while len(raw) <= gc_command_runtime.GC_LIFECYCLE_REQUEST_MAX_BYTES:
+        character = sys.stdin.read(1)
+        if not isinstance(character, str) or len(character) > 1:
+            raise gc_command_runtime.GcLifecycleRequestInvalid(
+                "GC lifecycle request input did not return text"
+            )
+        if character == "":
+            break
+        try:
+            raw.extend(character.encode("utf-8"))
+        except UnicodeError as exc:
+            raise gc_command_runtime.GcLifecycleRequestInvalid(
+                "GC lifecycle request input is not UTF-8"
+            ) from exc
+    return bytes(raw)
+
+
+def _run_gc_lifecycle(
+    operation: str,
+    *,
+    inputs: WorkspaceRuntimeInputs | None,
+    output: TextIO,
+    errors: TextIO,
+) -> int:
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        if resolved_inputs is None:
+            failure = gc_command_runtime.GcLifecycleFailure(
+                operation,
+                "invalid",
+                EXIT_INVALID,
+                "runtime_authority_missing",
+                "install_candidate_authority",
+            )
+            return _emit_gc_preview_output(
+                errors,
+                failure.canonical,
+                exit_code=failure.exit_code,
+            )
+        runtime = compose_workspace_runtime(resolved_inputs)
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = gc_command_runtime.classify_failure(exc, operation)
+        return _emit_gc_preview_output(
+            errors,
+            failure.canonical,
+            exit_code=failure.exit_code,
+        )
+
+    try:
+        try:
+            raw_request = _read_gc_lifecycle_request_bytes()
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            if isinstance(exc, gc_command_runtime.GcLifecycleRequestInvalid):
+                raise
+            raise gc_command_runtime.GcLifecycleRequestInvalid(
+                "GC lifecycle request input cannot be read"
+            ) from exc
+        occurred_at = datetime.now(timezone.utc)
+        with (
+            redirect_stdout(_DISCARDED_ENGINE_OUTPUT),
+            redirect_stderr(_DISCARDED_ENGINE_OUTPUT),
+        ):
+            if operation == "execute":
+                request = gc_command_runtime.GcExecuteRequest.from_bytes(raw_request)
+                result = gc_command_runtime.execute_gc(
+                    runtime,
+                    request,
+                    occurred_at=occurred_at,
+                    monotonic_clock=time.monotonic_ns,
+                )
+            elif operation == "reconcile":
+                request = gc_command_runtime.GcReconcileRequest.from_bytes(raw_request)
+                result = gc_command_runtime.reconcile_gc(
+                    runtime,
+                    request,
+                    occurred_at=occurred_at,
+                    monotonic_clock=time.monotonic_ns,
+                )
+            elif operation == "purge":
+                request = gc_command_runtime.GcPurgeRequest.from_bytes(raw_request)
+                result = gc_command_runtime.purge_gc(
+                    runtime,
+                    request,
+                    occurred_at=occurred_at,
+                    monotonic_clock=time.monotonic_ns,
+                )
+            else:  # pragma: no cover - exact dispatcher invariant
+                raise ValueError("unsupported GC lifecycle operation")
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = gc_command_runtime.classify_failure(exc, operation)
+        return _emit_gc_preview_output(
+            errors,
+            failure.canonical,
+            exit_code=failure.exit_code,
+        )
+    return _emit_gc_preview_output(
+        output,
+        result.canonical,
+        exit_code=EXIT_READY,
+    )
+
+
 def _doctor_text(report: WorkspaceStatusReport) -> str:
     value = report.to_dict()
     lines = [
@@ -2644,16 +2772,38 @@ def run_workspace_command(
             errors=errors,
         )
     if command and command[0] == "gc":
-        if command != ("gc", "--dry-run", "--request-stdin"):
-            return _emit_text_payload(
-                errors,
-                _GC_PREVIEW_USAGE + "\n",
-                exit_code=EXIT_USAGE,
+        if command == ("gc", "--dry-run", "--request-stdin"):
+            return _run_gc_preview(
+                inputs=inputs,
+                output=output,
+                errors=errors,
             )
-        return _run_gc_preview(
-            inputs=inputs,
-            output=output,
-            errors=errors,
+        lifecycle_commands: dict[tuple[str, ...], str] = {
+            ("gc", "--execute", "--request-stdin"): "execute",
+            ("gc", "--reconcile", "--request-stdin"): "reconcile",
+            ("gc", "--purge", "--request-stdin"): "purge",
+        }
+        operation = lifecycle_commands.get(command)
+        if operation is not None:
+            return _run_gc_lifecycle(
+                operation,
+                inputs=inputs,
+                output=output,
+                errors=errors,
+            )
+        usage = _GC_PREVIEW_USAGE
+        for flag, lifecycle_usage in (
+            ("--execute", _GC_EXECUTE_USAGE),
+            ("--reconcile", _GC_RECONCILE_USAGE),
+            ("--purge", _GC_PURGE_USAGE),
+        ):
+            if flag in command:
+                usage = lifecycle_usage
+                break
+        return _emit_text_payload(
+            errors,
+            usage + "\n",
+            exit_code=EXIT_USAGE,
         )
     if command and command[0] == "rollback":
         if command != ("rollback", "--request-stdin"):
@@ -2811,10 +2961,65 @@ def load_gc_preview_result_schema() -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
+def _load_gc_lifecycle_schema(path: Path, label: str) -> dict[str, Any]:
+    value = _load_json(path.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError(f"workspace GC {label} schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+def load_gc_execute_request_schema() -> dict[str, Any]:
+    """Load the public canonical fenced-GC execute request schema."""
+
+    return _load_gc_lifecycle_schema(_GC_EXECUTE_REQUEST_SCHEMA_PATH, "execute request")
+
+
+def load_gc_execute_result_schema() -> dict[str, Any]:
+    """Load the public redacted fenced-GC execute result schema."""
+
+    return _load_gc_lifecycle_schema(_GC_EXECUTE_RESULT_SCHEMA_PATH, "execute result")
+
+
+def load_gc_reconcile_request_schema() -> dict[str, Any]:
+    """Load the public canonical fenced-GC reconcile request schema."""
+
+    return _load_gc_lifecycle_schema(
+        _GC_RECONCILE_REQUEST_SCHEMA_PATH,
+        "reconcile request",
+    )
+
+
+def load_gc_reconcile_result_schema() -> dict[str, Any]:
+    """Load the public redacted fenced-GC reconcile result schema."""
+
+    return _load_gc_lifecycle_schema(
+        _GC_RECONCILE_RESULT_SCHEMA_PATH,
+        "reconcile result",
+    )
+
+
+def load_gc_purge_request_schema() -> dict[str, Any]:
+    """Load the public canonical fenced-GC purge request schema."""
+
+    return _load_gc_lifecycle_schema(_GC_PURGE_REQUEST_SCHEMA_PATH, "purge request")
+
+
+def load_gc_purge_result_schema() -> dict[str, Any]:
+    """Load the public redacted fenced-GC purge result schema."""
+
+    return _load_gc_lifecycle_schema(_GC_PURGE_RESULT_SCHEMA_PATH, "purge result")
+
+
 __all__ = [
     "load_activation_schema",
+    "load_gc_execute_request_schema",
+    "load_gc_execute_result_schema",
     "load_gc_preview_request_schema",
     "load_gc_preview_result_schema",
+    "load_gc_purge_request_schema",
+    "load_gc_purge_result_schema",
+    "load_gc_reconcile_request_schema",
+    "load_gc_reconcile_result_schema",
     "load_identity_maintenance_schema",
     "load_query_request_schema",
     "load_query_result_schema",
