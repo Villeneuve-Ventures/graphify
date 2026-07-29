@@ -1925,7 +1925,7 @@ def test_gc_execute_normalizes_redundant_shared_lock_protection_reason(
     lock = runtime.gc.state.path(
         runtime.gc.generations._lock(REPO_UUID, "gen-current")
     )
-    holder = subprocess.Popen(
+    with subprocess.Popen(
         [
             sys.executable,
             "-c",
@@ -1938,20 +1938,22 @@ def test_gc_execute_normalizes_redundant_shared_lock_protection_reason(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
-    )
-    assert holder.stdout is not None and holder.stdout.readline().strip() == "READY"
-    try:
-        result = command.execute_gc(
-            runtime,
-            _approved_execute_request(runtime),
-            occurred_at=START,
-            monotonic_clock=time.monotonic_ns,
-        )
-    finally:
-        assert holder.stdin is not None
-        holder.stdin.write("\n")
-        holder.stdin.flush()
-        holder.wait(timeout=5)
+    ) as holder:
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline().strip() == "READY"
+            result = command.execute_gc(
+                runtime,
+                _approved_execute_request(runtime),
+                occurred_at=START,
+                monotonic_clock=time.monotonic_ns,
+            )
+        finally:
+            try:
+                holder.communicate(input="\n", timeout=5)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                holder.communicate()
 
     assert result.to_dict()["quarantined"] == ["gen-unused"]
 
@@ -2312,12 +2314,15 @@ def test_gc_public_lifecycle_propagates_one_request_deadline_to_store_operations
     if operation == "execute":
         request = _approved_execute_request(runtime)
         method_names = ("plan", "execute")
-        invoke = lambda: command.execute_gc(
-            runtime,
-            request,
-            occurred_at=START,
-            monotonic_clock=time.monotonic_ns,
-        )
+
+        def invoke() -> object:
+            return command.execute_gc(
+                runtime,
+                request,
+                occurred_at=START,
+                monotonic_clock=time.monotonic_ns,
+            )
+
     elif operation == "reconcile":
         interrupted = False
 
@@ -2344,12 +2349,15 @@ def test_gc_public_lifecycle_propagates_one_request_deadline_to_store_operations
             canonical_json_bytes(_gc_live_lifecycle_request(runtime, "reconcile"))
         )
         method_names = ("reconcile",)
-        invoke = lambda: command.reconcile_gc(
-            runtime,
-            request,
-            occurred_at=START,
-            monotonic_clock=time.monotonic_ns,
-        )
+
+        def invoke() -> object:
+            return command.reconcile_gc(
+                runtime,
+                request,
+                occurred_at=START,
+                monotonic_clock=time.monotonic_ns,
+            )
+
     else:
         executed = command.execute_gc(
             runtime,
@@ -2370,12 +2378,14 @@ def test_gc_public_lifecycle_propagates_one_request_deadline_to_store_operations
             )
         )
         method_names = ("purge",)
-        invoke = lambda: command.purge_gc(
-            runtime,
-            request,
-            occurred_at=START,
-            monotonic_clock=time.monotonic_ns,
-        )
+
+        def invoke() -> object:
+            return command.purge_gc(
+                runtime,
+                request,
+                occurred_at=START,
+                monotonic_clock=time.monotonic_ns,
+            )
 
     observed: dict[str, list[int | None]] = {name: [] for name in method_names}
     for name in method_names:

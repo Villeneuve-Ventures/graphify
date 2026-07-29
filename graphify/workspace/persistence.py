@@ -31,6 +31,7 @@ _ATOMIC_TEMP_RE = re.compile(
 )
 _PRIVATE_DIRECTORY_MODES = frozenset({0o700})
 _PRIVATE_FILE_MODES = frozenset({0o600})
+_PRIVATE_TREE_DEADLINE_DETAIL = "private tree operation exceeded its deadline"
 
 
 class WorkspaceRuntimeError(RuntimeError):
@@ -892,6 +893,36 @@ class DurableStateRoot:
             os.close(descriptor)
         return True
 
+    def _tree_entry_names_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        deadline_ns: int | None = None,
+    ) -> list[str]:
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
+        try:
+            with os.scandir(descriptor) as entries:
+                names: list[str] = []
+                for entry in entries:
+                    require_before_deadline(
+                        deadline_ns,
+                        _PRIVATE_TREE_DEADLINE_DETAIL,
+                    )
+                    names.append(entry.name)
+        except OSError as exc:
+            raise StatePathError(
+                f"state tree cannot be enumerated safely: {path}: {exc}"
+            ) from exc
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
+        return sorted(names)
+
     def _tree_bytes_descriptor(
         self,
         descriptor: int,
@@ -899,14 +930,24 @@ class DurableStateRoot:
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
     ) -> int:
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
         before = os.fstat(descriptor)
-        try:
-            names = sorted(entry.name for entry in os.scandir(descriptor))
-        except OSError as exc:
-            raise StatePathError(f"state tree cannot be enumerated safely: {path}: {exc}") from exc
+        names = self._tree_entry_names_descriptor(
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+        )
         total = 0
         for name in names:
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
             candidate = path / name
             try:
                 details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
@@ -939,9 +980,14 @@ class DurableStateRoot:
                         candidate,
                         allowed_directory_modes=allowed_directory_modes,
                         allowed_file_modes=allowed_file_modes,
+                        deadline_ns=deadline_ns,
                     )
                 finally:
                     os.close(child)
+                require_before_deadline(
+                    deadline_ns,
+                    _PRIVATE_TREE_DEADLINE_DETAIL,
+                )
                 continue
             self._require_regular_details(
                 details,
@@ -974,8 +1020,20 @@ class DurableStateRoot:
                 total += opened.st_size
             finally:
                 os.close(file_descriptor)
-        after_names = sorted(entry.name for entry in os.scandir(descriptor))
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+        after_names = self._tree_entry_names_descriptor(
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+        )
         after = os.fstat(descriptor)
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
         if names != after_names or self._stat_identity(before) != self._stat_identity(after):
             raise StatePathError(f"state tree changed while scanning: {path}")
         return total
@@ -1010,9 +1068,18 @@ class DurableStateRoot:
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
     ) -> None:
-        names = sorted(entry.name for entry in os.scandir(descriptor))
+        names = self._tree_entry_names_descriptor(
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+        )
         for name in names:
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
             candidate = path / name
             details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
             if stat.S_ISDIR(details.st_mode):
@@ -1030,17 +1097,34 @@ class DurableStateRoot:
                         candidate,
                         allowed_directory_modes=allowed_directory_modes,
                         allowed_file_modes=allowed_file_modes,
+                        deadline_ns=deadline_ns,
                     )
                 finally:
                     os.close(child)
+                require_before_deadline(
+                    deadline_ns,
+                    _PRIVATE_TREE_DEADLINE_DETAIL,
+                )
                 self.syscalls.rmdir_at(name, dir_fd=descriptor)
+                require_before_deadline(
+                    deadline_ns,
+                    _PRIVATE_TREE_DEADLINE_DETAIL,
+                )
                 continue
             self._require_regular_details(
                 details,
                 candidate,
                 allowed_modes=allowed_file_modes,
             )
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
             self.syscalls.unlink_at(name, dir_fd=descriptor)
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
 
     def remove_private_tree(
         self,
@@ -1048,9 +1132,14 @@ class DurableStateRoot:
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
     ) -> bool:
         """Validate and remove one private tree through held no-follow descriptors."""
 
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
         path = self.path(relative)
         parent_relative = path.parent.relative_to(self.root)
         with self._existing_private_directory(
@@ -1074,17 +1163,27 @@ class DurableStateRoot:
                     path,
                     allowed_directory_modes=allowed_directory_modes,
                     allowed_file_modes=allowed_file_modes,
+                    deadline_ns=deadline_ns,
                 )
                 self._remove_tree_contents_descriptor(
                     descriptor,
                     path,
                     allowed_directory_modes=allowed_directory_modes,
                     allowed_file_modes=allowed_file_modes,
+                    deadline_ns=deadline_ns,
                 )
             finally:
                 os.close(descriptor)
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
             self.syscalls.rmdir_at(path.name, dir_fd=parent_descriptor)
             self.syscalls.fsync(parent_descriptor)
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
         return True
 
     def fsync_contained_regular_file(

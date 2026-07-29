@@ -35,6 +35,7 @@ from graphify.workspace.persistence import (
     CommitUnknown,
     DurableStateRoot,
     InjectedFault,
+    LockTimeout,
     PosixSyscalls,
     StateCorrupt,
     StatePathError,
@@ -158,6 +159,19 @@ class _FailOncePurgeSyscalls(PosixSyscalls):
     def fsync(self, descriptor: int) -> None:
         self._fail("fsync")
         super().fsync(descriptor)
+
+
+class _ExpireAfterFirstPurgeUnlinkSyscalls(PosixSyscalls):
+    def __init__(self) -> None:
+        self.armed = False
+        self.expired = False
+        self.unlinked: list[str] = []
+
+    def unlink_at(self, path: str, *, dir_fd: int) -> None:
+        super().unlink_at(path, dir_fd=dir_fd)
+        if self.armed and not self.expired:
+            self.unlinked.append(path)
+            self.expired = True
 
 
 def _runtime(tmp_path: Path):
@@ -605,6 +619,73 @@ def test_gc_execute_propagates_deadline_to_candidate_lock_acquisition(
     )
 
     assert observed == [deadline_ns]
+
+
+def test_gc_purge_stops_recursive_deletion_at_request_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, pointers, _receipts = _runtime(tmp_path)
+    gc_grant = acquire(harness, "GC", tick=3)
+    syscalls = _ExpireAfterFirstPurgeUnlinkSyscalls()
+    gc = GcStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        pointers,
+        capabilities=harness.leases.state.capabilities,
+        syscalls=syscalls,
+    )
+    plan = gc.plan(
+        gc_grant,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        monotonic_ns=30_001,
+    )
+    completion = gc.execute(
+        gc_grant,
+        plan,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        occurred_at=START,
+        monotonic_ns=30_002,
+    )
+    quarantine = gc.state.path(
+        gc._quarantine(REPO_UUID, "gen-unused", completion.operation_epoch)
+    )
+    syscalls.armed = True
+    monkeypatch.setattr(
+        "graphify.workspace.persistence.time.monotonic_ns",
+        lambda: 2 if syscalls.expired else 1,
+    )
+
+    with pytest.raises(LockTimeout, match="private tree operation"):
+        gc.purge(
+            gc_grant,
+            plan_sha256=plan.sha256,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            completed_at=START,
+            monotonic_ns=30_003,
+            deadline_ns=2,
+        )
+
+    assert syscalls.unlinked
+    assert quarantine.is_dir()
+    assert not gc.state.path(gc._purge_path(REPO_UUID, plan.sha256)).exists()
+
+    syscalls.armed = False
+    syscalls.expired = False
+    purge = gc.purge(
+        gc_grant,
+        plan_sha256=plan.sha256,
+        capacity_policy=POLICY,
+        protections=EMPTY_PROTECTION,
+        completed_at=START,
+        monotonic_ns=30_004,
+        deadline_ns=2,
+    )
+    assert purge.purged == ("gen-unused",)
 
 
 def test_gc_execute_rejects_dangling_completion_before_quarantine(

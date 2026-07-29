@@ -1258,6 +1258,7 @@ class GcStore:
                 relative,
                 allowed_directory_modes=_PURGE_ALLOWED_DIRECTORY_MODES,
                 allowed_file_modes=_PURGE_ALLOWED_FILE_MODES,
+                deadline_ns=deadline_ns,
             )
         except StatePathError as exc:
             raise GcError(f"quarantine path is unsafe: {exc}") from exc
