@@ -1,0 +1,643 @@
+"""Contract tests for explicit, fenced workspace pointer repair.
+
+The repair surface intentionally has no CLI dependency: callers first obtain a
+canonical, read-only plan and then present that plan's SHA-256 with a fresh
+REPAIR lease and explicit REPAIR_EXECUTE authorization.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+import time
+
+import pytest
+
+from graphify.workspace import persistence as persistence_module
+from graphify.workspace.composition import WorkspaceRuntime
+from graphify.workspace.generations import GenerationStore
+from graphify.workspace.journal import JournalStore
+from graphify.workspace.leases import LeaseGrant
+from graphify.workspace.persistence import (
+    CommitUnknown,
+    InjectedFault,
+    LockTimeout,
+    StatePathError,
+)
+from graphify.workspace.pointers import PointerRepairPlan, PointerSet, PointerStore
+from graphify.workspace.repair import (  # pragma: no cover - RED until P5B2 repair exists.
+    RepairAuthorization,
+    RepairExecuteRequest,
+    RepairPlanChanged,
+    RepairPreviewRequest,
+    WorkspaceRepair,
+    classify_failure,
+    repair_execute,
+    repair_preview,
+)
+
+from tests.test_workspace_pointers import POLICY, _cas, _certify, _semantic_queue
+from tests.workspace_p3_helpers import (
+    COMPATIBILITY_MANIFEST,
+    REPO_UUID,
+    START,
+    acquire,
+    create_harness,
+    tree_snapshot,
+)
+
+
+def _runtime(
+    tmp_path: Path,
+    *,
+    fault_hook: Any = None,
+) -> tuple[Any, JournalStore, GenerationStore, PointerStore, Any]:
+    harness = create_harness(tmp_path)
+    build = acquire(harness, "BUILD", tick=1)
+    journal = JournalStore(
+        harness.state_root,
+        harness.leases,
+        capabilities=harness.leases.state.capabilities,
+    )
+    generations = GenerationStore(
+        harness.state_root,
+        harness.leases,
+        journal,
+        semantic_queue=_semantic_queue(harness),
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+    )
+    old = _certify(generations, build, "gen-old", "old\n", monotonic_ns=10_001)
+    new = _certify(generations, build, "gen-new", "new\n", monotonic_ns=10_011)
+    racer = _certify(generations, build, "gen-racer", "racer\n", monotonic_ns=10_021)
+    harness.leases.release(build)
+    pointers = PointerStore(
+        harness.state_root,
+        harness.leases,
+        generations,
+        journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST,
+        capabilities=harness.leases.state.capabilities,
+        fault_hook=fault_hook,
+    )
+    return harness, journal, generations, pointers, (old, new, racer)
+
+
+def _repair(
+    harness: Any, journal: JournalStore, generations: GenerationStore, pointers: PointerStore
+) -> WorkspaceRepair:
+    return WorkspaceRepair(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        pointers,
+        journal,
+        capabilities=harness.leases.state.capabilities,
+    )
+
+
+def _request(harness: Any, *, timeout_ns: int = 100_000) -> RepairPreviewRequest:
+    registry = harness.registry.load().to_dict()
+    entry = registry["workspaces"][0]
+    lease = harness.leases.inspect(REPO_UUID)
+    return RepairPreviewRequest(
+        repo_uuid=REPO_UUID,
+        expected_registry_revision=int(registry["revision"]),
+        expected_active_source_revision=int(entry["active_source_revision"]),
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        timeout_ns=timeout_ns,
+    )
+
+
+def _authorization() -> RepairAuthorization:
+    return RepairAuthorization(
+        action="REPAIR_EXECUTE",
+        operator_id="operator:p5b2-repair-test",
+        reason="repair canonical preview",
+        issued_at="2026-07-28T19:00:00Z",
+        nonce="repair-execute-1",
+    )
+
+
+def _promote(pointers: PointerStore, harness: Any, receipt: Any) -> None:
+    promote = acquire(harness, "PROMOTE", tick=2)
+    pointers.promote(
+        promote,
+        _cas(promote, receipt, revision=0, current_sha256=None),
+        occurred_at=START,
+        monotonic_ns=20_001,
+    )
+    harness.leases.release(promote)
+
+
+def test_preview_is_read_only_and_returns_a_deterministic_no_op_plan(tmp_path: Path) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+
+    payload = preview.to_dict()
+    decision_sha256 = payload.pop("decision_sha256")
+    assert isinstance(decision_sha256, str)
+    assert len(decision_sha256) == 64
+    assert set(decision_sha256) <= set("0123456789abcdef")
+    assert payload == {
+        "classification": "no_op",
+        "candidate": {"generation_id": "gen-old", "receipt_sha256": receipts[0].sha256},
+        "last_good": None,
+        "next_pointer_revision": 1,
+        "selected_from": "current",
+        "pointer_action": "none",
+        "journal_actions": [],
+        "quarantine": [],
+    }
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_selects_verified_pending_candidate_and_plans_repair(tmp_path: Path) -> None:
+    failpoint = "pointer:promoted:pending_durable"
+
+    def interrupt_pending(event: str) -> None:
+        if event == failpoint:
+            raise InjectedFault(event)
+
+    harness, journal, generations, pointers, receipts = _runtime(
+        tmp_path, fault_hook=interrupt_pending
+    )
+    promote = acquire(harness, "PROMOTE", tick=2)
+    with pytest.raises(InjectedFault, match="pending_durable"):
+        pointers.promote(
+            promote,
+            _cas(promote, receipts[0], revision=0, current_sha256=None),
+            occurred_at=START,
+            monotonic_ns=20_001,
+        )
+    harness.leases.release(promote)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+
+    payload = preview.to_dict()
+    assert payload["classification"] == "repairable"
+    assert payload["candidate"] == {
+        "generation_id": "gen-old",
+        "receipt_sha256": receipts[0].sha256,
+    }
+    assert payload["selected_from"] == "pending"
+    assert payload["pointer_action"] == "replace"
+    assert payload["next_pointer_revision"] == 2
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_reports_irreparable_when_no_pointer_reference_verifies(tmp_path: Path) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    payload = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "generations"
+        / "gen-old"
+        / "graphify-out"
+        / "graph.json"
+    )
+    payload.write_text("corrupt\n", encoding="utf-8")
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+
+    assert preview.to_dict()["classification"] == "irreparable"
+    assert preview.to_dict()["candidate"] is None
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_routes_gc_intent_outside_pointer_repair_without_writes(
+    tmp_path: Path,
+) -> None:
+    from tests.test_workspace_status import _gc_intent
+
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    pointer = pointers.load(REPO_UUID, allow_missing=False)
+    assert pointer is not None
+    intent = _gc_intent(pointer, capacity_policy_sha256=POLICY.sha256)
+    gc_directory = harness.state_root / "workspaces" / REPO_UUID / "gc"
+    gc_directory.mkdir(mode=0o700)
+    intent_path = gc_directory / "intent.json"
+    intent_path.write_bytes(intent.canonical)
+    intent_path.chmod(0o600)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+
+    assert preview.to_dict()["classification"] == "irreparable"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_rejects_corrupt_semantic_queue_without_writes(tmp_path: Path) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    semantic_queue = generations.semantic_queue
+    assert semantic_queue is not None
+    current, _previous, _pending = semantic_queue._paths(REPO_UUID)
+    queue_path = semantic_queue.state.path(current)
+    queue_path.write_bytes(b"{}\n")
+    queue_path.chmod(0o600)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+
+    assert preview.to_dict()["classification"] == "irreparable"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_requires_every_referenced_generation_lock(tmp_path: Path) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    generation_lock = generations.state.path(generations._lock(REPO_UUID, "gen-old"))
+    generation_lock.unlink()
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+
+    assert preview.to_dict()["classification"] == "irreparable"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+@pytest.mark.parametrize(
+    "probe_kind",
+    ("current_pointer", "prior_pointer", "generation_lock"),
+)
+def test_repair_analysis_rechecks_deadline_after_existing_only_path_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_kind: str,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    target = {
+        "current_pointer": pointers._current(REPO_UUID),
+        "prior_pointer": pointers._prior(REPO_UUID),
+        "generation_lock": generations._lock(REPO_UUID, "gen-old"),
+    }[probe_kind]
+    original_probe = pointers.state.private_file_exists
+    expired = False
+
+    def expiring_probe(relative: str | Path) -> bool:
+        nonlocal expired
+        if Path(relative) != target:
+            return original_probe(relative)
+        exists = original_probe(relative) if probe_kind == "generation_lock" else False
+        expired = True
+        return exists
+
+    deadline_ns = 500
+    monkeypatch.setattr(pointers.state, "private_file_exists", expiring_probe)
+    monkeypatch.setattr(
+        persistence_module.time,
+        "monotonic_ns",
+        lambda: deadline_ns if expired else deadline_ns - 1,
+    )
+    before_tree = tree_snapshot(harness.state_root)
+
+    with pytest.raises(LockTimeout) as raised:
+        if probe_kind == "current_pointer":
+            pointers._read_repair_pointer(
+                target,
+                repo_uuid=REPO_UUID,
+                allow_missing=True,
+                allow_invalid=True,
+                deadline_ns=deadline_ns,
+            )
+        elif probe_kind == "prior_pointer":
+            pointers._read_repair_prior(REPO_UUID, deadline_ns=deadline_ns)
+        else:
+            repair.preview(request, deadline_ns=deadline_ns)
+
+    failure = classify_failure(raised.value, "preview")
+    assert failure.reason_code == "repair_lease_busy"
+    assert failure.action_code == "retry_workspace_repair"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_execute_rejects_changed_plan_before_pointer_mutation(tmp_path: Path) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    before_tree = tree_snapshot(harness.state_root)
+    stale = replace(request, expected_operation_epoch=request.expected_operation_epoch + 1)
+
+    with pytest.raises(RepairPlanChanged, match="canonical preview no longer matches"):
+        repair.execute(
+            stale,
+            approved_preview_sha256=preview.sha256,
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    runtime = cast(
+        WorkspaceRuntime,
+        SimpleNamespace(
+            registry=harness.registry,
+            leases=harness.leases,
+            generations=generations,
+            pointers=pointers,
+            journal=journal,
+        ),
+    )
+    request = _request(harness, timeout_ns=10_000_000_000)
+    preview = repair_preview(runtime, request, monotonic_ns=30_001)
+    assert preview.to_dict()["classification"] == "no_op"
+    before_epoch = harness.leases.inspect(REPO_UUID).operation_epoch
+    recover_calls: list[LeaseGrant] = []
+    recover_deadlines: list[int | None] = []
+    deadline_calls: list[int] = []
+    deadline_ns = time.monotonic_ns() + 10_000_000_000
+    original_recover = PointerStore.recover
+
+    def fixed_deadline(_request: RepairPreviewRequest) -> int:
+        deadline_calls.append(deadline_ns)
+        return deadline_ns
+
+    def observed_recover(
+        store: PointerStore,
+        grant: LeaseGrant,
+        *,
+        occurred_at: datetime,
+        monotonic_ns: int,
+        expected_plan: PointerRepairPlan | None = None,
+        deadline_ns: int | None = None,
+    ) -> PointerSet:
+        recover_calls.append(grant)
+        recover_deadlines.append(deadline_ns)
+        return original_recover(
+            store,
+            grant,
+            occurred_at=occurred_at,
+            monotonic_ns=monotonic_ns,
+            expected_plan=expected_plan,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(RepairPreviewRequest, "runtime_deadline", fixed_deadline)
+    monkeypatch.setattr(PointerStore, "recover", observed_recover)
+    result = repair_execute(
+        runtime,
+        RepairExecuteRequest(
+            repo_uuid=request.repo_uuid,
+            expected_registry_revision=request.expected_registry_revision,
+            expected_active_source_revision=request.expected_active_source_revision,
+            expected_operation_epoch=request.expected_operation_epoch,
+            expected_migration_epoch=request.expected_migration_epoch,
+            approved_preview_sha256=preview.sha256,
+            authorization=_authorization(),
+            timeout_ns=request.timeout_ns,
+        ),
+        occurred_at=START + timedelta(seconds=4),
+        monotonic_clock=lambda: 40_001,
+    )
+
+    assert result.to_dict()["state"] == "no_op"
+    assert deadline_calls == [deadline_ns]
+    assert len(recover_calls) == 1
+    assert recover_deadlines == [deadline_ns]
+    assert recover_calls[0].lease.to_dict()["operation"] == "REPAIR"
+    lease_state = harness.leases.inspect(REPO_UUID)
+    assert lease_state.operation_epoch == before_epoch + 1
+    assert lease_state.leases.get("workspace") is None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_state", "expected_exit", "expected_action"),
+    [
+        (
+            StatePathError("private unsafe state"),
+            "invalid",
+            20,
+            "configure_safe_state_root",
+        ),
+        (
+            CommitUnknown("private commit uncertainty"),
+            "invalid",
+            20,
+            "run_workspace_status_then_repair_dry_run",
+        ),
+        (
+            LockTimeout(
+                "private lock contention",
+                phase="acquire",
+                kind="workspace",
+            ),
+            "conflict",
+            10,
+            "retry_workspace_repair",
+        ),
+    ],
+)
+def test_execute_preserves_preview_failure_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    expected_state: str,
+    expected_exit: int,
+    expected_action: str,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+
+    def fail_preview(*_args: object, **_kwargs: object) -> Any:
+        raise error
+
+    monkeypatch.setattr(repair, "preview", fail_preview)
+    with pytest.raises(Exception) as raised:
+        repair.execute(
+            _request(harness),
+            approved_preview_sha256="a" * 64,
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    assert raised.value is error
+    failure = classify_failure(error, "execute")
+    assert failure.state == expected_state
+    assert failure.exit_code == expected_exit
+    assert failure.action_code == expected_action
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    (
+        "pointer:repaired:prior_durable",
+        "pointer:repaired:pending_durable",
+        "pointer:repaired:visible",
+        "pointer:repaired:journal_durable",
+    ),
+)
+def test_interrupted_execute_requires_fresh_preview_and_resumes_safely(
+    tmp_path: Path,
+    failpoint: str,
+) -> None:
+    active_failpoint: str | None = None
+
+    def fail_once(event: str) -> None:
+        nonlocal active_failpoint
+        if event == active_failpoint:
+            active_failpoint = None
+            raise InjectedFault(event)
+
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path, fault_hook=fail_once)
+    promote = acquire(harness, "PROMOTE", tick=2)
+    with pytest.raises(InjectedFault, match="pending_durable"):
+        active_failpoint = "pointer:promoted:pending_durable"
+        pointers.promote(
+            promote,
+            _cas(promote, receipts[0], revision=0, current_sha256=None),
+            occurred_at=START,
+            monotonic_ns=20_001,
+        )
+    active_failpoint = None
+    harness.leases.release(promote)
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    active_failpoint = failpoint
+
+    with pytest.raises(InjectedFault):
+        repair.execute(
+            request,
+            approved_preview_sha256=preview.sha256,
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+    with pytest.raises(RepairPlanChanged, match="canonical preview no longer matches"):
+        repair.execute(
+            request,
+            approved_preview_sha256=preview.sha256,
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=5),
+            monotonic_ns=50_001,
+        )
+    fresh_request = _request(harness)
+    fresh_preview = repair.preview(fresh_request, monotonic_ns=60_001)
+    repaired = repair.execute(
+        fresh_request,
+        approved_preview_sha256=fresh_preview.sha256,
+        authorization=_authorization(),
+        occurred_at=START + timedelta(seconds=6),
+        monotonic_ns=70_001,
+    )
+
+    pointer = pointers.load(REPO_UUID)
+    assert pointer is not None
+    expected_revision = cast(int, preview.to_dict()["next_pointer_revision"])
+    assert int(pointer.to_dict()["pointer_revision"]) >= expected_revision
+    assert pointers.verify_pointer(pointer)["current"].sha256 == receipts[0].sha256
+    assert pointers.state.path(generations._generation(REPO_UUID, "gen-old")).is_dir()
+    assert repaired.to_dict()["classification"] == "repairable"
+
+
+def test_execute_quarantines_only_corrupt_generation_excluded_from_repaired_pointer(
+    tmp_path: Path,
+) -> None:
+    failpoint: str | None = None
+
+    def interrupt_pending(event: str) -> None:
+        if event == failpoint:
+            raise InjectedFault(event)
+
+    harness, journal, generations, pointers, receipts = _runtime(
+        tmp_path,
+        fault_hook=interrupt_pending,
+    )
+    old, current, racer = receipts
+    promote = acquire(harness, "PROMOTE", tick=2)
+    pointers.promote(
+        promote,
+        _cas(promote, old, revision=0, current_sha256=None),
+        occurred_at=START,
+        monotonic_ns=20_001,
+    )
+    pointers.promote(
+        promote,
+        _cas(promote, current, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=20_002,
+    )
+    failpoint = "pointer:promoted:pending_durable"
+    with pytest.raises(InjectedFault, match="pending_durable"):
+        pointers.promote(
+            promote,
+            _cas(promote, racer, revision=2, current_sha256=current.sha256),
+            occurred_at=START + timedelta(seconds=2),
+            monotonic_ns=20_003,
+        )
+    harness.leases.release(promote)
+    corrupt_payload = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "generations"
+        / "gen-new"
+        / "graphify-out"
+        / "graph.json"
+    )
+    corrupt_payload.write_text("corrupt\n", encoding="utf-8")
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    workspace = harness.state_root / "workspaces" / REPO_UUID
+    unrelated_before = {
+        "old": tree_snapshot(workspace / "generations" / "gen-old"),
+        "racer": tree_snapshot(workspace / "generations" / "gen-racer"),
+        "gc": tree_snapshot(workspace / "gc"),
+        "staging": tree_snapshot(workspace / "staging"),
+        "queue": tree_snapshot(workspace / "queue"),
+    }
+
+    assert preview.to_dict()["quarantine"] == ["gen-new"]
+
+    repair.execute(
+        request,
+        approved_preview_sha256=preview.sha256,
+        authorization=_authorization(),
+        occurred_at=START + timedelta(seconds=4),
+        monotonic_ns=40_001,
+    )
+
+    assert pointers.state.path(generations._generation(REPO_UUID, "gen-old")).is_dir()
+    assert pointers.state.path(generations._generation(REPO_UUID, "gen-racer")).is_dir()
+    assert not pointers.state.path(generations._generation(REPO_UUID, "gen-new")).exists()
+    assert tree_snapshot(workspace / "generations" / "gen-old") == unrelated_before["old"]
+    assert tree_snapshot(workspace / "generations" / "gen-racer") == unrelated_before["racer"]
+    assert tree_snapshot(workspace / "gc") == unrelated_before["gc"]
+    assert tree_snapshot(workspace / "staging") == unrelated_before["staging"]
+    assert tree_snapshot(workspace / "queue") == unrelated_before["queue"]

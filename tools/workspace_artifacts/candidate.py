@@ -366,6 +366,10 @@ def _build_reproducible_wheel(repo_root: Path, destination: Path) -> Path:
         "graphify/workspace/schemas/cli/v1/gc-reconcile-result.schema.json",
         "graphify/workspace/schemas/cli/v1/gc-purge-request.schema.json",
         "graphify/workspace/schemas/cli/v1/gc-purge-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/repair-preview-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/repair-preview-result.schema.json",
+        "graphify/workspace/schemas/cli/v1/repair-execute-request.schema.json",
+        "graphify/workspace/schemas/cli/v1/repair-execute-result.schema.json",
     }
     missing = required - names
     if missing:

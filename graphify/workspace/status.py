@@ -33,7 +33,11 @@ from graphify.workspace.generations import (
     StagedBuildReadRecoveryRequired,
 )
 from graphify.workspace.gc import GcError
-from graphify.workspace.journal import JournalError, JournalSnapshot
+from graphify.workspace.journal import (
+    JournalError,
+    JournalRecoveryRequired,
+    JournalSnapshot,
+)
 from graphify.workspace.leases import LeaseError
 from graphify.workspace.persistence import (
     LockTimeout,
@@ -911,8 +915,8 @@ def _inspect_workspace(
                     component=f"{prefix}:leases",
                     state="invalid",
                     reason_code="workspace_record_missing",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
+                    action_code="inspect_workspace_state",
+                    repair_required=False,
                 )
             except StateCorrupt:
                 return _workspace_failure(
@@ -921,8 +925,8 @@ def _inspect_workspace(
                     component=f"{prefix}:leases",
                     state="invalid",
                     reason_code="workspace_record_invalid",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
+                    action_code="inspect_workspace_state",
+                    repair_required=False,
                 )
             workspace["leases"] = {
                 "migration_epoch": lease_state.migration_epoch,
@@ -950,8 +954,8 @@ def _inspect_workspace(
                     component=f"{prefix}:gc",
                     state="invalid",
                     reason_code="workspace_state_invalid",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
+                    action_code="inspect_workspace_state",
+                    repair_required=False,
                 )
             if gc_intent is not None:
                 return _workspace_failure(
@@ -961,7 +965,7 @@ def _inspect_workspace(
                     state="invalid",
                     reason_code="workspace_state_invalid",
                     action_code="run_workspace_gc_reconcile",
-                    repair_required=True,
+                    repair_required=False,
                 )
             checks.append(_check(f"{prefix}:gc", "ready", "ready", "none"))
 
@@ -998,8 +1002,8 @@ def _inspect_workspace(
                     component=f"{prefix}:staged_build",
                     state="invalid",
                     reason_code="staged_build_invalid",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
+                    action_code="inspect_workspace_state",
+                    repair_required=False,
                 )
             if staged_build is None:
                 staged_build_tokens[repo_uuid] = None
@@ -1058,8 +1062,8 @@ def _inspect_workspace(
                     component=f"{prefix}:semantic_queue",
                     state="invalid",
                     reason_code="semantic_queue_invalid",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
+                    action_code="inspect_semantic_queue",
+                    repair_required=False,
                 )
             queue_summary = _queue_summary(queue)
             queue_tokens[repo_uuid] = (queue.revision, queue.sha256)
@@ -1156,7 +1160,7 @@ def _inspect_workspace(
                     checks,
                     component=f"{prefix}:journal",
                 )
-            except JournalError:
+            except JournalRecoveryRequired:
                 return _workspace_failure(
                     workspace,
                     checks,
@@ -1165,6 +1169,16 @@ def _inspect_workspace(
                     reason_code="journal_invalid",
                     action_code="run_workspace_repair",
                     repair_required=True,
+                )
+            except JournalError:
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:journal",
+                    state="invalid",
+                    reason_code="journal_invalid",
+                    action_code="inspect_workspace_state",
+                    repair_required=False,
                 )
             workspace["journal"] = journal_summary
             journal_tokens[repo_uuid] = _journal_snapshot_token(journal)
@@ -1228,7 +1242,17 @@ def _inspect_workspace(
                     action_code="install_supported_candidate",
                     repair_required=False,
                 )
-            except (GenerationError, PointerError, StatePathError):
+            except StatePathError:
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:generation",
+                    state="invalid",
+                    reason_code="unsafe_state_path",
+                    action_code="configure_safe_state_root",
+                    repair_required=False,
+                )
+            except PointerError:
                 return _workspace_failure(
                     workspace,
                     checks,
@@ -1237,6 +1261,16 @@ def _inspect_workspace(
                     reason_code="generation_or_pointer_invalid",
                     action_code="run_workspace_repair",
                     repair_required=True,
+                )
+            except GenerationError:
+                return _workspace_failure(
+                    workspace,
+                    checks,
+                    component=f"{prefix}:generation",
+                    state="invalid",
+                    reason_code="generation_or_pointer_invalid",
+                    action_code="inspect_workspace_state",
+                    repair_required=False,
                 )
             pointer_value = pointer.to_dict()
             current_receipt = receipts["current"].to_dict()
@@ -1277,8 +1311,8 @@ def _inspect_workspace(
             reason_code=(
                 "workspace_state_invalid" if workspace_lock_acquired else "workspace_lock_invalid"
             ),
-            action_code="run_workspace_repair",
-            repair_required=True,
+            action_code="configure_safe_state_root",
+            repair_required=False,
         )
     except (WorkspaceRuntimeError, LeaseError, ContractError):
         return _workspace_failure(
@@ -1287,8 +1321,8 @@ def _inspect_workspace(
             component=f"{prefix}:state",
             state="invalid",
             reason_code="workspace_state_invalid",
-            action_code="run_workspace_repair",
-            repair_required=True,
+            action_code="inspect_workspace_state",
+            repair_required=False,
         )
 
 
@@ -1715,7 +1749,7 @@ def inspect_workspace_status(
                 "registry",
                 "invalid",
                 "registry_invalid",
-                "run_workspace_repair",
+                "inspect_workspace_state",
             )
         )
     else:
@@ -1785,7 +1819,7 @@ def inspect_workspace_status(
                                                 state="invalid",
                                                 reason_code="workspace_state_invalid",
                                                 action_code="run_workspace_gc_reconcile",
-                                                repair_required=True,
+                                                repair_required=False,
                                             )
                                         elif not _queue_snapshot_is_current_locked(
                                             runtime,
@@ -1845,8 +1879,8 @@ def inspect_workspace_status(
                                         component=f"workspace:{repo_uuid}:state",
                                         state="invalid",
                                         reason_code="workspace_state_invalid",
-                                        action_code="run_workspace_repair",
-                                        repair_required=True,
+                                        action_code="inspect_workspace_state",
+                                        repair_required=False,
                                     )
             except LockTimeout:
                 for workspace in workspaces:

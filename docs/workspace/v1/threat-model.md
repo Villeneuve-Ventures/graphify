@@ -92,6 +92,27 @@ visible recovery barrier with `safe_to_query=false` and an exact-resume action.
 Terminal promoted or abandoned records do not create a false barrier, while
 corrupt or contradictory staged state fails closed.
 
+The public pointer-repair dry run is an existing-only, no-write inspection: it
+opens no missing lock or state path and allocates no lease or fence. Its bounded
+canonical output exposes only verified generation references, decision facts,
+and redacted classifications; it excludes authorization, owner/fence data,
+paths, raw records, environment values, and errors. Execute requires the
+SHA-256 of those exact preview bytes (including the final newline), canonical
+`REPAIR_EXECUTE` authorization, fresh CAS-bound `REPAIR` authority, and a
+second exact decision under the required locks before mutation. This blocks a
+stale preview, substituted candidate, authority drift, or post-preview pointer
+change from selecting a repair target. `PointerStore` verifies receipts and
+payloads, preserves monotonic revision evidence, and quarantines only corrupt
+generations not referenced by the repaired pointer.
+
+Repair is not recovery authority for every external-state fault. A valid GC
+intent remains an explicit GC-reconcile barrier. Nonterminal/corrupt staged
+state, semantic-queue corruption, registry or lease corruption, and unsafe
+paths fail closed with their corresponding status action. A commit-unknown
+repair does not permit replay: status inspection plus a fresh preview/request
+pair is required. Doctor remains a read-only observer and cannot turn an
+inspection action into a mutation.
+
 Operational corpus processing will use a cleaned allowlisted environment,
 network denial by default, bounded CPU/memory/file/time resources, read-only
 source, staging-only writes, and host-agent instruction/data separation.
@@ -151,6 +172,11 @@ journal is corruption-evident, not cryptographically authenticated against such
 an actor. Cross-platform support, network filesystems, pre-login service,
 automatic online GC, strict source-linearizable query, and inter-observation ABA
 detection are deferred.
+
+V1 does not claim automatic, online, service, arbitrary-history, registry,
+lease, path, staged-build, semantic-queue, or GC repair from the public pointer
+repair lifecycle. It adds no durable repair completion index and makes no
+governance or receipt-acceptance claim.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

@@ -35,6 +35,10 @@ from graphify.workspace.persistence import (
 
 
 _SEGMENT_RE = re.compile(r"^(?P<sequence>[0-9]{20})\.gwf$", re.ASCII)
+_ATOMIC_SEGMENT_TEMP_RE = re.compile(
+    r"^\..+\.tmp-[1-9][0-9]*-[0-9a-f]{32}$",
+    re.ASCII,
+)
 _MAX_JOURNAL_FRAME_BYTES = 1024 * 1024
 _EVENT_NAMESPACE = uuid.UUID("3924cb61-439f-49d0-8a8c-b3753d140d5e")
 _PRECERTIFICATION = frozenset({"ALLOCATED", "STAGING", "BUILT", "VALIDATING", "FAILED"})
@@ -98,6 +102,15 @@ class JournalSnapshot:
         )
 
 
+@dataclass(frozen=True)
+class JournalRecoveryProjection:
+    """The exact journal state and bounded writes a recovery would produce."""
+
+    snapshot: JournalSnapshot
+    actions: tuple[str, ...]
+    evidence_sha256: str
+
+
 def _timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         raise JournalError("journal timestamps must be timezone-aware")
@@ -156,6 +169,7 @@ class JournalStore:
         self,
         repo_uuid: str,
         *,
+        ignore_atomic_temps: bool = False,
         deadline_ns: int | None = None,
     ) -> list[tuple[int, Path]]:
         relative = self._segments_directory(repo_uuid)
@@ -175,6 +189,12 @@ class JournalStore:
                 for name in names:
                     _require_stable_read_deadline(deadline_ns)
                     match = _SEGMENT_RE.fullmatch(name)
+                    if (
+                        match is None
+                        and ignore_atomic_temps
+                        and _ATOMIC_SEGMENT_TEMP_RE.fullmatch(name) is not None
+                    ):
+                        continue
                     entry_details = os.stat(
                         name,
                         dir_fd=descriptor,
@@ -328,6 +348,146 @@ class JournalStore:
             payload=head.canonical,
             decoder=JournalHeadState.from_json,
             deadline_ns=deadline_ns,
+        )
+
+    def project_recovery(
+        self,
+        repo_uuid: str,
+        *,
+        allow_atomic_temps: bool = False,
+        deadline_ns: int | None = None,
+    ) -> JournalRecoveryProjection:
+        """Project the exact bounded journal recovery without mutating state."""
+
+        current, previous, pending = self._head_paths(repo_uuid)
+        head_temps = self.state.inspect_atomic_temps(
+            current.parent,
+            deadline_ns=deadline_ns,
+        )
+        segment_temps = self.state.inspect_atomic_temps(
+            self._segments_directory(repo_uuid),
+            deadline_ns=deadline_ns,
+        )
+        if not allow_atomic_temps and (head_temps or segment_temps):
+            raise JournalCorrupt("journal atomic temporary files require legacy fenced recovery")
+        head_record_sha256: dict[str, str | None] = {}
+        for name, relative in (
+            ("current", current),
+            ("previous", previous),
+            ("pending", pending),
+        ):
+            data = self.state.read_optional_existing_bytes(
+                relative,
+                max_bytes=64 * 1024,
+                deadline_ns=deadline_ns,
+            )
+            head_record_sha256[name] = None if data is None else hashlib.sha256(data).hexdigest()
+        try:
+            head_projection = self.state.project_record_recovery(
+                label="journal_head",
+                current=current,
+                previous=previous,
+                pending=pending,
+                decoder=JournalHeadState.from_json,
+                revision=lambda value: value.revision,
+                allow_missing=True,
+                deadline_ns=deadline_ns,
+            )
+        except StateCorrupt as exc:
+            raise JournalCorrupt(str(exc)) from exc
+        head = head_projection.record
+        if head is not None and head.repo_uuid != repo_uuid:
+            raise JournalCorrupt("journal head is installed under the wrong workspace")
+
+        actions: list[str] = []
+        if head_projection.requires_recovery:
+            actions.append("recover_head")
+        segments = self._segment_names(
+            repo_uuid,
+            ignore_atomic_temps=allow_atomic_temps,
+            deadline_ns=deadline_ns,
+        )
+        committed = 0 if head is None else head.sequence
+        if len(segments) < committed:
+            raise JournalCorrupt("journal head names a missing committed segment")
+        if len(segments) > committed + 1:
+            raise JournalCorrupt("journal has ambiguous uncommitted segment suffix")
+        segment_sha256 = {
+            str(sequence): hashlib.sha256(
+                self.state.read_existing_bytes(
+                    self._segment_path(repo_uuid, sequence),
+                    max_bytes=_MAX_JOURNAL_FRAME_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+            ).hexdigest()
+            for sequence, _path in segments
+        }
+
+        events: list[JournalEvent] = []
+        frames: list[bytes] = []
+        prior_sha256: str | None = None
+        for sequence, _path in segments[:committed]:
+            relative = self._segment_path(repo_uuid, sequence)
+            try:
+                frame, event = self._decode_segment(
+                    relative,
+                    existing_only=True,
+                    deadline_ns=deadline_ns,
+                )
+            except JournalFrameTruncated as exc:
+                raise JournalCorrupt("committed journal segment is truncated") from exc
+            value = event.to_dict()
+            self._require_repo_event_id(repo_uuid, event)
+            if int(value["sequence"]) != sequence:
+                raise JournalCorrupt("journal frame sequence does not match its segment")
+            if value["prior_event_sha256"] != prior_sha256:
+                raise JournalCorrupt("journal prior-event hash chain is broken")
+            prior_sha256 = event.sha256
+            frames.append(frame)
+            events.append(event)
+
+        if head is not None:
+            if not events:
+                raise JournalCorrupt("journal head names a missing committed segment")
+            expected = self._head_for(repo_uuid, events[-1], frames[-1])
+            if expected.canonical != head.canonical:
+                raise JournalCorrupt("journal head does not bind the committed segment")
+
+        if len(segments) == committed + 1:
+            sequence = committed + 1
+            relative = self._segment_path(repo_uuid, sequence)
+            try:
+                frame, event = self._decode_segment(
+                    relative,
+                    existing_only=True,
+                    deadline_ns=deadline_ns,
+                )
+            except JournalFrameTruncated:
+                actions.append("discard_torn_tail")
+            else:
+                value = event.to_dict()
+                self._require_repo_event_id(repo_uuid, event)
+                if (
+                    int(value["sequence"]) != sequence
+                    or value["prior_event_sha256"] != prior_sha256
+                ):
+                    raise JournalCorrupt("uncommitted journal segment does not extend the head")
+                events.append(event)
+                head = self._head_for(repo_uuid, event, frame)
+                actions.append("adopt_tail")
+
+        self._validate_lifecycle(events, deadline_ns=deadline_ns)
+        return JournalRecoveryProjection(
+            snapshot=JournalSnapshot(head=head, events=tuple(events)),
+            actions=tuple(actions),
+            evidence_sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "head_record_sha256": head_record_sha256,
+                        "segment_sha256": segment_sha256,
+                    }
+                )
+            ).hexdigest(),
         )
 
     def recover_locked(
@@ -541,6 +701,7 @@ class JournalStore:
         generation_id: str,
         receipt_sha256: str | None,
         pointer_revision: int | None,
+        deadline_ns: int | None = None,
     ) -> None:
         allowed = _TRANSITION_OPERATIONS.get(transition)
         if allowed is None or operation.operation not in allowed:
@@ -551,7 +712,12 @@ class JournalStore:
             return
         relative = LeaseStore._directory(operation.repo_uuid) / "pointers.json"
         try:
-            pointer = PointerSet.from_json(self.state.read_existing_bytes(relative))
+            pointer = PointerSet.from_json(
+                self.state.read_existing_bytes(
+                    relative,
+                    deadline_ns=deadline_ns,
+                )
+            )
         except Exception as exc:
             raise JournalConflict(
                 f"{transition} requires a valid visible pointer: {exc}"
@@ -580,6 +746,7 @@ class JournalStore:
         pointer_revision: int | None,
         occurred_at: datetime,
         _authority: object | None = None,
+        deadline_ns: int | None = None,
     ) -> JournalEvent:
         """Append one canonical event under its owning operation.
 
@@ -606,8 +773,9 @@ class JournalStore:
             generation_id=generation_id,
             receipt_sha256=receipt_sha256,
             pointer_revision=pointer_revision,
+            deadline_ns=deadline_ns,
         )
-        snapshot = self.recover_locked(operation)
+        snapshot = self.recover_locked(operation, deadline_ns=deadline_ns)
         logical = {
             "transition": transition,
             "generation_id": generation_id,
@@ -671,17 +839,23 @@ class JournalStore:
             ),
         )
         proposed = [*snapshot.events, event]
-        self._validate_lifecycle(proposed)
+        self._validate_lifecycle(proposed, deadline_ns=deadline_ns)
         frame = encode_journal_frame(event)
         segment = self._segment_path(operation.repo_uuid, sequence)
         label = f"journal:{transition}:segment"
-        self.state.install_once_bytes(segment, frame, label=label)
+        self.state.install_once_bytes(
+            segment,
+            frame,
+            label=label,
+            deadline_ns=deadline_ns,
+        )
         self.fault_hook(f"journal:{transition}:segment_durable")
         head = self._head_for(operation.repo_uuid, event, frame)
         self._commit_head(
             operation.repo_uuid,
             head,
             label=f"journal:{transition}:head",
+            deadline_ns=deadline_ns,
         )
         self.fault_hook(f"journal:{transition}:head_durable")
         return event
@@ -695,6 +869,7 @@ class JournalStore:
         receipt_sha256: str | None,
         pointer_revision: int | None,
         occurred_at: datetime,
+        deadline_ns: int | None = None,
     ) -> JournalEvent:
         if transition not in _PRECERTIFICATION | {"CERTIFIED"}:
             raise JournalConflict(f"{transition} is not a generation transition")
@@ -706,6 +881,7 @@ class JournalStore:
             pointer_revision=pointer_revision,
             occurred_at=occurred_at,
             _authority=self._generation_authority,
+            deadline_ns=deadline_ns,
         )
 
     def append_pointer_locked(
@@ -717,6 +893,7 @@ class JournalStore:
         receipt_sha256: str,
         pointer_revision: int,
         occurred_at: datetime,
+        deadline_ns: int | None = None,
     ) -> JournalEvent:
         if transition not in {"PROMOTED", "ROLLED_BACK", "REPAIRED", "SUPERSEDED"}:
             raise JournalConflict(f"{transition} is not a pointer transition")
@@ -728,6 +905,7 @@ class JournalStore:
             pointer_revision=pointer_revision,
             occurred_at=occurred_at,
             _authority=self._pointer_authority,
+            deadline_ns=deadline_ns,
         )
 
     def append(
@@ -756,6 +934,7 @@ __all__ = [
     "JournalConflict",
     "JournalCorrupt",
     "JournalError",
+    "JournalRecoveryProjection",
     "JournalRecoveryRequired",
     "JournalSnapshot",
     "JournalStore",

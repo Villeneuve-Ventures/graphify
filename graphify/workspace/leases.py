@@ -524,7 +524,7 @@ class LeaseStore:
         if self._durable_record_exists(
             pointer_intent,
             deadline_ns=deadline_ns,
-        ) and operation != "POINTER_RECOVERY":
+        ) and operation not in {"POINTER_RECOVERY", "REPAIR"}:
             raise LeaseRecoveryRequired("unresolved pointer intent requires fenced recovery")
         staged_build = self._load_staged_build_locked(
             repo_uuid,

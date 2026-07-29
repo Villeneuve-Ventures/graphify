@@ -163,15 +163,19 @@ def classify_failure(error: Exception) -> RollbackFailure:
             "rollback_authority_conflict",
             "refresh_rollback_request",
         )
-    if isinstance(
-        error,
-        (LeaseRecoveryRequired, PointerRecoveryRequired, StateRecoveryRequired),
-    ):
+    if isinstance(error, PointerRecoveryRequired):
         return RollbackFailure(
             "conflict",
             EXIT_DEGRADED,
             "workspace_recovery_required",
-            "run_workspace_doctor",
+            "run_workspace_repair",
+        )
+    if isinstance(error, (LeaseRecoveryRequired, StateRecoveryRequired)):
+        return RollbackFailure(
+            "conflict",
+            EXIT_DEGRADED,
+            "workspace_recovery_required",
+            "inspect_workspace_state",
         )
     if isinstance(error, CommitUnknown):
         return RollbackFailure(
@@ -201,12 +205,19 @@ def classify_failure(error: Exception) -> RollbackFailure:
             "unsupported_compatibility",
             "install_supported_candidate",
         )
-    if isinstance(error, (StateCorrupt, PointerCorrupt, GenerationError, JournalError)):
+    if isinstance(error, (PointerCorrupt, JournalRecoveryRequired)):
         return RollbackFailure(
             "invalid",
             EXIT_INVALID,
             "state_corrupt",
             "run_workspace_repair",
+        )
+    if isinstance(error, (GenerationError, JournalError, StateCorrupt)):
+        return RollbackFailure(
+            "invalid",
+            EXIT_INVALID,
+            "state_corrupt",
+            "inspect_workspace_state",
         )
     return RollbackFailure(
         "invalid",

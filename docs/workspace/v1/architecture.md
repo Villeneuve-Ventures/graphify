@@ -116,6 +116,27 @@ behavior, installation, performance certification, candidate publication, or
 live-cutover authority; retained production query/service authority remains
 P5C work.
 
+The public pointer-repair lifecycle adds only exact
+`workspace repair --dry-run --request-stdin` and
+`workspace repair --execute --request-stdin` transports. Dry-run is outside the
+fenced operation domain: it uses existing-only registry/workspace/generation
+locks to inspect the bounded pointer, journal, and generation evidence, creates
+no coordination object, and performs no recovery, cleanup, lease, or durable
+write. Execute binds `REPAIR_EXECUTE` authorization to the SHA-256 of the exact
+canonical preview bytes (including the final newline), acquires a fresh `REPAIR`
+lease through existing CAS authority, and recomputes the exact plan while the
+same mutation locks are held. Only a plan equal to the approved decision may
+enter `PointerStore`; that store remains the sole writer of pointer/journal
+repair and may quarantine only excluded corrupt generations. The transport does
+so under one absolute request deadline carried from preview through lease
+acquisition and the in-lock mutation decision; the timeout is not renewed
+between phases. It does not repair GC, staged-build, semantic queue, registry,
+lease, or unsafe-path
+state, committed-journal corruption, or arbitrary generations discovered by GC
+or rollback. Even an approved no-op obtains the fresh fence and passes the
+in-lock exact-plan comparison. The transport does not choose arbitrary history
+and adds no completion index or automatic/service repair authority.
+
 ## Authority split
 
 Repo-owned `.graphify/workspace.toml` contains the required
@@ -155,7 +176,8 @@ P5B1 additionally reserves `runtime-manifest.json` at the root above as an
 internal format-version-1 read authority containing the complete frozen
 compatibility manifest and explicit semantic-queue policy. Status, doctor,
 P5B2a registration, identity maintenance, P5B2b code-only sync, P5B2c one-shot
-query, exact-last-good rollback, and bounded GC preview authority loading read
+query, exact-last-good rollback, bounded GC preview, and public pointer-repair
+authority loading read
 it through the same
 private-directory,
 singular-regular-file, 0600, no-follow, bounded-read rules used for durable
@@ -284,3 +306,10 @@ fresh `GC` lease only after execute has revalidated the exact public preview
 bytes, and delegates plan, execute, reconcile, and purge to the existing store.
 Its public comparison intentionally excludes the newly granted operation epoch
 and fence; all other authority and candidate/protection facts must match.
+The repair preview likewise has no lease or new lock identity. Its execute
+counterpart acquires a fresh lifecycle operation only after matching exact
+preview bytes, then compares its in-lock repair decision before `PointerStore`
+can recover a journal, clean a temporary, replace/finalize a pointer, or
+quarantine a generation. A completed repair advances lifecycle authority; an
+uncertain caller must inspect status and start a new preview/request pair rather
+than replay the old execute request.

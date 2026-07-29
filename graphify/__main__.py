@@ -533,6 +533,7 @@ def _run_cli() -> None:
         ("workspace", "sync"),
         ("workspace", "query"),
         ("workspace", "gc"),
+        ("workspace", "repair"),
         ("workspace", "activate"),
         ("workspace", "rollback"),
     }
@@ -564,6 +565,10 @@ def _run_cli() -> None:
         print("                            explicitly reconcile a durable offline GC intent")
         print("  workspace gc --purge --request-stdin")
         print("                            purge one exact completed offline GC plan")
+        print("  workspace repair --dry-run --request-stdin")
+        print("                            preview bounded pointer repair without writes")
+        print("  workspace repair --execute --request-stdin")
+        print("                            execute one exact approved fenced pointer repair")
         print("  workspace activate --repo-uuid UUID ...")
         print("                            activate one identity-bound workspace source")
         print("  workspace rollback --request-stdin")
@@ -763,6 +768,7 @@ def _run_cli() -> None:
         ("workspace", "sync"),
         ("workspace", "query"),
         ("workspace", "gc"),
+        ("workspace", "repair"),
         ("workspace", "activate"),
         ("workspace", "rollback"),
     }

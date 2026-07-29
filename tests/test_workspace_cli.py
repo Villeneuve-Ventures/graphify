@@ -131,7 +131,7 @@ def _report(exit_code: int) -> WorkspaceStatusReport:
     state, reason_code, action_code = {
         0: ("ready", "ready", "none"),
         10: ("degraded", "no_registered_workspaces", "register_workspace"),
-        20: ("invalid", "registry_invalid", "run_workspace_repair"),
+        20: ("invalid", "registry_invalid", "inspect_workspace_state"),
     }[exit_code]
     return WorkspaceStatusReport(
         {

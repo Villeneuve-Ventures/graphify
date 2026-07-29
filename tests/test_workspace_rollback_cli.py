@@ -27,7 +27,12 @@ from graphify.workspace.composition import (
     WorkspaceAuthorityUnsupported,
 )
 from graphify.workspace.contracts import STATE_SCHEMA_VERSION, canonical_json_bytes
-from graphify.workspace.journal import JournalConflict
+from graphify.workspace.generations import GenerationError
+from graphify.workspace.journal import (
+    JournalConflict,
+    JournalCorrupt,
+    JournalRecoveryRequired,
+)
 from graphify.workspace.leases import LeaseBusy, LeaseExpired, LeaseRecoveryRequired
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -1048,17 +1053,51 @@ def test_rollback_fails_closed_for_every_stale_cas_dimension(field: str, value: 
 
 
 @pytest.mark.parametrize(
-    "error, expected_exit, reason_code",
+    "error, expected_exit, reason_code, action_code",
     [
-        (LeaseBusy("private owner"), 10, "lease_busy"),
+        (LeaseBusy("private owner"), 10, "lease_busy", "retry_workspace_rollback"),
         (
             LeaseRecoveryRequired("private recovery"),
             10,
             "workspace_recovery_required",
+            "inspect_workspace_state",
         ),
-        (PointerCorrupt("private pointer"), 20, "state_corrupt"),
-        (StateCorrupt("private state"), 20, "state_corrupt"),
-        (CommitUnknown("private uncertain commit"), 20, "commit_unknown"),
+        (
+            PointerCorrupt("private pointer"),
+            20,
+            "state_corrupt",
+            "run_workspace_repair",
+        ),
+        (
+            JournalRecoveryRequired("private suffix"),
+            20,
+            "state_corrupt",
+            "run_workspace_repair",
+        ),
+        (
+            GenerationError("private generation"),
+            20,
+            "state_corrupt",
+            "inspect_workspace_state",
+        ),
+        (
+            JournalCorrupt("private journal"),
+            20,
+            "state_corrupt",
+            "inspect_workspace_state",
+        ),
+        (
+            StateCorrupt("private state"),
+            20,
+            "state_corrupt",
+            "inspect_workspace_state",
+        ),
+        (
+            CommitUnknown("private uncertain commit"),
+            20,
+            "commit_unknown",
+            "run_workspace_doctor",
+        ),
     ],
 )
 def test_rollback_contention_recovery_corruption_and_commit_unknown_are_redacted(
@@ -1066,6 +1105,7 @@ def test_rollback_contention_recovery_corruption_and_commit_unknown_are_redacted
     error: Exception,
     expected_exit: int,
     reason_code: str,
+    action_code: str,
 ) -> None:
     workspace_cli = _cli()
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes())))
@@ -1084,6 +1124,7 @@ def test_rollback_contention_recovery_corruption_and_commit_unknown_are_redacted
     assert stdout.getvalue() == ""
     payload = json.loads(stderr.getvalue())
     assert payload["reason_code"] == reason_code
+    assert payload["action_code"] == action_code
     Draft202012Validator(
         workspace_cli.load_rollback_receipt_schema(),
         format_checker=FormatChecker(),

@@ -1246,7 +1246,8 @@ def test_status_rejects_policy_matching_semantic_queue_over_item_capacity(
     assert report.exit_code == 20
     assert queue_check["state"] == "invalid"
     assert queue_check["reason_code"] == "semantic_queue_invalid"
-    assert value["workspaces"][0]["repair"]["required"] is True
+    assert queue_check["action_code"] == "inspect_semantic_queue"
+    assert value["workspaces"][0]["repair"]["required"] is False
 
 
 def test_status_reports_pointer_pending_recovery_as_invalid(tmp_path: Path) -> None:
@@ -1259,10 +1260,18 @@ def test_status_reports_pointer_pending_recovery_as_invalid(tmp_path: Path) -> N
     report = inspect_workspace_status(_inputs(harness.state_root))
 
     assert report.exit_code == 20
-    assert "pointer_recovery_required" in _reason_codes(report)
+    value = report.to_dict()
+    pointer_check = next(
+        check
+        for check in value["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:pointer"
+    )
+    assert pointer_check["reason_code"] == "pointer_recovery_required"
+    assert pointer_check["action_code"] == "run_workspace_repair"
+    assert value["workspaces"][0]["repair"]["required"] is True
 
 
-def test_status_reports_unresolved_gc_intent_as_repair_required(tmp_path: Path) -> None:
+def test_status_routes_unresolved_gc_intent_only_to_gc_reconcile(tmp_path: Path) -> None:
     from tests.test_workspace_freshness import POLICY
     from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
     from tests.test_workspace_freshness import _runtime as certified_runtime
@@ -1297,7 +1306,7 @@ def test_status_reports_unresolved_gc_intent_as_repair_required(tmp_path: Path) 
     assert gc_check["state"] == "invalid"
     assert gc_check["reason_code"] == "workspace_state_invalid"
     assert gc_check["action_code"] == "run_workspace_gc_reconcile"
-    assert value["workspaces"][0]["repair"]["required"] is True
+    assert value["workspaces"][0]["repair"]["required"] is False
     assert tree_snapshot(runtime.state_root) == before
 
 
@@ -1581,7 +1590,7 @@ def test_status_revalidates_gc_intent_after_freshness(
     assert injected_snapshot is not None
     assert report.exit_code == 20
     assert value["safe_to_query"] is False
-    assert value["workspaces"][0]["repair"]["required"] is True
+    assert value["workspaces"][0]["repair"]["required"] is False
     assert any(
         check == {
             "component": f"workspace:{REPO_UUID}:gc",
@@ -2064,6 +2073,13 @@ def test_status_rejects_oversized_generation_verification_records_without_writin
 
     assert report.exit_code == 20
     assert "generation_or_pointer_invalid" in _reason_codes(report)
+    generation_check = next(
+        check
+        for check in report.to_dict()["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:generation"
+    )
+    assert generation_check["action_code"] == "inspect_workspace_state"
+    assert report.to_dict()["workspaces"][0]["repair"]["required"] is False
     assert tree_snapshot(runtime.state_root) == before
 
 
@@ -2236,6 +2252,61 @@ def test_status_classifies_journal_summary_deadline_at_journal_boundary(
     assert report.exit_code == 10
     assert journal_check["reason_code"] == "inspection_deadline_exceeded"
     assert journal_check["action_code"] == "retry_status"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_action", "repair_required"),
+    [
+        ("corrupt", "inspect_workspace_state", False),
+        ("generic", "inspect_workspace_state", False),
+        ("recovery", "run_workspace_repair", True),
+    ],
+)
+def test_status_routes_journal_failures_by_repair_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: str,
+    expected_action: str,
+    repair_required: bool,
+) -> None:
+    from graphify.workspace.journal import (
+        JournalCorrupt,
+        JournalError,
+        JournalRecoveryRequired,
+    )
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    raised = {
+        "corrupt": JournalCorrupt("committed journal corruption"),
+        "generic": JournalError("committed journal failure"),
+        "recovery": JournalRecoveryRequired("recoverable journal suffix"),
+    }[error]
+
+    def failed_summary(*_args: object, **_kwargs: object) -> object:
+        raise raised
+
+    monkeypatch.setattr("graphify.workspace.status._journal_summary", failed_summary)
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    workspace = report.to_dict()["workspaces"][0]
+    journal_check = next(
+        check
+        for check in report.to_dict()["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:journal"
+    )
+
+    assert report.exit_code == 20
+    assert journal_check["reason_code"] == "journal_invalid"
+    assert journal_check["action_code"] == expected_action
+    assert workspace["repair"]["required"] is repair_required
 
 
 def test_status_stops_registry_traversal_after_deadline(
@@ -2561,7 +2632,8 @@ def test_status_classifies_unsafe_lease_snapshot_at_its_boundary(
 
     assert report.exit_code == 20
     assert lease_check["reason_code"] == "workspace_state_invalid"
-    assert lease_check["action_code"] == "run_workspace_repair"
+    assert lease_check["action_code"] == "configure_safe_state_root"
+    assert value["workspaces"][0]["repair"]["required"] is False
     assert "workspace_lock_invalid" not in _reason_codes(report)
     assert tree_snapshot(harness.state_root) == before_tree
     assert metadata_snapshot(harness.state_root) == before_metadata

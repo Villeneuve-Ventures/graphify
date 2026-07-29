@@ -59,6 +59,30 @@ an old revision directly. Recovery rejects stale pending/current records against
 the retained-prior and journal revision evidence, and it resumes its own fenced
 pending repair only after fully verifying every referenced generation.
 
+`graphify workspace repair --dry-run --request-stdin` is the bounded public
+inspection transport for that existing repair policy. It consumes one canonical
+CLI-v1 request no larger than 16 KiB, uses existing-only registry/workspace and
+generation locks, and projects the same bounded pointer/journal/generation
+decision without creating a lock, allocating a lease/fence, recovering state,
+cleaning temporary files, or writing anything. Its result is canonical and
+redacted, classifies the decision as `no_op`, `repairable`, or `irreparable`,
+and carries the only execute-approval bytes.
+
+`graphify workspace repair --execute --request-stdin` consumes a separate
+16 KiB canonical request with `REPAIR_EXECUTE` authorization and the SHA-256 of
+the exact preview bytes, including the trailing newline. It recomputes the
+preview, obtains a fresh CAS-bound `REPAIR` fence, and recomputes the exact plan
+with mutation locks held before `PointerStore` may recover the journal, mutate
+the pointer, or quarantine an excluded corrupt generation. An approved no-op
+passes the same fence and in-lock plan comparison before returning. One
+absolute request deadline bounds preview, fence acquisition, and the in-lock
+mutation decision without a per-phase timeout reset. The plan is not an
+arbitrary historical selector: its candidate must be a fully verified,
+journal-certified generation under the current active-source authority, and its
+revision is above all observed pointer/journal evidence. A stale or
+commit-unknown execute is not replayable; status inspection and a fresh
+preview/request pair are required.
+
 ## Readers and GC
 
 A reader loads the pointer, opens the already-created coordination object
@@ -117,7 +141,8 @@ protections, atomically renames only unreachable generations to quarantine,
 syncs both directories, and persists completion. An unresolved GC intent is a
 workspace-wide mutation barrier until a successor `GC` or `POINTER_RECOVERY`
 fence reconciles source/quarantine location. A durable pointer intent likewise
-blocks every mutation except fenced pointer recovery. GC intent, completion,
+blocks every mutation except fenced pointer recovery or the bounded fenced
+public pointer-repair execution. GC intent, completion,
 and purge evidence are bound to the containing workspace and plan. Recursive
 deletion is a separate explicit purge; coordination lock identities remain
 retained. Purge deletion and parent-directory synchronization use the injected
