@@ -19,6 +19,7 @@ import time
 from types import TracebackType
 from typing import Any, ClassVar, cast
 
+from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.composition import WorkspaceAuthorityError, WorkspaceRuntime
 from graphify.workspace.contracts import (
     CLI_CONTRACT_VERSION,
@@ -758,6 +759,18 @@ class RepairPreviewResult:
         return hashlib.sha256(self.canonical).hexdigest()
 
 
+def _public_preview_result(
+    request: RepairPreviewRequest,
+    plan: RepairPlan,
+) -> RepairPreviewResult:
+    return RepairPreviewResult(
+        repo_uuid=request.repo_uuid,
+        request_sha256=request.request_sha256,
+        observed_authority=RepairObservedAuthority.from_request(request),
+        plan=plan,
+    )
+
+
 @dataclass(frozen=True)
 class RepairExecution:
     plan: RepairPlan
@@ -925,6 +938,14 @@ def classify_failure(error: Exception, operation: str) -> RepairFailure:
             EXIT_INVALID,
             "unsafe_state_path",
             "configure_safe_state_root",
+        )
+    if isinstance(error, UnsupportedCompatibility):
+        return RepairFailure(
+            operation,
+            "invalid",
+            EXIT_INVALID,
+            "unsupported_compatibility",
+            "install_supported_candidate",
         )
     if isinstance(error, UnsupportedRuntime):
         return RepairFailure(
@@ -1117,7 +1138,7 @@ class WorkspaceRepair:
         occurred_at: datetime,
         monotonic_ns: int,
     ) -> RepairExecution:
-        """Execute a library-approved plan under one fresh public repair fence."""
+        """Execute an approved public preview under one fresh repair fence."""
 
         authorization.require()
         _digest(approved_preview_sha256, "approved_preview_sha256")
@@ -1129,12 +1150,10 @@ class WorkspaceRepair:
                 deadline_ns=deadline_ns,
             )
         except RepairAuthorityConflict as exc:
-            raise RepairPlanChanged(
-                "canonical preview no longer matches repair authority"
-            ) from exc
+            raise RepairPlanChanged("canonical preview no longer matches repair authority") from exc
         if plan.classification == "irreparable":
             raise RepairIrreparable("current state is outside pointer repair authority")
-        if plan.sha256 != approved_preview_sha256:
+        if _public_preview_result(request, plan).sha256 != approved_preview_sha256:
             raise RepairPlanChanged("canonical preview no longer matches")
         return self._execute_plan(
             request,
@@ -1247,12 +1266,7 @@ def repair_preview(
     """Return the exact canonical public preview approved by execute."""
 
     plan = _workspace_repair(runtime).preview(request, monotonic_ns=monotonic_ns)
-    return RepairPreviewResult(
-        repo_uuid=request.repo_uuid,
-        request_sha256=request.request_sha256,
-        observed_authority=RepairObservedAuthority.from_request(request),
-        plan=plan,
-    )
+    return _public_preview_result(request, plan)
 
 
 def _pointer_public_value(
@@ -1296,12 +1310,7 @@ def repair_execute(
         monotonic_ns=monotonic_clock(),
         deadline_ns=deadline_ns,
     )
-    preview = RepairPreviewResult(
-        repo_uuid=request.repo_uuid,
-        request_sha256=preview_request.request_sha256,
-        observed_authority=RepairObservedAuthority.from_request(preview_request),
-        plan=plan,
-    )
+    preview = _public_preview_result(preview_request, plan)
     if preview.sha256 != request.approved_preview_sha256:
         raise RepairPlanChanged(
             "approved preview SHA-256 does not match current canonical preview bytes"

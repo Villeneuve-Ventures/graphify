@@ -1810,7 +1810,7 @@ def test_pointer_records_are_bound_to_their_containing_workspace(
         monotonic_ns=30_000,
         ttl_ns=1_000_000,
     )
-    with pytest.raises(PointerCorrupt, match="no fully verified pointer source"):
+    with pytest.raises(PointerCorrupt, match="another workspace"):
         pointers.recover(
             recovery,
             occurred_at=START + timedelta(seconds=3),

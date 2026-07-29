@@ -74,7 +74,7 @@
         "pointer_action": {"enum": ["none", "replace", "finalize_pending", "resume_pending", "unsupported"]},
         "quarantine": {
           "type": "array",
-          "maxItems": 4096,
+          "maxItems": 8,
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/generation_id"},
           "description": "Generation IDs are emitted in canonical sorted order."

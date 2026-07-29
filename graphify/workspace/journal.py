@@ -40,6 +40,7 @@ _ATOMIC_SEGMENT_TEMP_RE = re.compile(
     re.ASCII,
 )
 _MAX_JOURNAL_FRAME_BYTES = 1024 * 1024
+_MAX_POINTER_RECORD_BYTES = 64 * 1024
 _EVENT_NAMESPACE = uuid.UUID("3924cb61-439f-49d0-8a8c-b3753d140d5e")
 _PRECERTIFICATION = frozenset({"ALLOCATED", "STAGING", "BUILT", "VALIDATING", "FAILED"})
 _PRECERTIFICATION_NEXT = {
@@ -715,9 +716,12 @@ class JournalStore:
             pointer = PointerSet.from_json(
                 self.state.read_existing_bytes(
                     relative,
+                    max_bytes=_MAX_POINTER_RECORD_BYTES,
                     deadline_ns=deadline_ns,
                 )
             )
+        except LockTimeout:
+            raise
         except Exception as exc:
             raise JournalConflict(
                 f"{transition} requires a valid visible pointer: {exc}"

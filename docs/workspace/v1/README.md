@@ -565,10 +565,9 @@ or fork engine logic inside the package.
   authority, authorization, policy, Git-discovery, and four-part CAS inputs,
   the P5B2b sync request/receipt transport, the P5B2c one-shot query transport,
   the bounded read-only GC preview transport, and the bounded public
-  pointer-repair transport; it reuses `.identity`, `.registry`, `.pointers`,
-  `.journal`, and existing lease authority without adding another persistence
-  path. Lifecycle mutation
-  fails closed outside
+  pointer-repair transport; it reuses `.identity`, `.registry`, `.sync`,
+  `.freshness`, `.gc`, `.pointers`, `.journal`, and existing lease authority
+  without adding another persistence path. Lifecycle mutation fails closed outside
   non-elevated macOS on local APFS; tests use an explicit injected capability
   seam and disposable external state roots.
 - Fixtures under `tests/fixtures/workspace/v1/` freeze positive, negative,

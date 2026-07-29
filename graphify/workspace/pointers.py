@@ -203,6 +203,7 @@ class PointerStore:
         relative: Path,
         *,
         deadline_ns: int | None = None,
+        preserve_path_error: bool = False,
     ) -> bool:
         try:
             require_before_deadline(
@@ -216,6 +217,8 @@ class PointerStore:
             )
             return result
         except StatePathError as exc:
+            if preserve_path_error:
+                raise
             raise PointerCorrupt(f"pointer state path is unsafe: {relative}") from exc
 
     def _read_pointer(
@@ -287,8 +290,13 @@ class PointerStore:
         repo_uuid: str,
         *,
         deadline_ns: int | None = None,
+        preserve_path_error: bool = False,
     ) -> None:
-        if self._exists(self._gc_intent(repo_uuid), deadline_ns=deadline_ns):
+        if self._exists(
+            self._gc_intent(repo_uuid),
+            deadline_ns=deadline_ns,
+            preserve_path_error=preserve_path_error,
+        ):
             raise PointerRecoveryRequired("unresolved GC intent blocks pointer mutation")
 
     @staticmethod
@@ -1055,14 +1063,12 @@ class PointerStore:
         digest = hashlib.sha256(data).hexdigest()
         try:
             pointer = cast(PointerSet, PointerSet.from_json(data))
-            if pointer.to_dict()["repo_uuid"] != repo_uuid:
-                raise PointerCorrupt(f"pointer record belongs to another workspace: {relative}")
         except Exception as exc:
             if allow_invalid:
                 return None, digest
-            if isinstance(exc, PointerCorrupt):
-                raise
             raise PointerCorrupt(f"pointer record is invalid: {relative}") from exc
+        if pointer.to_dict()["repo_uuid"] != repo_uuid:
+            raise PointerCorrupt(f"pointer record belongs to another workspace: {relative}")
         return pointer, digest
 
     def _read_repair_prior(
@@ -1575,7 +1581,11 @@ class PointerStore:
     ) -> PointerRepairPlan:
         """Return a deterministic repair plan without any state mutation."""
 
-        self._assert_no_gc_intent(repo_uuid, deadline_ns=deadline_ns)
+        self._assert_no_gc_intent(
+            repo_uuid,
+            deadline_ns=deadline_ns,
+            preserve_path_error=True,
+        )
         with self._repair_analysis_locked(
             repo_uuid,
             active_source_revision=active_source_revision,
@@ -1605,6 +1615,7 @@ class PointerStore:
             self._assert_no_gc_intent(
                 operation.repo_uuid,
                 deadline_ns=deadline_ns,
+                preserve_path_error=operation.operation == "REPAIR",
             )
             with self._repair_analysis_locked(
                 operation.repo_uuid,

@@ -1,8 +1,8 @@
 """Contract tests for explicit, fenced workspace pointer repair.
 
 The repair surface intentionally has no CLI dependency: callers first obtain a
-canonical, read-only plan and then present that plan's SHA-256 with a fresh
-REPAIR lease and explicit REPAIR_EXECUTE authorization.
+canonical, read-only public preview and then present that preview's SHA-256 with
+a fresh REPAIR lease and explicit REPAIR_EXECUTE authorization.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace import persistence as persistence_module
 from graphify.workspace.composition import WorkspaceRuntime
 from graphify.workspace.generations import GenerationStore
@@ -27,12 +28,15 @@ from graphify.workspace.persistence import (
     LockTimeout,
     StatePathError,
 )
-from graphify.workspace.pointers import PointerRepairPlan, PointerSet, PointerStore
-from graphify.workspace.repair import (  # pragma: no cover - RED until P5B2 repair exists.
+from graphify.workspace.pointers import PointerCorrupt, PointerRepairPlan, PointerSet, PointerStore
+from graphify.workspace.repair import (
     RepairAuthorization,
     RepairExecuteRequest,
+    RepairObservedAuthority,
+    RepairPlan,
     RepairPlanChanged,
     RepairPreviewRequest,
+    RepairPreviewResult,
     WorkspaceRepair,
     classify_failure,
     repair_execute,
@@ -122,6 +126,15 @@ def _authorization() -> RepairAuthorization:
         issued_at="2026-07-28T19:00:00Z",
         nonce="repair-execute-1",
     )
+
+
+def _approved_preview_sha256(request: RepairPreviewRequest, plan: RepairPlan) -> str:
+    return RepairPreviewResult(
+        repo_uuid=request.repo_uuid,
+        request_sha256=request.request_sha256,
+        observed_authority=RepairObservedAuthority.from_request(request),
+        plan=plan,
+    ).sha256
 
 
 def _promote(pointers: PointerStore, harness: Any, receipt: Any) -> None:
@@ -244,6 +257,56 @@ def test_preview_routes_gc_intent_outside_pointer_repair_without_writes(
     assert tree_snapshot(harness.state_root) == before_tree
 
 
+def test_pointer_repair_analysis_preserves_unsafe_gc_intent_path() -> None:
+    pointers = cast(Any, object.__new__(PointerStore))
+
+    def reject_unsafe_path(_relative: Path) -> bool:
+        raise StatePathError("private unsafe GC intent path")
+
+    pointers.state = SimpleNamespace(private_file_exists=reject_unsafe_path)
+
+    with pytest.raises(StatePathError, match="unsafe GC intent"):
+        pointers.analyze_repair(
+            REPO_UUID,
+            active_source_revision=1,
+        )
+
+
+def test_pointer_repair_rejects_foreign_workspace_pointer_even_when_invalid_is_allowed() -> None:
+    pointers = cast(Any, object.__new__(PointerStore))
+    foreign = PointerSet.from_mapping(
+        {
+            "contract": "graphify.workspace.pointer_set",
+            "schema_version": 1,
+            "repo_uuid": "22222222-2222-4222-8222-222222222222",
+            "pointer_revision": 1,
+            "active_source_revision": 1,
+            "source_epoch": 1,
+            "operation_epoch": 1,
+            "fence_token": 1,
+            "state_schema_version": 1,
+            "current": {
+                "generation_id": "gen-foreign",
+                "receipt_sha256": "a" * 64,
+            },
+            "last_good": None,
+        }
+    )
+    pointers.state = SimpleNamespace(
+        private_file_exists=lambda _relative: True,
+        read_existing_bytes=lambda *_args, **_kwargs: foreign.canonical,
+    )
+
+    with pytest.raises(PointerCorrupt, match="another workspace"):
+        pointers._read_repair_pointer(
+            Path("workspaces") / REPO_UUID / "pointers.json",
+            repo_uuid=REPO_UUID,
+            allow_missing=True,
+            allow_invalid=True,
+            deadline_ns=None,
+        )
+
+
 def test_preview_rejects_corrupt_semantic_queue_without_writes(tmp_path: Path) -> None:
     harness, journal, generations, pointers, receipts = _runtime(tmp_path)
     _promote(pointers, harness, receipts[0])
@@ -346,13 +409,55 @@ def test_execute_rejects_changed_plan_before_pointer_mutation(tmp_path: Path) ->
     with pytest.raises(RepairPlanChanged, match="canonical preview no longer matches"):
         repair.execute(
             stale,
-            approved_preview_sha256=preview.sha256,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
             authorization=_authorization(),
             occurred_at=START + timedelta(seconds=4),
             monotonic_ns=40_001,
         )
 
     assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_library_execute_accepts_the_public_preview_result_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repair = cast(Any, object.__new__(WorkspaceRepair))
+    request = RepairPreviewRequest(
+        repo_uuid=REPO_UUID,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=0,
+        expected_migration_epoch=0,
+        timeout_ns=1_000_000_000,
+    )
+    plan = RepairPlan(
+        classification="no_op",
+        candidate={"generation_id": "gen-current", "receipt_sha256": "a" * 64},
+        last_good=None,
+        next_pointer_revision=1,
+        selected_from="current",
+        pointer_action="none",
+        journal_actions=(),
+        quarantine=(),
+        decision_sha256="b" * 64,
+        decision=cast(Any, object()),
+    )
+    execution = SimpleNamespace(plan=plan, pointer=None)
+    monkeypatch.setattr(repair, "preview", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(repair, "_execute_plan", lambda *_args, **_kwargs: execution)
+    approved_preview_sha256 = _approved_preview_sha256(request, plan)
+
+    assert approved_preview_sha256 != plan.sha256
+    assert (
+        repair.execute(
+            request,
+            approved_preview_sha256=approved_preview_sha256,
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+        is execution
+    )
 
 
 def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
@@ -492,6 +597,20 @@ def test_execute_preserves_preview_failure_classification(
     assert failure.action_code == expected_action
 
 
+def test_failure_classifies_unsupported_compatibility_with_specific_guidance() -> None:
+    failure = classify_failure(UnsupportedCompatibility("private compatibility detail"), "preview")
+
+    assert failure.to_dict() == {
+        "action_code": "install_supported_candidate",
+        "cli_contract_version": 1,
+        "contract": "graphify.workspace.repair_preview_result",
+        "exit_code": 20,
+        "reason_code": "unsupported_compatibility",
+        "schema_version": 1,
+        "state": "invalid",
+    }
+
+
 @pytest.mark.parametrize(
     "failpoint",
     (
@@ -533,7 +652,7 @@ def test_interrupted_execute_requires_fresh_preview_and_resumes_safely(
     with pytest.raises(InjectedFault):
         repair.execute(
             request,
-            approved_preview_sha256=preview.sha256,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
             authorization=_authorization(),
             occurred_at=START + timedelta(seconds=4),
             monotonic_ns=40_001,
@@ -541,7 +660,7 @@ def test_interrupted_execute_requires_fresh_preview_and_resumes_safely(
     with pytest.raises(RepairPlanChanged, match="canonical preview no longer matches"):
         repair.execute(
             request,
-            approved_preview_sha256=preview.sha256,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
             authorization=_authorization(),
             occurred_at=START + timedelta(seconds=5),
             monotonic_ns=50_001,
@@ -550,7 +669,7 @@ def test_interrupted_execute_requires_fresh_preview_and_resumes_safely(
     fresh_preview = repair.preview(fresh_request, monotonic_ns=60_001)
     repaired = repair.execute(
         fresh_request,
-        approved_preview_sha256=fresh_preview.sha256,
+        approved_preview_sha256=_approved_preview_sha256(fresh_request, fresh_preview),
         authorization=_authorization(),
         occurred_at=START + timedelta(seconds=6),
         monotonic_ns=70_001,
@@ -627,7 +746,7 @@ def test_execute_quarantines_only_corrupt_generation_excluded_from_repaired_poin
 
     repair.execute(
         request,
-        approved_preview_sha256=preview.sha256,
+        approved_preview_sha256=_approved_preview_sha256(request, preview),
         authorization=_authorization(),
         occurred_at=START + timedelta(seconds=4),
         monotonic_ns=40_001,

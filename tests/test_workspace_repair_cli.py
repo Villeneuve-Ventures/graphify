@@ -196,6 +196,24 @@ def test_repair_execute_request_requires_approved_preview_and_exact_authorizatio
             repair.RepairExecuteRequest.from_bytes(_request_bytes(invalid))
 
 
+def test_repair_execute_schema_matches_transport_bounded_authorization() -> None:
+    workspace_cli = _cli()
+    repair = _repair()
+    value = _execute_request_value()
+    value["authorization"] = {
+        **_authorization(),
+        "reason": "r" * 4_097,
+    }
+    raw = _request_bytes(value)
+
+    assert len(raw) < repair.REPAIR_REQUEST_MAX_BYTES
+    assert repair.RepairExecuteRequest.from_bytes(raw).to_dict() == value
+    Draft202012Validator(
+        workspace_cli.load_repair_execute_request_schema(),
+        format_checker=FormatChecker(),
+    ).validate(value)
+
+
 def test_repair_result_schemas_admit_only_redacted_bounded_public_shapes() -> None:
     workspace_cli = _cli()
     preview = _preview_result_value()
@@ -216,6 +234,12 @@ def test_repair_result_schemas_admit_only_redacted_bounded_public_shapes() -> No
     assert not list(execute_validator.iter_errors(_execute_result_value(state="no_op")))
     assert list(preview_validator.iter_errors({**preview, "absolute_path": "/private/state"}))
     assert list(execute_validator.iter_errors({**execute, "authorization": _authorization()}))
+    bounded_quarantine = _preview_result_value()
+    bounded_quarantine["plan"]["quarantine"] = [f"gen-quarantine-{index}" for index in range(8)]
+    oversized_quarantine = _preview_result_value()
+    oversized_quarantine["plan"]["quarantine"] = [f"gen-quarantine-{index}" for index in range(9)]
+    assert not list(preview_validator.iter_errors(bounded_quarantine))
+    assert list(preview_validator.iter_errors(oversized_quarantine))
 
 
 def test_repair_failure_results_are_schema_valid_and_redacted() -> None:

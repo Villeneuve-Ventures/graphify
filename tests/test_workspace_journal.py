@@ -5,7 +5,8 @@ import errno
 from pathlib import Path
 import subprocess
 import sys
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -460,6 +461,37 @@ def test_journal_recovery_head_commit_honors_deadline(tmp_path: Path) -> None:
         )
 
     assert current_path.read_bytes() == current_before
+
+
+def test_repaired_transition_authority_preserves_deadline_timeout() -> None:
+    store = cast(Any, object.__new__(JournalStore))
+    timeout = LockTimeout("visible pointer validation exceeded its deadline")
+    read_kwargs: list[dict[str, object]] = []
+
+    def expire_visible_pointer(*_args: object, **_kwargs: object) -> bytes:
+        read_kwargs.append(_kwargs)
+        raise timeout
+
+    store.state = SimpleNamespace(read_existing_bytes=expire_visible_pointer)
+    operation = SimpleNamespace(
+        operation="REPAIR",
+        repo_uuid=REPO_UUID,
+        grant=SimpleNamespace(operation_epoch=1),
+        fence_token=1,
+    )
+
+    with pytest.raises(LockTimeout) as raised:
+        store._require_transition_authority(
+            operation,
+            transition="REPAIRED",
+            generation_id="gen-repaired",
+            receipt_sha256="a" * 64,
+            pointer_revision=1,
+            deadline_ns=20_000,
+        )
+
+    assert raised.value is timeout
+    assert read_kwargs == [{"deadline_ns": 20_000, "max_bytes": 64 * 1024}]
 
 
 def test_journal_adopts_one_complete_hash_linked_uncommitted_segment(tmp_path: Path) -> None:
