@@ -30,6 +30,7 @@ from graphify.workspace.persistence import (
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
+    StateRecoveryRequired,
     Syscalls,
     WORKSPACE_LOCK_RANK,
     require_before_deadline,
@@ -61,6 +62,14 @@ class LeaseExpired(LeaseError):
 
 class LeaseRecoveryRequired(LeaseError):
     code = "lease_recovery_required"
+
+
+class GcIntentRecoveryRequired(LeaseRecoveryRequired):
+    """A durable GC intent must be reconciled before another lease can start."""
+
+
+class StagedBuildLeaseRecoveryRequired(LeaseRecoveryRequired):
+    """A staged build must resume its exact sync lifecycle before another lease."""
 
 
 class StaleLease(LeaseError):
@@ -424,6 +433,10 @@ class LeaseStore:
                 max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
                 deadline_ns=deadline_ns,
             )
+        except StateRecoveryRequired as exc:
+            raise StagedBuildLeaseRecoveryRequired(
+                f"staged build state requires exact recovery: {exc}"
+            ) from exc
         except (StateCorrupt, StatePathError) as exc:
             raise LeaseRecoveryRequired(f"staged build state requires recovery: {exc}") from exc
 
@@ -519,7 +532,9 @@ class LeaseStore:
             "GC",
             "POINTER_RECOVERY",
         }:
-            raise LeaseRecoveryRequired("unresolved GC intent requires fenced reconciliation")
+            raise GcIntentRecoveryRequired(
+                "unresolved GC intent requires fenced reconciliation"
+            )
         pointer_intent = workspace / "pointers.pending.json"
         if self._durable_record_exists(
             pointer_intent,
@@ -536,7 +551,7 @@ class LeaseStore:
             and staged_build.abandonment_intent is not None
             and not allow_staged_abandonment
         ):
-            raise LeaseRecoveryRequired(
+            raise StagedBuildLeaseRecoveryRequired(
                 "durable staged abandonment requires exact recovery"
             )
         if (
@@ -548,7 +563,7 @@ class LeaseStore:
             else:
                 allowed = {"BUILD"}
             if operation not in allowed:
-                raise LeaseRecoveryRequired(
+                raise StagedBuildLeaseRecoveryRequired(
                     "unresolved staged build requires request-bound recovery"
                 )
         if operation != "ACTIVATE":
@@ -698,11 +713,15 @@ class LeaseStore:
         ttl_ns: int,
         deadline_ns: int | None = None,
     ) -> LeaseGrant:
-        snapshot = (
-            self.registry.recovered_snapshot()
-            if deadline_ns is None
-            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
-        )
+        existing_only = operation == "REPAIR"
+        if existing_only:
+            snapshot = self.registry.read_only_snapshot(deadline_ns=deadline_ns)
+        else:
+            snapshot = (
+                self.registry.recovered_snapshot()
+                if deadline_ns is None
+                else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+            )
         with snapshot as document:
             return self._acquire_under_registry_lock(
                 document,
@@ -717,6 +736,7 @@ class LeaseStore:
                 monotonic_ns=monotonic_ns,
                 ttl_ns=ttl_ns,
                 verify_active=True,
+                existing_only=existing_only,
                 deadline_ns=deadline_ns,
             )
 
@@ -828,6 +848,7 @@ class LeaseStore:
         staged_request: tuple[str, StructuralBuildRequest] | None = None,
         staged_attempt_sha256: str | None = None,
         allow_stale_staged_authority: bool = False,
+        existing_only: bool = False,
         deadline_ns: int | None = None,
     ) -> LeaseGrant:
         require_before_deadline(
@@ -856,23 +877,38 @@ class LeaseStore:
             deadline_ns,
             "lease acquisition exceeded its deadline",
         )
-        lock = (
-            self.workspace_lock(repo_uuid)
-            if deadline_ns is None
-            else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
-        )
+        if existing_only:
+            lock = self.read_only_workspace_lock(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+        else:
+            lock = (
+                self.workspace_lock(repo_uuid)
+                if deadline_ns is None
+                else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+            )
         with lock:
             if deadline_ns is None:
-                state = self._load_state_locked(document, repo_uuid)
-                staged_build = self._load_staged_build_locked(repo_uuid)
+                state = self._load_state_locked(
+                    document,
+                    repo_uuid,
+                    recover=not existing_only,
+                )
+                staged_build = self._load_staged_build_locked(
+                    repo_uuid,
+                    recover=not existing_only,
+                )
             else:
                 state = self._load_state_locked(
                     document,
                     repo_uuid,
+                    recover=not existing_only,
                     deadline_ns=deadline_ns,
                 )
                 staged_build = self._load_staged_build_locked(
                     repo_uuid,
+                    recover=not existing_only,
                     deadline_ns=deadline_ns,
                 )
             if staged_request is None:
@@ -889,7 +925,7 @@ class LeaseStore:
                     staged_build is not None
                     and staged_build.lifecycle_state not in _STAGED_BUILD_TERMINAL_STATES
                 ):
-                    raise LeaseRecoveryRequired(
+                    raise StagedBuildLeaseRecoveryRequired(
                         "unresolved staged build requires request-bound recovery"
                     )
             else:
@@ -908,6 +944,7 @@ class LeaseStore:
             self._assert_recovery_barriers_locked(
                 repo_uuid,
                 operation,
+                recover=not existing_only,
                 allow_staged_abandonment=allow_stale_staged_authority,
                 deadline_ns=deadline_ns,
             )
@@ -1370,11 +1407,13 @@ __all__ = [
     "LeaseError",
     "LeaseExpired",
     "LeaseGrant",
+    "GcIntentRecoveryRequired",
     "LeaseIdentityProvider",
     "LeaseOperation",
     "LeaseOwner",
     "LeaseRecoveryRequired",
     "LeaseStore",
+    "StagedBuildLeaseRecoveryRequired",
     "StaleLease",
     "SystemLeaseIdentityProvider",
 ]

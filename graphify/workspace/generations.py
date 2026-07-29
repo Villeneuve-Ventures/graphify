@@ -336,7 +336,7 @@ class GenerationStore:
         self,
         repo_uuid: str,
         *,
-        deadline_ns: int,
+        deadline_ns: int | None,
     ) -> StagedBuildState | None:
         """Read existing staged-build authority without recovery or writes.
 

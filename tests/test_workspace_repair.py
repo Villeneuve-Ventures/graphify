@@ -21,16 +21,22 @@ from graphify.workspace import persistence as persistence_module
 from graphify.workspace.composition import WorkspaceRuntime
 from graphify.workspace.generations import GenerationStore
 from graphify.workspace.journal import JournalStore
-from graphify.workspace.leases import LeaseGrant
+from graphify.workspace.leases import (
+    GcIntentRecoveryRequired,
+    LeaseGrant,
+    StagedBuildLeaseRecoveryRequired,
+)
 from graphify.workspace.persistence import (
     CommitUnknown,
     InjectedFault,
     LockTimeout,
     StatePathError,
+    StateRecoveryRequired,
 )
 from graphify.workspace.pointers import PointerCorrupt, PointerRepairPlan, PointerSet, PointerStore
 from graphify.workspace.repair import (
     RepairAuthorization,
+    RepairError,
     RepairExecuteRequest,
     RepairObservedAuthority,
     RepairPlan,
@@ -42,6 +48,7 @@ from graphify.workspace.repair import (
     repair_execute,
     repair_preview,
 )
+from graphify.workspace.semantic_queue import SemanticQueueError
 
 from tests.test_workspace_pointers import POLICY, _cas, _certify, _semantic_queue
 from tests.workspace_p3_helpers import (
@@ -251,9 +258,35 @@ def test_preview_routes_gc_intent_outside_pointer_repair_without_writes(
     repair = _repair(harness, journal, generations, pointers)
     before_tree = tree_snapshot(harness.state_root)
 
-    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+    with pytest.raises(RepairError) as raised:
+        repair.preview(_request(harness), monotonic_ns=30_001)
 
-    assert preview.to_dict()["classification"] == "irreparable"
+    failure = classify_failure(raised.value, "preview")
+    assert failure.reason_code == "repair_state_unsupported"
+    assert failure.action_code == "run_workspace_gc_reconcile"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_routes_nonterminal_staged_build_outside_pointer_repair_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    monkeypatch.setattr(
+        generations,
+        "read_only_staged_build_locked",
+        lambda *_args, **_kwargs: SimpleNamespace(lifecycle_state="REQUESTED"),
+    )
+    before_tree = tree_snapshot(harness.state_root)
+
+    with pytest.raises(RepairError) as raised:
+        repair.preview(_request(harness), monotonic_ns=30_001)
+
+    failure = classify_failure(raised.value, "preview")
+    assert failure.reason_code == "repair_state_unsupported"
+    assert failure.action_code == "resume_exact_workspace_sync"
     assert tree_snapshot(harness.state_root) == before_tree
 
 
@@ -319,9 +352,12 @@ def test_preview_rejects_corrupt_semantic_queue_without_writes(tmp_path: Path) -
     repair = _repair(harness, journal, generations, pointers)
     before_tree = tree_snapshot(harness.state_root)
 
-    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+    with pytest.raises(SemanticQueueError) as raised:
+        repair.preview(_request(harness), monotonic_ns=30_001)
 
-    assert preview.to_dict()["classification"] == "irreparable"
+    failure = classify_failure(raised.value, "preview")
+    assert failure.reason_code == "repair_state_unsupported"
+    assert failure.action_code == "inspect_semantic_queue"
     assert tree_snapshot(harness.state_root) == before_tree
 
 
@@ -416,6 +452,220 @@ def test_execute_rejects_changed_plan_before_pointer_mutation(tmp_path: Path) ->
         )
 
     assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_execute_revalidates_semantic_queue_after_repair_fence_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    semantic_queue = generations.semantic_queue
+    assert semantic_queue is not None
+    current, _previous, _pending = semantic_queue._paths(REPO_UUID)
+    queue_path = semantic_queue.state.path(current)
+    pointer_path = pointers.state.path(pointers._current(REPO_UUID))
+    pointer_before = pointer_path.read_bytes()
+    original_acquire = harness.leases.acquire
+    original_analysis = pointers._repair_analysis_locked
+    fence_acquired = False
+
+    def corrupt_queue_before_acquire(*args: Any, **kwargs: Any) -> LeaseGrant:
+        nonlocal fence_acquired
+        queue_path.write_bytes(b"{}\n")
+        queue_path.chmod(0o600)
+        grant = original_acquire(*args, **kwargs)
+        fence_acquired = True
+        return grant
+
+    def reject_pointer_analysis_after_fence(*args: Any, **kwargs: Any) -> Any:
+        if fence_acquired:
+            raise AssertionError("pointer analysis ran before semantic-queue revalidation")
+        return original_analysis(*args, **kwargs)
+
+    monkeypatch.setattr(harness.leases, "acquire", corrupt_queue_before_acquire)
+    monkeypatch.setattr(pointers, "_repair_analysis_locked", reject_pointer_analysis_after_fence)
+
+    with pytest.raises(SemanticQueueError) as raised:
+        repair.execute(
+            request,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    failure = classify_failure(raised.value, "execute")
+    assert fence_acquired is True
+    assert failure.reason_code == "repair_state_unsupported"
+    assert failure.action_code == "inspect_semantic_queue"
+    assert pointer_path.read_bytes() == pointer_before
+
+
+def test_execute_routes_gc_intent_created_before_repair_lease_to_reconcile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_workspace_status import _gc_intent
+
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    pointer = pointers.load(REPO_UUID, allow_missing=False)
+    assert pointer is not None
+    intent = _gc_intent(pointer, capacity_policy_sha256=POLICY.sha256)
+    intent_path = harness.state_root / "workspaces" / REPO_UUID / "gc" / "intent.json"
+    pointer_path = harness.state_root / "workspaces" / REPO_UUID / "pointers.json"
+    pointer_before = pointer_path.read_bytes()
+    operation_epoch_before = harness.leases.inspect(REPO_UUID).operation_epoch
+    original_acquire = harness.leases.acquire
+
+    def create_gc_intent_before_acquire(*args: Any, **kwargs: Any) -> LeaseGrant:
+        intent_path.parent.mkdir(mode=0o700)
+        intent_path.write_bytes(intent.canonical)
+        intent_path.chmod(0o600)
+        return original_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(harness.leases, "acquire", create_gc_intent_before_acquire)
+
+    with pytest.raises(GcIntentRecoveryRequired) as raised:
+        repair.execute(
+            request,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    failure = classify_failure(raised.value, "execute")
+    assert failure.reason_code == "repair_state_unsupported"
+    assert failure.action_code == "run_workspace_gc_reconcile"
+    assert pointer_path.read_bytes() == pointer_before
+    assert harness.leases.inspect(REPO_UUID).operation_epoch == operation_epoch_before
+
+
+def test_execute_routes_staged_build_created_before_repair_lease_to_exact_sync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    pointer_path = harness.state_root / "workspaces" / REPO_UUID / "pointers.json"
+    pointer_before = pointer_path.read_bytes()
+    operation_epoch_before = harness.leases.inspect(REPO_UUID).operation_epoch
+    original_acquire = harness.leases.acquire
+
+    def create_staged_build_before_acquire(*args: Any, **kwargs: Any) -> LeaseGrant:
+        monkeypatch.setattr(
+            harness.leases,
+            "_load_staged_build_locked",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                lifecycle_state="REQUESTED",
+                abandonment_intent=None,
+            ),
+        )
+        return original_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(harness.leases, "acquire", create_staged_build_before_acquire)
+
+    with pytest.raises(StagedBuildLeaseRecoveryRequired) as raised:
+        repair.execute(
+            request,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    failure = classify_failure(raised.value, "execute")
+    assert failure.reason_code == "repair_state_unsupported"
+    assert failure.action_code == "resume_exact_workspace_sync"
+    assert pointer_path.read_bytes() == pointer_before
+    assert harness.leases.inspect(REPO_UUID).operation_epoch == operation_epoch_before
+
+
+@pytest.mark.parametrize(
+    ("record", "expected_error", "expected_action"),
+    [
+        ("registry", StateRecoveryRequired, "inspect_workspace_state"),
+        ("workspace", StateRecoveryRequired, "inspect_workspace_state"),
+        ("staged_build", StagedBuildLeaseRecoveryRequired, "resume_exact_workspace_sync"),
+    ],
+)
+def test_execute_does_not_recover_non_pointer_pending_state_before_repair_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    record: str,
+    expected_error: type[Exception],
+    expected_action: str,
+) -> None:
+    from tests.test_workspace_status import _fresh_runtime_with_staged_request
+
+    staged_payload: bytes | None = None
+    if record == "staged_build":
+        _fresh, staged_runtime, _request_value = _fresh_runtime_with_staged_request(
+            tmp_path / "staged-fixture"
+        )
+        staged_current, _staged_previous, _staged_pending = (
+            staged_runtime.generations._staged_build_paths(REPO_UUID)
+        )
+        staged_payload = staged_runtime.generations.state.path(staged_current).read_bytes()
+
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path / "repair")
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request, monotonic_ns=30_001)
+    if record == "registry":
+        current = harness.registry.state.path(harness.registry.CURRENT)
+        pending = harness.registry.state.path(harness.registry.PENDING)
+        pending_payload = current.read_bytes()
+    elif record == "workspace":
+        current_relative, _previous_relative, pending_relative = harness.leases._paths(REPO_UUID)
+        current = harness.leases.state.path(current_relative)
+        pending = harness.leases.state.path(pending_relative)
+        pending_payload = current.read_bytes()
+    else:
+        _current_relative, _previous_relative, pending_relative = (
+            harness.leases._staged_build_paths(REPO_UUID)
+        )
+        pending = harness.leases.state.path(pending_relative)
+        assert staged_payload is not None
+        pending_payload = staged_payload
+    original_acquire = harness.leases.acquire
+    before_attempt: dict[str, tuple[int, int, int, str | None]] | None = None
+
+    def create_pending_record_before_acquire(*args: Any, **kwargs: Any) -> LeaseGrant:
+        nonlocal before_attempt
+        pending.write_bytes(pending_payload)
+        pending.chmod(0o600)
+        before_attempt = tree_snapshot(harness.state_root)
+        return original_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(harness.leases, "acquire", create_pending_record_before_acquire)
+
+    with pytest.raises(expected_error) as raised:
+        repair.execute(
+            request,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    assert before_attempt is not None
+    failure = classify_failure(raised.value, "execute")
+    assert failure.reason_code == "repair_state_unsupported"
+    assert failure.action_code == expected_action
+    assert tree_snapshot(harness.state_root) == before_attempt
 
 
 def test_library_execute_accepts_the_public_preview_result_digest(

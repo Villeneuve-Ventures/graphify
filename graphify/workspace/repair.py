@@ -28,7 +28,11 @@ from graphify.workspace.contracts import (
     WorkspaceLeaseState,
     canonical_json_bytes,
 )
-from graphify.workspace.generations import GenerationError, GenerationStore
+from graphify.workspace.generations import (
+    GenerationError,
+    GenerationStore,
+    StagedBuildReadRecoveryRequired,
+)
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
@@ -36,12 +40,14 @@ from graphify.workspace.identity import (
 )
 from graphify.workspace.journal import JournalError, JournalStore
 from graphify.workspace.leases import (
+    GcIntentRecoveryRequired,
     LeaseBusy,
     LeaseError,
     LeaseExpired,
     LeaseGrant,
     LeaseRecoveryRequired,
     LeaseStore,
+    StagedBuildLeaseRecoveryRequired,
     StaleLease,
 )
 from graphify.workspace.persistence import (
@@ -142,6 +148,14 @@ class RepairIrreparable(RepairError):
 
 class RepairCommitUnknown(CommitUnknown):
     """Repair may have crossed a durable boundary; a fresh preview is required."""
+
+
+class _RepairBoundaryUnsupported(RepairError):
+    """A valid non-pointer recovery boundary must retain its operator action."""
+
+    def __init__(self, detail: str, *, action_code: str) -> None:
+        super().__init__(detail)
+        self.action_code = action_code
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -898,6 +912,14 @@ def classify_failure(error: Exception, operation: str) -> RepairFailure:
             "commit_unknown",
             "run_workspace_status_then_repair_dry_run",
         )
+    if isinstance(error, _RepairBoundaryUnsupported):
+        return RepairFailure(
+            operation,
+            "invalid",
+            EXIT_INVALID,
+            "repair_state_unsupported",
+            error.action_code,
+        )
     if isinstance(error, RepairIrreparable):
         return RepairFailure(
             operation,
@@ -954,6 +976,30 @@ def classify_failure(error: Exception, operation: str) -> RepairFailure:
             EXIT_INVALID,
             "unsupported_runtime",
             "use_supported_runtime",
+        )
+    if isinstance(error, SemanticQueueError):
+        return RepairFailure(
+            operation,
+            "invalid",
+            EXIT_INVALID,
+            "repair_state_unsupported",
+            "inspect_semantic_queue",
+        )
+    if isinstance(error, GcIntentRecoveryRequired):
+        return RepairFailure(
+            operation,
+            "invalid",
+            EXIT_INVALID,
+            "repair_state_unsupported",
+            "run_workspace_gc_reconcile",
+        )
+    if isinstance(error, StagedBuildLeaseRecoveryRequired):
+        return RepairFailure(
+            operation,
+            "invalid",
+            EXIT_INVALID,
+            "repair_state_unsupported",
+            "resume_exact_workspace_sync",
         )
     if isinstance(
         error,
@@ -1101,32 +1147,66 @@ class WorkspaceRepair:
                         deadline_ns=deadline_ns,
                     )
                     self._check_authority(request, registry, entry, lease_state)
+                    decision: PointerRepairPlan | None
+                    try:
+                        decision = self.pointers.analyze_repair(
+                            request.repo_uuid,
+                            active_source_revision=request.expected_active_source_revision,
+                            operation_epoch=None,
+                            fence_token=None,
+                            deadline_ns=deadline_ns,
+                        )
+                    except PointerRecoveryRequired as exc:
+                        raise _RepairBoundaryUnsupported(
+                            "GC reconciliation is required before pointer repair",
+                            action_code="run_workspace_gc_reconcile",
+                        ) from exc
+                    except PointerCorrupt, GenerationError, JournalError:
+                        decision = None
+                    try:
+                        staged_build = self.generations.read_only_staged_build_locked(
+                            request.repo_uuid,
+                            deadline_ns=deadline_ns,
+                        )
+                    except StagedBuildReadRecoveryRequired as exc:
+                        raise _RepairBoundaryUnsupported(
+                            "staged-build recovery is required before pointer repair",
+                            action_code="resume_exact_workspace_sync",
+                        ) from exc
+                    except GenerationError as exc:
+                        raise LeaseRecoveryRequired(
+                            "staged-build state requires inspection before pointer repair"
+                        ) from exc
+                    if staged_build is not None and staged_build.lifecycle_state not in {
+                        "PROMOTED",
+                        "ABANDONED",
+                    }:
+                        raise _RepairBoundaryUnsupported(
+                            "a nonterminal staged build is outside pointer repair authority",
+                            action_code="resume_exact_workspace_sync",
+                        )
+                    semantic_queue = self.generations.semantic_queue
+                    if semantic_queue is None:
+                        raise _RepairBoundaryUnsupported(
+                            "semantic-queue authority is unavailable",
+                            action_code="inspect_semantic_queue",
+                        )
+                    semantic_queue.read_only_snapshot_locked(
+                        request.repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
                     self.leases._assert_recovery_barriers_locked(
                         request.repo_uuid,
                         "REPAIR",
                         recover=False,
                         deadline_ns=deadline_ns,
                     )
-                    semantic_queue = self.generations.semantic_queue
-                    if semantic_queue is None:
+                    if decision is None:
                         return RepairPlan.irreparable()
-                    semantic_queue.read_only_snapshot_locked(
-                        request.repo_uuid,
-                        deadline_ns=deadline_ns,
-                    )
-                    decision = self.pointers.analyze_repair(
-                        request.repo_uuid,
-                        active_source_revision=request.expected_active_source_revision,
-                        operation_epoch=None,
-                        fence_token=None,
-                        deadline_ns=deadline_ns,
-                    )
                     return RepairPlan.from_decision(decision)
         except RepairError:
             raise
-        except PointerCorrupt, GenerationError, JournalError, SemanticQueueError:
-            return RepairPlan.irreparable()
-        except LeaseRecoveryRequired, StateRecoveryRequired:
+        except PointerCorrupt, GenerationError, JournalError:
             return RepairPlan.irreparable()
 
     def execute(
@@ -1209,6 +1289,11 @@ class WorkspaceRepair:
                     expected_plan=plan.decision,
                     deadline_ns=deadline_ns,
                 )
+            except PointerRecoveryRequired as exc:
+                raise _RepairBoundaryUnsupported(
+                    "GC reconciliation is required before pointer repair",
+                    action_code="run_workspace_gc_reconcile",
+                ) from exc
             except PointerConflict as exc:
                 raise RepairPlanChanged(
                     "canonical repair plan changed under the mutation boundary"

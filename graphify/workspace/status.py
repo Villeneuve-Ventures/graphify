@@ -1263,6 +1263,53 @@ def _inspect_workspace(
                     repair_required=True,
                 )
             except GenerationError:
+                try:
+                    repair_plan = runtime.pointers.analyze_repair(
+                        repo_uuid,
+                        active_source_revision=cast(int, entry["active_source_revision"]),
+                        operation_epoch=None,
+                        fence_token=None,
+                        deadline_ns=deadline_ns,
+                    )
+                except LockTimeout as exc:
+                    return _deadline_failure(
+                        workspace,
+                        checks,
+                        component=f"{prefix}:generation",
+                        reason_code=_lock_timeout_reason(exc, "generation"),
+                    )
+                except UnsupportedCompatibility:
+                    return _workspace_failure(
+                        workspace,
+                        checks,
+                        component=f"{prefix}:compatibility",
+                        state="invalid",
+                        reason_code="unsupported_compatibility",
+                        action_code="install_supported_candidate",
+                        repair_required=False,
+                    )
+                except StatePathError:
+                    return _workspace_failure(
+                        workspace,
+                        checks,
+                        component=f"{prefix}:generation",
+                        state="invalid",
+                        reason_code="unsafe_state_path",
+                        action_code="configure_safe_state_root",
+                        repair_required=False,
+                    )
+                except (PointerError, GenerationError, JournalError):
+                    repair_plan = None
+                if repair_plan is not None and repair_plan.classification == "repairable":
+                    return _workspace_failure(
+                        workspace,
+                        checks,
+                        component=f"{prefix}:generation",
+                        state="invalid",
+                        reason_code="generation_or_pointer_invalid",
+                        action_code="run_workspace_repair",
+                        repair_required=True,
+                    )
                 return _workspace_failure(
                     workspace,
                     checks,

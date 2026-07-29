@@ -40,6 +40,7 @@ from graphify.workspace.persistence import (
     Syscalls,
     require_before_deadline,
 )
+from graphify.workspace.semantic_queue import SemanticQueueError
 
 
 _MAX_POINTER_RECORD_BYTES = 64 * 1024
@@ -1617,6 +1618,14 @@ class PointerStore:
                 deadline_ns=deadline_ns,
                 preserve_path_error=operation.operation == "REPAIR",
             )
+            if operation.operation == "REPAIR":
+                semantic_queue = self.generations.semantic_queue
+                if semantic_queue is None:
+                    raise SemanticQueueError("semantic-queue authority is unavailable")
+                semantic_queue.read_only_snapshot_locked(
+                    operation.repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
             with self._repair_analysis_locked(
                 operation.repo_uuid,
                 active_source_revision=operation.grant.active_source_revision,

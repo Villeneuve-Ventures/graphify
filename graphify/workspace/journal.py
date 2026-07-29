@@ -29,6 +29,7 @@ from graphify.workspace.persistence import (
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
+    StateRecoveryRequired,
     Syscalls,
     require_before_deadline,
 )
@@ -626,6 +627,17 @@ class JournalStore:
                 phase=exc.phase,
                 kind=exc.kind,
             ) from exc
+        except StateRecoveryRequired as exc:
+            projection = self.project_recovery(
+                repo_uuid,
+                allow_atomic_temps=False,
+                deadline_ns=deadline_ns,
+            )
+            if "recover_head" not in projection.actions:  # pragma: no cover - pending invariant
+                raise JournalCorrupt("journal head requires unsupported recovery") from exc
+            raise JournalRecoveryRequired(
+                "journal head requires recovery before stable read"
+            ) from exc
         except (StateCorrupt, StatePathError) as exc:
             raise JournalCorrupt(str(exc)) from exc
         if head is not None and head.repo_uuid != repo_uuid:
@@ -634,6 +646,13 @@ class JournalStore:
         segments = self._segment_names(repo_uuid, deadline_ns=deadline_ns)
         committed = 0 if head is None else head.sequence
         if len(segments) != committed:
+            projection = self.project_recovery(
+                repo_uuid,
+                allow_atomic_temps=False,
+                deadline_ns=deadline_ns,
+            )
+            if not projection.actions:  # pragma: no cover - segment-count invariant
+                raise JournalCorrupt("journal segment count changed without a recovery action")
             raise JournalRecoveryRequired("journal requires recovery before stable read")
 
         events: list[JournalEvent] = []

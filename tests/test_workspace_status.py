@@ -2083,6 +2083,61 @@ def test_status_rejects_oversized_generation_verification_records_without_writin
     assert tree_snapshot(runtime.state_root) == before
 
 
+def test_status_routes_a_corrupt_current_generation_with_valid_fallback_to_repair(
+    tmp_path: Path,
+) -> None:
+    from tests.test_workspace_pointers import SEMANTIC_QUEUE_POLICY, _cas
+    from tests.test_workspace_repair import _runtime as repair_runtime
+
+    harness, _journal, _generations, pointers, receipts = repair_runtime(tmp_path)
+    old, current, _racer = receipts
+    promote = acquire(harness, "PROMOTE", tick=2)
+    pointers.promote(
+        promote,
+        _cas(promote, old, revision=0, current_sha256=None),
+        occurred_at=START,
+        monotonic_ns=20_001,
+    )
+    pointers.promote(
+        promote,
+        _cas(promote, current, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=20_002,
+    )
+    harness.leases.release(promote)
+    payload = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "generations"
+        / "gen-new"
+        / "graphify-out"
+        / "graph.json"
+    )
+    payload.write_text("corrupt\n", encoding="utf-8")
+    before = tree_snapshot(harness.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=harness.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=SEMANTIC_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    generation_check = next(
+        check
+        for check in report.to_dict()["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:generation"
+    )
+
+    assert report.exit_code == 20
+    assert generation_check["reason_code"] == "generation_or_pointer_invalid"
+    assert generation_check["action_code"] == "run_workspace_repair"
+    assert report.to_dict()["workspaces"][0]["repair"]["required"] is True
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_status_revalidates_pointer_after_freshness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2307,6 +2362,95 @@ def test_status_routes_journal_failures_by_repair_authority(
     assert journal_check["reason_code"] == "journal_invalid"
     assert journal_check["action_code"] == expected_action
     assert workspace["repair"]["required"] is repair_required
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected_action", "repair_required"),
+    [
+        ("torn", "run_workspace_repair", True),
+        ("invalid", "inspect_workspace_state", False),
+        ("ambiguous", "inspect_workspace_state", False),
+    ],
+)
+def test_status_only_routes_a_projected_recoverable_journal_suffix_to_repair(
+    tmp_path: Path,
+    suffix: str,
+    expected_action: str,
+    repair_required: bool,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    journal = runtime.pointers.journal
+    snapshot = journal.read_stable(REPO_UUID)
+    assert snapshot.head is not None
+    committed = snapshot.head.sequence
+    committed_path = journal.state.path(journal._segment_path(REPO_UUID, committed))
+    first_tail = journal.state.path(journal._segment_path(REPO_UUID, committed + 1))
+    first_tail.write_bytes(b"\x00" if suffix == "torn" else committed_path.read_bytes())
+    first_tail.chmod(0o600)
+    if suffix == "ambiguous":
+        second_tail = journal.state.path(journal._segment_path(REPO_UUID, committed + 2))
+        second_tail.write_bytes(b"\x00")
+        second_tail.chmod(0o600)
+    before = tree_snapshot(runtime.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    journal_check = next(
+        check
+        for check in report.to_dict()["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:journal"
+    )
+
+    assert report.exit_code == 20
+    assert journal_check["reason_code"] == "journal_invalid"
+    assert journal_check["action_code"] == expected_action
+    assert report.to_dict()["workspaces"][0]["repair"]["required"] is repair_required
+    assert tree_snapshot(runtime.state_root) == before
+
+
+def test_status_routes_a_projected_recoverable_pending_journal_head_to_repair(
+    tmp_path: Path,
+) -> None:
+    from tests.test_workspace_freshness import QUEUE_POLICY as CERTIFIED_QUEUE_POLICY
+    from tests.test_workspace_freshness import _runtime as certified_runtime
+
+    runtime = certified_runtime(tmp_path)
+    journal = runtime.pointers.journal
+    current, _previous, pending = journal._head_paths(REPO_UUID)
+    current_path = journal.state.path(current)
+    pending_path = journal.state.path(pending)
+    pending_path.write_bytes(current_path.read_bytes())
+    pending_path.chmod(0o600)
+    before = tree_snapshot(runtime.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=runtime.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=CERTIFIED_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    journal_check = next(
+        check
+        for check in report.to_dict()["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:journal"
+    )
+
+    assert report.exit_code == 20
+    assert journal_check["reason_code"] == "journal_invalid"
+    assert journal_check["action_code"] == "run_workspace_repair"
+    assert report.to_dict()["workspaces"][0]["repair"]["required"] is True
+    assert tree_snapshot(runtime.state_root) == before
 
 
 def test_status_stops_registry_traversal_after_deadline(
