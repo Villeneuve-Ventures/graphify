@@ -1354,12 +1354,23 @@ class LeaseStore:
                     migration_epoch=committed.migration_epoch,
                 )
 
-    def release(self, grant: LeaseGrant) -> WorkspaceLeaseState:
-        with self.registry.recovered_snapshot() as document:
+    def release(
+        self,
+        grant: LeaseGrant,
+        *,
+        deadline_ns: int | None = None,
+    ) -> WorkspaceLeaseState:
+        snapshot = (
+            self.registry.recovered_snapshot()
+            if deadline_ns is None
+            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+        )
+        with snapshot as document:
             return self._release_under_registry_lock(
                 grant,
                 document,
                 validate_active=False,
+                deadline_ns=deadline_ns,
             )
 
     def _release_under_registry_lock(
@@ -1368,13 +1379,23 @@ class LeaseStore:
         document: Registry,
         *,
         validate_active: bool,
+        deadline_ns: int | None = None,
     ) -> WorkspaceLeaseState:
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        with self.workspace_lock(repo_uuid):
+        lock = (
+            self.workspace_lock(repo_uuid)
+            if deadline_ns is None
+            else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+        )
+        with lock:
             if validate_active:
                 self._check_active(document, grant)
-            state = self._load_state_locked(document, repo_uuid)
+            state = self._load_state_locked(
+                document,
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
             domain, _current = self._matching_lease(state, grant, require_epochs=False)
             leases = dict(state.leases)
             del leases[domain]
@@ -1393,7 +1414,8 @@ class LeaseStore:
                     leases=leases,
                     lease_epochs=lease_epochs,
                     staged_attempt_sha256=staged_attempt_sha256,
-                )
+                ),
+                deadline_ns=deadline_ns,
             )
 
     def inspect(self, repo_uuid: str) -> WorkspaceLeaseState:

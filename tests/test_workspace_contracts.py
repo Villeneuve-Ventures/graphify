@@ -615,7 +615,14 @@ def test_published_cli_v1_failure_action_mappings_remain_frozen() -> None:
                 if isinstance(properties, dict):
                     reason = properties.get("reason_code")
                     action = properties.get("action_code")
-                    if isinstance(reason, dict) and reason.get("const") == reason_code:
+                    reason_matches = isinstance(reason, dict) and (
+                        reason.get("const") == reason_code
+                        or (
+                            isinstance(reason.get("enum"), list)
+                            and reason_code in reason["enum"]
+                        )
+                    )
+                    if reason_matches:
                         if isinstance(action, dict) and isinstance(action.get("const"), str):
                             actions.add(action["const"])
                         elif isinstance(action, dict) and isinstance(action.get("enum"), list):
@@ -633,6 +640,14 @@ def test_published_cli_v1_failure_action_mappings_remain_frozen() -> None:
     gc_preview = _json(CLI_SCHEMAS / "gc-preview-result.schema.json")
     sync = _json(CLI_SCHEMAS / "sync-receipt.schema.json")
     rollback = _json(CLI_SCHEMAS / "rollback-receipt.schema.json")
+
+    enum_probe = {
+        "properties": {
+            "reason_code": {"enum": ["state_corrupt", "other_reason"]},
+            "action_code": {"enum": ["run_workspace_repair"]},
+        }
+    }
+    assert reason_actions(enum_probe, "state_corrupt") == {"run_workspace_repair"}
 
     assert reason_actions(query, "state_corrupt") == {"run_workspace_repair"}
     assert reason_actions(gc_preview, "gc_coordination_unavailable") == {

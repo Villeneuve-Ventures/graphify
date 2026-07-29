@@ -793,9 +793,11 @@ def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
     before_epoch = harness.leases.inspect(REPO_UUID).operation_epoch
     recover_calls: list[LeaseGrant] = []
     recover_deadlines: list[int | None] = []
+    release_deadlines: list[int | None] = []
     deadline_calls: list[int] = []
     deadline_ns = time.monotonic_ns() + 10_000_000_000
     original_recover = PointerStore.recover
+    original_release = harness.leases.release
 
     def fixed_deadline(_request: RepairPreviewRequest) -> int:
         deadline_calls.append(deadline_ns)
@@ -821,8 +823,17 @@ def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
             deadline_ns=deadline_ns,
         )
 
+    def observed_release(
+        grant: LeaseGrant,
+        *,
+        deadline_ns: int | None = None,
+    ) -> object:
+        release_deadlines.append(deadline_ns)
+        return original_release(grant, deadline_ns=deadline_ns)
+
     monkeypatch.setattr(RepairPreviewRequest, "runtime_deadline", fixed_deadline)
     monkeypatch.setattr(PointerStore, "recover", observed_recover)
+    monkeypatch.setattr(harness.leases, "release", observed_release)
     result = repair_execute(
         runtime,
         RepairExecuteRequest(
@@ -843,6 +854,7 @@ def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
     assert deadline_calls == [deadline_ns]
     assert len(recover_calls) == 1
     assert recover_deadlines == [deadline_ns]
+    assert release_deadlines == [deadline_ns]
     assert recover_calls[0].lease.to_dict()["operation"] == "REPAIR"
     lease_state = harness.leases.inspect(REPO_UUID)
     assert lease_state.operation_epoch == before_epoch + 1

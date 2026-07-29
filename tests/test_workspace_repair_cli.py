@@ -234,6 +234,7 @@ def test_repair_result_schemas_admit_only_redacted_bounded_public_shapes() -> No
     assert not list(execute_validator.iter_errors(_execute_result_value(state="no_op")))
     assert list(preview_validator.iter_errors({**preview, "absolute_path": "/private/state"}))
     assert list(execute_validator.iter_errors({**execute, "authorization": _authorization()}))
+    assert list(execute_validator.iter_errors({**execute, "pointer_revision": 0}))
     bounded_quarantine = _preview_result_value()
     bounded_quarantine["plan"]["quarantine"] = [f"gen-quarantine-{index}" for index in range(8)]
     oversized_quarantine = _preview_result_value()

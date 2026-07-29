@@ -1321,16 +1321,21 @@ class WorkspaceRepair:
         except BaseException as exc:
             primary = (exc, exc.__traceback__)
         finally:
-            self._release(grant, primary)
+            self._release(grant, primary, deadline_ns=deadline_ns)
         raise AssertionError("unreachable")
 
     def _release(
         self,
         grant: LeaseGrant,
         primary: tuple[BaseException, TracebackType | None] | None,
+        *,
+        deadline_ns: int | None,
     ) -> None:
         try:
-            self.leases.release(grant)
+            if deadline_ns is None:
+                self.leases.release(grant)
+            else:
+                self.leases.release(grant, deadline_ns=deadline_ns)
         except (CommitUnknown, InjectedFault) as exc:
             if primary is None:
                 raise RepairCommitUnknown(
