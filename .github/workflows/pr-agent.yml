@@ -1,0 +1,369 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+
+concurrency:
+  # Eligible review requests share a PR-scoped group so /prreview waits for an
+  # in-progress initial summary/review to establish its baseline. Ineligible
+  # events use a run-specific namespace and cannot displace an eligible review.
+  group: >-
+    pr-agent-${{
+      case(
+        github.event_name == 'pull_request' &&
+        github.event.sender.type != 'Bot' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository,
+        github.event.pull_request.number,
+        github.event_name == 'issue_comment' &&
+        github.event.sender.type != 'Bot' &&
+        github.event.issue.pull_request &&
+        github.event.comment.body == '/prreview' &&
+        contains(
+          fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+          github.event.comment.author_association
+        ),
+        github.event.issue.number,
+        format('run-{0}', github.run_id)
+      )
+    }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    # Secrets are unavailable to pull_request workflows from forks. Review those
+    # only after a trusted maintainer explicitly comments /prreview, which runs
+    # from the default branch through issue_comment.
+    if: >-
+      ${{
+        github.event.sender.type != 'Bot' &&
+        (
+          (
+            github.event_name == 'pull_request' &&
+            github.event.pull_request.draft == false &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          ) ||
+          (
+            github.event_name == 'issue_comment' &&
+            github.event.issue.pull_request &&
+            github.event.comment.body == '/prreview' &&
+            contains(
+              fromJSON('["OWNER","MEMBER","COLLABORATOR"]'),
+              github.event.comment.author_association
+            )
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install pinned PR-Agent
+        run: >-
+          python -m pip install --disable-pip-version-check
+          "git+https://github.com/the-pr-agent/pr-agent.git@570f67ed5fc8db5be74c18df070bc20079b64b0d"
+
+      - name: Run PR-Agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Keep provider-critical settings in the trusted workflow as well as
+          # .pr_agent.toml. This prevents a missing/unreadable repo config from
+          # silently falling back to PR-Agent's default OpenAI model.
+          config.model: "gemini/gemini-3.6-flash"
+          config.fallback_models: '["gemini/gemini-3.5-flash-lite"]'
+          config.reasoning_effort: "high"
+          config.max_model_tokens: "65536"
+          github_action_config.auto_review: "true"
+          github_action_config.auto_describe: "true"
+          github_action_config.auto_improve: "false"
+          # Publish the generated summary as its own persistent comment instead
+          # of replacing the maintainer-authored PR title or description.
+          pr_description.publish_description_as_comment: "true"
+          pr_description.publish_description_as_comment_persistent: "true"
+          # Initial non-draft events run the summary and full review. Later
+          # changes wait for an explicit /prreview incremental review request.
+          github_action_config.handle_push_trigger: "false"
+          pr_reviewer.publish_output_no_suggestions: "true"
+          pr_reviewer.persistent_comment: "true"
+          pr_reviewer.final_update_message: "true"
+        run: |
+          python - <<'PY'
+          import asyncio
+          import hashlib
+          import os
+          import re
+
+          from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
+
+          # PR-Agent at the pinned revision does not yet list these stable model
+          # IDs in its reasoning-effort allowlist. LiteLLM 1.93 supports their
+          # reasoning_effort parameter, so extend the in-memory list before
+          # importing the runner and its AI handler. .pr_agent.toml supplies the
+          # corresponding review-context cap.
+          for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
+              if model not in SUPPORT_REASONING_EFFORT_MODELS:
+                  SUPPORT_REASONING_EFFORT_MODELS.append(model)
+
+          REVIEW_MARKER_RE = re.compile(
+              r"<!-- graphify-pr-agent-review:([0-9a-f]{40}):[0-9a-f]{16} -->"
+          )
+
+          def _workflow_comment(comment):
+              login = getattr(getattr(comment, "user", None), "login", "")
+              return login.lower() in {"github-actions", "github-actions[bot]"}
+
+          def _review_marker_sha(body):
+              match = REVIEW_MARKER_RE.search(body or "")
+              return match.group(1) if match else None
+
+          def _set_sha_bound_incremental_commits(provider):
+              commits = list(provider.pr_commits or provider.pr.get_commits())
+              provider.pr_commits = commits
+              comments = list(provider.pr.get_issue_comments())
+              provider.comments = comments
+
+              previous_review = None
+              reviewed_sha = None
+              for comment in reversed(comments):
+                  if not _workflow_comment(comment):
+                      continue
+                  reviewed_sha = _review_marker_sha(comment.body)
+                  if reviewed_sha:
+                      previous_review = comment
+                      break
+
+              if previous_review is None:
+                  provider.incremental.is_incremental = False
+                  return
+
+              reviewed_index = next(
+                  (
+                      index
+                      for index, commit in enumerate(commits)
+                      if commit.sha == reviewed_sha
+                  ),
+                  None,
+              )
+              if reviewed_index is None:
+                  provider.incremental.is_incremental = False
+                  return
+
+              provider.previous_review = previous_review
+              provider.incremental.last_seen_commit = commits[reviewed_index]
+              commits_range = commits[reviewed_index + 1 :]
+              provider.incremental.commits_range = commits_range
+              provider.incremental.first_new_commit = (
+                  commits_range[0] if commits_range else None
+              )
+              for commit in commits_range:
+                  provider.unreviewed_files_map.update(
+                      {file.filename: file for file in commit.files}
+                  )
+
+          def _marked_publication(args, kwargs, provider, kind):
+              body = args[0] if args else kwargs.get("pr_comment")
+              if not isinstance(body, str):
+                  raise RuntimeError("PR-Agent publication has no text body")
+              head_sha = getattr(
+                  getattr(provider, "last_commit_id", None), "sha", ""
+              )
+              if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+                  raise RuntimeError("PR-Agent publication has no verified head SHA")
+              digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+              marker = f"<!-- graphify-pr-agent-{kind}:{head_sha}:{digest} -->"
+              first_line, separator, remainder = body.partition("\n")
+              marked_body = f"{first_line}\n{marker}"
+              if separator:
+                  marked_body += f"\n{remainder}"
+              if args:
+                  args = (marked_body, *args[1:])
+              else:
+                  kwargs = {**kwargs, "pr_comment": marked_body}
+              return args, kwargs, marker
+
+          def _publication_visible(provider, marker):
+              return any(
+                  _workflow_comment(comment) and marker in (comment.body or "")
+                  for comment in provider.get_issue_comments()
+              )
+
+          # The pinned tools catch their own exceptions. Wrap both initial tools
+          # so a missing prediction or publication fails the Actions check.
+          from pr_agent.agent.pr_agent import PRAgent
+          from pr_agent.git_providers.github_provider import GithubProvider
+          from pr_agent.tools.pr_description import PRDescription
+          from pr_agent.tools.pr_reviewer import PRReviewer
+
+          # The pinned provider uses review-comment timestamps and commit author
+          # dates for -i. Bind incremental ranges to a workflow-owned reviewed SHA
+          # instead, so old-authored/cherry-picked commits cannot be skipped.
+          GithubProvider._get_incremental_commits = (
+              _set_sha_bound_incremental_commits
+          )
+
+          verification = {
+              "description_completed": False,
+              "review_completed": False,
+              "review_mode": None,
+          }
+
+          original_description = PRDescription.run
+
+          async def run_verified_description(self):
+              description_published = False
+              original_publish = self.git_provider.publish_persistent_comment
+
+              def publish_verified_description(*args, **kwargs):
+                  nonlocal description_published
+                  if kwargs.get("name") != "describe":
+                      return original_publish(*args, **kwargs)
+                  args, kwargs, marker = _marked_publication(
+                      args, kwargs, self.git_provider, "summary"
+                  )
+                  result = original_publish(*args, **kwargs)
+                  description_published = _publication_visible(
+                      self.git_provider, marker
+                  )
+                  return result
+
+              self.git_provider.publish_persistent_comment = (
+                  publish_verified_description
+              )
+              try:
+                  await original_description(self)
+              finally:
+                  self.git_provider.publish_persistent_comment = original_publish
+
+              if not self.prediction:
+                  raise RuntimeError("PR-Agent did not produce a summary prediction")
+              if not description_published:
+                  raise RuntimeError("PR-Agent did not publish its summary comment")
+              verification["description_completed"] = True
+
+          PRDescription.run = run_verified_description
+
+          original_review = PRReviewer.run
+
+          async def run_verified_review(self):
+              requested_incremental = bool(self.args and self.args[0] == "-i")
+              effective_incremental = bool(self.incremental.is_incremental)
+              persistent_review_published = False
+              incremental_review_published = False
+              original_publish_persistent = (
+                  self.git_provider.publish_persistent_comment
+              )
+              original_publish_comment = self.git_provider.publish_comment
+
+              def publish_verified_persistent_review(*args, **kwargs):
+                  nonlocal persistent_review_published
+                  args, kwargs, marker = _marked_publication(
+                      args, kwargs, self.git_provider, "review"
+                  )
+                  result = original_publish_persistent(*args, **kwargs)
+                  persistent_review_published = _publication_visible(
+                      self.git_provider, marker
+                  )
+                  return result
+
+              def publish_verified_incremental_review(*args, **kwargs):
+                  nonlocal incremental_review_published
+                  is_temporary = kwargs.get(
+                      "is_temporary", args[1] if len(args) > 1 else False
+                  )
+                  body = args[0] if args else kwargs.get("pr_comment", "")
+                  is_incremental_output = isinstance(body, str) and body.startswith(
+                      ("## Incremental PR Reviewer Guide", "Incremental Review Skipped")
+                  )
+                  if effective_incremental and not is_temporary and is_incremental_output:
+                      args, kwargs, marker = _marked_publication(
+                          args, kwargs, self.git_provider, "review"
+                      )
+                      result = original_publish_comment(*args, **kwargs)
+                      incremental_review_published = _publication_visible(
+                          self.git_provider, marker
+                      )
+                      return result
+                  result = original_publish_comment(*args, **kwargs)
+                  return result
+
+              self.git_provider.publish_persistent_comment = (
+                  publish_verified_persistent_review
+              )
+              self.git_provider.publish_comment = publish_verified_incremental_review
+              try:
+                  await original_review(self)
+              finally:
+                  self.git_provider.publish_persistent_comment = (
+                      original_publish_persistent
+                  )
+                  self.git_provider.publish_comment = original_publish_comment
+
+              if requested_incremental and effective_incremental:
+                  if not incremental_review_published:
+                      raise RuntimeError(
+                          "PR-Agent did not publish its incremental review"
+                      )
+                  review_mode = "incremental"
+              else:
+                  if not self.prediction:
+                      raise RuntimeError(
+                          "PR-Agent did not produce a review prediction"
+                      )
+                  if not persistent_review_published:
+                      raise RuntimeError(
+                          "PR-Agent did not publish its persistent review"
+                      )
+                  review_mode = (
+                      "baseline_full" if requested_incremental else "initial_full"
+                  )
+
+              verification["review_completed"] = True
+              verification["review_mode"] = review_mode
+
+          PRReviewer.run = run_verified_review
+
+          original_handle_request = PRAgent.handle_request
+
+          async def handle_verified_request(self, pr_url, request, *args, **kwargs):
+              # /prreview is the public GitHub command. Translate it to an
+              # incremental review without exposing /review to other apps.
+              if isinstance(request, str) and request.strip().lower() == "/prreview":
+                  request = "/review -i"
+
+              handled = await original_handle_request(
+                  self, pr_url, request, *args, **kwargs
+              )
+              if handled is False:
+                  raise RuntimeError("PR-Agent did not handle the review command")
+              return handled
+
+          PRAgent.handle_request = handle_verified_request
+
+          from pr_agent.servers.github_action_runner import _run_action_and_drain
+
+          asyncio.run(_run_action_and_drain())
+          if not verification["review_completed"]:
+              raise RuntimeError("PR-Agent did not complete a verified review")
+          if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+              if not verification["description_completed"]:
+                  raise RuntimeError("PR-Agent did not complete a verified summary")
+          if os.environ.get("GITHUB_EVENT_NAME") == "issue_comment":
+              if verification["review_mode"] not in {
+                  "baseline_full",
+                  "incremental",
+              }:
+                  raise RuntimeError("/prreview did not complete a verified review")
+          PY
