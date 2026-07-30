@@ -856,11 +856,11 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
         ),
         (
             lambda _module: JournalRecoveryRequired("/private/journal provider-secret"),
-            (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
+            (20, "invalid", "gc_recovery_required", "run_workspace_repair", "not_observed"),
         ),
         (
             lambda _module: JournalCorrupt("/private/journal provider-secret"),
-            (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
+            (20, "invalid", "journal_invalid", "inspect_workspace_state", "not_observed"),
         ),
         (
             lambda _module: GenerationError("/private/generation provider-secret"),

@@ -2464,12 +2464,26 @@ def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
             "gc_recovery_required",
             "run_workspace_repair",
         )
+    if isinstance(error, JournalRecoveryRequired):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "gc_recovery_required",
+            "run_workspace_repair",
+        )
     if isinstance(error, StatePathError):
         return _GcPreviewFailure(
             "invalid",
             EXIT_INVALID,
             "unsafe_state_path",
             "configure_safe_state_root",
+        )
+    if isinstance(error, JournalError):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "journal_invalid",
+            "inspect_workspace_state",
         )
     if isinstance(error, UnsupportedRuntime):
         return _GcPreviewFailure(
@@ -2490,7 +2504,6 @@ def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
         (
             ContractError,
             GenerationError,
-            JournalError,
             LeaseError,
             PointerCorrupt,
             StateCorrupt,

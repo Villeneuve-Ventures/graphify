@@ -2139,6 +2139,8 @@ class SemanticQueueStore:
         )
         path = cls._certification_binding_path(repo_uuid, generation_id)
         try:
+            if not state.private_file_exists(path):
+                return None
             raw = state.read_optional_existing_bytes(
                 path,
                 max_bytes=_MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES,
@@ -2147,7 +2149,9 @@ class SemanticQueueStore:
             if raw is None:
                 return None
             binding = _SemanticCertificationBinding.from_json(raw)
-        except (ContractError, StateCorrupt, StatePathError) as exc:
+        except StatePathError:
+            raise
+        except (ContractError, StateCorrupt) as exc:
             raise SemanticCertificationBlocked(
                 f"durable semantic certification binding is invalid: {exc}"
             ) from exc

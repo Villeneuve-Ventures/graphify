@@ -340,6 +340,40 @@ def test_preview_rejects_unsafe_referenced_generation_receipt_without_writes(
     assert tree_snapshot(harness.state_root) == before_tree
 
 
+def test_preview_rejects_unsafe_certification_binding_without_writes(
+    tmp_path: Path,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    old, current, _racer = receipts
+    _promote(pointers, harness, old)
+    promote = acquire(harness, "PROMOTE", tick=3)
+    pointers.promote(
+        promote,
+        _cas(promote, current, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=30_001,
+    )
+    harness.leases.release(promote)
+    semantic_queue = generations.semantic_queue
+    assert semantic_queue is not None
+    binding_path = semantic_queue.state.path(
+        semantic_queue._certification_binding_path(REPO_UUID, "gen-new")
+    )
+    detached_binding = tmp_path / "detached-certification-binding.json"
+    binding_path.rename(detached_binding)
+    binding_path.symlink_to(detached_binding)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError) as raised:
+        repair.preview(_request(harness))
+
+    failure = classify_failure(raised.value, "preview")
+    assert failure.reason_code == "unsafe_state_path"
+    assert failure.action_code == "configure_safe_state_root"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
 def test_repair_uses_verified_last_good_when_current_is_corrupt_and_prior_is_missing(
     tmp_path: Path,
 ) -> None:
