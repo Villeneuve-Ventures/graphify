@@ -37,6 +37,7 @@ from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
     OperatorAuthorization,
+    SourceDiscoveryTimeout,
 )
 from graphify.workspace.journal import JournalError, JournalStore
 from graphify.workspace.leases import (
@@ -918,7 +919,7 @@ def classify_failure(error: Exception, operation: str) -> RepairFailure:
             "repair_authority_conflict",
             "refresh_repair_request",
         )
-    if isinstance(error, (LeaseBusy, LockTimeout)):
+    if isinstance(error, (LeaseBusy, LockTimeout, SourceDiscoveryTimeout)):
         return RepairFailure(
             operation,
             "conflict",

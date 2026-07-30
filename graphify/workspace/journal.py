@@ -388,6 +388,11 @@ class JournalStore:
                 max_bytes=64 * 1024,
                 deadline_ns=deadline_ns,
             )
+            if name == "previous" and data is not None:
+                try:
+                    JournalHeadState.from_json(data)
+                except Exception as exc:
+                    raise JournalCorrupt("journal previous head is invalid") from exc
             head_record_sha256[name] = None if data is None else hashlib.sha256(data).hexdigest()
         try:
             head_projection = self.state.project_record_recovery(

@@ -23,7 +23,11 @@ from graphify.workspace.contracts import (
     StructuralBuildRequest,
     WorkspaceLeaseState,
 )
-from graphify.workspace.identity import SourceAmbiguousError, discover_source
+from graphify.workspace.identity import (
+    SourceAmbiguousError,
+    SourceDiscoveryTimeout,
+    discover_source,
+)
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
@@ -453,6 +457,8 @@ class LeaseStore:
                 Path(recorded_source["path"]),
                 deadline_ns=deadline_ns,
             )
+        except SourceDiscoveryTimeout:
+            raise
         except (OSError, RuntimeError) as exc:
             raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
         if discovered.repo_uuid != repo_uuid or discovered.registry_source != recorded_source:

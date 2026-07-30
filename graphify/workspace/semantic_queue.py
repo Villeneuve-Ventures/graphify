@@ -2074,6 +2074,12 @@ class SemanticQueueStore:
             deadline_ns,
             "semantic queue snapshot read exceeded its deadline",
         )
+        for path in self._paths(repo_uuid):
+            self.state.private_file_exists(path)
+            require_before_deadline(
+                deadline_ns,
+                "semantic queue snapshot read exceeded its deadline",
+            )
         snapshot = self._load_locked(
             repo_uuid,
             recover=False,

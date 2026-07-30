@@ -20,6 +20,7 @@ from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace import persistence as persistence_module
 from graphify.workspace.composition import WorkspaceRuntime
 from graphify.workspace.generations import GenerationStore
+from graphify.workspace.identity import SourceDiscoveryTimeout
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import (
     GcIntentRecoveryRequired,
@@ -466,6 +467,49 @@ def test_preview_rejects_corrupt_semantic_queue_without_writes(tmp_path: Path) -
     assert tree_snapshot(harness.state_root) == before_tree
 
 
+def test_preview_rejects_malformed_previous_journal_head_without_writes(
+    tmp_path: Path,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    _current, previous, _pending = journal._head_paths(REPO_UUID)
+    previous_path = journal.state.path(previous)
+    previous_path.write_bytes(b"{\n")
+    previous_path.chmod(0o600)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    preview = repair.preview(_request(harness))
+
+    assert preview.to_dict()["classification"] == "irreparable"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_preserves_unsafe_semantic_queue_path_classification(
+    tmp_path: Path,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    semantic_queue = generations.semantic_queue
+    assert semantic_queue is not None
+    current, _previous, _pending = semantic_queue._paths(REPO_UUID)
+    queue_path = semantic_queue.state.path(current)
+    queue_path.unlink()
+    external = tmp_path / "external-semantic-queue.jsonl"
+    external.write_bytes(b"")
+    queue_path.symlink_to(external)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError) as raised:
+        repair.preview(_request(harness))
+
+    failure = classify_failure(raised.value, "preview")
+    assert failure.reason_code == "unsafe_state_path"
+    assert failure.action_code == "configure_safe_state_root"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
 def test_preview_requires_every_referenced_generation_lock(tmp_path: Path) -> None:
     harness, journal, generations, pointers, receipts = _runtime(tmp_path)
     _promote(pointers, harness, receipts[0])
@@ -557,6 +601,37 @@ def test_execute_rejects_changed_plan_before_pointer_mutation(tmp_path: Path) ->
         )
 
     assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_execute_preserves_source_discovery_timeout_before_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    repair = _repair(harness, journal, generations, pointers)
+    request = _request(harness)
+    preview = repair.preview(request)
+    operation_epoch_before = harness.leases.inspect(REPO_UUID).operation_epoch
+
+    def source_timeout(*_args: object, **_kwargs: object) -> object:
+        raise SourceDiscoveryTimeout("private source discovery timeout")
+
+    monkeypatch.setattr("graphify.workspace.leases.discover_source", source_timeout)
+
+    with pytest.raises(SourceDiscoveryTimeout) as raised:
+        repair.execute(
+            request,
+            approved_preview_sha256=_approved_preview_sha256(request, preview),
+            authorization=_authorization(),
+            occurred_at=START + timedelta(seconds=4),
+            monotonic_ns=40_001,
+        )
+
+    failure = classify_failure(raised.value, "execute")
+    assert failure.reason_code == "repair_lease_busy"
+    assert failure.action_code == "retry_workspace_repair"
+    assert harness.leases.inspect(REPO_UUID).operation_epoch == operation_epoch_before
 
 
 def test_execute_revalidates_semantic_queue_after_repair_fence_acquisition(
