@@ -32,6 +32,7 @@ from graphify.workspace.persistence import (
     CommitUnknown,
     InjectedFault,
     LockTimeout,
+    StateCorrupt,
     StatePathError,
     StateRecoveryRequired,
 )
@@ -113,7 +114,7 @@ def _repair(
     )
 
 
-def _request(harness: Any, *, timeout_ns: int = 100_000) -> RepairPreviewRequest:
+def _request(harness: Any, *, timeout_ms: int = 5_000) -> RepairPreviewRequest:
     registry = harness.registry.load().to_dict()
     entry = registry["workspaces"][0]
     lease = harness.leases.inspect(REPO_UUID)
@@ -123,7 +124,7 @@ def _request(harness: Any, *, timeout_ns: int = 100_000) -> RepairPreviewRequest
         expected_active_source_revision=int(entry["active_source_revision"]),
         expected_operation_epoch=lease.operation_epoch,
         expected_migration_epoch=lease.migration_epoch,
-        timeout_ns=timeout_ns,
+        timeout_ms=timeout_ms,
     )
 
 
@@ -135,6 +136,47 @@ def _authorization() -> RepairAuthorization:
         issued_at="2026-07-28T19:00:00Z",
         nonce="repair-execute-1",
     )
+
+
+def test_preview_request_uses_only_the_canonical_timeout() -> None:
+    request = RepairPreviewRequest(
+        repo_uuid=REPO_UUID,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=0,
+        expected_migration_epoch=0,
+        timeout_ms=5_000,
+    )
+
+    assert request.deadline_from(100) == 5_000_000_100
+    with pytest.raises(TypeError):
+        cast(Any, RepairPreviewRequest)(
+            repo_uuid=REPO_UUID,
+            expected_registry_revision=1,
+            expected_active_source_revision=1,
+            expected_operation_epoch=0,
+            expected_migration_epoch=0,
+            timeout_ms=5_000,
+            timeout_ns=5_000_000_000,
+        )
+
+
+def test_repair_plan_rejects_a_decision_without_classification() -> None:
+    decision = SimpleNamespace(
+        decision_sha256="a" * 64,
+        to_dict=lambda: {
+            "candidate": {"generation_id": "gen-current", "receipt_sha256": "b" * 64},
+            "journal_actions": [],
+            "last_good": None,
+            "next_pointer_revision": 1,
+            "pointer_action": "none",
+            "quarantine": [],
+            "selected_from": "current",
+        },
+    )
+
+    with pytest.raises(StateCorrupt, match="invalid plan"):
+        RepairPlan.from_decision(cast(Any, decision))
 
 
 def _approved_preview_sha256(request: RepairPreviewRequest, plan: RepairPlan) -> str:
@@ -163,7 +205,7 @@ def test_preview_is_read_only_and_returns_a_deterministic_no_op_plan(tmp_path: P
     repair = _repair(harness, journal, generations, pointers)
     before_tree = tree_snapshot(harness.state_root)
 
-    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+    preview = repair.preview(_request(harness))
 
     payload = preview.to_dict()
     decision_sha256 = payload.pop("decision_sha256")
@@ -205,7 +247,7 @@ def test_preview_selects_verified_pending_candidate_and_plans_repair(tmp_path: P
     repair = _repair(harness, journal, generations, pointers)
     before_tree = tree_snapshot(harness.state_root)
 
-    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+    preview = repair.preview(_request(harness))
 
     payload = preview.to_dict()
     assert payload["classification"] == "repairable"
@@ -235,7 +277,7 @@ def test_preview_reports_irreparable_when_no_pointer_reference_verifies(tmp_path
     repair = _repair(harness, journal, generations, pointers)
     before_tree = tree_snapshot(harness.state_root)
 
-    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+    preview = repair.preview(_request(harness))
 
     assert preview.to_dict()["classification"] == "irreparable"
     assert preview.to_dict()["candidate"] is None
@@ -264,7 +306,7 @@ def test_repair_uses_verified_last_good_when_current_is_corrupt_and_prior_is_mis
     request = _request(harness)
     before_tree = tree_snapshot(harness.state_root)
 
-    preview = repair.preview(request, monotonic_ns=40_001)
+    preview = repair.preview(request)
 
     payload = preview.to_dict()
     decision_sha256 = payload.pop("decision_sha256")
@@ -322,7 +364,7 @@ def test_preview_routes_gc_intent_outside_pointer_repair_without_writes(
     before_tree = tree_snapshot(harness.state_root)
 
     with pytest.raises(RepairError) as raised:
-        repair.preview(_request(harness), monotonic_ns=30_001)
+        repair.preview(_request(harness))
 
     failure = classify_failure(raised.value, "preview")
     assert failure.reason_code == "repair_state_unsupported"
@@ -345,7 +387,7 @@ def test_preview_routes_nonterminal_staged_build_outside_pointer_repair_without_
     before_tree = tree_snapshot(harness.state_root)
 
     with pytest.raises(RepairError) as raised:
-        repair.preview(_request(harness), monotonic_ns=30_001)
+        repair.preview(_request(harness))
 
     failure = classify_failure(raised.value, "preview")
     assert failure.reason_code == "repair_state_unsupported"
@@ -416,7 +458,7 @@ def test_preview_rejects_corrupt_semantic_queue_without_writes(tmp_path: Path) -
     before_tree = tree_snapshot(harness.state_root)
 
     with pytest.raises(SemanticQueueError) as raised:
-        repair.preview(_request(harness), monotonic_ns=30_001)
+        repair.preview(_request(harness))
 
     failure = classify_failure(raised.value, "preview")
     assert failure.reason_code == "repair_state_unsupported"
@@ -432,7 +474,7 @@ def test_preview_requires_every_referenced_generation_lock(tmp_path: Path) -> No
     repair = _repair(harness, journal, generations, pointers)
     before_tree = tree_snapshot(harness.state_root)
 
-    preview = repair.preview(_request(harness), monotonic_ns=30_001)
+    preview = repair.preview(_request(harness))
 
     assert preview.to_dict()["classification"] == "irreparable"
     assert tree_snapshot(harness.state_root) == before_tree
@@ -501,7 +543,7 @@ def test_execute_rejects_changed_plan_before_pointer_mutation(tmp_path: Path) ->
     _promote(pointers, harness, receipts[0])
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     before_tree = tree_snapshot(harness.state_root)
     stale = replace(request, expected_operation_epoch=request.expected_operation_epoch + 1)
 
@@ -525,7 +567,7 @@ def test_execute_revalidates_semantic_queue_after_repair_fence_acquisition(
     _promote(pointers, harness, receipts[0])
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     semantic_queue = generations.semantic_queue
     assert semantic_queue is not None
     current, _previous, _pending = semantic_queue._paths(REPO_UUID)
@@ -578,7 +620,7 @@ def test_execute_routes_gc_intent_created_before_repair_lease_to_reconcile(
     _promote(pointers, harness, receipts[0])
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     pointer = pointers.load(REPO_UUID, allow_missing=False)
     assert pointer is not None
     intent = _gc_intent(pointer, capacity_policy_sha256=POLICY.sha256)
@@ -620,7 +662,7 @@ def test_execute_routes_staged_build_created_before_repair_lease_to_exact_sync(
     _promote(pointers, harness, receipts[0])
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     pointer_path = harness.state_root / "workspaces" / REPO_UUID / "pointers.json"
     pointer_before = pointer_path.read_bytes()
     operation_epoch_before = harness.leases.inspect(REPO_UUID).operation_epoch
@@ -686,7 +728,7 @@ def test_execute_does_not_recover_non_pointer_pending_state_before_repair_lease(
     _promote(pointers, harness, receipts[0])
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     if record == "registry":
         current = harness.registry.state.path(harness.registry.CURRENT)
         pending = harness.registry.state.path(harness.registry.PENDING)
@@ -741,7 +783,7 @@ def test_library_execute_accepts_the_public_preview_result_digest(
         expected_active_source_revision=1,
         expected_operation_epoch=0,
         expected_migration_epoch=0,
-        timeout_ns=1_000_000_000,
+        timeout_ms=1_000,
     )
     plan = RepairPlan(
         classification="no_op",
@@ -789,8 +831,8 @@ def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
             journal=journal,
         ),
     )
-    request = _request(harness, timeout_ns=10_000_000_000)
-    preview = repair_preview(runtime, request, monotonic_ns=30_001)
+    request = _request(harness, timeout_ms=10_000)
+    preview = repair_preview(runtime, request)
     assert preview.to_dict()["classification"] == "no_op"
     before_epoch = harness.leases.inspect(REPO_UUID).operation_epoch
     recover_calls: list[LeaseGrant] = []
@@ -846,7 +888,7 @@ def test_public_execute_no_op_uses_a_fresh_repair_lease_and_pointer_recovery(
             expected_migration_epoch=request.expected_migration_epoch,
             approved_preview_sha256=preview.sha256,
             authorization=_authorization(),
-            timeout_ns=request.timeout_ns,
+            timeout_ms=request.timeout_ms,
         ),
         occurred_at=START + timedelta(seconds=4),
         monotonic_clock=lambda: 40_001,
@@ -876,8 +918,8 @@ def test_execute_does_not_recover_registry_after_repair_fence(
     harness, journal, generations, pointers, receipts = _runtime(tmp_path)
     _promote(pointers, harness, receipts[0])
     repair = _repair(harness, journal, generations, pointers)
-    request = _request(harness, timeout_ns=10_000_000_000)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    request = _request(harness, timeout_ms=10_000)
+    preview = repair.preview(request)
 
     def reject_registry_recovery(*_args: object, **_kwargs: object) -> object:
         pytest.fail("REPAIR recovered global registry state after acquiring its fence")
@@ -902,7 +944,7 @@ def test_post_fence_timeout_requires_status_and_a_fresh_preview(
     _promote(pointers, harness, receipts[0])
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     before_epoch = harness.leases.inspect(REPO_UUID).operation_epoch
 
     def timeout_after_fence(*_args: object, **_kwargs: object) -> PointerSet:
@@ -1039,7 +1081,7 @@ def test_interrupted_execute_requires_fresh_preview_and_resumes_safely(
     harness.leases.release(promote)
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     active_failpoint = failpoint
 
     with pytest.raises(InjectedFault):
@@ -1059,7 +1101,7 @@ def test_interrupted_execute_requires_fresh_preview_and_resumes_safely(
             monotonic_ns=50_001,
         )
     fresh_request = _request(harness)
-    fresh_preview = repair.preview(fresh_request, monotonic_ns=60_001)
+    fresh_preview = repair.preview(fresh_request)
     repaired = repair.execute(
         fresh_request,
         approved_preview_sha256=_approved_preview_sha256(fresh_request, fresh_preview),
@@ -1125,7 +1167,7 @@ def test_execute_quarantines_only_corrupt_generation_excluded_from_repaired_poin
     corrupt_payload.write_text("corrupt\n", encoding="utf-8")
     repair = _repair(harness, journal, generations, pointers)
     request = _request(harness)
-    preview = repair.preview(request, monotonic_ns=30_001)
+    preview = repair.preview(request)
     workspace = harness.state_root / "workspaces" / REPO_UUID
     unrelated_before = {
         "old": tree_snapshot(workspace / "generations" / "gen-old"),

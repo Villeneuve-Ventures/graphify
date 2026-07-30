@@ -270,8 +270,7 @@ class RepairPreviewRequest:
     expected_active_source_revision: int
     expected_operation_epoch: int
     expected_migration_epoch: int
-    timeout_ms: int | None = None
-    timeout_ns: int | None = field(default=None, repr=False, compare=False)
+    timeout_ms: int
 
     CONTRACT: ClassVar[str] = REPAIR_PREVIEW_REQUEST_CONTRACT
 
@@ -298,32 +297,13 @@ class RepairPreviewRequest:
                 "expected_migration_epoch",
                 minimum=0,
             )
-            if self.timeout_ms is None and self.timeout_ns is None:
-                raise ValueError("repair request timeout is missing")
-            if self.timeout_ms is not None and self.timeout_ns is not None:
-                timeout_ms = _integer(self.timeout_ms, "timeout_ms", minimum=1)
-                duration_ns = _integer(self.timeout_ns, "timeout_ns", minimum=1)
-                if (
-                    timeout_ms > REPAIR_TIMEOUT_MAX_MS
-                    or duration_ns > REPAIR_TIMEOUT_MAX_MS * 1_000_000
-                    or timeout_ms != max(1, (duration_ns + 999_999) // 1_000_000)
-                ):
-                    raise ValueError("repair request timeout units are inconsistent")
-            elif self.timeout_ms is not None:
-                timeout_ms = _integer(self.timeout_ms, "timeout_ms", minimum=1)
-                if timeout_ms > REPAIR_TIMEOUT_MAX_MS:
-                    raise ValueError("repair request timeout_ms is invalid")
-                duration_ns = timeout_ms * 1_000_000
-            else:
-                duration_ns = _integer(self.timeout_ns, "timeout_ns", minimum=1)
-                if duration_ns > REPAIR_TIMEOUT_MAX_MS * 1_000_000:
-                    raise ValueError("repair request timeout_ns is invalid")
-                timeout_ms = max(1, (duration_ns + 999_999) // 1_000_000)
+            timeout_ms = _integer(self.timeout_ms, "timeout_ms", minimum=1)
+            if timeout_ms > REPAIR_TIMEOUT_MAX_MS:
+                raise ValueError("repair request timeout_ms is invalid")
         except ValueError as exc:
             raise RepairPreviewRequestInvalid("repair preview request is invalid") from exc
         object.__setattr__(self, "repo_uuid", repo_uuid)
         object.__setattr__(self, "timeout_ms", timeout_ms)
-        object.__setattr__(self, "timeout_ns", duration_ns)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -351,13 +331,9 @@ class RepairPreviewRequest:
             started_ns = time.monotonic_ns()
         if type(started_ns) is not int or started_ns < 0:
             raise ValueError("repair deadline start must be a non-negative integer")
-        return started_ns + cast(int, self.timeout_ns)
+        return started_ns + self.timeout_ms * 1_000_000
 
-    def runtime_deadline(self) -> int | None:
-        """Return the public deadline, or ``None`` for synthetic test-clock inputs."""
-
-        if self.timeout_ns != cast(int, self.timeout_ms) * 1_000_000:
-            return None
+    def runtime_deadline(self) -> int:
         return self.deadline_from()
 
     @classmethod
@@ -415,8 +391,7 @@ class RepairExecuteRequest:
     expected_migration_epoch: int
     approved_preview_sha256: str
     authorization: RepairAuthorization
-    timeout_ms: int | None = None
-    timeout_ns: int | None = field(default=None, repr=False, compare=False)
+    timeout_ms: int
 
     CONTRACT: ClassVar[str] = REPAIR_EXECUTE_REQUEST_CONTRACT
 
@@ -429,7 +404,6 @@ class RepairExecuteRequest:
                 expected_operation_epoch=self.expected_operation_epoch,
                 expected_migration_epoch=self.expected_migration_epoch,
                 timeout_ms=self.timeout_ms,
-                timeout_ns=self.timeout_ns,
             )
             digest = _digest(
                 self.approved_preview_sha256,
@@ -442,7 +416,6 @@ class RepairExecuteRequest:
             raise RepairExecuteRequestInvalid("repair execute request is invalid") from exc
         object.__setattr__(self, "repo_uuid", preview.repo_uuid)
         object.__setattr__(self, "timeout_ms", preview.timeout_ms)
-        object.__setattr__(self, "timeout_ns", preview.timeout_ns)
         object.__setattr__(self, "approved_preview_sha256", digest)
 
     @property
@@ -634,23 +607,11 @@ class RepairPlan:
             raise StateCorrupt("pointer repair analysis returned an invalid plan") from exc
         if not isinstance(value, Mapping):
             raise StateCorrupt("pointer repair analysis returned an invalid plan")
-        classification_value = value.get("classification")
-        if isinstance(classification_value, str):
-            classification = classification_value
-        else:
-            pointer_action = value.get("pointer_action")
-            classification = (
-                "no_op"
-                if pointer_action in {"none", "noop"}
-                and not value.get("journal_actions")
-                and not value.get("quarantine")
-                else "repairable"
-            )
         try:
             journal_actions = tuple(cast(list[str] | tuple[str, ...], value["journal_actions"]))
             quarantine = tuple(cast(list[str] | tuple[str, ...], value["quarantine"]))
             return cls(
-                classification=classification,
+                classification=cast(str, value["classification"]),
                 candidate=cast(dict[str, str] | None, value["candidate"]),
                 last_good=cast(dict[str, str] | None, value["last_good"]),
                 next_pointer_revision=cast(int, value["next_pointer_revision"]),
@@ -1138,12 +1099,10 @@ class WorkspaceRepair:
         self,
         request: RepairPreviewRequest,
         *,
-        monotonic_ns: int | None = None,
         deadline_ns: int | None = None,
     ) -> RepairPlan:
         """Analyze repair using existing-only locks and no durable writes."""
 
-        del monotonic_ns  # operation clocks do not define host lock deadlines
         if deadline_ns is None:
             deadline_ns = request.runtime_deadline()
         try:
@@ -1238,7 +1197,6 @@ class WorkspaceRepair:
         try:
             plan = self.preview(
                 request,
-                monotonic_ns=monotonic_ns,
                 deadline_ns=deadline_ns,
             )
         except RepairAuthorityConflict as exc:
@@ -1366,12 +1324,10 @@ def _workspace_repair(runtime: WorkspaceRuntime) -> WorkspaceRepair:
 def repair_preview(
     runtime: WorkspaceRuntime,
     request: RepairPreviewRequest,
-    *,
-    monotonic_ns: int | None = None,
 ) -> RepairPreviewResult:
     """Return the exact canonical public preview approved by execute."""
 
-    plan = _workspace_repair(runtime).preview(request, monotonic_ns=monotonic_ns)
+    plan = _workspace_repair(runtime).preview(request)
     return _public_preview_result(request, plan)
 
 
@@ -1413,7 +1369,6 @@ def repair_execute(
     deadline_ns = preview_request.runtime_deadline()
     plan = repair.preview(
         preview_request,
-        monotonic_ns=monotonic_clock(),
         deadline_ns=deadline_ns,
     )
     preview = _public_preview_result(preview_request, plan)

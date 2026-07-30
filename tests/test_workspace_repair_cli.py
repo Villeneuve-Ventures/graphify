@@ -73,6 +73,25 @@ def _request_bytes(value: dict[str, Any]) -> bytes:
     return canonical_json_bytes(value)
 
 
+def test_canonical_result_short_write_names_the_repair_boundary() -> None:
+    class ShortBinaryStream:
+        def write(self, payload: bytes) -> int:
+            return len(payload) - 1
+
+        def flush(self) -> None:
+            raise AssertionError("short writes must fail before flush")
+
+    stream = SimpleNamespace(buffer=ShortBinaryStream())
+
+    with pytest.raises(OSError, match="incomplete workspace repair preview result"):
+        _cli()._emit_canonical_result(
+            stream,
+            b"{}",
+            exit_code=20,
+            result_label="repair preview result",
+        )
+
+
 def _preview_result_value(*, classification: str = "repairable") -> dict[str, Any]:
     if classification == "irreparable":
         plan: dict[str, Any] = {
@@ -457,7 +476,7 @@ def test_repair_preview_cli_preserves_unsafe_analysis_paths_without_writes(
     except OSError:
         pytest.skip("filesystem does not support symlinks")
     before_tree = tree_snapshot(harness.state_root)
-    request = _request(harness, timeout_ns=5_000_000_000)
+    request = _request(harness, timeout_ms=5_000)
     runtime = SimpleNamespace(
         registry=harness.registry,
         leases=harness.leases,

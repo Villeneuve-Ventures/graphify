@@ -978,13 +978,14 @@ def _emit_rollback_output(
     return exit_code
 
 
-def _emit_gc_preview_output(
+def _emit_canonical_result(
     stream: TextIO,
     payload: bytes,
     *,
     exit_code: int,
+    result_label: str,
 ) -> int:
-    """Write one canonical GC preview result as exact UTF-8 bytes."""
+    """Write one canonical workspace result as exact UTF-8 bytes."""
 
     binary_stream = getattr(stream, "buffer", None)
     if binary_stream is None:
@@ -996,7 +997,7 @@ def _emit_gc_preview_output(
     try:
         written = binary_stream.write(payload)
         if written != len(payload):
-            raise OSError(errno.EIO, "incomplete workspace GC preview result")
+            raise OSError(errno.EIO, f"incomplete workspace {result_label}")
         binary_stream.flush()
     except (BrokenPipeError, OSError) as exc:
         if not _silence_standard_streams_after_broken_pipe(stream, exc):
@@ -2513,10 +2514,11 @@ def _emit_gc_preview_failure(
     errors: TextIO,
     failure: _GcPreviewFailure,
 ) -> int:
-    return _emit_gc_preview_output(
+    return _emit_canonical_result(
         errors,
         _gc_preview_failure_payload(failure),
         exit_code=failure.exit_code,
+        result_label="GC preview result",
     )
 
 
@@ -2597,10 +2599,11 @@ def _run_gc_preview(
                 "run_workspace_doctor",
             ),
         )
-    return _emit_gc_preview_output(
+    return _emit_canonical_result(
         output,
         _gc_preview_success_payload(result),
         exit_code=EXIT_READY,
+        result_label="GC preview result",
     )
 
 
@@ -2660,20 +2663,22 @@ def _run_gc_lifecycle(
                 "runtime_authority_missing",
                 "install_candidate_authority",
             )
-            return _emit_gc_preview_output(
+            return _emit_canonical_result(
                 errors,
                 failure.canonical,
                 exit_code=failure.exit_code,
+                result_label=f"GC {operation} result",
             )
         runtime = compose_workspace_runtime(resolved_inputs)
     except InjectedFault:
         raise
     except Exception as exc:
         failure = gc_command_runtime.classify_failure(exc, operation)
-        return _emit_gc_preview_output(
+        return _emit_canonical_result(
             errors,
             failure.canonical,
             exit_code=failure.exit_code,
+            result_label=f"GC {operation} result",
         )
 
     try:
@@ -2720,15 +2725,17 @@ def _run_gc_lifecycle(
         raise
     except Exception as exc:
         failure = gc_command_runtime.classify_failure(exc, operation)
-        return _emit_gc_preview_output(
+        return _emit_canonical_result(
             errors,
             failure.canonical,
             exit_code=failure.exit_code,
+            result_label=f"GC {operation} result",
         )
-    return _emit_gc_preview_output(
+    return _emit_canonical_result(
         output,
         result.canonical,
         exit_code=EXIT_READY,
+        result_label=f"GC {operation} result",
     )
 
 
@@ -2780,20 +2787,22 @@ def _run_repair(
                 "runtime_authority_missing",
                 "install_candidate_authority",
             )
-            return _emit_gc_preview_output(
+            return _emit_canonical_result(
                 errors,
                 failure.canonical,
                 exit_code=failure.exit_code,
+                result_label=f"repair {operation} result",
             )
         runtime = compose_workspace_runtime(resolved_inputs)
     except InjectedFault:
         raise
     except Exception as exc:
         failure = repair_runtime.classify_failure(exc, operation)
-        return _emit_gc_preview_output(
+        return _emit_canonical_result(
             errors,
             failure.canonical,
             exit_code=failure.exit_code,
+            result_label=f"repair {operation} result",
         )
 
     try:
@@ -2813,11 +2822,7 @@ def _run_repair(
         ):
             if operation == "preview":
                 request = RepairPreviewRequest.from_bytes(raw_request)
-                result = repair_preview(
-                    runtime,
-                    request,
-                    monotonic_ns=time.monotonic_ns(),
-                )
+                result = repair_preview(runtime, request)
             elif operation == "execute":
                 request = RepairExecuteRequest.from_bytes(raw_request)
                 result = repair_execute(
@@ -2832,20 +2837,22 @@ def _run_repair(
         raise
     except Exception as exc:
         failure = repair_runtime.classify_failure(exc, operation)
-        return _emit_gc_preview_output(
+        return _emit_canonical_result(
             errors,
             failure.canonical,
             exit_code=failure.exit_code,
+            result_label=f"repair {operation} result",
         )
     exit_code = (
         EXIT_INVALID
         if operation == "preview" and result.to_dict()["classification"] == "irreparable"
         else EXIT_READY
     )
-    return _emit_gc_preview_output(
+    return _emit_canonical_result(
         output,
         result.canonical,
         exit_code=exit_code,
+        result_label=f"repair {operation} result",
     )
 
 
