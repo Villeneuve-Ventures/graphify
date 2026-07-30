@@ -848,6 +848,26 @@ def _workspace_failure(
     return workspace, checks
 
 
+def _pointer_state_is_repairable(
+    runtime: WorkspaceRuntime,
+    repo_uuid: str,
+    *,
+    active_source_revision: int,
+    deadline_ns: int,
+) -> bool:
+    try:
+        plan = runtime.pointers.analyze_repair(
+            repo_uuid,
+            active_source_revision=active_source_revision,
+            operation_epoch=None,
+            fence_token=None,
+            deadline_ns=deadline_ns,
+        )
+    except (PointerError, GenerationError, JournalError):
+        return False
+    return plan.classification == "repairable"
+
+
 def _deadline_failure(
     workspace: dict[str, object],
     checks: list[dict[str, str]],
@@ -1109,25 +1129,55 @@ def _inspect_workspace(
                     checks,
                     component=f"{prefix}:pointer",
                 )
-            except PointerRecoveryRequired:
+            except PointerError as exc:
+                try:
+                    repairable = _pointer_state_is_repairable(
+                        runtime,
+                        repo_uuid,
+                        active_source_revision=cast(int, entry["active_source_revision"]),
+                        deadline_ns=deadline_ns,
+                    )
+                except LockTimeout as timeout:
+                    return _deadline_failure(
+                        workspace,
+                        checks,
+                        component=f"{prefix}:pointer",
+                        reason_code=_lock_timeout_reason(timeout, "generation"),
+                    )
+                except UnsupportedCompatibility:
+                    return _workspace_failure(
+                        workspace,
+                        checks,
+                        component=f"{prefix}:compatibility",
+                        state="invalid",
+                        reason_code="unsupported_compatibility",
+                        action_code="install_supported_candidate",
+                        repair_required=False,
+                    )
+                except StatePathError:
+                    return _workspace_failure(
+                        workspace,
+                        checks,
+                        component=f"{prefix}:pointer",
+                        state="invalid",
+                        reason_code="unsafe_state_path",
+                        action_code="configure_safe_state_root",
+                        repair_required=False,
+                    )
                 return _workspace_failure(
                     workspace,
                     checks,
                     component=f"{prefix}:pointer",
                     state="invalid",
-                    reason_code="pointer_recovery_required",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
-                )
-            except PointerError:
-                return _workspace_failure(
-                    workspace,
-                    checks,
-                    component=f"{prefix}:pointer",
-                    state="invalid",
-                    reason_code="pointer_invalid",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
+                    reason_code=(
+                        "pointer_recovery_required"
+                        if isinstance(exc, PointerRecoveryRequired)
+                        else "pointer_invalid"
+                    ),
+                    action_code=(
+                        "run_workspace_repair" if repairable else "inspect_workspace_state"
+                    ),
+                    repair_required=repairable,
                 )
             state_path_component = f"{prefix}:journal"
             try:
@@ -1264,11 +1314,10 @@ def _inspect_workspace(
                 )
             except GenerationError:
                 try:
-                    repair_plan = runtime.pointers.analyze_repair(
+                    repairable = _pointer_state_is_repairable(
+                        runtime,
                         repo_uuid,
                         active_source_revision=cast(int, entry["active_source_revision"]),
-                        operation_epoch=None,
-                        fence_token=None,
                         deadline_ns=deadline_ns,
                     )
                 except LockTimeout as exc:
@@ -1298,9 +1347,7 @@ def _inspect_workspace(
                         action_code="configure_safe_state_root",
                         repair_required=False,
                     )
-                except (PointerError, GenerationError, JournalError):
-                    repair_plan = None
-                if repair_plan is not None and repair_plan.classification == "repairable":
+                if repairable:
                     return _workspace_failure(
                         workspace,
                         checks,

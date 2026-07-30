@@ -1250,11 +1250,53 @@ def test_status_rejects_policy_matching_semantic_queue_over_item_capacity(
     assert value["workspaces"][0]["repair"]["required"] is False
 
 
-def test_status_reports_pointer_pending_recovery_as_invalid(tmp_path: Path) -> None:
+def test_status_routes_repairable_pointer_pending_to_repair(tmp_path: Path) -> None:
+    from tests.test_workspace_pointers import SEMANTIC_QUEUE_POLICY, _cas
+    from tests.test_workspace_repair import _runtime as repair_runtime
+
+    def interrupt_pending(event: str) -> None:
+        if event == "pointer:promoted:pending_durable":
+            raise RuntimeError(event)
+
+    harness, _journal, _generations, pointers, receipts = repair_runtime(
+        tmp_path,
+        fault_hook=interrupt_pending,
+    )
+    promote = acquire(harness, "PROMOTE", tick=2)
+    with pytest.raises(RuntimeError, match="pending_durable"):
+        pointers.promote(
+            promote,
+            _cas(promote, receipts[0], revision=0, current_sha256=None),
+            occurred_at=START,
+            monotonic_ns=20_001,
+        )
+    harness.leases.release(promote)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=harness.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=SEMANTIC_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+
+    assert report.exit_code == 20
+    value = report.to_dict()
+    pointer_check = next(
+        check
+        for check in value["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:pointer"
+    )
+    assert pointer_check["reason_code"] == "pointer_recovery_required"
+    assert pointer_check["action_code"] == "run_workspace_repair"
+    assert value["workspaces"][0]["repair"]["required"] is True
+
+
+def test_status_does_not_route_malformed_pending_pointer_to_repair(tmp_path: Path) -> None:
     harness = create_harness(tmp_path)
-    pointer = PointerSet.from_json((FIXTURES / "positive" / "pointer-set.json").read_bytes())
     pending = harness.state_root / "workspaces" / REPO_UUID / "pointers.pending.json"
-    pending.write_bytes(pointer.canonical)
+    pending.write_bytes(b"{}\n")
     pending.chmod(0o600)
 
     report = inspect_workspace_status(_inputs(harness.state_root))
@@ -1267,8 +1309,8 @@ def test_status_reports_pointer_pending_recovery_as_invalid(tmp_path: Path) -> N
         if check["component"] == f"workspace:{REPO_UUID}:pointer"
     )
     assert pointer_check["reason_code"] == "pointer_recovery_required"
-    assert pointer_check["action_code"] == "run_workspace_repair"
-    assert value["workspaces"][0]["repair"]["required"] is True
+    assert pointer_check["action_code"] == "inspect_workspace_state"
+    assert value["workspaces"][0]["repair"]["required"] is False
 
 
 def test_status_routes_unresolved_gc_intent_only_to_gc_reconcile(tmp_path: Path) -> None:
