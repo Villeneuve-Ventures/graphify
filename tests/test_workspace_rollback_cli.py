@@ -944,6 +944,7 @@ def test_rollback_expired_reload_stops_before_generation_reverification(
 
     runtime.pointers.verify_pointer = verify_once
     deadline_ns = 40_000_000_000
+    before_expiry_ns = deadline_ns - 5_000_000_000
     expired = False
     acquire = runtime.leases.acquire
 
@@ -956,7 +957,7 @@ def test_rollback_expired_reload_stops_before_generation_reverification(
     monkeypatch.setattr(runtime.leases, "acquire", acquire_then_expire)
     monkeypatch.setattr(
         "graphify.workspace.persistence.time.monotonic_ns",
-        lambda: deadline_ns + 1 if expired else deadline_ns - 1,
+        lambda: deadline_ns + 1 if expired else before_expiry_ns,
     )
 
     with pytest.raises(RevisionConflict, match="lease advanced") as raised:
