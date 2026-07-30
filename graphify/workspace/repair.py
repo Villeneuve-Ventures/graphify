@@ -60,6 +60,7 @@ from graphify.workspace.persistence import (
     StatePathError,
     StateRecoveryRequired,
     UnsupportedRuntime,
+    require_before_deadline,
 )
 from graphify.workspace.pointers import (
     PointerConflict,
@@ -1135,6 +1136,18 @@ class WorkspaceRepair:
                         ) from exc
                     except PointerCorrupt, GenerationError, JournalError:
                         decision = None
+                    for staged_path in self.generations._staged_build_paths(
+                        request.repo_uuid
+                    ):
+                        require_before_deadline(
+                            deadline_ns,
+                            "staged-build inspection exceeded its deadline",
+                        )
+                        self.generations.state.private_file_exists(staged_path)
+                        require_before_deadline(
+                            deadline_ns,
+                            "staged-build inspection exceeded its deadline",
+                        )
                     try:
                         staged_build = self.generations.read_only_staged_build_locked(
                             request.repo_uuid,

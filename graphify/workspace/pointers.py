@@ -506,6 +506,16 @@ class PointerStore:
             )
             if not generation_exists:
                 continue
+            receipt_path = generation_path / "receipt.json"
+            require_before_deadline(
+                deadline_ns,
+                "pointer repair generation inspection exceeded its deadline",
+            )
+            self.state.private_file_exists(receipt_path)
+            require_before_deadline(
+                deadline_ns,
+                "pointer repair generation inspection exceeded its deadline",
+            )
             try:
                 receipt = self._verify_generation(
                     repo_uuid,

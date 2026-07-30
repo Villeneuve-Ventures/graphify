@@ -560,6 +560,53 @@ def test_status_keeps_staged_resume_primary_over_semantic_queue_degradation(
     assert not validator.is_valid(wrong_workspace)
 
 
+def test_status_keeps_staged_resume_primary_over_repairable_pointer_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from graphify.workspace.pointers import PointerRecoveryRequired
+    from tests.test_workspace_freshness import QUEUE_POLICY as FRESH_QUEUE_POLICY
+
+    fresh, _runtime, _request = _fresh_runtime_with_staged_request(tmp_path)
+
+    def pointer_recovery_required(*_args: object, **_kwargs: object) -> None:
+        raise PointerRecoveryRequired("injected repairable pointer intent")
+
+    monkeypatch.setattr(PointerStore, "load", pointer_recovery_required)
+    monkeypatch.setattr(
+        "graphify.workspace.status._pointer_state_is_repairable",
+        lambda *_args, **_kwargs: True,
+    )
+    before_tree = tree_snapshot(fresh.state_root)
+    before_metadata = metadata_snapshot(fresh.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=fresh.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=FRESH_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    value = report.to_dict()
+    workspace = value["workspaces"][0]
+
+    assert report.exit_code == 20
+    assert value["reason_code"] == "staged_build_recovery_required"
+    assert value["action_code"] == "resume_exact_workspace_sync"
+    assert workspace["state"] == "invalid"
+    assert workspace["reason_code"] == "staged_build_recovery_required"
+    assert workspace["action_code"] == "resume_exact_workspace_sync"
+    assert workspace["repair"]["required"] is False
+    assert "pointer_recovery_required" in _reason_codes(report)
+    assert Draft202012Validator(
+        load_status_schema(),
+        format_checker=FormatChecker(),
+    ).is_valid(value)
+    assert tree_snapshot(fresh.state_root) == before_tree
+    assert metadata_snapshot(fresh.state_root) == before_metadata
+
+
 def test_status_terminal_promoted_staged_build_does_not_block_query(tmp_path: Path) -> None:
     fresh, runtime, request = _fresh_runtime_with_staged_request(tmp_path)
     _write_staged_state(runtime, _staged_state(request, "PROMOTED", pointer_revision=1))

@@ -565,6 +565,17 @@ def _finalize(
         state = "invalid"
         exit_code = EXIT_INVALID
         primary = invalid[0]
+        for workspace in workspaces:
+            prefix = f"workspace:{workspace['repo_uuid']}:"
+            if primary["component"].startswith(prefix) and workspace[
+                "action_code"
+            ] == "resume_exact_workspace_sync":
+                primary = {
+                    **primary,
+                    "reason_code": str(workspace["reason_code"]),
+                    "action_code": str(workspace["action_code"]),
+                }
+                break
     elif degraded:
         state = "degraded"
         exit_code = EXIT_DEGRADED
@@ -841,9 +852,16 @@ def _workspace_failure(
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
     workspace["state"] = state
     workspace["safe_to_query"] = False
-    workspace["reason_code"] = reason_code
-    workspace["action_code"] = action_code
-    cast(dict[str, object], workspace["repair"])["required"] = repair_required
+    preserve_staged_guidance = (
+        workspace["action_code"] == "resume_exact_workspace_sync"
+        and action_code == "run_workspace_repair"
+    )
+    if not preserve_staged_guidance:
+        workspace["reason_code"] = reason_code
+        workspace["action_code"] = action_code
+    cast(dict[str, object], workspace["repair"])["required"] = (
+        repair_required and not preserve_staged_guidance
+    )
     checks.append(_check(component, state, reason_code, action_code))
     return workspace, checks
 

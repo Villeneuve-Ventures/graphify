@@ -311,6 +311,35 @@ def test_preview_rejects_broken_referenced_generation_symlink_without_writes(
     assert tree_snapshot(harness.state_root) == before_tree
 
 
+def test_preview_rejects_unsafe_referenced_generation_receipt_without_writes(
+    tmp_path: Path,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    old, current, _racer = receipts
+    _promote(pointers, harness, old)
+    promote = acquire(harness, "PROMOTE", tick=3)
+    pointers.promote(
+        promote,
+        _cas(promote, current, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=30_001,
+    )
+    harness.leases.release(promote)
+    receipt_path = pointers.state.path(
+        generations._generation(REPO_UUID, "gen-new") / "receipt.json"
+    )
+    detached_receipt = tmp_path / "detached-receipt.json"
+    receipt_path.rename(detached_receipt)
+    receipt_path.symlink_to(detached_receipt)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError):
+        repair.preview(_request(harness))
+
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
 def test_repair_uses_verified_last_good_when_current_is_corrupt_and_prior_is_missing(
     tmp_path: Path,
 ) -> None:
@@ -419,6 +448,26 @@ def test_preview_routes_nonterminal_staged_build_outside_pointer_repair_without_
     failure = classify_failure(raised.value, "preview")
     assert failure.reason_code == "repair_state_unsupported"
     assert failure.action_code == "resume_exact_workspace_sync"
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
+def test_preview_rejects_unsafe_staged_build_record_without_writes(tmp_path: Path) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    _promote(pointers, harness, receipts[0])
+    current, _previous, _pending = generations._staged_build_paths(REPO_UUID)
+    staged_path = generations.state.path(current)
+    external = tmp_path / "external-staged-build.json"
+    external.write_bytes(b"{}\n")
+    staged_path.symlink_to(external)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError) as raised:
+        repair.preview(_request(harness))
+
+    failure = classify_failure(raised.value, "preview")
+    assert failure.reason_code == "unsafe_state_path"
+    assert failure.action_code == "configure_safe_state_root"
     assert tree_snapshot(harness.state_root) == before_tree
 
 
