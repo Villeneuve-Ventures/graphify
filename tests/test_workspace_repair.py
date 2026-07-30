@@ -285,6 +285,32 @@ def test_preview_reports_irreparable_when_no_pointer_reference_verifies(tmp_path
     assert tree_snapshot(harness.state_root) == before_tree
 
 
+def test_preview_rejects_broken_referenced_generation_symlink_without_writes(
+    tmp_path: Path,
+) -> None:
+    harness, journal, generations, pointers, receipts = _runtime(tmp_path)
+    old, current, _racer = receipts
+    _promote(pointers, harness, old)
+    promote = acquire(harness, "PROMOTE", tick=3)
+    pointers.promote(
+        promote,
+        _cas(promote, current, revision=1, current_sha256=old.sha256),
+        occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=30_001,
+    )
+    harness.leases.release(promote)
+    generation_path = pointers.state.path(generations._generation(REPO_UUID, "gen-new"))
+    generation_path.rename(tmp_path / "detached-gen-new")
+    generation_path.symlink_to(tmp_path / "missing-generation", target_is_directory=True)
+    repair = _repair(harness, journal, generations, pointers)
+    before_tree = tree_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError):
+        repair.preview(_request(harness))
+
+    assert tree_snapshot(harness.state_root) == before_tree
+
+
 def test_repair_uses_verified_last_good_when_current_is_corrupt_and_prior_is_missing(
     tmp_path: Path,
 ) -> None:

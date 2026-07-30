@@ -284,9 +284,12 @@ def test_repair_result_schemas_admit_only_redacted_bounded_public_shapes() -> No
     contradictory_no_op["plan"]["candidate"] = None
     contradictory_repairable = _preview_result_value()
     contradictory_repairable["plan"]["pointer_action"] = "unsupported"
+    unproducible_journal_action = _preview_result_value()
+    unproducible_journal_action["plan"]["journal_actions"] = ["clear_head_pending"]
     assert list(preview_validator.iter_errors(contradictory_irreparable))
     assert list(preview_validator.iter_errors(contradictory_no_op))
     assert list(preview_validator.iter_errors(contradictory_repairable))
+    assert list(preview_validator.iter_errors(unproducible_journal_action))
     bounded_quarantine = _preview_result_value()
     bounded_quarantine["plan"]["quarantine"] = [f"gen-quarantine-{index}" for index in range(8)]
     oversized_quarantine = _preview_result_value()

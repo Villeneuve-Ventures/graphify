@@ -494,10 +494,17 @@ class PointerStore:
                 continue
             ref = cast(dict[str, Any], reference)
             generation_id = str(ref["generation_id"])
-            generation_path = self.state.path(
-                self.generations._generation(repo_uuid, generation_id)
+            generation_path = self.generations._generation(repo_uuid, generation_id)
+            require_before_deadline(
+                deadline_ns,
+                "pointer repair generation inspection exceeded its deadline",
             )
-            if not generation_path.exists():
+            generation_exists = self.state.private_directory_exists(generation_path)
+            require_before_deadline(
+                deadline_ns,
+                "pointer repair generation inspection exceeded its deadline",
+            )
+            if not generation_exists:
                 continue
             try:
                 receipt = self._verify_generation(

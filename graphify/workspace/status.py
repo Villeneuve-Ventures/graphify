@@ -1302,17 +1302,7 @@ def _inspect_workspace(
                     action_code="configure_safe_state_root",
                     repair_required=False,
                 )
-            except PointerError:
-                return _workspace_failure(
-                    workspace,
-                    checks,
-                    component=f"{prefix}:generation",
-                    state="invalid",
-                    reason_code="generation_or_pointer_invalid",
-                    action_code="run_workspace_repair",
-                    repair_required=True,
-                )
-            except GenerationError:
+            except (PointerError, GenerationError):
                 try:
                     repairable = _pointer_state_is_repairable(
                         runtime,

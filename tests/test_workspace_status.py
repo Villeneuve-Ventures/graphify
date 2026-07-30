@@ -2180,6 +2180,58 @@ def test_status_routes_a_corrupt_current_generation_with_valid_fallback_to_repai
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_status_does_not_route_stale_pointer_receipt_without_fallback_to_repair(
+    tmp_path: Path,
+) -> None:
+    from tests.test_workspace_pointers import SEMANTIC_QUEUE_POLICY, _cas
+    from tests.test_workspace_repair import _runtime as repair_runtime
+
+    harness, _journal, _generations, pointers, receipts = repair_runtime(tmp_path)
+    old = receipts[0]
+    promote = acquire(harness, "PROMOTE", tick=2)
+    pointers.promote(
+        promote,
+        _cas(promote, old, revision=0, current_sha256=None),
+        occurred_at=START,
+        monotonic_ns=20_001,
+    )
+    harness.leases.release(promote)
+    pointer = pointers.load(REPO_UUID)
+    assert pointer is not None
+    pointer_value = pointer.to_dict()
+    current = cast(dict[str, Any], pointer_value["current"])
+    stale_pointer = PointerSet.from_mapping(
+        {
+            **pointer_value,
+            "current": {**current, "receipt_sha256": "0" * 64},
+        }
+    )
+    pointer_path = pointers.state.path(pointers._current(REPO_UUID))
+    pointer_path.write_bytes(stale_pointer.canonical)
+    pointer_path.chmod(0o600)
+    before = tree_snapshot(harness.state_root)
+
+    report = inspect_workspace_status(
+        WorkspaceRuntimeInputs(
+            state_root=harness.state_root,
+            compatibility_manifest=COMPATIBILITY_MANIFEST,
+            semantic_queue_policy=SEMANTIC_QUEUE_POLICY,
+            capabilities=SUPPORTED,
+        )
+    )
+    generation_check = next(
+        check
+        for check in report.to_dict()["checks"]
+        if check["component"] == f"workspace:{REPO_UUID}:generation"
+    )
+
+    assert report.exit_code == 20
+    assert generation_check["reason_code"] == "generation_or_pointer_invalid"
+    assert generation_check["action_code"] == "inspect_workspace_state"
+    assert report.to_dict()["workspaces"][0]["repair"]["required"] is False
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_status_revalidates_pointer_after_freshness(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
