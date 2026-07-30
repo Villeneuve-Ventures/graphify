@@ -86,7 +86,8 @@ def test_initial_non_draft_event_publishes_summary_and_review() -> None:
 
 def test_runtime_and_review_policy_follow_target_python_support() -> None:
     workflow = _workflow()
-    instructions = _config()["pr_reviewer"]["extra_instructions"]
+    config = _config()
+    instructions = config["pr_reviewer"]["extra_instructions"]
 
     assert 'python-version: "3.14"' in workflow
     assert (
@@ -95,6 +96,8 @@ def test_runtime_and_review_policy_follow_target_python_support() -> None:
     assert "qodo-ai/pr-agent" not in workflow
     assert "from pr_agent.servers.github_action_runner import _run_action_and_drain" in workflow
     assert "asyncio.run(_run_action_and_drain())" in workflow
+    assert config["config"]["max_model_tokens"] == 65536
+    assert "custom_model_max_tokens" not in config["config"]
     assert "target branch's requires-python declaration" in instructions
     assert "PEP 758" in instructions
     assert "Preserve Python 3.10 compatibility" not in instructions
