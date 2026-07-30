@@ -93,6 +93,26 @@ def test_initial_non_draft_event_publishes_summary_and_review() -> None:
     assert config["pr_reviewer"]["persistent_comment"] is True
 
 
+def test_runtime_and_review_policy_follow_target_python_support() -> None:
+    workflow = _workflow()
+    instructions = _config()["pr_reviewer"]["extra_instructions"]
+
+    assert 'python-version: "3.14"' in workflow
+    assert (
+        "git+https://github.com/the-pr-agent/pr-agent.git@"
+        "570f67ed5fc8db5be74c18df070bc20079b64b0d"
+    ) in workflow
+    assert "qodo-ai/pr-agent" not in workflow
+    assert (
+        "from pr_agent.servers.github_action_runner import _run_action_and_drain"
+        in workflow
+    )
+    assert "asyncio.run(_run_action_and_drain())" in workflow
+    assert "target branch's requires-python declaration" in instructions
+    assert "PEP 758" in instructions
+    assert "Preserve Python 3.10 compatibility" not in instructions
+
+
 def test_ineligible_pull_request_runs_use_isolated_concurrency_groups() -> None:
     workflow = _workflow()
     concurrency = workflow.split("concurrency:", 1)[1].split("\njobs:", 1)[0]
