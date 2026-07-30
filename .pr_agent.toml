@@ -8,10 +8,6 @@ reasoning_effort = "high"
 # repository deliberately caps review context at 64K to keep usage bounded.
 ai_timeout = 300
 max_model_tokens = 65536
-# PR-Agent's pinned token map does not yet include Google's stable 3.6 Flash or
-# 3.5 Flash-Lite IDs. Both have an official 1M input limit; max_model_tokens
-# still caps the effective review context at 64K.
-custom_model_max_tokens = 1048576
 large_patch_policy = "clip"
 
 patch_extra_lines_before = 5
@@ -79,8 +75,11 @@ performance, packaging, and missing tests.
 
 Apply these repository-specific rules:
 
-- Preserve Python 3.10 compatibility. Do not recommend syntax, typing features,
-  or standard-library APIs introduced after Python 3.10 unless they are guarded.
+- Treat the target branch's requires-python declaration, configured lint/type-check
+  target, and CI matrix as authoritative. Do not demand compatibility with older
+  Python releases or reject syntax supported by the declared minimum version.
+- For targets requiring Python 3.14 or newer, accept PEP 758 syntax such as
+  unparenthesized multiple exception types in an except clause.
 - Keep pyproject.toml and uv.lock synchronized when dependencies change. CI uses
   frozen lockfile installs, so an unresolved dependency edit is a defect.
 - Treat generated Graphify skill artifacts as generated. Changes must be made in
