@@ -17,16 +17,10 @@ def _workflow() -> str:
 
 def _embedded_python() -> str:
     lines = _workflow().splitlines()
-    start = next(
-        index for index, line in enumerate(lines) if line.strip() == "python - <<'PY'"
-    ) + 1
-    end = next(
-        index for index in range(start, len(lines)) if lines[index].strip() == "PY"
-    )
+    start = next(index for index, line in enumerate(lines) if line.strip() == "python - <<'PY'") + 1
+    end = next(index for index in range(start, len(lines)) if lines[index].strip() == "PY")
     indent = len(lines[start]) - len(lines[start].lstrip())
-    return "\n".join(
-        line[indent:] if line.strip() else "" for line in lines[start:end]
-    )
+    return "\n".join(line[indent:] if line.strip() else "" for line in lines[start:end])
 
 
 def _embedded_policy_namespace() -> dict:
@@ -77,10 +71,7 @@ def test_initial_non_draft_event_publishes_summary_and_review() -> None:
     assert 'github_action_config.auto_review: "true"' in workflow
     assert 'github_action_config.handle_push_trigger: "false"' in workflow
     assert 'pr_description.publish_description_as_comment: "true"' in workflow
-    assert (
-        'pr_description.publish_description_as_comment_persistent: "true"'
-        in workflow
-    )
+    assert 'pr_description.publish_description_as_comment_persistent: "true"' in workflow
 
     assert config["github_action_config"]["pr_actions"] == [
         "opened",
@@ -99,14 +90,10 @@ def test_runtime_and_review_policy_follow_target_python_support() -> None:
 
     assert 'python-version: "3.14"' in workflow
     assert (
-        "git+https://github.com/the-pr-agent/pr-agent.git@"
-        "570f67ed5fc8db5be74c18df070bc20079b64b0d"
+        "git+https://github.com/the-pr-agent/pr-agent.git@570f67ed5fc8db5be74c18df070bc20079b64b0d"
     ) in workflow
     assert "qodo-ai/pr-agent" not in workflow
-    assert (
-        "from pr_agent.servers.github_action_runner import _run_action_and_drain"
-        in workflow
-    )
+    assert "from pr_agent.servers.github_action_runner import _run_action_and_drain" in workflow
     assert "asyncio.run(_run_action_and_drain())" in workflow
     assert "target branch's requires-python declaration" in instructions
     assert "PEP 758" in instructions
@@ -207,9 +194,7 @@ def test_incremental_range_uses_an_authenticated_reviewed_head() -> None:
 
 
 def test_incremental_without_a_verified_baseline_falls_back_to_full() -> None:
-    set_incremental = _embedded_policy_namespace()[
-        "_set_sha_bound_incremental_commits"
-    ]
+    set_incremental = _embedded_policy_namespace()["_set_sha_bound_incremental_commits"]
 
     class Provider:
         pr_commits = [SimpleNamespace(sha="1" * 40, files=[])]
@@ -232,9 +217,7 @@ def test_publication_requires_a_workflow_owned_marker() -> None:
     publication_visible = helpers["_publication_visible"]
 
     provider = SimpleNamespace(last_commit_id=SimpleNamespace(sha="1" * 40))
-    args, _, marker = marked_publication(
-        ("## Title\nsummary",), {}, provider, "summary"
-    )
+    args, _, marker = marked_publication(("## Title\nsummary",), {}, provider, "summary")
     marked_body = args[0]
     forged = SimpleNamespace(
         body=marked_body,
