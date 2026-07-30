@@ -37,6 +37,7 @@ from graphify.workspace.gc import (
     GcRecoveryRequired,
     GcStore,
 )
+from graphify.workspace.identity import SourceDiscoveryTimeout
 from graphify.workspace.leases import LeaseRecoveryRequired
 from graphify.workspace.journal import JournalCorrupt, JournalRecoveryRequired
 from graphify.workspace.persistence import (
@@ -136,12 +137,8 @@ def _protection_value(
     protection: GcProtection = EMPTY_PROTECTION,
 ) -> dict[str, JsonValue]:
     return {
-        "active_lease_generations": cast(
-            JsonValue, sorted(protection.active_lease_generations)
-        ),
-        "fixture_generations": cast(
-            JsonValue, sorted(protection.fixture_generations)
-        ),
+        "active_lease_generations": cast(JsonValue, sorted(protection.active_lease_generations)),
+        "fixture_generations": cast(JsonValue, sorted(protection.fixture_generations)),
         "migration_sources": cast(JsonValue, sorted(protection.migration_sources)),
         "proof_generations": cast(JsonValue, sorted(protection.proof_generations)),
         "rollback_artifact_generations": cast(
@@ -295,9 +292,7 @@ def test_gc_preview_request_and_result_schemas_freeze_the_public_contract() -> N
             "pointer_revision": 1,
             "registry_revision": 1,
         },
-        "protected": [
-            {"generation_id": "gen-current", "reasons": ["visible_current"]}
-        ],
+        "protected": [{"generation_id": "gen-current", "reasons": ["visible_current"]}],
         "reason_code": "preview_ready",
         "repo_uuid": REPO_UUID,
         "state": "previewed",
@@ -348,11 +343,14 @@ def test_gc_preview_usage_is_exact_and_precedes_authority_and_stdin(
 
     monkeypatch.setattr(sys, "stdin", UnreadableStdin())
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        arguments,
-        stdout=stdout,
-        stderr=stderr,
-    ) == 64
+    assert (
+        workspace_cli.run_workspace_command(
+            arguments,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 64
+    )
     assert stdout.getvalue() == ""
     assert stderr.getvalue() == _GC_USAGE + "\n"
 
@@ -360,12 +358,15 @@ def test_gc_preview_usage_is_exact_and_precedes_authority_and_stdin(
 def test_general_workspace_usage_lists_the_gc_lifecycle_commands() -> None:
     workspace_cli = _cli()
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("unknown",),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 64
+    assert (
+        workspace_cli.run_workspace_command(
+            ("unknown",),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 64
+    )
     usage = stderr.getvalue()
     assert _GC_USAGE in usage
     assert _GC_EXECUTE_USAGE in usage
@@ -386,11 +387,14 @@ def test_gc_preview_missing_authority_is_reported_before_stdin(
 
     monkeypatch.setattr(sys, "stdin", UnreadableStdin())
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     assert _result_payload(stderr) == {
         **_result_common(),
@@ -453,11 +457,14 @@ def test_gc_preview_invalid_runtime_authority_precedes_stdin_and_is_redacted(
 
     monkeypatch.setattr(sys, "stdin", UnreadableStdin())
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     result = _result_payload(stderr)
     assert result["state"] == state
@@ -533,12 +540,15 @@ def test_gc_preview_rejects_invalid_stdin_before_runtime_preview(
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(payload)))
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     result = _result_payload(stderr)
     assert result["reason_code"] == "gc_request_invalid"
@@ -580,12 +590,15 @@ def test_gc_preview_rejects_oversized_protection_union_before_runtime_preview(
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(payload)))
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     result = _result_payload(stderr)
     assert result["reason_code"] == "gc_request_invalid"
@@ -610,12 +623,15 @@ def test_gc_preview_stdin_is_bounded_before_decode_or_runtime_preview(
     assert len(oversized) == workspace_cli._GC_PREVIEW_REQUEST_MAX_BYTES + 1
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(oversized)))
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     assert _result_payload(stderr)["reason_code"] == "gc_request_invalid"
 
@@ -637,12 +653,15 @@ def test_gc_preview_rejects_unsupported_request_version_before_runtime(
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(request)))
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     result = _result_payload(stderr)
     assert result["state"] == "unsupported"
     assert result["reason_code"] == "gc_request_unsupported"
@@ -685,12 +704,15 @@ def test_gc_preview_passes_only_explicit_authority_and_emits_canonical_result(
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes(request))))
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 0
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 0
+    )
     assert stderr.getvalue() == ""
     result = _result_payload(stdout)
     assert stdout.getvalue().encode("utf-8") == canonical_json_bytes(result)
@@ -708,9 +730,7 @@ def test_gc_preview_passes_only_explicit_authority_and_emits_canonical_result(
             "pointer_revision": 1,
             "registry_revision": 1,
         },
-        "protected": [
-            {"generation_id": "gen-current", "reasons": ["visible_current"]}
-        ],
+        "protected": [{"generation_id": "gen-current", "reasons": ["visible_current"]}],
         "reason_code": "preview_ready",
         "repo_uuid": REPO_UUID,
         "state": "previewed",
@@ -778,12 +798,15 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes())))
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     assert _result_payload(stderr) == {
         **_result_common(),
@@ -800,15 +823,11 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
     ("error_factory", "expected"),
     [
         (
-            lambda module: module.GcPreviewAuthorityConflict(
-                "/private/state provider-secret"
-            ),
+            lambda module: module.GcPreviewAuthorityConflict("/private/state provider-secret"),
             (10, "conflict", "gc_authority_conflict", "refresh_gc_request", "not_observed"),
         ),
         (
-            lambda module: module.GcPreviewUnstable(
-                "/private/state provider-secret"
-            ),
+            lambda module: module.GcPreviewUnstable("/private/state provider-secret"),
             (10, "withheld", "gc_observation_unstable", "retry_gc_preview", "unstable"),
         ),
         (
@@ -820,15 +839,11 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
             (10, "withheld", "gc_coordination_contended", "retry_gc_preview", "not_observed"),
         ),
         (
-            lambda module: module.GcCoordinationUnavailable(
-                "/private/lock provider-secret"
-            ),
+            lambda module: module.GcCoordinationUnavailable("/private/lock provider-secret"),
             (20, "invalid", "gc_coordination_unavailable", "run_workspace_repair", "not_observed"),
         ),
         (
-            lambda _module: GcRecoveryRequired(
-                "/private/intent provider-secret"
-            ),
+            lambda _module: GcRecoveryRequired("/private/intent provider-secret"),
             (20, "invalid", "gc_recovery_required", "run_workspace_repair", "not_observed"),
         ),
         (
@@ -840,9 +855,7 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
             (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
         ),
         (
-            lambda _module: JournalRecoveryRequired(
-                "/private/journal provider-secret"
-            ),
+            lambda _module: JournalRecoveryRequired("/private/journal provider-secret"),
             (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
         ),
         (
@@ -850,9 +863,7 @@ def test_gc_preview_rejects_results_not_bound_to_the_request(
             (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
         ),
         (
-            lambda _module: GenerationError(
-                "/private/generation provider-secret"
-            ),
+            lambda _module: GenerationError("/private/generation provider-secret"),
             (20, "invalid", "state_corrupt", "run_workspace_repair", "not_observed"),
         ),
     ],
@@ -876,12 +887,15 @@ def test_gc_preview_failures_are_stable_and_redacted(
     )
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes())))
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == expected[0]
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == expected[0]
+    )
     assert stdout.getvalue() == ""
     result = _result_payload(stderr)
     assert stderr.getvalue().encode("utf-8") == canonical_json_bytes(result)
@@ -1002,17 +1016,18 @@ def test_gc_preview_with_real_runtime_is_unfenced_and_writes_nothing(
         SimpleNamespace(buffer=BytesIO(_request_bytes(request))),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 0
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 0
+    )
     assert stderr.getvalue() == ""
     result = _result_payload(stdout)
     assert result["candidates"] == ["gen-unused"]
-    assert result["protected"] == [
-        {"generation_id": "gen-current", "reasons": ["visible_current"]}
-    ]
+    assert result["protected"] == [{"generation_id": "gen-current", "reasons": ["visible_current"]}]
     assert "fence_token" not in stdout.getvalue()
     assert "lease" not in stdout.getvalue()
     assert orphan.read_bytes() == b"do-not-clean"
@@ -1065,12 +1080,15 @@ def test_gc_preview_stale_cas_fails_without_writes(
         SimpleNamespace(buffer=BytesIO(_request_bytes(request))),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 10
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 10
+    )
     assert stdout.getvalue() == ""
     assert _result_payload(stderr)["reason_code"] == "gc_authority_conflict"
     assert tree_snapshot(harness.state_root) == before_tree
@@ -1089,9 +1107,7 @@ def test_gc_preview_rejects_missing_protected_generation_lock_without_writes(
         fixture_generations=frozenset({"gen-unused"}),
     )
     request = _request_for_runtime(harness, pointers, protection=protection)
-    generation_lock = generations.state.path(
-        generations._lock(REPO_UUID, "gen-unused")
-    )
+    generation_lock = generations.state.path(generations._lock(REPO_UUID, "gen-unused"))
     generation_lock.unlink()
     before_tree = tree_snapshot(harness.state_root)
     before_metadata = metadata_snapshot(harness.state_root)
@@ -1106,12 +1122,15 @@ def test_gc_preview_rejects_missing_protected_generation_lock_without_writes(
         SimpleNamespace(buffer=BytesIO(_request_bytes(request))),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     assert _result_payload(stderr)["reason_code"] == "gc_coordination_unavailable"
     assert tree_snapshot(harness.state_root) == before_tree
@@ -1201,12 +1220,15 @@ def test_gc_preview_real_failure_paths_write_nothing(
         SimpleNamespace(buffer=BytesIO(_request_bytes(request))),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--dry-run", "--request-stdin"),
-        inputs=object(),
-        stdout=stdout,
-        stderr=stderr,
-    ) == expected_exit
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--dry-run", "--request-stdin"),
+            inputs=object(),
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == expected_exit
+    )
     assert stdout.getvalue() == ""
     result = _result_payload(stderr)
     assert result["reason_code"] == expected_reason
@@ -1443,12 +1465,15 @@ def test_gc_lifecycle_stdin_read_stops_at_the_public_byte_limit(
         metadata_snapshot(harness.state_root),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert _cli().run_workspace_command(
-        ("gc", "--execute", "--request-stdin"),
-        inputs=inputs,
-        stdout=stdout,
-        stderr=stderr,
-    ) == 20
+    assert (
+        _cli().run_workspace_command(
+            ("gc", "--execute", "--request-stdin"),
+            inputs=inputs,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 20
+    )
 
     assert binary_input.read_sizes == [command.GC_LIFECYCLE_REQUEST_MAX_BYTES + 1]
     assert stdout.getvalue() == ""
@@ -1485,12 +1510,15 @@ def test_gc_lifecycle_cli_conflict_receipt_is_canonical_redacted_and_no_write(
         metadata_snapshot(harness.state_root),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert _cli().run_workspace_command(
-        ("gc", "--execute", "--request-stdin"),
-        inputs=inputs,
-        stdout=stdout,
-        stderr=stderr,
-    ) == 10
+    assert (
+        _cli().run_workspace_command(
+            ("gc", "--execute", "--request-stdin"),
+            inputs=inputs,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 10
+    )
 
     assert stdout.getvalue() == ""
     raw = stderr.getvalue().encode()
@@ -1526,8 +1554,18 @@ def test_gc_lifecycle_cli_conflict_receipt_is_canonical_redacted_and_no_write(
 @pytest.mark.parametrize(
     ("operation", "request_class", "request_loader", "result_loader"),
     [
-        ("execute", "GcExecuteRequest", "load_gc_execute_request_schema", "load_gc_execute_result_schema"),
-        ("reconcile", "GcReconcileRequest", "load_gc_reconcile_request_schema", "load_gc_reconcile_result_schema"),
+        (
+            "execute",
+            "GcExecuteRequest",
+            "load_gc_execute_request_schema",
+            "load_gc_execute_result_schema",
+        ),
+        (
+            "reconcile",
+            "GcReconcileRequest",
+            "load_gc_reconcile_request_schema",
+            "load_gc_reconcile_result_schema",
+        ),
         ("purge", "GcPurgeRequest", "load_gc_purge_request_schema", "load_gc_purge_result_schema"),
     ],
 )
@@ -1567,13 +1605,9 @@ def test_gc_lifecycle_contracts_are_bounded_canonical_and_schema_backed(
         with pytest.raises(ValueError):
             request_type.from_bytes(invalid)
     with pytest.raises(command.GcLifecycleRequestUnsupported):
-        request_type.from_bytes(
-            canonical_json_bytes({**request_value, "schema_version": 2})
-        )
+        request_type.from_bytes(canonical_json_bytes({**request_value, "schema_version": 2}))
     with pytest.raises(ValueError):
-        request_type.from_bytes(
-            b" " * (command.GC_LIFECYCLE_REQUEST_MAX_BYTES + 1)
-        )
+        request_type.from_bytes(b" " * (command.GC_LIFECYCLE_REQUEST_MAX_BYTES + 1))
 
 
 @pytest.mark.parametrize(
@@ -1591,9 +1625,12 @@ def test_gc_lifecycle_authorizations_are_operation_specific(
 ) -> None:
     command = _gc_command()
     request_type = getattr(command, request_class)
-    assert request_type.from_bytes(
-        canonical_json_bytes(_gc_lifecycle_request_value(operation))
-    ).authorization.action.value == f"GC_{operation.upper()}"
+    assert (
+        request_type.from_bytes(
+            canonical_json_bytes(_gc_lifecycle_request_value(operation))
+        ).authorization.action.value
+        == f"GC_{operation.upper()}"
+    )
     for action in other_actions:
         with pytest.raises(ValueError):
             request_type.from_bytes(
@@ -1629,6 +1666,13 @@ def test_gc_lifecycle_authorizations_are_operation_specific(
             10,
             "workspace_recovery_required",
             "run_workspace_doctor",
+        ),
+        (
+            SourceDiscoveryTimeout("/private/source provider-secret"),
+            "conflict",
+            10,
+            "gc_lease_busy",
+            "retry_workspace_gc_execute",
         ),
         (
             CommitUnknown("/private/commit provider-secret"),
@@ -1778,7 +1822,10 @@ def test_gc_execute_request_binds_the_exact_canonical_preview_result_bytes() -> 
     assert parsed.approved_preview_sha256 == request["approved_preview_sha256"]
     stale = dict(request)
     stale["approved_preview_sha256"] = "0" * 64
-    assert command.GcExecuteRequest.from_bytes(canonical_json_bytes(stale)).approved_preview_sha256 != parsed.approved_preview_sha256
+    assert (
+        command.GcExecuteRequest.from_bytes(canonical_json_bytes(stale)).approved_preview_sha256
+        != parsed.approved_preview_sha256
+    )
 
 
 def _gc_mutation_runtime(harness: Any, *, fault_hook: Any = None) -> Any:
@@ -1839,9 +1886,7 @@ def _approved_execute_request(runtime: Any) -> Any:
     preview = runtime.gc.preview(
         REPO_UUID,
         expected_registry_revision=cast(int, request_value["expected_registry_revision"]),
-        expected_active_source_revision=cast(
-            int, request_value["expected_active_source_revision"]
-        ),
+        expected_active_source_revision=cast(int, request_value["expected_active_source_revision"]),
         expected_operation_epoch=cast(int, request_value["expected_operation_epoch"]),
         expected_migration_epoch=cast(int, request_value["expected_migration_epoch"]),
         expected_pointer_revision=cast(int, request_value["expected_pointer_revision"]),
@@ -1865,9 +1910,7 @@ def test_gc_execute_requires_exact_approved_preview_before_any_lease_or_mutation
         "execute",
         approved_preview_sha256="0" * 64,
     )
-    request = _gc_command().GcExecuteRequest.from_bytes(
-        canonical_json_bytes(request_value)
-    )
+    request = _gc_command().GcExecuteRequest.from_bytes(canonical_json_bytes(request_value))
     before = tree_snapshot(harness.state_root)
 
     with pytest.raises(ValueError, match="approved preview"):
@@ -1924,9 +1967,7 @@ def test_gc_execute_rejects_fresh_plan_non_fence_projection_drift(
             "non-fence projection drift must not reach GC execute"
         ),
     )
-    generation_root = (
-        harness.state_root / "workspaces" / REPO_UUID / "generations"
-    )
+    generation_root = harness.state_root / "workspaces" / REPO_UUID / "generations"
     quarantine_root = harness.state_root / "workspaces" / REPO_UUID / "quarantine"
     before = (tree_snapshot(generation_root), tree_snapshot(quarantine_root))
 
@@ -1947,9 +1988,7 @@ def test_gc_execute_normalizes_redundant_shared_lock_protection_reason(
     harness, _generations, _pointers, _receipts = _runtime(tmp_path)
     runtime = _gc_mutation_runtime(harness)
     command = _gc_command()
-    lock = runtime.gc.state.path(
-        runtime.gc.generations._lock(REPO_UUID, "gen-current")
-    )
+    lock = runtime.gc.state.path(runtime.gc.generations._lock(REPO_UUID, "gen-current"))
     with subprocess.Popen(
         [
             sys.executable,
@@ -1990,13 +2029,14 @@ def test_gc_reconcile_and_purge_reject_stale_pointer_before_lease_mutation(
     runtime = _gc_mutation_runtime(harness)
     command = _gc_command()
     reconcile_value = _gc_live_lifecycle_request(runtime, "reconcile")
-    reconcile_value["expected_pointer_revision"] = cast(
-        int,
-        reconcile_value["expected_pointer_revision"],
-    ) + 1
-    stale_reconcile = command.GcReconcileRequest.from_bytes(
-        canonical_json_bytes(reconcile_value)
+    reconcile_value["expected_pointer_revision"] = (
+        cast(
+            int,
+            reconcile_value["expected_pointer_revision"],
+        )
+        + 1
     )
+    stale_reconcile = command.GcReconcileRequest.from_bytes(canonical_json_bytes(reconcile_value))
     before_reconcile = (
         tree_snapshot(harness.state_root),
         metadata_snapshot(harness.state_root),
@@ -2027,13 +2067,14 @@ def test_gc_reconcile_and_purge_reject_stale_pointer_before_lease_mutation(
         "purge",
         expected_plan_sha256=plan_sha256,
     )
-    purge_value["expected_pointer_revision"] = cast(
-        int,
-        purge_value["expected_pointer_revision"],
-    ) + 1
-    stale_purge = command.GcPurgeRequest.from_bytes(
-        canonical_json_bytes(purge_value)
+    purge_value["expected_pointer_revision"] = (
+        cast(
+            int,
+            purge_value["expected_pointer_revision"],
+        )
+        + 1
     )
+    stale_purge = command.GcPurgeRequest.from_bytes(canonical_json_bytes(purge_value))
     quarantine_root = harness.state_root / "workspaces" / REPO_UUID / "quarantine"
     before_purge = (
         tree_snapshot(harness.state_root),
@@ -2086,9 +2127,7 @@ def test_gc_public_reconcile_policy_mismatch_requires_refreshed_request(
     request_value = _gc_live_lifecycle_request(runtime, "reconcile")
     capacity_policy = cast(dict[str, JsonValue], request_value["capacity_policy"])
     capacity_policy["reserve_bytes"] = cast(int, capacity_policy["reserve_bytes"]) + 1
-    request = command.GcReconcileRequest.from_bytes(
-        canonical_json_bytes(request_value)
-    )
+    request = command.GcReconcileRequest.from_bytes(canonical_json_bytes(request_value))
     before = (
         tree_snapshot(harness.state_root),
         metadata_snapshot(harness.state_root),
@@ -2293,9 +2332,7 @@ def test_gc_reconcile_lease_ttl_starts_after_preflight(tmp_path: Path) -> None:
     recovery_runtime = _gc_mutation_runtime(harness)
     request_value = _gc_live_lifecycle_request(recovery_runtime, "reconcile")
     request_value["timeout_ms"] = 60_000
-    request = _gc_command().GcReconcileRequest.from_bytes(
-        canonical_json_bytes(request_value)
-    )
+    request = _gc_command().GcReconcileRequest.from_bytes(canonical_json_bytes(request_value))
     started_ns = time.monotonic_ns()
     ticks = iter(
         (
@@ -2330,9 +2367,7 @@ def test_gc_purge_lease_ttl_starts_after_preflight(tmp_path: Path) -> None:
         expected_plan_sha256=cast(str, executed.to_dict()["plan_sha256"]),
     )
     request_value["timeout_ms"] = 60_000
-    request = _gc_command().GcPurgeRequest.from_bytes(
-        canonical_json_bytes(request_value)
-    )
+    request = _gc_command().GcPurgeRequest.from_bytes(canonical_json_bytes(request_value))
     started_ns = time.monotonic_ns()
     ticks = iter(
         (
@@ -2598,12 +2633,15 @@ def test_gc_lifecycle_cli_dispatches_canonical_success_receipts(
         SimpleNamespace(buffer=BytesIO(execute_request.canonical)),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--execute", "--request-stdin"),
-        inputs=inputs,
-        stdout=stdout,
-        stderr=stderr,
-    ) == 0
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--execute", "--request-stdin"),
+            inputs=inputs,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 0
+    )
     assert stderr.getvalue() == ""
     execute_value = json.loads(stdout.getvalue())
     Draft202012Validator(
@@ -2620,12 +2658,15 @@ def test_gc_lifecycle_cli_dispatches_canonical_success_receipts(
         SimpleNamespace(buffer=BytesIO(reconcile_request.canonical)),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--reconcile", "--request-stdin"),
-        inputs=inputs,
-        stdout=stdout,
-        stderr=stderr,
-    ) == 0
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--reconcile", "--request-stdin"),
+            inputs=inputs,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 0
+    )
     assert stderr.getvalue() == ""
     reconcile_value = json.loads(stdout.getvalue())
     Draft202012Validator(
@@ -2651,12 +2692,15 @@ def test_gc_lifecycle_cli_dispatches_canonical_success_receipts(
         SimpleNamespace(buffer=BytesIO(purge_request.canonical)),
     )
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(
-        ("gc", "--purge", "--request-stdin"),
-        inputs=inputs,
-        stdout=stdout,
-        stderr=stderr,
-    ) == 0
+    assert (
+        workspace_cli.run_workspace_command(
+            ("gc", "--purge", "--request-stdin"),
+            inputs=inputs,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 0
+    )
     assert stderr.getvalue() == ""
     purge_value = json.loads(stdout.getvalue())
     Draft202012Validator(
@@ -2705,12 +2749,7 @@ def test_gc_public_purge_rejects_reprotected_quarantine_then_allows_fresh_retry(
 
     assert tree_snapshot(quarantine_root) == quarantine_before
     assert not (
-        harness.state_root
-        / "workspaces"
-        / REPO_UUID
-        / "gc"
-        / "purges"
-        / f"{plan_sha256}.json"
+        harness.state_root / "workspaces" / REPO_UUID / "gc" / "purges" / f"{plan_sha256}.json"
     ).exists()
     retry = _gc_command().GcPurgeRequest.from_bytes(
         canonical_json_bytes(
@@ -2767,9 +2806,7 @@ def test_gc_public_lifecycle_single_disposable_proof_boundary(
         runtime.gc.preview(
             REPO_UUID,
             expected_registry_revision=execute_request.expected_registry_revision,
-            expected_active_source_revision=(
-                execute_request.expected_active_source_revision
-            ),
+            expected_active_source_revision=(execute_request.expected_active_source_revision),
             expected_operation_epoch=execute_request.expected_operation_epoch,
             expected_migration_epoch=execute_request.expected_migration_epoch,
             expected_pointer_revision=execute_request.expected_pointer_revision,
@@ -2778,9 +2815,7 @@ def test_gc_public_lifecycle_single_disposable_proof_boundary(
             deadline_ns=time.monotonic_ns() + 5_000_000_000,
         )
     )
-    assert hashlib.sha256(approved_bytes).hexdigest() == (
-        execute_request.approved_preview_sha256
-    )
+    assert hashlib.sha256(approved_bytes).hexdigest() == (execute_request.approved_preview_sha256)
 
     lock = generations.state.path(generations._lock(REPO_UUID, "gen-unused"))
     holder = subprocess.Popen(
@@ -2834,9 +2869,7 @@ def test_gc_public_lifecycle_single_disposable_proof_boundary(
 
     recovery_runtime = _gc_mutation_runtime(harness)
     reconcile_request = command.GcReconcileRequest.from_bytes(
-        canonical_json_bytes(
-            _gc_live_lifecycle_request(recovery_runtime, "reconcile")
-        )
+        canonical_json_bytes(_gc_live_lifecycle_request(recovery_runtime, "reconcile"))
     )
     reconciled = command.reconcile_gc(
         recovery_runtime,
@@ -3073,9 +3106,7 @@ def test_gc_reconcile_replays_current_epoch_completion_after_lost_execute_receip
 
     recovery_runtime = _gc_mutation_runtime(harness)
     request = command.GcReconcileRequest.from_bytes(
-        canonical_json_bytes(
-            _gc_live_lifecycle_request(recovery_runtime, "reconcile")
-        )
+        canonical_json_bytes(_gc_live_lifecycle_request(recovery_runtime, "reconcile"))
     )
     before = (
         tree_snapshot(harness.state_root),
@@ -3145,9 +3176,7 @@ def test_gc_reconcile_replays_current_epoch_completion_after_lost_reconcile_rece
         fault_hook=lose_reconcile_receipt,
     )
     recovery_request = command.GcReconcileRequest.from_bytes(
-        canonical_json_bytes(
-            _gc_live_lifecycle_request(recovery_runtime, "reconcile")
-        )
+        canonical_json_bytes(_gc_live_lifecycle_request(recovery_runtime, "reconcile"))
     )
     with pytest.raises(InjectedFault):
         command.reconcile_gc(
@@ -3157,15 +3186,11 @@ def test_gc_reconcile_replays_current_epoch_completion_after_lost_reconcile_rece
             monotonic_clock=time.monotonic_ns,
         )
     assert receipt_lost is True
-    assert not recovery_runtime.gc.state.path(
-        recovery_runtime.gc._intent_path(REPO_UUID)
-    ).exists()
+    assert not recovery_runtime.gc.state.path(recovery_runtime.gc._intent_path(REPO_UUID)).exists()
 
     replay_runtime = _gc_mutation_runtime(harness)
     replay_request = command.GcReconcileRequest.from_bytes(
-        canonical_json_bytes(
-            _gc_live_lifecycle_request(replay_runtime, "reconcile")
-        )
+        canonical_json_bytes(_gc_live_lifecycle_request(replay_runtime, "reconcile"))
     )
     monkeypatch.setattr(
         command,
@@ -3214,9 +3239,7 @@ def test_every_durable_execute_interruption_requires_explicit_public_reconcile(
 
     recovery_runtime = _gc_mutation_runtime(harness)
     reconcile_request = _gc_command().GcReconcileRequest.from_bytes(
-        canonical_json_bytes(
-            _gc_live_lifecycle_request(recovery_runtime, "reconcile")
-        )
+        canonical_json_bytes(_gc_live_lifecycle_request(recovery_runtime, "reconcile"))
     )
     result = _gc_command().reconcile_gc(
         recovery_runtime,

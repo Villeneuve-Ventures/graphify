@@ -110,14 +110,7 @@ def _append_allocated(
 
 
 def _segment(root: Path, sequence: int) -> Path:
-    return (
-        root
-        / "workspaces"
-        / REPO_UUID
-        / "journal"
-        / "segments"
-        / f"{sequence:020d}.gwf"
-    )
+    return root / "workspaces" / REPO_UUID / "journal" / "segments" / f"{sequence:020d}.gwf"
 
 
 def test_journal_append_is_idempotent_and_rejects_divergent_logical_retry(
@@ -222,8 +215,10 @@ def test_read_stable_honors_deadline_during_segment_traversal(
     assert decoded < 20
 
 
+@pytest.mark.parametrize("segment_name", ["00000000000000000001.gwf", "stray"])
 def test_project_recovery_preserves_unsafe_segment_path_classification(
     tmp_path: Path,
+    segment_name: str,
 ) -> None:
     harness = create_harness(tmp_path)
     store = JournalStore(
@@ -234,7 +229,7 @@ def test_project_recovery_preserves_unsafe_segment_path_classification(
     segments = store.state.ensure_directory(store._segments_directory(REPO_UUID))
     external = tmp_path / "external.gwf"
     external.write_bytes(b"")
-    (segments / "00000000000000000001.gwf").symlink_to(external)
+    (segments / segment_name).symlink_to(external)
 
     with pytest.raises(StatePathError, match="journal segment entry is unsafe"):
         store.project_recovery(REPO_UUID)
@@ -367,8 +362,7 @@ def test_successor_cleans_real_process_death_atomic_segment_temp(tmp_path: Path)
     assert killed.returncode == 91
     segments = harness.state_root / "workspaces" / REPO_UUID / "journal" / "segments"
     assert [path.name for path in segments.iterdir()] and any(
-        path.name.startswith(".00000000000000000001.gwf.tmp-")
-        for path in segments.iterdir()
+        path.name.startswith(".00000000000000000001.gwf.tmp-") for path in segments.iterdir()
     )
 
     successor = acquire(harness, "BUILD", tick=3)
@@ -531,16 +525,19 @@ def test_journal_adopts_one_complete_hash_linked_uncommitted_segment(tmp_path: P
         "fence_token": grant.lease.to_dict()["fence_token"],
         "occurred_at": "2026-07-16T19:00:00Z",
     }
-    second = cast(JournalEvent, JournalEvent.from_mapping(
-        {
-            "contract": "graphify.workspace.journal_event",
-            "schema_version": 1,
-            "event_id": store._event_id(REPO_UUID, logical),
-            "sequence": 2,
-            "prior_event_sha256": first.sha256,
-            **logical,
-        }
-    ))
+    second = cast(
+        JournalEvent,
+        JournalEvent.from_mapping(
+            {
+                "contract": "graphify.workspace.journal_event",
+                "schema_version": 1,
+                "event_id": store._event_id(REPO_UUID, logical),
+                "sequence": 2,
+                "prior_event_sha256": first.sha256,
+                **logical,
+            }
+        ),
+    )
     tail = _segment(harness.state_root, 2)
     tail.write_bytes(encode_journal_frame(second))
     tail.chmod(0o600)
@@ -767,15 +764,18 @@ def test_journal_handles_eintr_short_writes_and_postvisibility_fsync_uncertainty
         capabilities=harness.leases.state.capabilities,
         syscalls=_ShortWriteEintrSyscalls(),
     )
-    assert short.append(
-        grant,
-        transition="STAGING",
-        generation_id="gen-journal",
-        receipt_sha256=None,
-        pointer_revision=None,
-        occurred_at=START,
-        monotonic_ns=10_002,
-    ).to_dict()["sequence"] == 2
+    assert (
+        short.append(
+            grant,
+            transition="STAGING",
+            generation_id="gen-journal",
+            receipt_sha256=None,
+            pointer_revision=None,
+            occurred_at=START,
+            monotonic_ns=10_002,
+        ).to_dict()["sequence"]
+        == 2
+    )
 
     uncertain = JournalStore(
         harness.state_root,

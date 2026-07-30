@@ -25,6 +25,7 @@ from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
     OperatorAuthorization,
+    SourceDiscoveryTimeout,
 )
 from graphify.workspace.generations import GenerationError
 from graphify.workspace.journal import JournalError, JournalRecoveryRequired
@@ -149,7 +150,7 @@ def classify_failure(error: Exception) -> RollbackFailure:
             "rollback_request_invalid",
             "provide_valid_rollback_request",
         )
-    if isinstance(error, (LeaseBusy, LockTimeout)):
+    if isinstance(error, (LeaseBusy, LockTimeout, SourceDiscoveryTimeout)):
         return RollbackFailure(
             "conflict",
             EXIT_DEGRADED,
@@ -292,9 +293,7 @@ class RollbackRequest:
         try:
             data = json.loads(value.decode("utf-8"), object_pairs_hook=_unique_object)
         except (UnicodeError, json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
-            raise RollbackRequestInvalid(
-                "rollback request is not valid UTF-8 JSON"
-            ) from exc
+            raise RollbackRequestInvalid("rollback request is not valid UTF-8 JSON") from exc
         if not isinstance(data, Mapping) or set(data) != _REQUEST_FIELDS:
             raise RollbackRequestInvalid("rollback request fields are invalid")
         contract = data["contract"]
@@ -310,31 +309,24 @@ class RollbackRequest:
             if isinstance(version, bool) or not isinstance(version, int):
                 raise RollbackRequestInvalid(f"rollback request {field} is invalid")
             if version != expected:
-                raise RollbackRequestUnsupported(
-                    f"rollback request {field} is unsupported"
-                )
+                raise RollbackRequestUnsupported(f"rollback request {field} is unsupported")
         try:
             repo_uuid = WorkspaceLeaseState.canonical_repo_uuid(data["repo_uuid"])
         except ContractError as exc:
             raise RollbackRequestInvalid("rollback request repo_uuid is invalid") from exc
         generation_id = data["target_generation_id"]
         if not isinstance(generation_id, str) or _GENERATION_RE.fullmatch(generation_id) is None:
-            raise RollbackRequestInvalid(
-                "rollback request target_generation_id is invalid"
-            )
+            raise RollbackRequestInvalid("rollback request target_generation_id is invalid")
         authorization_value = data["authorization"]
-        if not isinstance(authorization_value, Mapping) or set(authorization_value) != _AUTHORIZATION_FIELDS:
-            raise RollbackRequestInvalid(
-                "rollback request authorization fields are invalid"
-            )
+        if (
+            not isinstance(authorization_value, Mapping)
+            or set(authorization_value) != _AUTHORIZATION_FIELDS
+        ):
+            raise RollbackRequestInvalid("rollback request authorization fields are invalid")
         if not all(isinstance(authorization_value[field], str) for field in _AUTHORIZATION_FIELDS):
-            raise RollbackRequestInvalid(
-                "rollback request authorization fields must be strings"
-            )
+            raise RollbackRequestInvalid("rollback request authorization fields must be strings")
         if authorization_value["action"] != IdentityAction.ROLLBACK.value:
-            raise RollbackRequestInvalid(
-                "rollback request authorization action is invalid"
-            )
+            raise RollbackRequestInvalid("rollback request authorization action is invalid")
         try:
             authorization = OperatorAuthorization(
                 action=IdentityAction.ROLLBACK,
@@ -344,32 +336,44 @@ class RollbackRequest:
                 reason=cast(str, authorization_value["reason"]),
             )
         except AuthorizationError as exc:
-            raise RollbackRequestInvalid(
-                "rollback request authorization is invalid"
-            ) from exc
+            raise RollbackRequestInvalid("rollback request authorization is invalid") from exc
         try:
             request = cls(
                 repo_uuid=repo_uuid,
-                expected_registry_revision=_integer(data["expected_registry_revision"], "expected_registry_revision", minimum=1),
-                expected_active_source_revision=_integer(data["expected_active_source_revision"], "expected_active_source_revision", minimum=1),
-                expected_operation_epoch=_integer(data["expected_operation_epoch"], "expected_operation_epoch", minimum=1),
-                expected_migration_epoch=_integer(data["expected_migration_epoch"], "expected_migration_epoch", minimum=0),
+                expected_registry_revision=_integer(
+                    data["expected_registry_revision"], "expected_registry_revision", minimum=1
+                ),
+                expected_active_source_revision=_integer(
+                    data["expected_active_source_revision"],
+                    "expected_active_source_revision",
+                    minimum=1,
+                ),
+                expected_operation_epoch=_integer(
+                    data["expected_operation_epoch"], "expected_operation_epoch", minimum=1
+                ),
+                expected_migration_epoch=_integer(
+                    data["expected_migration_epoch"], "expected_migration_epoch", minimum=0
+                ),
                 expected_pointer_revision=_integer(
                     data["expected_pointer_revision"],
                     "expected_pointer_revision",
                     minimum=1,
                     maximum=_MAX_EXPECTED_POINTER_REVISION,
                 ),
-                expected_current_receipt_sha256=_digest(data["expected_current_receipt_sha256"], "expected_current_receipt_sha256"),
+                expected_current_receipt_sha256=_digest(
+                    data["expected_current_receipt_sha256"], "expected_current_receipt_sha256"
+                ),
                 target_generation_id=generation_id,
-                target_receipt_sha256=_digest(data["target_receipt_sha256"], "target_receipt_sha256"),
-                target_source_epoch=_integer(data["target_source_epoch"], "target_source_epoch", minimum=1),
+                target_receipt_sha256=_digest(
+                    data["target_receipt_sha256"], "target_receipt_sha256"
+                ),
+                target_source_epoch=_integer(
+                    data["target_source_epoch"], "target_source_epoch", minimum=1
+                ),
                 authorization=authorization,
             )
         except ValueError as exc:
-            raise RollbackRequestInvalid(
-                "rollback request fields are invalid"
-            ) from exc
+            raise RollbackRequestInvalid("rollback request fields are invalid") from exc
         if request.canonical != value:
             raise RollbackRequestInvalid("rollback request is not canonical JSON")
         return request
@@ -507,14 +511,12 @@ def _release_grant(
 ) -> None:
     try:
         runtime.leases.release(grant)
-    except (CommitUnknown, InjectedFault):
+    except CommitUnknown, InjectedFault:
         if primary is None:
             raise
     except Exception as exc:
         if primary is None:
-            raise CommitUnknown(
-                "rollback lease release outcome is uncertain"
-            ) from exc
+            raise CommitUnknown("rollback lease release outcome is uncertain") from exc
     if primary is not None:
         error, traceback = primary
         raise error.with_traceback(traceback)
@@ -600,9 +602,7 @@ def rollback(
                 deadline_ns=deadline_ns,
             )
         except LockTimeout as exc:
-            raise RevisionConflict(
-                "rollback lease advanced; refresh the rollback request"
-            ) from exc
+            raise RevisionConflict("rollback lease advanced; refresh the rollback request") from exc
         try:
             result_value = _pointer_value(result)
             result_current = cast(Mapping[str, object], result_value["current"])
@@ -613,13 +613,10 @@ def rollback(
             )
             if (
                 result_current.get("generation_id") != request.target_generation_id
-                or result_current.get("receipt_sha256")
-                != request.target_receipt_sha256
+                or result_current.get("receipt_sha256") != request.target_receipt_sha256
                 or revision != request.expected_pointer_revision + 1
             ):
-                raise PointerConflict(
-                    "rollback result does not bind the requested target"
-                )
+                raise PointerConflict("rollback result does not bind the requested target")
             receipt = RollbackReceipt(
                 repo_uuid=request.repo_uuid,
                 request_sha256=request.request_sha256,
@@ -628,9 +625,7 @@ def rollback(
                 pointer_revision=revision,
             )
         except Exception as exc:
-            raise CommitUnknown(
-                "rollback completed without a valid canonical receipt"
-            ) from exc
+            raise CommitUnknown("rollback completed without a valid canonical receipt") from exc
         return receipt
     except BaseException as exc:
         primary = (exc, exc.__traceback__)

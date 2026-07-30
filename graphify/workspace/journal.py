@@ -98,9 +98,7 @@ class JournalSnapshot:
 
     def for_generation(self, generation_id: str) -> tuple[JournalEvent, ...]:
         return tuple(
-            event
-            for event in self.events
-            if event.to_dict()["generation_id"] == generation_id
+            event for event in self.events if event.to_dict()["generation_id"] == generation_id
         )
 
 
@@ -202,20 +200,11 @@ class JournalStore:
                         dir_fd=descriptor,
                         follow_symlinks=False,
                     )
+                    if not stat.S_ISREG(entry_details.st_mode) or entry_details.st_nlink != 1:
+                        raise StatePathError(f"journal segment entry is unsafe: {directory / name}")
                     if match is None:
-                        raise JournalCorrupt(
-                            f"unexpected journal segment entry: {name}"
-                        )
-                    if (
-                        not stat.S_ISREG(entry_details.st_mode)
-                        or entry_details.st_nlink != 1
-                    ):
-                        raise StatePathError(
-                            f"journal segment entry is unsafe: {directory / name}"
-                        )
-                    result.append(
-                        (int(match.group("sequence")), directory / name)
-                    )
+                        raise JournalCorrupt(f"unexpected journal segment entry: {name}")
+                    result.append((int(match.group("sequence")), directory / name))
         except JournalCorrupt:
             raise
         except StatePathError:
@@ -267,12 +256,9 @@ class JournalStore:
                     )
                 if transition == prior == "VALIDATING":
                     prior_value = latest_event[generation_id].to_dict()
-                    if (
-                        int(value["operation_epoch"])
-                        <= int(prior_value["operation_epoch"])
-                        or int(value["fence_token"])
-                        <= int(prior_value["fence_token"])
-                    ):
+                    if int(value["operation_epoch"]) <= int(prior_value["operation_epoch"]) or int(
+                        value["fence_token"]
+                    ) <= int(prior_value["fence_token"]):
                         raise JournalCorrupt(
                             "revalidation requires a strictly newer operation and fence"
                         )
@@ -752,9 +738,7 @@ class JournalStore:
         except LockTimeout:
             raise
         except Exception as exc:
-            raise JournalConflict(
-                f"{transition} requires a valid visible pointer: {exc}"
-            ) from exc
+            raise JournalConflict(f"{transition} requires a valid visible pointer: {exc}") from exc
         value = pointer.to_dict()
         current = cast(dict[str, Any], value["current"])
         if (
@@ -765,9 +749,7 @@ class JournalStore:
             or current["generation_id"] != generation_id
             or current["receipt_sha256"] != receipt_sha256
         ):
-            raise JournalConflict(
-                f"{transition} does not match the visible pointer replacement"
-            )
+            raise JournalConflict(f"{transition} does not match the visible pointer replacement")
 
     def append_locked(
         self,
