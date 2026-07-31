@@ -466,6 +466,85 @@ generation, and freshness suites. P5A also requires the repository gates above,
 exact-head CI, a current Graphify graph, and independent code, architecture, and
 verification reviews.
 
+## P5B2 host-agent semantic-worker contract gates
+
+These gates freeze the sole contract-only READY child. They are future
+implementation acceptance criteria, not evidence that the command exists:
+
+- the only argv is `workspace semantic-worker --stdio`; malformed, reordered,
+  repeated, or extended argv exits 64 before installed-authority loading,
+  standard-input reads, source discovery, lease allocation, or state access;
+- valid argv loads and composes installed runtime authority before consuming
+  one canonical at-most-16-KiB `begin` frame. The single request/result
+  families are version 1, reject duplicate/unknown fields and versions, and
+  bind explicit registry, active-source, operation, migration, queue, and
+  watermark CAS plus a 1--600000 ms absolute deadline;
+- `executor="host_agent"` and Boolean `host_agent_active=true` are required.
+  Named/headless backends, provider/model/endpoint/credential fields,
+  `graphify.llm` discovery or dispatch, environment inference, network calls,
+  and automatic fallback are absent and denied;
+- one long-lived process derives one trusted boot/PID/process-start owner,
+  acquires one `SEMANTIC_CLAIM` lease, and retains that exact owner and fence
+  through at most one claim, eight bounded checkpoints, one terminal complete
+  or fail frame, and release. Tests prove separate subprocesses cannot continue
+  the claim;
+- the current working directory is the exact active Git top level; existing
+  bounded no-follow policy and checkout verification precede the redacted
+  source-relative work frame. `UPSERT` stream-hashes the exact regular file and
+  `DELETE` requires absence before work release and again before staging.
+  Activation, migration, lease expiry, queue drift, and replacement desired
+  work invalidate the stale session at every mutation boundary;
+- `complete` accepts exactly one operation-matched payload: an `UPSERT`
+  semantic fragment with exactly `nodes`, `edges`, and `hyperedges`, or the
+  fieldless `DELETE` tombstone. It enforces the existing 25 MiB, node, edge,
+  hyperedge, member, and ID bounds before unbounded work, validates, sanitizes,
+  validates again, and canonicalizes the payload. Host-agent output never
+  appears in a public result;
+- successful output is atomically installed only at the derived private
+  external path
+  `workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`
+  as one canonical immutable binding. Tests cover no-follow `0700`/`0600`
+  containment, same-byte idempotence, different-byte conflict, short writes,
+  sync/replace failures, and reopen/rehash verification;
+- queue completion is unreachable until the verified binding digest is stored
+  as `result:<sha256>` in the current claim checkpoint, the file is reopened
+  and rehashed again, and exact claim/work/source/owner/fence/operation/migration
+  authority still matches. Injected races at every boundary prove no completion
+  without the binding;
+- the seven frozen failure classifications accept only their specified
+  retryability. Three are accepted from `fail`; four are transport-only; and
+  `semantic_work_unsupported` is also transport-derived when a work frame would
+  exceed the public bound. Timeout, EOF/interruption, malformed or invalid
+  result data, and source mismatch attempt exactly one worker-owned `fail()`
+  under the live claim. Failure count advances once; retry occurs only within
+  the explicit budget, while non-retryable or exhausted work becomes durable
+  dead-letter and blocks completed watermark advancement. A worker crash before
+  that transition is recovered only through the existing `claim_expired` rule;
+- one absolute work deadline spans source verification, acquisition, protocol
+  waits, validation, staging, checkpoint, and the observed terminal mutation.
+  Heartbeats use the fixed 30-second TTL and 10-second cadence without extending
+  that deadline. After expiry, only one timeout failure and release may be
+  attempted before the unchanged lease liveness deadline;
+- result-install and checkpoint commit uncertainty may be adopted only by exact
+  reread. Uncertainty after completion or failure begins, or release-only
+  uncertainty, is `commit_unknown`, never success or replay authority. It is a
+  direct session result with action `none`; it invents no status route because
+  the current completed queue item retains no result digest;
+- every public frame is canonical and at most 64 KiB, uses one exact per-kind
+  field set, and limits failure reason/action values to the frozen enums. Frames
+  contain no source bytes, semantic payload, secret, credential, provider/model
+  data, private absolute path, owner/fence detail, environment value, raw
+  exception, or extension text;
+- recursive source, Git, real `HOME`, real `XDG_STATE_HOME`, real
+  `CODEX_HOME`, graph, receipt, and global-install snapshots remain unchanged.
+  The only permitted writes are the reviewed queue/lease transitions and
+  semantic-staging file beneath a disposable configured external state root;
+  and
+- no gate calls `bind_sealed_inputs()`, completes generation staging, certifies
+  or promotes a generation, moves a pointer, performs migrate/GC/repair,
+  retains a service/watch loop, consumes or cleans staged semantic output, or
+  claims full semantic sync or governance acceptance.
+
 ## P5B2 public fenced pointer-repair CLI gates
 
 - the only accepted repair argv forms are `workspace repair --dry-run

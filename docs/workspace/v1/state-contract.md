@@ -309,6 +309,59 @@ binding only when that marker is present; pre-P5A receipts without it, including
 legacy positive-watermark receipts permitted by the frozen schema, remain
 readable without being retroactively treated as P5A authority.
 
+## Contract-only host-agent result staging
+
+The future host-agent semantic-worker transport is frozen in
+[`semantic-sync.md`](semantic-sync.md). It does not revise
+`graphify.workspace.semantic_queue.internal` or any public durable schema. The
+exact command is `graphify workspace semantic-worker --stdio`, and one process
+must retain the same OS-derived `SEMANTIC_CLAIM` owner from claim through
+optional checkpoints and terminal completion or failure.
+
+The single request/result families are
+`graphify.workspace.semantic_worker_request` version 1 and
+`graphify.workspace.semantic_worker_result` version 1. A canonical begin frame
+binds explicit registry, active-source, operation, migration, queue, and
+watermark CAS plus an absolute deadline, `executor="host_agent"`, and the
+Boolean `host_agent_active=true`. There is no backend, provider, network,
+credential, model, endpoint, or fallback field.
+
+Validated successful output is staged only at the derived external path
+`workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`.
+The file is one immutable canonical
+`graphify.workspace.semantic_result_binding.internal` format-version-1
+envelope. It binds the begin-request digest, repository UUID, claim ID, attempt,
+exact desired work, active-source revision, operation and migration epochs, and
+the canonical payload bytes, byte count, and SHA-256. An `UPSERT` payload
+contains exactly one validated and sanitized semantic fragment; a `DELETE`
+payload is the exact fieldless delete tombstone. Existing no-follow
+install-once semantics apply: exact same bytes are idempotent, different bytes
+at the same derived path are a conflict, and a reopened regular `0600` file must
+match before it can be referenced.
+
+Queue completion requires the live claim to persist
+`result:<result_binding_sha256>` in its existing bounded checkpoint, reopen and
+rehash the envelope, and revalidate the same claim, work, source, fence, owner,
+operation epoch, and migration epoch immediately before `complete()`. A
+complete frame, an installed envelope, or a checkpoint alone is not completion
+authority. The terminal public result contains digests and queue watermarks,
+never the fragment, source content, private paths, owner/fence data, secrets,
+or exception text.
+
+The staging file is neither a queue record nor a generation payload,
+certification binding, or completion index. A successor claim ignores an older
+session directory, and this first child performs no cleanup. Because the
+existing `complete()` transition clears the claim/checkpoint and stores no
+result digest, uncertainty after completion begins cannot be recovered as a
+successful public receipt without a later durable-schema decision. It remains
+`commit_unknown`; manual durable-state inspection is required, and downstream
+semantic sync must not consume the staged result without the exact exit-0
+terminal receipt. This direct session outcome adds no status reason or action.
+
+The worker stops before `bind_sealed_inputs()`, generation staging completion,
+certification, promotion, pointer mutation, and full semantic sync. This is a
+READY contract only and supplies no implementation or acceptance evidence.
+
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct
 accepted fence token used by a future compare-and-swap.

@@ -80,6 +80,28 @@ calls `WorkspaceRuntime.freshness.query()` exactly once. It performs no
 advisory status probe. The existing freshness authority owns query bounds,
 locks, two-sided observation, and release; the CLI releases raw native UTF-8
 output only for `release` / `observed_current` and otherwise withholds output.
+
+The sole contract-only READY successor is the future
+`graphify workspace semantic-worker --stdio` transport described in
+[`semantic-sync.md`](semantic-sync.md). Unlike provider-owning extraction, it
+does not invoke a model. One long-lived CLI process derives one trusted owner,
+acquires one `SEMANTIC_CLAIM` lease, emits one verified source-relative desired
+work identity to an already-active host agent, accepts bounded canonical
+checkpoint and terminal frames, and completes or fails that item under the
+same claim. Separate subprocesses cannot continue the claim because owner,
+fence, source revision, and operation and migration epochs are exact.
+
+On the completion path, the transport validates and sanitizes an `UPSERT`
+fragment or accepts the exact `DELETE` tombstone, installs one canonical
+immutable result envelope in private external workspace semantic staging,
+reopens and verifies its SHA-256, persists that digest in the existing bounded
+claim checkpoint, revalidates both under the live grant, and only then calls the
+existing queue completion transition. The queue durable
+format is unchanged. The transport stops before generation staging
+finalization, `bind_sealed_inputs()`, certification, promotion, or pointer
+mutation. No runtime implementation or completion receipt exists for this
+READY contract.
+
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
 authority before consuming one bounded canonical request, requires its target
@@ -227,6 +249,23 @@ Each certification file is a separate immutable, store-owned internal record
 binding one generation and certification request to the revalidated queue view
 and exact sealed staged-input manifest.
 
+The contract-only host-agent worker reserves this future private staging
+layout relative to the configured external state root:
+
+```text
+<external_state_root>/workspaces/<repo_uuid>/semantic-staging/
+  <begin_request_sha256>/result.json
+```
+
+Each `result.json` is a canonical immutable internal binding installed through
+the existing no-follow durable-state primitives. It binds one begin request,
+one exact semantic claim and desired work item, the accepted source and epoch
+authority, and the sanitized fragment or delete-tombstone bytes and digest. It
+is not a queue record, generation payload, certification binding, or public
+receipt. A later
+full semantic-sync contract must own consumption and cleanup; this first child
+does neither.
+
 ## Ordering
 
 P2 enforces global registry lock before the exclusive fenced workspace-operation
@@ -262,6 +301,17 @@ Once the binding is durable, the exact request and payload can recover even if
 newer desired work later advances the queue; a staged receipt alone is never
 queue authority. The receipt remains the idempotent boundary for the subsequent
 generation install and journal transition.
+
+The contract-only semantic worker retains the registry-before-workspace order
+for each queue mutation but keeps one process alive between mutations so the
+same OS-derived owner and fence remain current. Its begin request supplies an
+absolute deadline and explicit registry, source, operation, migration, queue,
+and watermark CAS. A checkpoint or terminal transition repeats the existing
+claim validation, so source activation or migration between protocol frames
+withholds the stale session. Result staging is verified before the checkpoint
+and again before completion. If completion begins but its terminal public frame
+is lost, the current queue format cannot prove the result association after the
+claim is cleared; that outcome is commit-unknown, never inferred success.
 
 P5B2b reuses the P5B2b0 registry-before-workspace order and installs the exact
 `REQUESTED` record before acquiring its request-bound `BUILD` lease. A

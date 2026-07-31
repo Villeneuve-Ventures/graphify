@@ -119,6 +119,36 @@ source, staging-only writes, and host-agent instruction/data separation.
 Backend endpoints and credentials are operator configuration, never repo policy;
 secrets are excluded from argv and persisted state.
 
+The contract-only host-agent semantic-worker child narrows that future boundary
+further. Its only frozen argv is `graphify workspace semantic-worker --stdio`.
+The caller must state an already-active host agent explicitly; the transport
+passes no named backend and never imports or calls `graphify.llm` provider
+discovery or dispatch. Credentials, provider files, ambient backend variables,
+network availability, and an absent API key are neither capability nor
+authority. Source bytes are read-only untrusted data and are never returned in
+public result frames.
+
+One long-lived process retains one OS-derived semantic owner and fence across
+claim, bounded checkpoints, and terminal completion or failure. This prevents
+separate subprocesses, a replaced caller, source activation, migration, lease
+expiry, or a successor attempt from inheriting semantic commit authority.
+Successful `UPSERT` output is treated as untrusted until the existing semantic
+fragment validator and sanitizer accept it; `DELETE` accepts only the exact
+fieldless tombstone. An immutable canonical result envelope is then
+installed under private external workspace staging, its exact bytes and digest
+are reopened and verified, and that digest is persisted in and revalidated
+against the live claim checkpoint. Queue completion before those checks is
+forbidden.
+
+The result envelope and public receipt omit credentials, source content,
+private absolute paths, raw exceptions, provider/model data, and lease owner or
+fence details. Same-path different-byte installation, unsafe paths, links,
+special files, oversized fragments, identifier/path tricks, unknown fields,
+stale claims, and epoch drift fail closed. Orphan result staging is not cleanup
+authority. If queue completion may have committed before its terminal public
+frame, the absence of a durable queue/result association is reported as
+commit-unknown rather than inferred success.
+
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted
 `SEMANTIC_CLAIM` lease and an explicit live capability decision. At the claim
@@ -177,6 +207,13 @@ V1 does not claim automatic, online, service, arbitrary-history, registry,
 lease, path, staged-build, semantic-queue, or GC repair from the public pointer
 repair lifecycle. It adds no durable repair completion index and makes no
 governance or receipt-acceptance claim.
+
+The READY host-agent semantic-worker document is likewise not runtime or
+acceptance authority. It does not claim named/headless backend execution,
+network access, API-key handling, provider fallback, durable post-completion
+receipt recovery, staging cleanup, sealed-input finalization, generation
+certification or promotion, pointer mutation, retained service/watch behavior,
+or full semantic sync.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

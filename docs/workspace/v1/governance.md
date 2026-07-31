@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-07-31T02:16:34Z`
+Ledger refresh: `2026-07-31T03:40:39Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -44,13 +44,13 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical checkout | Repository root on `workspace/v1` at `d79d4290780924bf2c2d6a9451bb5ce3d128c41c`, tree `5ceef4cf831093b0562413971ec2208c036c0920`; local upstream divergence `0/0`. It remained clean at the fail-closed pre-edit preflight. |
-| Current canonical branch | Live GitHub and `origin/workspace/v1` at merge/current commit `d79d4290780924bf2c2d6a9451bb5ce3d128c41c`, current tree `5ceef4cf831093b0562413971ec2208c036c0920`. |
-| Worktrees | Two worktrees exist: the clean canonical checkout and this isolated retained governance worktree on `codex/workspace-p5b2-pointer-repair-governance`. No delivery worktree or competing governance worktree exists. |
-| GitHub | PR [#39](https://github.com/Villeneuve-Ventures/graphify/pull/39) is merged; the fork repository has no open pull requests. |
-| P5B2 public fenced pointer-repair lifecycle delivery | PR #39 exact delivery head `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b`; merge/current commit `d79d4290780924bf2c2d6a9451bb5ce3d128c41c`; delivery/merge/current tree `5ceef4cf831093b0562413971ec2208c036c0920`. The 36-file delivery head is the second direct parent of the merge. PR-head-associated CI [30584447157](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30584447157) checked out synthetic merge commit `d5d055b48ebd35d2676ddfeb697b77732caceec3`, whose parents and tree exactly matched the delivery merge, and passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded. The hosted Python 3.14 job reported `4,999 passed, 4 skipped, 5 warnings`. |
-| PR #39 review state | Thirty-seven review threads: 21 resolved and 16 unresolved, all 16 non-outdated. Every unresolved record was rechecked against exact delivery head `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b`; a 30-test thread-regression selection passed and none remains technically actionable. The latest submitted review was `COMMENTED` at `2026-07-30T16:09:23Z` against pre-delivery commit `dcf00b0ea403e725ec42aab952d24658229a7184`; later commits `2b4cfeec5f56bbb3421140f8f788a46e36004ef1` and `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b` preserved the final safety classifications. No thread was replied to or resolved during this closeout. |
-| Support baseline | Observed host CPython `3.14.6`; project environment CPython `3.14.3`; uv `0.11.30` |
+| Canonical checkout | Repository root on `workspace/v1` at `d70219f07b37f96b2406c9f97c7a40e5c2592486`, tree `d85946828ecd45f2bd6f72ee6761c63cd15ea7b6`; local upstream divergence `0/0`. It remained clean at the fail-closed pre-edit preflight. |
+| Current canonical branch | Live GitHub and `origin/workspace/v1` at merge/current commit `d70219f07b37f96b2406c9f97c7a40e5c2592486`, current tree `d85946828ecd45f2bd6f72ee6761c63cd15ea7b6`. |
+| Worktrees | Two worktrees exist: the clean canonical checkout and this isolated contract-only worktree on `codex/workspace-p5b2-host-agent-semantic-contract`, created from the canonical commit above. No delivery or competing governance worktree exists. |
+| GitHub | PR [#42](https://github.com/Villeneuve-Ventures/graphify/pull/42) is merged at the canonical commit above; the fork repository has no open pull requests. |
+| P5B2 public fenced pointer-repair governance acceptance | PR #42 exact head `bd616e737ea67e88f35a1a8168f2ed736c5c96c2`; merge/current commit `d70219f07b37f96b2406c9f97c7a40e5c2592486`; merge/current tree `d85946828ecd45f2bd6f72ee6761c63cd15ea7b6`. PR-head CI [30600458869](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30600458869) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded. |
+| Contract-only successor preflight | The canonical branch, HEAD, tree, cleanliness, divergence, worktree inventory, merged PR #42, and empty open-PR inventory were revalidated before this isolated worktree was created. No GitHub review thread was replied to, resolved, or otherwise mutated. |
+| Support baseline | Observed host CPython `3.14.6`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
 orientation only and cannot justify execution.
@@ -67,10 +67,10 @@ orientation only and cannot justify execution.
 | H1 | P4F | COMPLETE | Inherited labeling-order test stabilization closed. |
 | H2 | H1 | COMPLETE | Candidate packaging, dependency, and blocking security hygiene closed. |
 | H3 | H2 | DEFERRED | Full-repository Pyright and medium-severity Bandit debt remains non-blocking. |
-| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children are complete; remaining P5B2 and the broad P5C gate are not. |
+| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children are complete; one contract-only P5B2 child is READY, while its implementation, remaining P5B2, and the broad P5C gate are not. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, P5B2c, identity maintenance, active-source activation, exact-last-good rollback, retained-source identity continuity, the bounded offline-GC preview, the public fenced offline-GC lifecycle, and the public fenced pointer-repair lifecycle are complete; semantic sync, migrate, broader repair, broader mutation or query authority, and all other commands remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | Delivered children remain complete. The contract-only host-agent semantic-worker transport is the sole READY child; its implementation, full semantic sync, explicit backend integration, migrate, broader repair, broader mutation or query authority, and all other commands remain waiting. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
@@ -82,7 +82,8 @@ orientation only and cannot justify execution.
 | P5B2b0 | P5B2a | COMPLETE | Request-bound staged-build recovery prerequisite closed. |
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
 | P5B2c | P5C1 | COMPLETE | Accepted receipt: [`P5B2c`](receipts/p5b2c.md). One-shot certified `workspace query --request-stdin` transport only. |
-| Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
+| P5B2 host-agent semantic-worker transport | P5A, P5C1 | READY | Contract-only exact `workspace semantic-worker --stdio` host-agent lifecycle in [`semantic-sync.md`](semantic-sync.md). P5A directly supplies queue semantics; P5C1 supplies installed runtime authority and transitively includes P5B1. No implementation or completion receipt exists; READY does not authorize implementation. |
+| Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
 | Remaining P5C concerns | P5C | WAITING | Watch/service, performance, shared-lock/root-traversal optimization, publication, retained query/service authority, and all other P5C work remain unchanged. |
@@ -90,6 +91,11 @@ orientation only and cannot justify execution.
 P6-P12 are intentionally absent from this Graphify-local ledger. Their
 cross-repository ordering remains in the external portfolio plan, and all
 remain waiting at this handoff.
+
+Statements in accepted boundary freezes below that a receipt promoted no later
+child describe that receipt's authority. They do not override the sole current
+READY row above, which is established only by this contract-only batch and
+carries no implementation or acceptance evidence.
 
 ## P5C1 boundary freeze
 
@@ -108,7 +114,7 @@ optimization; publication; retained production query/service authority; H3;
 P6+; and every remaining P5B2 command. The bounded candidate/proof
 implementation is complete under the accepted
 [`P5C1` receipt](receipts/p5c1.md); none of those exclusions changed, and no
-later child is `READY`.
+later child was promoted by that receipt.
 
 ## P5B2c boundary freeze
 
@@ -131,7 +137,38 @@ Provider selection, networking, semantic execution, mutation, retained
 service/watch, publication, performance/resource qualification, H3, P6+, and
 every broader query or workspace-command authority remain excluded. The
 bounded delivery is complete under the accepted
-[`P5B2c` receipt](receipts/p5b2c.md); no later child is `READY`.
+[`P5B2c` receipt](receipts/p5b2c.md); that receipt promoted no later child.
+
+## P5B2 host-agent semantic-worker contract freeze
+
+The sole current READY child is the contract-only future transport:
+
+```text
+graphify workspace semantic-worker --stdio
+```
+
+The exact protocol and lifecycle are frozen in
+[`semantic-sync.md`](semantic-sync.md). One long-lived process owns one
+`SEMANTIC_CLAIM` lease from claim through optional checkpoints and terminal
+completion or classified failure. The caller must state `host_agent_active`
+as the Boolean `true`; the transport passes no explicit backend and performs no
+ambient provider or credential discovery.
+
+Before queue completion, a successful host-agent fragment must pass the
+existing bounded validation and sanitization, be installed as one canonical
+private immutable result envelope under external workspace semantic staging,
+be reopened and cryptographically verified, and be bound to the live claim's
+existing checkpoint. The current queue state machine is not redesigned.
+Commit uncertainty after queue completion begins is not replay or success
+authority because the completed queue item does not retain that result digest.
+
+This READY record does not authorize implementation and is not completion
+evidence. It adds no named/headless backend, network, `graphify.llm` provider
+discovery, API-key handling, automatic fallback, full semantic sync,
+`bind_sealed_inputs()` finalization, generation certification, promotion,
+pointer mutation, migrate, repair, GC, service/watch, publication, or cleanup
+authority. P5 and P5B2 remain `IN_PROGRESS`; all other remaining P5B2 and P5C
+surfaces remain `WAITING` or deferred as recorded above.
 
 ## P5B2 identity-maintenance boundary freeze
 
@@ -158,7 +195,7 @@ lock acquisition and recovery may reconcile pre-existing state first.
 Activation, additional sync, migrate, rollback, GC, repair, broader mutation
 or query authority, production installation, watch/service, performance or
 resource qualification, candidate publication, H3, P6+, and cleanup remain
-excluded. This acceptance promotes no later child to `READY`.
+excluded. This acceptance itself promoted no later child.
 
 ## P5B2 active-source activation boundary freeze
 
@@ -181,7 +218,7 @@ closes the prior rotation and later-resolution nonclaims without reopening or
 broadening this activation receipt. Additional sync modes, migrate, rollback,
 GC, repair, broader mutation or query authority, production installation,
 watch/service, performance or resource qualification, candidate publication,
-H3, P6+, and cleanup remain excluded. No later child is promoted to `READY`.
+H3, P6+, and cleanup remain excluded. That acceptance promoted no later child.
 
 ## P5B2 exact-last-good rollback boundary freeze
 
@@ -210,7 +247,7 @@ migrate, GC, repair, broader mutation or query authority, production
 installation, watch/service, performance or resource qualification, candidate
 publication, H3, P6+, or cleanup authority. The separately accepted
 retained-source identity-continuity receipt does not broaden rollback
-authority, and no later child is promoted to `READY`.
+authority, and that acceptance promoted no later child.
 
 ## P5B2 bounded offline-GC preview boundary freeze
 
@@ -266,9 +303,9 @@ not performance or resource qualification.
 This acceptance adds no automatic, online, or service GC; semantic sync;
 migrate; repair; mutation beyond this exact lifecycle; broader query authority;
 production installation; watch/service; publication; performance or resource
-proof; H3; P6+; or cleanup authority. P5 and P5B2 remain `IN_PROGRESS`. The
-current authority set freezes no later child boundary, so the successor rerank
-promotes no later child to `READY`.
+proof; H3; P6+; or cleanup authority. P5 and P5B2 remain `IN_PROGRESS`. This
+receipt did not promote a later child; the separately reviewed host-agent
+semantic-worker contract is the sole current READY child.
 
 ## P5B2 public fenced pointer-repair lifecycle boundary freeze
 
@@ -305,7 +342,7 @@ generation selection; GC reconciliation; mutation or query authority beyond
 the two exact forms; production installation; watch/service; publication;
 performance or resource proof; H3; P6+; or cleanup authority. P5 and P5B2
 remain `IN_PROGRESS`, P5C and its remaining concerns remain `WAITING`, and no
-later child is promoted to `READY`.
+later child was promoted by that acceptance.
 
 ## P5B2a ADOPT correction boundary freeze
 
