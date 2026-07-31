@@ -520,11 +520,15 @@ implementation acceptance criteria, not evidence that the command exists:
   the explicit budget, while non-retryable or exhausted work becomes durable
   dead-letter and blocks completed watermark advancement. A worker crash before
   that transition is recovered only through the existing `claim_expired` rule;
-- one absolute work deadline spans source verification, acquisition, protocol
-  waits, validation, staging, checkpoint, and the observed terminal mutation.
+- deadline tests start one absolute work deadline only after the canonical
+  `begin` frame is accepted and prove it bounds source verification, lease
+  acquisition, protocol waits, validation, staging, checkpoint, and both the
+  start and observed return of completion or caller-requested failure.
   Heartbeats use the fixed 30-second TTL and 10-second cadence without extending
-  that deadline. After expiry, only one timeout failure and release may be
-  attempted before the unchanged lease liveness deadline;
+  that deadline. After expiry, tests reject checkpoints, completion, and further
+  heartbeats and permit, only while the claim remains live, exactly one
+  transport-owned `host_agent_timeout=true` failure plus lease release before
+  the unchanged lease liveness deadline;
 - result-install and checkpoint commit uncertainty may be adopted only by exact
   reread. Uncertainty after completion or failure begins, or release-only
   uncertainty, is `commit_unknown`, never success or replay authority. It is a

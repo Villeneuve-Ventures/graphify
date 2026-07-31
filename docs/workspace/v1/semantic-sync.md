@@ -43,11 +43,12 @@ empty for a valid invocation; only invalid argv emits plain-text usage.
 
 Every input frame belongs to the single
 `graphify.workspace.semantic_worker_request` version 1 family and contains
-exactly `contract`, `schema_version`, `cli_contract_version`, `action`, and the
-fields defined for that action below. Unknown fields, versions, or actions fail
-closed.
+exactly the four common fields `contract`, `schema_version`,
+`cli_contract_version`, and `action`, plus the action-specific fields defined
+below. Unknown fields, versions, or actions fail closed.
 
-The first frame is `begin`, is limited to 16 KiB, and contains exactly:
+The first frame is `begin`, is limited to 16 KiB, and has exactly these
+additional action-specific fields:
 
 - `repo_uuid`;
 - `expected_registry_revision`, `expected_active_source_revision`,
@@ -117,22 +118,24 @@ contains no source bytes or private absolute path. If that exact work frame
 would exceed 64 KiB, the worker records `semantic_work_unsupported=false`
 without exposing the oversized work.
 
-A terminal `completed` frame additionally contains exactly
-`begin_request_sha256`, `repo_uuid`, `claim_id`, `attempt`, `work_sha256`,
+For a `terminal` frame with `outcome="completed"`, the exact outcome-specific
+fields are `begin_request_sha256`, `repo_uuid`, `claim_id`, `attempt`,
+`work_sha256`,
 `payload_kind`, `payload_bytes`, `payload_sha256`, `result_binding_bytes`,
-`result_binding_sha256`, `queue_revision`, and `completed_watermark`. A terminal
-`idle` frame contains exactly `begin_request_sha256`, `repo_uuid`,
-`queue_revision`, `desired_watermark`, and `completed_watermark`. Neither frame
-contains `reason_code` or `action_code`.
+`result_binding_sha256`, `queue_revision`, and `completed_watermark`. For
+`outcome="idle"`, they are exactly `begin_request_sha256`, `repo_uuid`,
+`queue_revision`, `desired_watermark`, and `completed_watermark`. Neither
+outcome has `reason_code` or `action_code`.
 
 `payload_kind` is exactly `semantic_fragment` for `UPSERT` or
 `delete_tombstone` for `DELETE`. Each SHA-256 field is the lowercase digest of
 the named canonical bytes; each byte count covers those same bytes, including
 their final newline.
 
-Every other terminal frame contains only `begin_request_sha256` when a begin
-frame was accepted, plus the exact `reason_code` and `action_code` pair below.
-No code accepts extension text, and no output field contains raw diagnostics:
+For every other terminal outcome, the exact outcome-specific fields are
+`reason_code` and `action_code`, plus `begin_request_sha256` if and only if a
+begin frame was accepted. No code accepts extension text, and no output field
+contains raw diagnostics:
 
 | `outcome` / exit | Exact reason codes | Action code |
 |---|---|---|

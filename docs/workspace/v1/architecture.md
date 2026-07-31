@@ -306,12 +306,19 @@ The contract-only semantic worker retains the registry-before-workspace order
 for each queue mutation but keeps one process alive between mutations so the
 same OS-derived owner and fence remain current. Its begin request supplies an
 absolute deadline and explicit registry, source, operation, migration, queue,
-and watermark CAS. A checkpoint or terminal transition repeats the existing
-claim validation, so source activation or migration between protocol frames
-withholds the stale session. Result staging is verified before the checkpoint
-and again before completion. If completion begins but its terminal public frame
-is lost, the current queue format cannot prove the result association after the
-claim is cleared; that outcome is commit-unknown, never inferred success.
+and watermark CAS. The deadline begins after the canonical begin frame is
+accepted and bounds both the start and observed return of completion or a
+caller-requested failure. After expiry, checkpoints and completion are
+forbidden and heartbeats stop; while the claim remains live, the only exception
+is one transport-owned `host_agent_timeout=true` failure and lease release
+before the unchanged lease liveness deadline. A checkpoint or terminal
+transition repeats the existing claim validation, so source activation or
+migration between protocol frames withholds the stale session. Result staging
+is verified before the checkpoint and again before completion. If completion or
+failure begins but its observed return or terminal public frame is lost, the
+mutation is unproven and the outcome is commit-unknown, never inferred success.
+After completion clears the claim, the current queue format also cannot
+reconstruct the result association.
 
 P5B2b reuses the P5B2b0 registry-before-workspace order and installs the exact
 `REQUESTED` record before acquiring its request-bound `BUILD` lease. A
