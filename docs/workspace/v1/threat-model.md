@@ -133,21 +133,28 @@ claim, bounded checkpoints, and terminal completion or failure. This prevents
 separate subprocesses, a replaced caller, source activation, migration, lease
 expiry, or a successor attempt from inheriting semantic commit authority.
 Successful `UPSERT` output is treated as untrusted until the existing semantic
-fragment validator and sanitizer accept it; `DELETE` accepts only the exact
-fieldless tombstone. An immutable canonical result envelope is then
+fragment validator is surrounded by the worker's closed nested schema and the
+sanitizer runs through a preflighted linear `rationale_for` index. Unknown keys,
+non-work-path provenance, noncanonical fixed-point scores, oversized semantic
+text, dangling references, and projected rationale or payload amplification are
+rejected before sanitizer allocation. `DELETE` accepts only the exact kind-only
+tombstone. An immutable canonical result envelope is then
 installed under private external workspace staging, its exact bytes and digest
 are reopened and verified, and that digest is persisted in and revalidated
 against the live claim checkpoint. Queue completion before those checks is
 forbidden.
 
-The result envelope and public receipt omit credentials, source content,
-private absolute paths, raw exceptions, provider/model data, and lease owner or
-fence details. Same-path different-byte installation, unsafe paths, links,
-special files, oversized fragments, identifier/path tricks, unknown fields,
-stale claims, and epoch drift fail closed. Orphan result staging is not cleanup
-authority. If queue completion may have committed before its terminal public
-frame, the absence of a durable queue/result association is reported as
-commit-unknown rather than inferred success.
+The private envelope admits source-derived text only in the schema's bounded
+semantic `label` and sanitizer-produced `rationale` fields; it has no separate
+raw-source or arbitrary metadata field. That private `0600` payload is not
+claimed to be secret-free or non-verbatim. Public receipts contain no semantic
+text, credential, private absolute path, raw exception, provider/model data, or
+lease owner or fence detail. Same-path different-byte installation, unsafe
+paths, links, special files, oversized fragments, identifier/path tricks,
+unknown fields, stale claims, and epoch drift fail closed. Orphan result staging
+is not cleanup authority. If queue completion may have committed before its
+terminal public frame, the absence of a durable queue/result association is
+reported as commit-unknown rather than inferred success.
 
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted
@@ -213,7 +220,8 @@ acceptance authority. It does not claim named/headless backend execution,
 network access, API-key handling, provider fallback, durable post-completion
 receipt recovery, staging cleanup, sealed-input finalization, generation
 certification or promotion, pointer mutation, retained service/watch behavior,
-or full semantic sync.
+full semantic sync, or content-level DLP classification of admitted semantic
+prose.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

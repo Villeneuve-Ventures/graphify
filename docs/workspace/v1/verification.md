@@ -496,10 +496,29 @@ implementation acceptance criteria, not evidence that the command exists:
   work invalidate the stale session at every mutation boundary;
 - `complete` accepts exactly one operation-matched payload: an `UPSERT`
   semantic fragment with exactly `nodes`, `edges`, and `hyperedges`, or the
-  fieldless `DELETE` tombstone. It enforces the existing 25 MiB, node, edge,
-  hyperedge, member, and ID bounds before unbounded work, validates, sanitizes,
-  validates again, and canonicalizes the payload. Host-agent output never
-  appears in a public result;
+  kind-only `DELETE` tombstone. Before the general validator or sanitizer, tests
+  enforce the exact worker-specific node/edge/hyperedge field sets, types,
+  enums, unique and referentially valid IDs, exact `work.path` provenance, null
+  metadata fields, 16-KiB semantic-text limits, and rejection of every unknown
+  nested field. Tests reject smuggling through absolute-path, raw-source,
+  credential-metadata, and provider-data extension keys; only the explicitly
+  bounded semantic text slots remain, and none is copied to public output;
+- fixed-point canonicality vectors accept bounded scores such as `0.75` and the
+  endpoint `1`, reject binary floats, exponent notation, negative zero,
+  excessive precision, `1.0`, NaN, and infinity, and prove parse/serialize/hash
+  parity without binary-floating-point rounding. No other request or result
+  field admits a non-integer JSON number;
+- sanitizer-amplification tests construct the `rationale_for` index in one edge
+  pass, instrument work as `O(nodes + edges + rationale_fanout)`, and reject
+  before concatenation when any projected rationale exceeds 16 KiB or the
+  sanitized fragment would exceed 25 MiB. The actual sanitized copy is then
+  checked against the closed post-sanitize schema and the same bounds;
+- digest vectors prove `payload_bytes` and `payload_sha256` cover the exact whole
+  canonical `complete.payload` wrapper plus its final newline for both `UPSERT`
+  and `DELETE`, never only the nested fragment or the result envelope. Separate
+  vectors prove `result_binding_bytes` and `result_binding_sha256` cover the
+  whole canonical envelope containing that payload object exactly once.
+  Host-agent output never appears in a public result;
 - successful output is atomically installed only at the derived private
   external path
   `workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`
@@ -525,20 +544,35 @@ implementation acceptance criteria, not evidence that the command exists:
   acquisition, protocol waits, validation, staging, checkpoint, and both the
   start and observed return of completion or caller-requested failure.
   Heartbeats use the fixed 30-second TTL and 10-second cadence without extending
-  that deadline. After expiry, tests reject checkpoints, completion, and further
-  heartbeats and permit, only while the claim remains live, exactly one
+  that deadline. Expiry before a claim, including during preflight or
+  acquisition, emits `withheld` / `semantic_worker_preclaim_timeout` /
+  `retry_status`, never calls `fail()`, and leaves `failure_count` unchanged.
+  Checkout, configuration, capability, CAS, contention, and staged-barrier
+  rejection before a claim likewise exercise their exact frozen terminal route
+  without queue failure mutation. An uncertain `claim()` call is reread: exact
+  absence uses the preclaim route, an exact installed claim uses post-claim
+  rules, and ambiguity is commit-unknown. After expiry with a live claim, tests
+  reject checkpoints, completion, and further heartbeats and permit exactly one
   transport-owned `host_agent_timeout=true` failure plus lease release before
   the unchanged lease liveness deadline;
+- post-commit fault injection at lease acquisition adopts only the unique exact
+  next owner/fence/domain-epoch record derived from the retained pre-acquisition
+  snapshot; absence, contention, authority drift, and ambiguity exercise their
+  distinct retry/withhold/commit-unknown paths. Heartbeat fault injection adopts
+  only the exact requested timestamp and liveness deadline, permits retry only
+  from the exact unchanged record, and forbids later claim mutation from an
+  unproven grant;
 - result-install and checkpoint commit uncertainty may be adopted only by exact
-  reread. Uncertainty after completion or failure begins, or release-only
-  uncertainty, is `commit_unknown`, never success or replay authority. It is a
-  direct session result with action `none`; it invents no status route because
-  the current completed queue item retains no result digest;
-- every public frame is canonical and at most 64 KiB, uses one exact per-kind
-  field set, and limits failure reason/action values to the frozen enums. Frames
-  contain no source bytes, semantic payload, secret, credential, provider/model
-  data, private absolute path, owner/fence detail, environment value, raw
-  exception, or extension text;
+  reread. Uncertainty after completion or failure begins, ambiguous lease
+  mutation, or release-only uncertainty is `commit_unknown`, never success or
+  replay authority. It is a direct session result with action `none`; it invents
+  no status route because the current completed queue item retains no result
+  digest;
+- every public output frame is canonical and at most 64 KiB, uses one exact
+  per-kind field set, and limits failure reason/action values to the frozen
+  enums. Output frames contain no source bytes, semantic payload, secret,
+  credential, provider/model data, private absolute path, owner/fence detail,
+  environment value, raw exception, or extension text;
 - recursive source, Git, real `HOME`, real `XDG_STATE_HOME`, real
   `CODEX_HOME`, graph, receipt, and global-install snapshots remain unchanged.
   The only permitted writes are the reviewed queue/lease transitions and

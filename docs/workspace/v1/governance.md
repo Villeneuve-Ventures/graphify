@@ -155,10 +155,11 @@ as the Boolean `true`; the transport passes no explicit backend and performs no
 ambient provider or credential discovery.
 
 Before queue completion, a successful host-agent fragment must pass the
-existing bounded validation and sanitization, be installed as one canonical
-private immutable result envelope under external workspace semantic staging,
-be reopened and cryptographically verified, and be bound to the live claim's
-existing checkpoint. The current queue state machine is not redesigned.
+worker-specific closed validation and bounded indexed sanitization around the
+existing semantic helpers, be installed as one canonical private immutable
+result envelope under external workspace semantic staging, be reopened and
+cryptographically verified, and be bound to the live claim's existing
+checkpoint. The current queue state machine is not redesigned.
 Commit uncertainty after queue completion begins is not replay or success
 authority because the completed queue item does not retain that result digest.
 

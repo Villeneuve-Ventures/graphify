@@ -34,8 +34,15 @@ lease owner.
 
 Standard input and standard output carry canonical UTF-8 JSON Lines. Each
 frame is one duplicate-free object encoded with sorted keys, compact
-separators, NFC-normalized strings, no floating-point values, and one final
-newline. Standard output contains only
+separators, NFC-normalized strings, and one final newline. Binary
+floating-point values are forbidden. The only non-integer JSON number tokens
+are `confidence_score` and `weight` inside an `UPSERT` semantic fragment. Each
+is an exact unsigned decimal value from 0 through 1 with at most six fractional
+digits. Canonical tokens use no exponent, leading plus, unnecessary integer-part
+zero, or insignificant trailing zero; a fraction below 1 retains its single
+required `0` before the decimal point. The endpoints are `0` and `1`, not `-0`,
+`0.0`, or `1.0`. Parsers retain those tokens as exact decimal values rather than
+first rounding them through binary floating point. Standard output contains only
 `graphify.workspace.semantic_worker_result` version 1 frames. Standard error is
 empty for a valid invocation; only invalid argv emits plain-text usage.
 
@@ -74,9 +81,10 @@ by this process.
   public output.
 - `complete` additionally carries exactly one `payload`. For `UPSERT`, it is
   `{"kind":"semantic_fragment","fragment":OBJECT}`, where the fragment has
-  exactly `nodes`, `edges`, and `hyperedges`. For `DELETE`, it is exactly
-  `{"kind":"delete_tombstone"}`. The fragment is limited to 25 MiB; the
-  complete frame is limited to 25 MiB plus 64 KiB of framing.
+  exactly `nodes`, `edges`, and `hyperedges` and the closed nested schema below.
+  For `DELETE`, it is exactly `{"kind":"delete_tombstone"}` with no additional
+  field. The raw fragment and canonical sanitized fragment are each limited to
+  25 MiB; the complete frame is limited to 25 MiB plus 64 KiB of framing.
 - `fail` additionally carries `error_code` and the actual Boolean
   `retryable`, is limited to 4 KiB, and accepts only these caller-stated pairs:
 
@@ -128,9 +136,15 @@ fields are `begin_request_sha256`, `repo_uuid`, `claim_id`, `attempt`,
 outcome has `reason_code` or `action_code`.
 
 `payload_kind` is exactly `semantic_fragment` for `UPSERT` or
-`delete_tombstone` for `DELETE`. Each SHA-256 field is the lowercase digest of
-the named canonical bytes; each byte count covers those same bytes, including
-their final newline.
+`delete_tombstone` for `DELETE`. `payload_bytes` and `payload_sha256` cover the
+exact canonical bytes, including the final newline, of the whole validated
+operation-matched `complete.payload` object: the
+`{"kind":"semantic_fragment","fragment":...}` wrapper for `UPSERT`, or the
+kind-only `{"kind":"delete_tombstone"}` object for `DELETE`. Hashing only the
+nested fragment, a tombstone surrogate, or the enclosing result-binding
+envelope is not equivalent. The result-binding envelope stores that exact
+payload object once. `result_binding_bytes` and `result_binding_sha256` cover
+the whole canonical envelope bytes, also including their final newline.
 
 For every other terminal outcome, the exact outcome-specific fields are
 `reason_code` and `action_code`, plus `begin_request_sha256` if and only if a
@@ -140,10 +154,25 @@ contains raw diagnostics:
 | `outcome` / exit | Exact reason codes | Action code |
 |---|---|---|
 | `retry_scheduled` / 10 | `host_agent_transient`, `host_agent_timeout`, `host_agent_interrupted`, `semantic_result_invalid` | `drain_semantic_queue` |
-| `withheld` / 10 | `semantic_claim_contended`, `semantic_authority_stale`, `staged_build_recovery_required` | `retry_status`, except `staged_build_recovery_required` uses `resume_exact_workspace_sync` |
+| `withheld` / 10 | `semantic_claim_contended`, `semantic_authority_stale`, `semantic_worker_preclaim_timeout`, `workspace_config_unavailable`, `semantic_capability_unavailable`, `staged_build_recovery_required` | `retry_status`, except `semantic_capability_unavailable` uses `inspect_workspace_state` and `staged_build_recovery_required` uses `resume_exact_workspace_sync` |
 | `dead_lettered` / 20 | any frozen caller or transport failure classification | `inspect_semantic_queue` |
-| `invalid` / 20 | `semantic_worker_request_invalid`, `runtime_authority_missing`, `runtime_authority_invalid`, `runtime_authority_unsupported`, `unsafe_state_path`, `semantic_queue_invalid` | respectively `none`, `install_candidate_authority`, `install_candidate_authority`, `install_supported_candidate`, `configure_safe_state_root`, `inspect_semantic_queue` |
+| `invalid` / 20 | `semantic_worker_request_invalid`, `runtime_authority_missing`, `runtime_authority_invalid`, `runtime_authority_unsupported`, `unsafe_state_path`, `workspace_config_invalid`, `semantic_queue_invalid` | respectively `none`, `install_candidate_authority`, `install_candidate_authority`, `install_supported_candidate`, `configure_safe_state_root`, `inspect_workspace_state`, `inspect_semantic_queue` |
 | `commit_unknown` / 20 | `semantic_worker_commit_unknown` | `none` |
+
+Before a queue claim exists, no condition may call the queue failure transition
+or increment `failure_count`. Deadline expiry in source/config preflight or lease
+acquisition is `semantic_worker_preclaim_timeout`. Missing or transiently
+unreadable active configuration is `workspace_config_unavailable`; malformed
+configuration is `workspace_config_invalid`; a policy that does not authorize
+the explicitly active host agent is `semantic_capability_unavailable`.
+Registry, source, checkout, configuration-digest, operation, migration, queue,
+or watermark CAS drift is `semantic_authority_stale`. Lease contention and the
+staged-build barrier retain their named outcomes above. These mappings apply
+only when rejection is proved to precede queue-claim mutation, whether before
+acquisition or after a grant. If a `claim()` call may have installed a claim,
+one locked reread must prove exact claim presence or absence; an exact present
+claim follows the post-claim failure rules, exact absence follows the preclaim
+mapping, and ambiguity is `semantic_worker_commit_unknown`.
 
 The process exits 0 only after a `completed` terminal or a truthful `idle`
 terminal with no eligible item. Exit 64 is reserved for invalid argv and emits
@@ -189,37 +218,89 @@ queue.
 ## Result validation and binding
 
 A `complete` frame is not queue-completion authority by itself. Under the live
-claim and absolute request deadline, the implementation must perform this
-ordering exactly:
+claim and absolute request deadline, a worker-specific closed validator must
+surround the existing general semantic helpers. The untrusted pre-sanitize
+fragment entries have exactly these required fields; no field is optional and
+no alias or unknown nested key is accepted:
+
+| Entry | Exact fields |
+|---|---|
+| node | `id`, `label`, `file_type`, `source_file`, `source_location`, `source_url`, `captured_at`, `author`, `contributor` |
+| edge | `source`, `target`, `relation`, `confidence`, `confidence_score`, `source_file`, `source_location`, `weight` |
+| hyperedge | `id`, `label`, `nodes`, `relation`, `confidence`, `confidence_score`, `source_file` |
+
+Node and hyperedge IDs and every edge endpoint/member use the existing semantic
+ID grammar and length bound. Node IDs are unique, hyperedge IDs are unique, all
+edge endpoints name input nodes, and every hyperedge member names an input node.
+`label` is a nonempty, trimmed string of at most 16 KiB in UTF-8 and contains no
+Unicode general-category `Cc` code point. `file_type` is one of `code`,
+`document`, `paper`, `image`, `rationale`, or `concept`. Edge `relation` is one
+of `calls`, `implements`,
+`references`, `cites`, `conceptually_related_to`, `shares_data_with`,
+`semantically_similar_to`, or `rationale_for`; edge `confidence` is one of
+`EXTRACTED`, `INFERRED`, or `AMBIGUOUS`. Hyperedge `relation` is one of
+`participate_in`, `implement`, or `form`; hyperedge `confidence` is
+`EXTRACTED` or `INFERRED`. Every score and weight is present and follows the
+exact fixed-point rule above. Every `source_file` is exactly the claimed
+source-relative `work.path`; `source_location` is null or `L` followed by a
+positive base-10 line number, with a 32-byte UTF-8 maximum. `source_url`,
+`captured_at`, `author`, and `contributor` are null. Thus designated labels are
+the only caller-supplied source-derived prose admitted to the pre-sanitize
+fragment; each is bounded and
+there is no separate field for a private path, raw-source blob, provider data,
+credential metadata, or arbitrary extension. This syntactic boundary does not
+claim that admitted semantic prose is non-verbatim, which is why no payload text
+is copied into a public result.
+
+Sanitization may remove nodes and add only one optional `rationale` field to a
+surviving node. That field consists solely of admitted candidate labels joined
+by the sanitizer's exact double-newline separator and is at most 16 KiB in
+UTF-8. The post-sanitize schema otherwise retains the exact field sets and
+value rules above, permits only `code`, `document`, `paper`, or `image` as
+surviving file types, and requires every retained edge and hyperedge member to
+name a surviving node.
+
+The implementation must perform this ordering exactly:
 
 1. enforce the complete-frame and payload byte limits before unbounded parse;
-2. for `UPSERT`, require exactly the three fragment arrays and apply the
-   existing semantic limits: at most 10,000 nodes, 100,000 edges, 10,000
-   hyperedges, 256 members per hyperedge, and 256 characters per semantic ID;
-3. for `UPSERT`, run `validate_semantic_fragment()`, sanitize a copy with
-   `sanitize_semantic_fragment()`, validate the sanitized result again, and
-   canonicalize one `semantic_fragment` payload containing only `nodes`,
-   `edges`, and `hyperedges`; for `DELETE`, require and canonicalize the exact
-   fieldless `delete_tombstone` payload;
-4. construct one canonical internal
+2. for `UPSERT`, enforce the closed pre-sanitize schema plus the existing
+   semantic limits: at most 10,000 nodes, 100,000 edges, 10,000 hyperedges, 256
+   members per hyperedge, and 256 characters per semantic ID, then run
+   `validate_semantic_fragment()`;
+3. build one `rationale_for` source-to-target index in a single edge pass,
+   identify rationale candidates in one node pass, and precompute expansion
+   before concatenation. Reject before sanitizer invocation if any projected
+   `rationale` exceeds 16 KiB or the projected canonical sanitized fragment
+   exceeds 25 MiB. Rationale propagation must be
+   `O(nodes + edges + rationale_fanout)`; a candidate-by-all-edges scan is not a
+   conforming implementation;
+4. sanitize a copy with `sanitize_semantic_fragment()` using that bounded
+   indexed path, run `validate_semantic_fragment()` again, enforce the closed
+   post-sanitize schema, and measure the actual canonical sanitized fragment
+   against the same per-string and 25-MiB limits;
+5. for `UPSERT`, construct and canonicalize the exact whole payload object
+   `{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}`; for `DELETE`,
+   require and canonicalize the exact kind-only
+   `{"kind":"delete_tombstone"}` object;
+6. construct one canonical internal
    `graphify.workspace.semantic_result_binding.internal` format-version-1
    envelope binding the begin-request SHA-256, repository UUID, claim ID,
    attempt, exact desired work, active-source revision, operation epoch,
-   migration epoch, canonical payload byte count and SHA-256, and the sanitized
-   fragment or delete tombstone;
-5. atomically install that envelope at the derived private external-state path
+   migration epoch, canonical payload byte count and SHA-256, and that exact
+   payload object;
+7. atomically install that envelope at the derived private external-state path
    `workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`
    through the existing no-follow durable-state primitives, with `0700`
    directories and a `0600` regular file;
-6. reopen the installed file without following links and require exact bytes
+8. reopen the installed file without following links and require exact bytes
    and SHA-256; same-byte install retry is idempotent, while different bytes at
    the same derived path are a binding conflict;
-7. persist the existing bounded claim checkpoint
+9. persist the existing bounded claim checkpoint
    `result:<result_binding_sha256>`, then reopen and rehash the envelope again;
-8. under the current semantic grant, require the same claim and checkpoint,
+10. under the current semantic grant, require the same claim and checkpoint,
    exact work, source revision, operation and migration epochs, and verified
    envelope; and
-9. only then call the existing queue completion transition and emit the
+11. only then call the existing queue completion transition and emit the
    `completed` result.
 
 This staging envelope does not revise
@@ -240,16 +321,17 @@ only while the explicit queue retry budget permits; otherwise, and for every
 non-retryable classification, the item becomes durable `dead_letter`.
 Dead-letter work continues to block reconciliation completion.
 
-The worker maps deadline expiry to `host_agent_timeout`, EOF or interruption
-before a terminal request to `host_agent_interrupted`, malformed, noncanonical,
-unknown, oversized, or invalid result data to `semantic_result_invalid`, and
-exact source mismatch to `source_content_changed`. It attempts one `fail()`
-while the claim remains live. Unknown caller classifications, invalid Boolean
-retryability, stale claims, and activation or migration drift are not rewritten
-into caller-selected queue failures. They fail closed or withhold stale
-authority. If the worker process itself dies before the transition, the claim
-remains for the existing successor `claim_expired` recovery, which increments
-the failure count once and applies the same retry-budget/dead-letter rule.
+Once a queue claim exists, the worker maps deadline expiry to
+`host_agent_timeout`, EOF or interruption before a terminal request to
+`host_agent_interrupted`, malformed, noncanonical, unknown, oversized, or
+invalid result data to `semantic_result_invalid`, and exact source mismatch to
+`source_content_changed`. It attempts one `fail()` while the claim remains live.
+Unknown caller classifications, invalid Boolean retryability, stale claims, and
+activation or migration drift are not rewritten into caller-selected queue
+failures. They fail closed or withhold stale authority. If the worker process
+itself dies before the transition, the claim remains for the existing successor
+`claim_expired` recovery, which increments the failure count once and applies
+the same retry-budget/dead-letter rule.
 
 One absolute work deadline begins after the canonical begin frame is accepted
 and bounds source verification, lease acquisition, frame waits, checkpoints,
@@ -257,6 +339,13 @@ payload validation and sanitization, result installation and reopen, and the
 start and observed return of queue completion or caller-requested failure.
 Heartbeats preserve the same owner and fence under a fixed 30-second lease TTL,
 every 10 seconds while work time remains, but never extend the work deadline.
+
+If the deadline expires before queue-claim mutation begins, or a locked reread
+proves that an uncertain claim call installed no claim, the worker emits the
+preclaim timeout outcome above after any provable lease release. It never
+synthesizes `host_agent_timeout`, calls `fail()`, or advances a queue failure
+count without a live claim. The same no-claim rule applies to checkout,
+configuration, capability, CAS, contention, and staged-barrier rejection.
 
 After that deadline, checkpoints and completion are forbidden and heartbeats
 stop. If the claim is still live, the worker may attempt only the one
@@ -266,6 +355,21 @@ session is `commit_unknown` or the successor later applies `claim_expired`.
 
 Commit uncertainty is phase-specific and fail-closed:
 
+- before lease acquisition, retain the exact lease-state revision, fence high
+  watermark, operation and migration epochs, and absence of a live
+  `SEMANTIC_CLAIM`. After an uncertain acquisition, one locked reread may adopt
+  only the unique next live lease for the derived owner with the expected source
+  authority and exact one-step fence/domain-epoch advances. Proven absence may
+  reacquire while the work deadline remains; a live different owner is
+  `semantic_claim_contended`, authority drift is `semantic_authority_stale`, and
+  an unreadable or non-unique state is `semantic_worker_commit_unknown`;
+- after an uncertain heartbeat, one locked reread adopts only the same
+  owner/fence/epochs with the exact requested heartbeat timestamp and liveness
+  deadline. The exact unchanged pre-heartbeat record may retry while both
+  deadlines remain. Absence, replacement, or expiry withholds stale authority;
+  any other or unreadable state is `semantic_worker_commit_unknown`. No
+  checkpoint, completion, or failure may proceed from the pre-heartbeat grant
+  until that reread proves one of those states;
 - uncertain result installation is adopted only after a no-follow reopen proves
   the exact expected bytes and digest; absence may retry under the same live
   claim, while ambiguity or different bytes is invalid;
@@ -320,6 +424,12 @@ credential inference, model selection, and automatic fallback. It also excludes
 certification, promotion, pointer mutation, migrate, GC, repair, retained
 service/watch behavior, publication, performance/resource qualification, full
 semantic sync, H3, P6+, and user-global installation.
+
+This child also supplies no content-level DLP or secret classifier for the
+bounded semantic `label` and `rationale` fields. Private staging remains
+untrusted `0600` state and is never public output. Any policy that rejects or
+redacts designated semantic prose by content, rather than by the closed schema
+above, requires a separately reviewed contract and implementation packet.
 
 Source checkout bytes and modes, Git metadata, and real `HOME`,
 `XDG_STATE_HOME`, and `CODEX_HOME` remain unchanged in verification. A future

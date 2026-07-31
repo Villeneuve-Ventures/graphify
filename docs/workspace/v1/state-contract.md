@@ -1,7 +1,11 @@
 # State contracts
 
 All hashed JSON uses UTF-8, NFC-normalized strings, lexicographically sorted
-object keys, compact separators, a final newline, and no floating-point values.
+object keys, compact separators, and a final newline. Binary floating-point
+values are forbidden. The only v1 non-integer JSON numbers are the exact bounded
+fixed-point semantic `confidence_score` and `weight` slots frozen in
+[`semantic-sync.md`](semantic-sync.md); every other hashed numeric field is an
+integer.
 Paths inside payload manifests are normalized, non-escaping POSIX relative
 paths. Payload arrays are sorted by path and contain unique regular files only.
 
@@ -333,8 +337,13 @@ The file is one immutable canonical
 envelope. It binds the begin-request digest, repository UUID, claim ID, attempt,
 exact desired work, active-source revision, operation and migration epochs, and
 the canonical payload bytes, byte count, and SHA-256. An `UPSERT` payload
-contains exactly one validated and sanitized semantic fragment; a `DELETE`
-payload is the exact fieldless delete tombstone. Existing no-follow
+is exactly the whole
+`{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}` object after
+worker-specific closed nested-schema, fixed-point, and bounded indexed-sanitizer
+validation. A `DELETE` payload is exactly the kind-only
+`{"kind":"delete_tombstone"}` object. The payload byte count and digest cover
+that whole canonical object including its final newline, and the envelope stores
+the same object once. Existing no-follow
 install-once semantics apply: exact same bytes are idempotent, different bytes
 at the same derived path are a conflict, and a reopened regular `0600` file must
 match before it can be referenced.
