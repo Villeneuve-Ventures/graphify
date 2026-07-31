@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-07-29T02:54:25Z`
+Ledger refresh: `2026-07-31T02:16:34Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -44,13 +44,13 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical checkout | Repository root on `workspace/v1` at `e1a5ebfe936f75f56a1309e35fff29c7aa6d0646`, tree `02bb3582b055bec478d3f1caea31baf797417889`; local upstream divergence `0/0`. It was clean at the fail-closed pre-edit preflight; this governance-only proposal now changes exactly the four allowlisted documentation files. |
-| Current canonical branch | Live GitHub and `origin/workspace/v1` at merge/current commit `e1a5ebfe936f75f56a1309e35fff29c7aa6d0646`, current tree `02bb3582b055bec478d3f1caea31baf797417889`. |
-| Worktrees | The canonical checkout is the only worktree; no delivery worktree or competing governance worktree exists. |
-| GitHub | PR [#37](https://github.com/Villeneuve-Ventures/graphify/pull/37) is merged; the fork repository has no open pull requests. |
-| P5B2 public fenced offline-GC lifecycle delivery | PR #37 exact delivery head `b2454ea78ce80b0e3aa25c7c73d2a073da4ca38a`; merge/current commit `e1a5ebfe936f75f56a1309e35fff29c7aa6d0646`; delivery/merge/current tree `02bb3582b055bec478d3f1caea31baf797417889`. The delivery head is the second direct parent of the merge. PR-head-associated CI [30416810686](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30416810686) checked out synthetic merge commit `1889b1cd3c92500b190d37b53b7baa6644b0e5d8`, whose tree exactly matched the delivery/merge/current tree, and passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded. |
-| PR #37 review state | Twenty review threads: ten resolved and ten unresolved workflow records. All ten unresolved records were rechecked against the final delivery code and focused regressions; none remains technically actionable. The latest submitted review was `COMMENTED` against pre-delivery commit `cb20c283265bde9a3cb0166b355fffc0ea366021`; final delivery commit `b2454ea78ce80b0e3aa25c7c73d2a073da4ca38a` addressed its two findings. No thread was replied to or resolved during this closeout. |
-| Support baseline | Observed host CPython `3.14.6`; uv `0.11.30` |
+| Canonical checkout | Repository root on `workspace/v1` at `d79d4290780924bf2c2d6a9451bb5ce3d128c41c`, tree `5ceef4cf831093b0562413971ec2208c036c0920`; local upstream divergence `0/0`. It remained clean at the fail-closed pre-edit preflight. |
+| Current canonical branch | Live GitHub and `origin/workspace/v1` at merge/current commit `d79d4290780924bf2c2d6a9451bb5ce3d128c41c`, current tree `5ceef4cf831093b0562413971ec2208c036c0920`. |
+| Worktrees | Two worktrees exist: the clean canonical checkout and this isolated retained governance worktree on `codex/workspace-p5b2-pointer-repair-governance`. No delivery worktree or competing governance worktree exists. |
+| GitHub | PR [#39](https://github.com/Villeneuve-Ventures/graphify/pull/39) is merged; the fork repository has no open pull requests. |
+| P5B2 public fenced pointer-repair lifecycle delivery | PR #39 exact delivery head `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b`; merge/current commit `d79d4290780924bf2c2d6a9451bb5ce3d128c41c`; delivery/merge/current tree `5ceef4cf831093b0562413971ec2208c036c0920`. The 36-file delivery head is the second direct parent of the merge. PR-head-associated CI [30584447157](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30584447157) checked out synthetic merge commit `d5d055b48ebd35d2676ddfeb697b77732caceec3`, whose parents and tree exactly matched the delivery merge, and passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded. The hosted Python 3.14 job reported `4,999 passed, 4 skipped, 5 warnings`. |
+| PR #39 review state | Thirty-seven review threads: 21 resolved and 16 unresolved, all 16 non-outdated. Every unresolved record was rechecked against exact delivery head `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b`; a 30-test thread-regression selection passed and none remains technically actionable. The latest submitted review was `COMMENTED` at `2026-07-30T16:09:23Z` against pre-delivery commit `dcf00b0ea403e725ec42aab952d24658229a7184`; later commits `2b4cfeec5f56bbb3421140f8f788a46e36004ef1` and `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b` preserved the final safety classifications. No thread was replied to or resolved during this closeout. |
+| Support baseline | Observed host CPython `3.14.6`; project environment CPython `3.14.3`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
 orientation only and cannot justify execution.
@@ -70,7 +70,7 @@ orientation only and cannot justify execution.
 | P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children are complete; remaining P5B2 and the broad P5C gate are not. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, P5B2c, identity maintenance, active-source activation, exact-last-good rollback, retained-source identity continuity, the bounded offline-GC preview, and the public fenced offline-GC lifecycle are complete; semantic sync, migrate, repair, broader mutation or query authority, and all other commands remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | P5B2a, P5B2b0, P5B2b, P5B2c, identity maintenance, active-source activation, exact-last-good rollback, retained-source identity continuity, the bounded offline-GC preview, the public fenced offline-GC lifecycle, and the public fenced pointer-repair lifecycle are complete; semantic sync, migrate, broader repair, broader mutation or query authority, and all other commands remain waiting. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
@@ -78,10 +78,11 @@ orientation only and cannot justify execution.
 | P5B2 retained-source identity continuity | P5B2 identity maintenance, P5B2 active-source activation | COMPLETE | Accepted receipt: [`P5B2 retained-source identity continuity`](receipts/p5b2-retained-source-identity-continuity.md). `rotate_enrollment_evidence()` and `resolve_active_source()` independently require a shared immutable enrollment history root or the enrolled Git common-directory identity. Rejected rotation occurs before the requested source evidence, identity-action evidence, or registry revision is persisted. |
 | P5B2 bounded offline-GC preview | P5B2 | COMPLETE | Accepted receipt: [`P5B2 bounded offline-GC preview`](receipts/p5b2-offline-gc-preview.md). Exact public `workspace gc --dry-run --request-stdin` read-only, unfenced preview only; mutation remains outside this preview receipt. |
 | P5B2 public fenced offline-GC lifecycle | P5B2 bounded offline-GC preview | COMPLETE | Accepted receipt: [`P5B2 public fenced offline-GC lifecycle`](receipts/p5b2-offline-gc-lifecycle.md). Exact explicit `workspace gc --execute`, `--reconcile`, and `--purge` forms with `--request-stdin` only; automatic, online, service, repair, migrate, and semantic-sync authority remain excluded. |
+| P5B2 public fenced pointer-repair lifecycle | P5B2 | COMPLETE | Accepted receipt: [`P5B2 public fenced pointer-repair lifecycle`](receipts/p5b2-pointer-repair.md). Exact `workspace repair --dry-run --request-stdin` existing-state-only preview and `workspace repair --execute --request-stdin` fenced execution only; broader repair, semantic sync, migrate, GC reconciliation, and every other mutation/query authority remain excluded. |
 | P5B2b0 | P5B2a | COMPLETE | Request-bound staged-build recovery prerequisite closed. |
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
 | P5B2c | P5C1 | COMPLETE | Accepted receipt: [`P5B2c`](receipts/p5b2c.md). One-shot certified `workspace query --request-stdin` transport only. |
-| Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, migrate, repair, every mutation beyond the accepted explicit GC lifecycle, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
+| Remaining P5B2 commands | P5B2 | WAITING | Semantic sync, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
 | Remaining P5C concerns | P5C | WAITING | Watch/service, performance, shared-lock/root-traversal optimization, publication, retained query/service authority, and all other P5C work remain unchanged. |
@@ -268,6 +269,43 @@ production installation; watch/service; publication; performance or resource
 proof; H3; P6+; or cleanup authority. P5 and P5B2 remain `IN_PROGRESS`. The
 current authority set freezes no later child boundary, so the successor rerank
 promotes no later child to `READY`.
+
+## P5B2 public fenced pointer-repair lifecycle boundary freeze
+
+The unnumbered public fenced pointer-repair lifecycle is limited to the exact
+commands accepted by the
+[`P5B2 public fenced pointer-repair lifecycle receipt`](receipts/p5b2-pointer-repair.md):
+
+```text
+graphify workspace repair --dry-run --request-stdin
+graphify workspace repair --execute --request-stdin
+```
+
+The frozen product contract remains in
+[`README.md`](README.md#public-fenced-pointer-repair-cli). Dry-run is
+existing-state-only, read-only inspection: it allocates no lease or fence,
+performs no recovery or cleanup, and writes no state. Execute binds the exact
+canonical preview-result bytes, including their terminating newline, to
+`approved_preview_sha256`; requires canonical `REPAIR_EXECUTE` authorization;
+acquires one fresh `REPAIR` lease; and requires the private in-lock plan to
+match the approved preview decision before `PointerStore` may mutate pointer,
+journal, or eligible corrupt-generation state. The one absolute request
+deadline spans preview, source verification, lease acquisition, locked
+revalidation, mutation, and release.
+
+Unsafe state paths remain outside repair authority. In particular, an unsafe
+semantic certification-binding path propagates as `unsafe_state_path` /
+`configure_safe_state_root` without writes; it is not downgraded to ordinary
+generation corruption or quarantine authority. GC intent, nonterminal or
+corrupt staged builds, semantic-queue, registry, lease, source-authority, and
+broader journal failures retain their separately owned operator guidance.
+
+This acceptance adds no semantic sync; migrate; broader repair; arbitrary
+generation selection; GC reconciliation; mutation or query authority beyond
+the two exact forms; production installation; watch/service; publication;
+performance or resource proof; H3; P6+; or cleanup authority. P5 and P5B2
+remain `IN_PROGRESS`, P5C and its remaining concerns remain `WAITING`, and no
+later child is promoted to `READY`.
 
 ## P5B2a ADOPT correction boundary freeze
 

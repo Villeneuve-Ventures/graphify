@@ -4,7 +4,7 @@ Implemented contract scope through the one-step P5B2 exact-last-good rollback
 CLI, the unnumbered P5B2 active-source activation CLI, the unnumbered P5B2
 identity-maintenance CLI, P5B2c one-shot certified workspace query, the
 bounded P5B2 GC preview CLI, the public fenced offline-GC lifecycle, and the
-bounded public fenced pointer-repair lifecycle implementation deliveries,
+accepted bounded public fenced pointer-repair lifecycle,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -105,8 +105,8 @@ release error. The request and receipt schemas are
 Migrate, broader mutation/query commands, watch/service, performance
 certification, and candidate publication remain later P5 work. The bounded GC
 preview, explicit fenced offline-GC lifecycle, and public fenced pointer-repair
-lifecycle below are implementation deliveries; lifecycle governance acceptance
-remains separate.
+lifecycle below remain narrowly frozen public surfaces with separately accepted
+governance receipts.
 P5B2b0 adds the internal request-bound staged-build and stale-abandonment
 recovery contract described in [State contracts](state-contract.md). P5B2b
 exposes only `graphify workspace sync --code-only --request-stdin`, using a
@@ -352,8 +352,10 @@ apply a second repair.
 
 This lifecycle does not add automatic repair, a service/online repair path,
 GC reconciliation, staged-build/semantic/registry/lease repair, arbitrary
-generation selection, source-checkout mutation, a new durable completion index,
-or governance/receipt acceptance. Those boundaries remain separately owned.
+generation selection, source-checkout mutation, or a new durable completion
+index. Governance completion is accepted separately under the
+[`P5B2 public fenced pointer-repair lifecycle` receipt](receipts/p5b2-pointer-repair.md);
+the remaining boundaries stay separately owned.
 
 ## Public offline-GC CLI
 
@@ -496,7 +498,7 @@ sequencing. Direct operator instruction alone owns execution authorization.
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
 | Active-source activation | Unnumbered P5B2 activation (`COMPLETE`) | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, an immutable-enrollment continuity check, and one redacted CLI-v1 receipt. |
 | Exact last-good rollback | P5B2 exact-last-good rollback (`COMPLETE`) | Accepted receipt: [`P5B2 exact-last-good rollback`](receipts/p5b2-exact-last-good-rollback.md). `workspace rollback --request-stdin` exposes one fenced move to the visible pointer's exact `last_good` reference with an explicit canonical request and redacted receipt. It does not authorize arbitrary historical selection or any later command. |
-| Public fenced pointer repair | P5B2 implementation delivery | `workspace repair --dry-run --request-stdin` is existing-only inspection; `--execute --request-stdin` requires exact approved preview bytes, `REPAIR_EXECUTE`, a fresh `REPAIR` lease, and an in-lock exact-plan match before the existing `PointerStore` may mutate pointer/journal state. It does not accept or claim governance/receipt acceptance. |
+| Public fenced pointer repair | P5B2 public fenced pointer-repair lifecycle (`COMPLETE`) | Accepted receipt: [`P5B2 public fenced pointer-repair lifecycle`](receipts/p5b2-pointer-repair.md). `workspace repair --dry-run --request-stdin` is existing-only inspection; `--execute --request-stdin` requires exact approved preview bytes, `REPAIR_EXECUTE`, a fresh `REPAIR` lease, and an in-lock exact-plan match before the existing `PointerStore` may mutate pointer/journal state or quarantine eligible corrupt generations. Broader repair and every other mutation/query authority remain outside this accepted surface. |
 | Bounded GC preview | P5B2 bounded offline-GC preview (`COMPLETE`) | Accepted receipt: [`P5B2 bounded offline-GC preview`](receipts/p5b2-offline-gc-preview.md). `workspace gc --dry-run --request-stdin` exposes only an unfenced, read-only, canonical preview with explicit authority, capacity, and protection inputs. It does not authorize GC mutation or make performance/resource or bounded pre-enumeration traversal claims. The published CLI-v1 capacity-policy fields remain frozen; any compatibility change requires separate versioned review. |
 | Public fenced offline-GC lifecycle | P5B2 public fenced offline-GC lifecycle (`COMPLETE`) | Accepted receipt: [`P5B2 public fenced offline-GC lifecycle`](receipts/p5b2-offline-gc-lifecycle.md). `workspace gc --execute`, `--reconcile`, and `--purge` each require `--request-stdin` and phase-specific authorization. Execute and first-time reconcile or purge mutation acquire fresh fenced `GC` authority; matching current-epoch completion recovery, reconcile with no recovery state, and exact terminal purge replay are no-write results. Execute binds an approved exact preview-result SHA-256 to a fresh non-fence-equivalent plan; reconcile and purge remain explicit-only. Automatic, online, service, migrate, semantic-sync, publication, and performance/resource authority remain outside this frozen boundary. |
 | Retained-source identity continuity | P5B2 registry hardening (`COMPLETE`) | `rotate_enrollment_evidence()` and `resolve_active_source()` now independently require a shared immutable enrollment history root or the enrolled Git common-directory identity. Rejected rotation occurs before the requested source evidence, identity-action evidence, or registry revision is persisted. Accepted receipt: [`P5B2 retained-source identity continuity`](receipts/p5b2-retained-source-identity-continuity.md). |
