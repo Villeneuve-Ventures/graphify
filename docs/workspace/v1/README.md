@@ -138,19 +138,21 @@ graphify workspace semantic-worker --stdio
 ```
 
 One long-lived process owns one `SEMANTIC_CLAIM` lease through claim, optional
-checkpoints, and terminal completion or classified failure. The canonical
-begin frame requires `executor="host_agent"` and
+checkpoints, the terminal request and queue transition, and release. The
+canonical begin frame requires `executor="host_agent"` and
 `host_agent_active=true`; there is no backend, endpoint, model, credential, or
 provider-fallback field. Separate phase subprocesses cannot share the exact
 boot/PID/process-start lease owner and are not an allowed transport.
 
 A successful `UPSERT` fragment or exact `DELETE` tombstone is bounded,
 canonically staged in private external workspace state, reopened and SHA-256
-verified, and bound to the live claim checkpoint before queue completion.
-`UPSERT` fragments are also validated and sanitized. The terminal result is a
-redacted digest receipt, not semantic content. The detailed request/result,
-deadline, retry/dead-letter, race, crash, result-binding, and status-routing
-contract is [semantic-sync.md](semantic-sync.md).
+verified, and bound to the live claim checkpoint before queue completion. The
+source is rechecked immediately before that transition, and the exact semantic
+lease is provably released before the public success frame. `UPSERT` fragments
+are also validated and sanitized. The terminal result is a redacted digest
+receipt, not semantic content. The detailed request/result, deadline,
+retry/dead-letter, race, crash, result-binding, and status-routing contract is
+[semantic-sync.md](semantic-sync.md).
 
 This is a READY contract only. It does not call `graphify.llm`, infer a
 provider from credentials or environment, invoke a network or named backend,

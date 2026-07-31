@@ -320,7 +320,7 @@ The future host-agent semantic-worker transport is frozen in
 `graphify.workspace.semantic_queue.internal` or any public durable schema. The
 exact command is `graphify workspace semantic-worker --stdio`, and one process
 must retain the same OS-derived `SEMANTIC_CLAIM` owner from claim through
-optional checkpoints and terminal completion or failure.
+optional checkpoints, the terminal request and queue transition, and release.
 
 The single request/result families are
 `graphify.workspace.semantic_worker_request` version 1 and
@@ -341,8 +341,9 @@ and its canonical digest, active-source revision, operation and migration
 epochs, and the canonical payload object, byte count, and SHA-256. An `UPSERT`
 payload is exactly the whole
 `{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}` object after
-worker-specific closed nested-schema, fixed-point, and bounded indexed-sanitizer
-validation. A `DELETE` payload is exactly the kind-only
+worker-specific closed nested-schema, lossless exact-decimal helper encoding,
+fixed-point, and bounded indexed-sanitizer validation. A `DELETE` payload is
+exactly the kind-only
 `{"kind":"delete_tombstone"}` object. The payload byte count and digest cover
 that whole canonical object including its final newline, and the envelope stores
 the same object once. Existing no-follow
@@ -369,9 +370,13 @@ rehash the envelope, and require that reopened SHA-256 to equal the checkpointed
 captured digest of the accepted canonical begin frame, and its `repo_uuid` must
 equal that request field. Its `claim_id`, `attempt`, and exact desired work must
 equal the live claim. The same source revision, owner, fence, operation epoch,
-and migration epoch must be revalidated immediately before `complete()`.
-A complete frame, an installed envelope, or a checkpoint alone is not
-completion authority. The terminal public result contains digests and queue
+and migration epoch must be revalidated, followed by one final no-follow source
+reopen that proves the claimed `UPSERT` content digest or `DELETE` absence
+immediately before `complete()`. After the completion return is observed, the
+exact semantic lease must be released and that owner/fence proved absent before
+the `completed` frame is emitted. A complete frame, an installed envelope, a
+checkpoint, or a queue completion without that released-lease proof is not
+public completion authority. The terminal result contains digests and queue
 watermarks, never the fragment, source content, private paths, owner/fence data,
 secrets, or exception text.
 
@@ -386,11 +391,12 @@ The staging file is neither a queue record nor a generation payload,
 certification binding, or completion index. A successor claim ignores an older
 session directory, and this first child performs no cleanup. Because the
 existing `complete()` transition clears the claim/checkpoint and stores no
-result digest, uncertainty after completion begins cannot be recovered as a
-successful public receipt without a later durable-schema decision. It remains
-`commit_unknown`; manual durable-state inspection is required, and downstream
-semantic sync must not consume the staged result without the exact exit-0
-terminal receipt. This direct session outcome adds no status reason or action.
+result digest, uncertainty after completion begins or during its pre-terminal
+lease release cannot be recovered as a successful public receipt without a
+later durable-schema decision. It remains `commit_unknown`; manual durable-state
+inspection is required, and downstream semantic sync must not consume the staged
+result without the exact exit-0 terminal receipt. This direct session outcome
+adds no status reason or action.
 
 The worker stops before `bind_sealed_inputs()`, generation staging completion,
 certification, promotion, pointer mutation, and full semantic sync. This is a

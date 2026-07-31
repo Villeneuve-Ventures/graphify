@@ -30,9 +30,9 @@ first protocol frame.
 The command is one long-lived process for exactly one queue item. It derives
 the trusted boot, PID, and process-start owner, acquires one
 `SEMANTIC_CLAIM` lease, and retains that same owner and fence through claim,
-optional checkpoints, terminal completion or failure, and release. Separate
-phase-specific subprocesses are forbidden because they cannot share the exact
-lease owner.
+optional checkpoints, the terminal request and queue transition, and release.
+Any public success terminal follows that release. Separate phase-specific
+subprocesses are forbidden because they cannot share the exact lease owner.
 
 Standard input and standard output carry canonical UTF-8 JSON Lines. Each
 frame is one duplicate-free object encoded with sorted keys, compact
@@ -48,6 +48,15 @@ first rounding them through binary floating point. Standard output contains only
 `graphify.workspace.semantic_worker_result` version 1 frames. Standard error is
 empty for a valid invocation; only an invalid argument vector emits plain-text
 usage.
+
+The future implementation must extend `validate_semantic_fragment()` with a
+lossless canonical-number encoder hook while preserving its current default for
+all existing callers. Both worker calls to that helper use the hook to encode
+the retained exact-decimal values as their original canonical, unquoted JSON
+number tokens. Coercion to binary float or JSON string is forbidden.
+`sanitize_semantic_fragment()` receives a copy that retains the exact-decimal
+values, and every surviving score or weight must remain exactly equal after
+sanitization.
 
 ## Versioned request family
 
@@ -67,6 +76,16 @@ additional action-specific fields:
 - `executor`, whose only accepted value is `host_agent`;
 - `host_agent_active`, which must be the Boolean `true`; and
 - `timeout_ms`, an integer from 1 through 600000.
+
+`repo_uuid` is a JSON string in canonical lowercase hyphenated RFC-variant UUID
+form, version 1 through 8. The three expected registry, active-source, and
+operation values are JSON integers from 1 through 9223372036854775807. Expected
+migration epoch, queue revision, and desired watermark are JSON integers from 0
+through 9223372036854775807. Of these six authority coordinates, zero is valid
+only for the latter three; zero queue revision or desired watermark denotes
+initial queue state. Booleans are not integers. A type, range, or UUID violation
+makes the frame unaccepted and follows `semantic_worker_request_invalid`, not
+`semantic_authority_stale`.
 
 The caller therefore states live host-agent authority affirmatively. The
 transport passes `host_agent_active=True` and `explicit_backend=None` to the
@@ -214,6 +233,11 @@ The process exits 0 only after a `completed` terminal or a truthful `idle`
 terminal with no eligible item. Exit 64 is reserved for an invalid argument
 vector and emits no result frame.
 
+An `idle` path that acquired a semantic lease also proves release of that exact
+owner/fence before emitting its terminal. Release failure or uncertainty without
+a primary failure follows `semantic_worker_commit_unknown`, using the same
+locked reread rule as completion.
+
 Downstream semantic sync may consume a staged result only when the process
 exits 0 and its final frame is exactly one schema-valid `completed` terminal
 whose begin-request, work, payload, and result-binding digests match the
@@ -250,7 +274,8 @@ the reserved headroom. Failure to preserve that headroom before claim is
 installs no current-session claim and does not suppress any already-proved
 predecessor `claim_expired` recovery.
 
-Before emitting `work` and again before staging a completion, the transport
+Before emitting `work`, again before staging a completion, and finally after all
+envelope and authority checks immediately before `complete()`, the transport
 reopens the contained active-source path without following links. `UPSERT`
 requires a regular file whose streamed SHA-256 exactly equals
 `content_sha256`; `DELETE` requires that path to remain absent. A mismatch under
@@ -315,7 +340,7 @@ The implementation must perform this ordering exactly:
 2. for `UPSERT`, enforce the closed pre-sanitize schema plus the existing
    semantic limits: at most 10,000 nodes, 100,000 edges, 10,000 hyperedges, 256
    members per hyperedge, and 256 characters per semantic ID, then run
-   `validate_semantic_fragment()`;
+   `validate_semantic_fragment()` through the exact-decimal encoder hook above;
 3. build one `rationale_for` source-to-target index in a single edge pass,
    identify rationale candidates in one node pass, and precompute expansion
    before concatenation. Reject before sanitizer invocation if any projected
@@ -323,10 +348,12 @@ The implementation must perform this ordering exactly:
    exceeds 25 MiB. Rationale propagation must be
    `O(nodes + edges + rationale_fanout)`; a candidate-by-all-edges scan is not a
    conforming implementation;
-4. sanitize a copy with `sanitize_semantic_fragment()` using that bounded
-   indexed path, run `validate_semantic_fragment()` again, enforce the closed
-   post-sanitize schema, and measure the actual canonical sanitized fragment
-   against the same per-string and 25-MiB limits;
+4. sanitize an exact-decimal-preserving copy with
+   `sanitize_semantic_fragment()` using that bounded indexed path, run
+   `validate_semantic_fragment()` again through the same encoder hook, enforce
+   the closed post-sanitize schema and exact surviving numeric values, and
+   measure the actual canonical sanitized fragment against the same per-string
+   and 25-MiB limits;
 5. for `UPSERT`, construct and canonicalize the exact whole payload object
    `{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}`; for `DELETE`,
    require and canonicalize the exact kind-only
@@ -381,9 +408,15 @@ The implementation must perform this ordering exactly:
     claim and captured work result. Require its payload object, byte count, and
     digest to equal the validated payload. Under the current semantic grant,
     revalidate the same source revision, owner, fence, operation epoch, and
-    migration epoch; and
-11. only then call the existing queue completion transition and emit the
-   `completed` result.
+    migration epoch;
+11. perform the final no-follow source-content check defined above. Any exact
+    content or absence mismatch follows `source_content_changed` while the claim
+    remains current;
+12. only then call the existing queue completion transition and require its
+    observed successful return;
+13. release the exact semantic lease and prove that owner/fence is no longer
+    installed, using the release return or the locked reread rule below; and
+14. only then emit the `completed` result.
 
 This staging envelope does not revise
 `graphify.workspace.semantic_queue.internal`, and it is not a certification
@@ -475,8 +508,15 @@ Commit uncertainty is phase-specific and fail-closed:
 - once queue completion or failure begins, uncertainty is
   `semantic_worker_commit_unknown` / `none`, never success, and the same request
   is not replay authority; and
-- release is cleanup, not commit acceptance. A release-only uncertain outcome
-  is `commit_unknown`, and release cannot mask a primary failure.
+- before release, retain the exact semantic lease record. On the success path,
+  release follows a proven queue completion but precedes the `completed` frame.
+  An `idle` success path applies the same proof before its terminal.
+  An observed release return or one locked reread proving that exact owner/fence
+  absent permits the frame; the exact unchanged record may retry only before
+  its liveness deadline. Unreadable or ambiguous state is `commit_unknown`, so
+  no success frame has yet been emitted. Release remains cleanup rather than
+  commit acceptance: release-only failure or uncertainty after proven
+  completion is `commit_unknown`, while release cannot mask a primary failure.
 
 The current completed queue item does not retain a result digest after
 `complete()` clears its claim. Therefore a crash after completion begins but

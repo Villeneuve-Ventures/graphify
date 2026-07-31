@@ -130,22 +130,27 @@ and an absent API key are neither capability nor authority. Source bytes are
 read-only untrusted data and are never returned in public result frames.
 
 One long-lived process retains one OS-derived semantic owner and fence across
-claim, bounded checkpoints, and terminal completion or failure. This prevents
-separate subprocesses, a replaced caller, source activation, migration, lease
-expiry, or a successor attempt from inheriting semantic commit authority.
+claim, bounded checkpoints, the terminal request and queue transition, and
+release. This prevents separate subprocesses, a replaced caller, source
+activation, migration, lease expiry, or a successor attempt from inheriting
+semantic commit authority.
 Successful `UPSERT` output is treated as untrusted until the existing semantic
 fragment validator is surrounded by the worker's closed nested schema and the
-sanitizer runs through a preflighted linear `rationale_for` index. Unknown keys,
-non-work-path provenance, noncanonical fixed-point scores, oversized semantic
-text, dangling references, and projected rationale or payload amplification are
-rejected before sanitizer allocation. `DELETE` accepts only the exact kind-only
-tombstone. An immutable canonical result envelope is then
+validator receives retained exact decimals through a lossless canonical-number
+encoder while the sanitizer runs through a preflighted linear `rationale_for`
+index. Unknown keys, non-work-path provenance, noncanonical fixed-point scores,
+oversized semantic text, dangling references, and projected rationale or payload
+amplification are rejected before sanitizer allocation. `DELETE` accepts only
+the exact kind-only tombstone. An immutable canonical result envelope is then
 installed under private external workspace staging, its exact bytes and digest
 are reopened and verified, and that digest is persisted in and revalidated
-against the live claim checkpoint. Queue completion before those checks is
-forbidden. Claim admission and every later queue mutation project the maximum
-mandatory result checkpoint before enforcing canonical-byte capacity, so an
-accepted claim cannot have its binding stranded by ordinary queue growth.
+against the live claim checkpoint. The source digest or absence is checked a
+final time immediately before queue completion, and the public success frame is
+withheld until the exact semantic lease is provably released. Queue completion
+before those checks is forbidden. Claim admission and every later queue mutation
+project the maximum mandatory result checkpoint before enforcing canonical-byte
+capacity, so an accepted claim cannot have its binding stranded by ordinary
+queue growth.
 
 The private envelope admits source-derived text only in the schema's bounded
 semantic `label` and sanitizer-produced `rationale` fields; it has no separate
@@ -158,8 +163,9 @@ unknown fields, stale claims, and epoch drift fail closed. An exact
 different-byte binding under a current claim is a non-retryable queue failure;
 unreadable or ambiguous staging state is commit-unknown. Orphan result staging
 is not cleanup authority. If queue completion may have committed before its
-terminal public frame, the absence of a durable queue/result association is
-reported as commit-unknown rather than inferred success.
+terminal public frame, including uncertainty during the intervening lease
+release, the absence of a durable queue/result association is reported as
+commit-unknown rather than inferred success.
 
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted

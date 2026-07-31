@@ -484,21 +484,30 @@ implementation acceptance criteria, not evidence that the command exists:
   catchable interruption, and malformed or oversized input before an accepted
   `begin` emit only `invalid` / `semantic_worker_request_invalid` / `none`, omit
   a begin digest, and perform no source, lease, or queue mutation;
+- begin-field vectors require a canonical lowercase hyphenated RFC-variant UUID
+  of version 1 through 8; positive 64-bit registry, active-source, and operation
+  coordinates; and nonnegative 64-bit migration, queue, and watermark
+  coordinates. They reject Booleans, strings, negative values, zero where
+  positive is required, and values above 9223372036854775807 as request-invalid
+  before authority comparison;
 - `executor="host_agent"` and Boolean `host_agent_active=true` are required.
   Named/headless backends, provider/model/endpoint/credential fields,
   `graphify.llm` discovery or dispatch, environment inference, network calls,
   and automatic fallback are absent and denied;
 - one long-lived process derives one trusted boot/PID/process-start owner,
   acquires one `SEMANTIC_CLAIM` lease, and retains that exact owner and fence
-  through at most one claim, eight bounded checkpoints, one terminal complete
-  or fail frame, and release. Tests prove separate subprocesses cannot continue
-  the claim;
+  through at most one claim, eight bounded checkpoints, one terminal `complete`
+  or `fail` request, its queue transition, and release. Tests prove separate
+  subprocesses cannot continue the claim;
 - the current working directory is the exact active Git top level; existing
   bounded no-follow policy and checkout verification precede the redacted
   source-relative work frame. `UPSERT` stream-hashes the exact regular file and
-  `DELETE` requires absence before work release and again before staging.
-  Activation, migration, lease expiry, queue drift, and replacement desired
-  work invalidate the stale session at every mutation boundary;
+  `DELETE` requires absence before emitting `work`, again before staging, and a
+  final time after envelope/authority validation immediately before
+  `complete()`. A source change during validation, installation, or checkpoint
+  follows `source_content_changed` rather than advancing the watermark.
+  Activation, migration, lease expiry, queue drift, and replacement desired work
+  invalidate the stale session at every mutation boundary;
 - `complete` accepts exactly one operation-matched payload: an `UPSERT`
   semantic fragment with exactly `nodes`, `edges`, and `hyperedges`, or the
   kind-only `DELETE` tombstone. Before the general validator or sanitizer, tests
@@ -511,8 +520,12 @@ implementation acceptance criteria, not evidence that the command exists:
 - fixed-point canonicality vectors accept bounded scores such as `0.75` and the
   endpoint `1`, reject binary floats, exponent notation, negative zero,
   excessive precision, `1.0`, NaN, and infinity, and prove parse/serialize/hash
-  parity without binary-floating-point rounding. No other request or result
-  field admits a non-integer JSON number;
+  parity without binary-floating-point rounding. The future helper extension
+  preserves the existing `validate_semantic_fragment()` default for current
+  callers, emits retained decimal values as unquoted canonical number tokens for
+  both worker calls, and proves the sanitizer preserves every surviving numeric
+  value without float or string coercion. No other request or result field
+  admits a non-integer JSON number;
 - sanitizer-amplification tests construct the `rationale_for` index in one edge
   pass, instrument work as `O(nodes + edges + rationale_fanout)`, and reject
   before concatenation when any projected rationale exceeds 16 KiB or the
@@ -553,9 +566,13 @@ implementation acceptance criteria, not evidence that the command exists:
   claim ID, attempt, exact desired work, and work digest equal the live claim and
   captured work result, its payload object/byte count/digest equal the validated
   payload, and exact source/owner/fence/operation/migration authority still
-  matches.
-  Substitution vectors vary each digest or binding independently, and injected
-  races at every boundary prove no completion without the exact binding;
+  matches. The contained source is then reopened without following links and
+  must still prove the exact `UPSERT` digest or `DELETE` absence immediately
+  before `complete()`. After an observed completion return, tests release the
+  exact semantic lease and prove that owner/fence absent before emitting
+  `completed`. Substitution vectors vary each digest or binding independently,
+  and injected races at every boundary prove no completion without the exact
+  binding and no success frame before released-lease proof;
 - the eight frozen failure classifications accept only their specified
   retryability. Three are accepted from `fail`; five are transport-only; and
   `semantic_work_unsupported` is also transport-derived when a work frame would
@@ -604,8 +621,12 @@ implementation acceptance criteria, not evidence that the command exists:
   adopted result checkpoints still require envelope reopen and revalidation.
   Uncertainty after completion or failure begins, ambiguous lease mutation, or
   release-only uncertainty is `commit_unknown`, never success or replay
-  authority. It is a direct session result with action `none`; it invents no
-  status route because the current completed queue item retains no result digest;
+  authority. Release fault injection retains the exact lease, accepts an
+  observed return or a locked reread proving that owner/fence absent, retries
+  only from the exact unchanged record before liveness expiry, and proves no
+  `completed` or post-grant `idle` frame preceded that result. It is a direct
+  session result with action `none`; it invents no status route because the
+  current completed queue item retains no result digest;
 - every public output frame is canonical and at most 64 KiB, uses one exact
   per-kind field set, and limits failure reason/action values to the frozen
   enums. Output frames contain no source bytes, semantic payload, secret,

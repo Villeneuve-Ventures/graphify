@@ -92,11 +92,13 @@ same claim. Separate subprocesses cannot continue the claim because owner,
 fence, source revision, and operation and migration epochs are exact.
 
 On the completion path, the transport validates and sanitizes an `UPSERT`
-fragment or accepts the exact `DELETE` tombstone, installs one canonical
-immutable result envelope in private external workspace semantic staging,
-reopens and verifies its SHA-256, persists that digest in the existing bounded
-claim checkpoint, revalidates both under the live grant, and only then calls the
-existing queue completion transition. The durable queue format is unchanged.
+fragment with lossless exact-decimal helper encoding or accepts the exact
+`DELETE` tombstone, installs one canonical immutable result envelope in private
+external workspace semantic staging, reopens and verifies its SHA-256, persists
+that digest in the existing bounded claim checkpoint, revalidates the envelope
+and source bytes under the live grant, and only then calls the existing queue
+completion transition. A public `completed` frame follows only after the exact
+semantic lease is provably released. The durable queue format is unchanged.
 The transport stops before generation staging
 finalization, `bind_sealed_inputs()`, certification, promotion, or pointer
 mutation. No runtime implementation or completion receipt exists for this
@@ -314,9 +316,12 @@ is one transport-owned `host_agent_timeout=true` failure and lease release
 before the unchanged lease liveness deadline. A checkpoint or terminal
 transition repeats the existing claim validation, so source activation or
 migration between protocol frames withholds the stale session. Result staging
-is verified before the checkpoint and again before completion. Claim admission
-and later queue mutation reserve canonical-byte headroom for the mandatory
-result checkpoint without a durable reservation field. Optional and mandatory
+is verified before the checkpoint and again before completion; the source
+content digest or absence is checked a final time immediately before
+`complete()`. A proven completion releases the exact semantic lease before any
+success frame. Claim admission and later queue mutation reserve canonical-byte
+headroom for the mandatory result checkpoint without a durable reservation
+field. Optional and mandatory
 checkpoint uncertainty uses an exact live-claim reread: adopt the requested
 value, retry the exact prior value within both deadlines, otherwise
 commit-unknown. If
