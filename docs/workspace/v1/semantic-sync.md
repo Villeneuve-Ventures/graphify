@@ -80,8 +80,8 @@ post-claim frame carries the exact `begin_request_sha256` and `claim_id` emitted
 by this process.
 
 - `checkpoint` additionally carries one stable progress code matching
-  `[a-z][a-z0-9_.:-]{0,63}` and is limited to 4 KiB. The code is not echoed in
-  public output.
+  `[a-z][a-z0-9_.:-]{0,63}`, must not start with the reserved `result:` prefix,
+  and is limited to 4 KiB. The code is not echoed in public output.
 - `complete` additionally carries exactly one `payload`. For `UPSERT`, it is
   `{"kind":"semantic_fragment","fragment":OBJECT}`, where the fragment has
   exactly `nodes`, `edges`, and `hyperedges` and the closed nested schema below.
@@ -97,12 +97,15 @@ by this process.
 | `semantic_policy_refused` | `false` |
 | `semantic_work_unsupported` | `false` |
 
-Four additional exact classifications are transport-only:
+Five additional exact classifications are transport-only after a live queue
+claim exists:
 `host_agent_timeout=true`, `host_agent_interrupted=true`,
-`semantic_result_invalid=true`, and `source_content_changed=false`. It derives
-those only from the local deadline, EOF/interruption, bounded canonical parsing
-and result validation, or exact source verification described below. They are
-not accepted from a `fail` frame. The caller-accepted
+`semantic_result_invalid=true`, `source_content_changed=false`, and
+`semantic_result_binding_conflict=false`. The transport derives those only from
+the local deadline, EOF/interruption while waiting for a post-claim frame,
+bounded canonical parsing and result validation, exact source verification, or
+an exact different-byte result-staging conflict described below. They are not
+accepted from a `fail` frame. The caller-accepted
 `semantic_work_unsupported=false` pair is shared: the transport also derives it
 when the exact work frame would exceed the public output bound.
 
@@ -149,6 +152,20 @@ envelope is not equivalent. The result-binding envelope stores that exact
 payload object once. `result_binding_bytes` and `result_binding_sha256` cover
 the whole canonical envelope bytes, also including their final newline.
 
+The request/work/checkpoint digest fields are lowercase hexadecimal over one
+exact preimage:
+
+- `begin_request_sha256` hashes the entire accepted canonical `begin` request
+  frame, including its final newline;
+- `work_sha256` hashes the exact canonical six-field `work` object, including
+  its final newline, not the enclosing `work` result frame; and
+- `checkpoint_sha256` hashes the entire accepted canonical `checkpoint` request
+  frame, including its final newline. It therefore binds the begin-request
+  digest, claim ID, and private progress code without echoing that code.
+
+Hashing the action-specific value alone, any enclosing result frame, or bytes
+without the required final newline is not equivalent.
+
 For every other terminal outcome, the exact outcome-specific fields are
 `reason_code` and `action_code`, plus `begin_request_sha256` if and only if a
 begin frame was accepted. No code accepts extension text, and no output field
@@ -157,25 +174,41 @@ contains raw diagnostics:
 | `outcome` / exit | Exact reason codes | Action code |
 |---|---|---|
 | `retry_scheduled` / 10 | `host_agent_transient`, `host_agent_timeout`, `host_agent_interrupted`, `semantic_result_invalid` | `drain_semantic_queue` |
-| `withheld` / 10 | `semantic_claim_contended`, `semantic_authority_stale`, `semantic_worker_preclaim_timeout`, `workspace_config_unavailable`, `semantic_capability_unavailable`, `staged_build_recovery_required` | `retry_status`, except `semantic_capability_unavailable` uses `inspect_workspace_state` and `staged_build_recovery_required` uses `resume_exact_workspace_sync` |
+| `withheld` / 10 | `semantic_claim_contended`, `semantic_authority_stale`, `semantic_worker_preclaim_timeout`, `semantic_worker_preclaim_interrupted`, `semantic_checkpoint_capacity_unavailable`, `workspace_config_unavailable`, `semantic_capability_unavailable`, `staged_build_recovery_required` | `retry_status`, except `semantic_checkpoint_capacity_unavailable` uses `inspect_semantic_queue`, `semantic_capability_unavailable` uses `inspect_workspace_state`, and `staged_build_recovery_required` uses `resume_exact_workspace_sync` |
 | `dead_lettered` / 20 | any frozen caller or transport failure classification | `inspect_semantic_queue` |
 | `invalid` / 20 | `semantic_worker_request_invalid`, `runtime_authority_missing`, `runtime_authority_invalid`, `runtime_authority_unsupported`, `unsafe_state_path`, `workspace_config_invalid`, `semantic_queue_invalid` | respectively `none`, `install_candidate_authority`, `install_candidate_authority`, `install_supported_candidate`, `configure_safe_state_root`, `inspect_workspace_state`, `inspect_semantic_queue` |
 | `commit_unknown` / 20 | `semantic_worker_commit_unknown` | `none` |
 
-Before a queue claim exists, no condition may call the queue failure transition
-or increment `failure_count`. Deadline expiry in source/config preflight or lease
-acquisition is `semantic_worker_preclaim_timeout`. Missing or transiently
-unreadable active configuration is `workspace_config_unavailable`; malformed
-configuration is `workspace_config_invalid`; a policy that does not authorize
-the explicitly active host agent is `semantic_capability_unavailable`.
+Before an accepted `begin`, observed EOF, a catchable interruption, or malformed,
+noncanonical, unknown, or oversized input emits `invalid` /
+`semantic_worker_request_invalid` / `none`, omits `begin_request_sha256`, and
+performs no source discovery, lease allocation, or queue mutation.
+
+Before a current-session queue claim exists, the worker may not call the queue
+failure transition or attribute a `failure_count` increment to that session.
+This does not suppress the existing deterministic `claim_expired` recovery
+inside `claim()`: predecessor attempts may advance failure state once and retry
+or dead-letter under the frozen queue budget before `claim()` installs or
+returns a current-session claim. Deadline expiry in source/config preflight or
+lease acquisition is `semantic_worker_preclaim_timeout`; a catchable
+interruption after `begin` but before a current-session claim is
+`semantic_worker_preclaim_interrupted`. Missing or transiently unreadable active
+configuration is `workspace_config_unavailable`; malformed configuration is
+`workspace_config_invalid`; a policy that does not authorize the explicitly
+active host agent is `semantic_capability_unavailable`.
 Registry, source, checkout, configuration-digest, operation, migration, queue,
 or watermark CAS drift is `semantic_authority_stale`. Lease contention and the
 staged-build barrier retain their named outcomes above. These mappings apply
-only when rejection is proved to precede queue-claim mutation, whether before
-acquisition or after a grant. If a `claim()` call may have installed a claim,
-one locked reread must prove exact claim presence or absence; an exact present
-claim follows the post-claim failure rules, exact absence follows the preclaim
-mapping, and ambiguity is `semantic_worker_commit_unknown`.
+only when rejection is proved to precede current-session queue-claim mutation,
+whether before acquisition or after a grant. Before `claim()`, the worker retains
+the exact queue snapshot and the deterministic projected candidate. If the call
+is uncertain, one locked reread adopts an exact installed current-session claim;
+an exact unchanged snapshot may retry while the work deadline remains or emit
+truthful `idle` when it proves no eligible item. A snapshot containing only the
+exact projected predecessor `claim_expired` recovery is adopted only when it
+also proves that no item is eligible, and then emits truthful `idle`. Any other
+absent-claim state, unreadable state, or ambiguity is
+`semantic_worker_commit_unknown`; absence alone is not a preclaim-failure route.
 
 The process exits 0 only after a `completed` terminal or a truthful `idle`
 terminal with no eligible item. Exit 64 is reserved for an invalid argument
@@ -203,6 +236,19 @@ work, owner, fence, operation epoch, migration epoch, active-source revision,
 attempt, and claim-ID bindings. A different queue revision or watermark,
 source activation, migration, expired lease, successor attempt, or replaced
 desired revision withholds the operation; none authorizes use of stale work.
+
+The locked claim-admission candidate must preserve capacity for the mandatory
+result checkpoint without revising the durable queue schema. After applying any
+deterministic predecessor recovery and projecting the new claim, the worker
+replaces that claim's checkpoint in a copy with `result:` followed by 64
+lowercase hexadecimal digits and measures the exact canonical queue bytes. It
+installs the claim only when that projected snapshot is within `max_bytes`.
+Every later queue mutation while the claim remains live applies the same
+projection, so enqueue, reconciliation, or another checkpoint cannot consume
+the reserved headroom. Failure to preserve that headroom before claim is
+`semantic_checkpoint_capacity_unavailable` / `inspect_semantic_queue`; it
+installs no current-session claim and does not suppress any already-proved
+predecessor `claim_expired` recovery.
 
 Before emitting `work` and again before staging a completion, the transport
 reopens the contained active-source path without following links. `UPSERT`
@@ -285,28 +331,57 @@ The implementation must perform this ordering exactly:
    `{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}`; for `DELETE`,
    require and canonicalize the exact kind-only
    `{"kind":"delete_tombstone"}` object;
-6. construct one canonical internal
-   `graphify.workspace.semantic_result_binding.internal` format-version-1
-   envelope binding the begin-request SHA-256, repository UUID, claim ID,
-   attempt, exact desired work, active-source revision, operation epoch,
-   migration epoch, canonical payload byte count and SHA-256, and that exact
-   payload object;
+6. construct one canonical internal result-binding envelope using exactly the
+   object grammar below. Uppercase names are typed metavariables; `WORK` is the
+   exact six-field object above and `PAYLOAD` the exact step-5 operation-matched
+   object. No other field or nesting is permitted:
+
+   ```text
+   {
+     "active_source_revision": ACTIVE_SOURCE_REVISION,
+     "attempt": ATTEMPT,
+     "begin_request_sha256": "BEGIN_REQUEST_SHA256",
+     "claim_id": "CLAIM_ID",
+     "contract": "graphify.workspace.semantic_result_binding.internal",
+     "format_version": 1,
+     "migration_epoch": MIGRATION_EPOCH,
+     "operation_epoch": OPERATION_EPOCH,
+     "payload": PAYLOAD,
+     "payload_bytes": PAYLOAD_BYTES,
+     "payload_sha256": "PAYLOAD_SHA256",
+     "repo_uuid": "REPO_UUID",
+     "work": WORK,
+     "work_sha256": "WORK_SHA256"
+   }
+   ```
+
+   The integer and string values equal the accepted request and live claim;
+   `work_sha256` equals the work digest defined above, while `payload_bytes` and
+   `payload_sha256` equal the byte count and digest of the exact payload preimage.
+   The envelope is encoded by the same canonical JSON rule with one final
+   newline. `result_binding_bytes` is the length of those whole bytes and
+   `result_binding_sha256` is their SHA-256;
 7. atomically install that envelope at the derived private external-state path
    `workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`
    through the existing no-follow durable-state primitives, with `0700`
    directories and a `0600` regular file;
 8. reopen the installed file without following links and require exact bytes
-   and SHA-256; same-byte install retry is idempotent, while different bytes at
-   the same derived path are a binding conflict;
+   and SHA-256; same-byte install retry is idempotent. Exact different bytes at
+   the same derived path, while the claim remains provably current, are the
+   transport-owned non-retryable `semantic_result_binding_conflict=false`
+   failure. One `fail()` transition makes the item `dead_lettered`, with
+   `inspect_semantic_queue` as the public action;
 9. persist the existing bounded claim checkpoint
    `result:<result_binding_sha256>`, then reopen and rehash the envelope again
    and require that reopened SHA-256 to equal the checkpoint suffix;
 10. parse and revalidate that exact envelope. Require its
     `begin_request_sha256` to equal the captured digest of the accepted canonical
     begin frame and its `repo_uuid` to equal that request field; require its
-    `claim_id`, `attempt`, and exact desired work to equal the live claim. Under
-    the current semantic grant, revalidate the same source revision, owner,
-    fence, operation epoch, and migration epoch; and
+    `claim_id`, `attempt`, exact desired work, and `work_sha256` to equal the live
+    claim and captured work result. Require its payload object, byte count, and
+    digest to equal the validated payload. Under the current semantic grant,
+    revalidate the same source revision, owner, fence, operation epoch, and
+    migration epoch; and
 11. only then call the existing queue completion transition and emit the
    `completed` result.
 
@@ -332,7 +407,9 @@ Once a queue claim exists, the worker maps deadline expiry to
 `host_agent_timeout`, EOF or interruption before a terminal request to
 `host_agent_interrupted`, malformed, noncanonical, unknown, oversized, or
 invalid result data to `semantic_result_invalid`, and exact source mismatch to
-`source_content_changed`. It attempts one `fail()` while the claim remains live.
+`source_content_changed`. An exact different-byte staging conflict maps to
+`semantic_result_binding_conflict`. It attempts one `fail()` while the claim
+remains live.
 Unknown caller classifications, invalid Boolean retryability, stale claims, and
 activation or migration drift are not rewritten into caller-selected queue
 failures. They fail closed or withhold stale authority. If the worker process
@@ -347,12 +424,16 @@ start and observed return of queue completion or caller-requested failure.
 Heartbeats preserve the same owner and fence under a fixed 30-second lease TTL,
 every 10 seconds while work time remains, but never extend the work deadline.
 
-If the deadline expires before queue-claim mutation begins, or a locked reread
-proves that an uncertain claim call installed no claim, the worker emits the
-preclaim timeout outcome above after any provable lease release. It never
-synthesizes `host_agent_timeout`, calls `fail()`, or advances a queue failure
-count without a live claim. The same no-claim rule applies to checkout,
-configuration, capability, CAS, contention, and staged-barrier rejection.
+If the deadline expires before current-session queue-claim mutation begins, the
+worker emits the preclaim timeout outcome above after any provable lease
+release. An uncertain `claim()` call that installed no current-session claim
+instead follows the exact retry, `idle`, or commit-unknown reread rules above;
+absence does not imply timeout. The worker never synthesizes
+`host_agent_timeout`, calls `fail()`, or advances a queue failure count for the
+current session without a live claim. Deterministic predecessor `claim_expired`
+recovery remains permitted as specified above. The same current-session
+no-claim rule applies to interruption, checkout, configuration, capability,
+CAS, contention, capacity, and staged-barrier rejection.
 
 After that deadline, checkpoints and completion are forbidden and heartbeats
 stop. If the claim is still live, the worker may attempt only the one
@@ -379,9 +460,18 @@ Commit uncertainty is phase-specific and fail-closed:
   until that reread proves one of those states;
 - uncertain result installation is adopted only after a no-follow reopen proves
   the exact expected bytes and digest; absence may retry under the same live
-  claim, while ambiguity or different bytes is invalid;
-- uncertain checkpoint persistence is adopted only when the current claim
-  contains the exact result-binding checkpoint;
+  claim. Exact different bytes follow the binding-conflict failure route only
+  while the claim is provably current; unreadable or ambiguous state is
+  `semantic_worker_commit_unknown`;
+- before any optional or mandatory checkpoint call, retain the exact current
+  claim and its prior checkpoint. After uncertain persistence, one locked reread
+  adopts only the same live claim containing the exact requested checkpoint; the
+  exact retained pre-call claim may retry while the work and lease deadlines
+  remain. Any other checkpoint, absent or stale claim, or unreadable state is
+  `semantic_worker_commit_unknown` and cannot proceed. An adopted optional
+  checkpoint emits `checkpointed` with the digest of its exact request frame; an
+  adopted mandatory `result:<result_binding_sha256>` checkpoint may continue
+  only to the envelope reopen and completion checks above;
 - once queue completion or failure begins, uncertainty is
   `semantic_worker_commit_unknown` / `none`, never success, and the same request
   is not replay authority; and

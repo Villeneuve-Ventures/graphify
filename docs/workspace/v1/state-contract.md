@@ -334,10 +334,12 @@ Validated successful output is staged only at the derived external path
 `workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`.
 The file is one immutable canonical
 `graphify.workspace.semantic_result_binding.internal` format-version-1
-envelope. It binds the begin-request digest, repository UUID, claim ID, attempt,
-exact desired work, active-source revision, operation and migration epochs, and
-the canonical payload bytes, byte count, and SHA-256. An `UPSERT` payload
-is exactly the whole
+envelope with exactly the closed field set and object grammar frozen in
+[`semantic-sync.md`](semantic-sync.md#result-validation-and-binding). It binds
+the begin-request digest, repository UUID, claim ID, attempt, exact desired work
+and its canonical digest, active-source revision, operation and migration
+epochs, and the canonical payload object, byte count, and SHA-256. An `UPSERT`
+payload is exactly the whole
 `{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}` object after
 worker-specific closed nested-schema, fixed-point, and bounded indexed-sanitizer
 validation. A `DELETE` payload is exactly the kind-only
@@ -346,7 +348,19 @@ that whole canonical object including its final newline, and the envelope stores
 the same object once. Existing no-follow
 install-once semantics apply: exact same bytes are idempotent, different bytes
 at the same derived path are a conflict, and a reopened regular `0600` file must
-match before it can be referenced.
+match before it can be referenced. Under a provably current claim, an exact
+different-byte conflict is the non-retryable
+`semantic_result_binding_conflict=false` failure. One queue failure transition
+dead-letters the item; unreadable or ambiguous staging state is commit-unknown.
+
+Claim admission and every later queue mutation preserve exact canonical-byte
+headroom for the mandatory `result:<64-lowercase-hex>` checkpoint by projecting
+that value into the live claim before applying `max_bytes`. This is capacity
+accounting, not a new durable reservation field. Admission that cannot preserve
+the headroom installs no current-session claim and returns
+`semantic_checkpoint_capacity_unavailable` / `inspect_semantic_queue`; existing
+deterministic predecessor `claim_expired` recovery remains attributable to the
+predecessor attempt.
 
 Queue completion requires the live claim to persist
 `result:<result_binding_sha256>` in its existing bounded checkpoint, reopen and
@@ -360,6 +374,13 @@ A complete frame, an installed envelope, or a checkpoint alone is not
 completion authority. The terminal public result contains digests and queue
 watermarks, never the fragment, source content, private paths, owner/fence data,
 secrets, or exception text.
+
+Before every optional progress or mandatory result checkpoint, the worker
+retains the exact live claim and prior checkpoint. Post-commit uncertainty
+adopts only the same live claim with the requested value, retries only from the
+exact retained pre-call claim while both deadlines remain, and otherwise is
+commit-unknown. Optional public checkpoint codes cannot use the reserved
+`result:` prefix.
 
 The staging file is neither a queue record nor a generation payload,
 certification binding, or completion index. A successor claim ignores an older

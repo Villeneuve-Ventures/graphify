@@ -143,7 +143,9 @@ tombstone. An immutable canonical result envelope is then
 installed under private external workspace staging, its exact bytes and digest
 are reopened and verified, and that digest is persisted in and revalidated
 against the live claim checkpoint. Queue completion before those checks is
-forbidden.
+forbidden. Claim admission and every later queue mutation project the maximum
+mandatory result checkpoint before enforcing canonical-byte capacity, so an
+accepted claim cannot have its binding stranded by ordinary queue growth.
 
 The private envelope admits source-derived text only in the schema's bounded
 semantic `label` and sanitizer-produced `rationale` fields; it has no separate
@@ -152,7 +154,9 @@ claimed to be secret-free or non-verbatim. Public receipts contain no semantic
 text, credential, private absolute path, raw exception, provider/model data, or
 lease owner or fence detail. Same-path different-byte installation, unsafe
 paths, links, special files, oversized fragments, identifier/path tricks,
-unknown fields, stale claims, and epoch drift fail closed. Orphan result staging
+unknown fields, stale claims, and epoch drift fail closed. An exact
+different-byte binding under a current claim is a non-retryable queue failure;
+unreadable or ambiguous staging state is commit-unknown. Orphan result staging
 is not cleanup authority. If queue completion may have committed before its
 terminal public frame, the absence of a durable queue/result association is
 reported as commit-unknown rather than inferred success.

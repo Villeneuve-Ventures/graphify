@@ -314,9 +314,15 @@ is one transport-owned `host_agent_timeout=true` failure and lease release
 before the unchanged lease liveness deadline. A checkpoint or terminal
 transition repeats the existing claim validation, so source activation or
 migration between protocol frames withholds the stale session. Result staging
-is verified before the checkpoint and again before completion. If completion or
-failure begins but its observed return or terminal public frame is lost, the
-mutation is unproven and the outcome is commit-unknown, never inferred success.
+is verified before the checkpoint and again before completion. Claim admission
+and later queue mutation reserve canonical-byte headroom for the mandatory
+result checkpoint without a durable reservation field. Optional and mandatory
+checkpoint uncertainty uses an exact live-claim reread: adopt the requested
+value, retry the exact prior value within both deadlines, otherwise
+commit-unknown. If
+completion or failure begins but its observed return or terminal public frame
+is lost, the mutation is unproven and the outcome is commit-unknown, never
+inferred success.
 After completion clears the claim, the current queue format also cannot
 reconstruct the result association.
 

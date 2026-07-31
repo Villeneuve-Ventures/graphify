@@ -480,7 +480,10 @@ implementation acceptance criteria, not evidence that the command exists:
   before consuming one canonical at-most-16-KiB `begin` frame. The single
   request/result families are version 1, reject duplicate/unknown fields and
   versions, and bind explicit registry, active-source, operation, migration,
-  queue, and watermark CAS plus a 1--600000 ms absolute deadline;
+  queue, and watermark CAS plus a 1--600000 ms absolute deadline. Observed EOF,
+  catchable interruption, and malformed or oversized input before an accepted
+  `begin` emit only `invalid` / `semantic_worker_request_invalid` / `none`, omit
+  a begin digest, and perform no source, lease, or queue mutation;
 - `executor="host_agent"` and Boolean `host_agent_active=true` are required.
   Named/headless backends, provider/model/endpoint/credential fields,
   `graphify.llm` discovery or dispatch, environment inference, network calls,
@@ -515,36 +518,54 @@ implementation acceptance criteria, not evidence that the command exists:
   before concatenation when any projected rationale exceeds 16 KiB or the
   sanitized fragment would exceed 25 MiB. The actual sanitized copy is then
   checked against the closed post-sanitize schema and the same bounds;
-- digest vectors prove `payload_bytes` and `payload_sha256` cover the exact whole
-  canonical `complete.payload` wrapper plus its final newline for both `UPSERT`
-  and `DELETE`, never only the nested fragment or the result envelope. Separate
-  vectors prove `result_binding_bytes` and `result_binding_sha256` cover the
-  whole canonical envelope containing that payload object exactly once.
-  Host-agent output never appears in a public result;
+- digest vectors prove `begin_request_sha256` covers the entire canonical
+  `begin` frame, `work_sha256` covers only the exact canonical six-field work
+  object, and `checkpoint_sha256` covers the entire canonical checkpoint frame,
+  each including its final newline. Additional vectors prove `payload_bytes`
+  and `payload_sha256` cover the exact whole canonical `complete.payload` wrapper
+  plus its final newline for both `UPSERT` and `DELETE`, never only the nested
+  fragment or the result envelope. The result-binding parser accepts only the
+  exact format-version-1 object grammar, rejects missing, unknown, renamed, or
+  nested fields, and requires the work/payload byte metadata to recompute
+  exactly. `result_binding_bytes` and `result_binding_sha256` cover that whole
+  envelope containing the payload object exactly once. Host-agent output never
+  appears in a public result;
 - successful output is atomically installed only at the derived private
   external path
   `workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`
   as one canonical immutable binding. Tests cover no-follow `0700`/`0600`
-  containment, same-byte idempotence, different-byte conflict, short writes,
-  sync/replace failures, and reopen/rehash verification;
+  containment, same-byte idempotence, short writes, sync/replace failures, and
+  reopen/rehash verification. Exact different bytes under a provably current
+  claim exercise the non-retryable `semantic_result_binding_conflict=false` /
+  `dead_lettered` / `inspect_semantic_queue` route; stale, unreadable, or
+  ambiguous conflict state never becomes a queue failure or success;
+- tight-boundary capacity vectors project the exact claim with the maximum
+  `result:<64-lowercase-hex>` checkpoint before claim admission and before every
+  later queue mutation. They prove a claim fitting only with `checkpoint=null`
+  is withheld as `semantic_checkpoint_capacity_unavailable` without a
+  current-session claim, and that concurrent enqueue, reconciliation, and
+  optional checkpoints cannot consume the reserved canonical-byte headroom;
 - queue completion is unreachable until the verified binding digest is stored
   as `result:<sha256>` in the current claim checkpoint, the file is reopened
   and rehashed again, that reopened digest equals the checkpoint suffix, the
   envelope's begin-request digest equals the captured digest of the accepted
   canonical begin frame, its repository UUID equals that request field, its
-  claim ID, attempt, and exact desired work equal the live claim, and exact
-  source/owner/fence/operation/migration authority still matches.
+  claim ID, attempt, exact desired work, and work digest equal the live claim and
+  captured work result, its payload object/byte count/digest equal the validated
+  payload, and exact source/owner/fence/operation/migration authority still
+  matches.
   Substitution vectors vary each digest or binding independently, and injected
   races at every boundary prove no completion without the exact binding;
-- the seven frozen failure classifications accept only their specified
-  retryability. Three are accepted from `fail`; four are transport-only; and
+- the eight frozen failure classifications accept only their specified
+  retryability. Three are accepted from `fail`; five are transport-only; and
   `semantic_work_unsupported` is also transport-derived when a work frame would
   exceed the public bound. Timeout, EOF/interruption, malformed or invalid
-  result data, and source mismatch attempt exactly one worker-owned `fail()`
-  under the live claim. Failure count advances once; retry occurs only within
-  the explicit budget, while non-retryable or exhausted work becomes durable
-  dead-letter and blocks completed watermark advancement. A worker crash before
-  that transition is recovered only through the existing `claim_expired` rule;
+  result data, source mismatch, and result-binding conflict attempt exactly one
+  worker-owned `fail()` under the live claim. Failure count advances once; retry
+  occurs only within the explicit budget, while non-retryable or exhausted work
+  becomes durable dead-letter and blocks completed watermark advancement. A
+  worker crash before that transition is recovered only through the existing
+  `claim_expired` rule;
 - deadline tests start one absolute work deadline only after the canonical
   `begin` frame is accepted and prove it bounds source verification, lease
   acquisition, protocol waits, validation, staging, checkpoint, and both the
@@ -552,12 +573,17 @@ implementation acceptance criteria, not evidence that the command exists:
   Heartbeats use the fixed 30-second TTL and 10-second cadence without extending
   that deadline. Expiry before a claim, including during preflight or
   acquisition, emits `withheld` / `semantic_worker_preclaim_timeout` /
-  `retry_status`, never calls `fail()`, and leaves `failure_count` unchanged.
-  Checkout, configuration, capability, CAS, contention, and staged-barrier
-  rejection before a claim likewise exercise their exact frozen terminal route
-  without queue failure mutation. An uncertain `claim()` call is reread: exact
-  absence uses the preclaim route, an exact installed claim uses post-claim
-  rules, and ambiguity is commit-unknown. After expiry with a live claim, tests
+  `retry_status`, never calls `fail()`, and attributes no failure increment to
+  the current session. Catchable preclaim interruption, checkout, configuration,
+  capability, CAS, contention, capacity, and staged-barrier rejection likewise
+  exercise their exact frozen terminal route without a current-session queue
+  failure. Separate vectors prove `claim()` may apply the existing predecessor
+  `claim_expired` transition and return no current claim; that increment belongs
+  to the predecessor, and an exact recovery-only snapshot yields `idle` only
+  when no item remains eligible. An uncertain `claim()` call adopts an exact
+  installed claim, retries only from the exact unchanged candidate state, and
+  treats every other absent-claim or unreadable state as commit-unknown. After
+  expiry with a live claim, tests
   reject checkpoints, completion, and further heartbeats and permit exactly one
   transport-owned `host_agent_timeout=true` failure plus lease release before
   the unchanged lease liveness deadline;
@@ -569,11 +595,17 @@ implementation acceptance criteria, not evidence that the command exists:
   from the exact unchanged record, and forbids later claim mutation from an
   unproven grant;
 - result-install and checkpoint commit uncertainty may be adopted only by exact
-  reread. Uncertainty after completion or failure begins, ambiguous lease
-  mutation, or release-only uncertainty is `commit_unknown`, never success or
-  replay authority. It is a direct session result with action `none`; it invents
-  no status route because the current completed queue item retains no result
-  digest;
+  reread. Optional progress codes reject the reserved `result:` prefix. For each
+  optional or mandatory checkpoint, fault injection retains the exact prior
+  claim, adopts only the same live claim with the requested value, retries only
+  from the exact prior value while both deadlines remain, and maps a different
+  checkpoint, absent/stale claim, or unreadable state to `commit_unknown`.
+  Adopted progress emits the digest of its full canonical request frame;
+  adopted result checkpoints still require envelope reopen and revalidation.
+  Uncertainty after completion or failure begins, ambiguous lease mutation, or
+  release-only uncertainty is `commit_unknown`, never success or replay
+  authority. It is a direct session result with action `none`; it invents no
+  status route because the current completed queue item retains no result digest;
 - every public output frame is canonical and at most 64 KiB, uses one exact
   per-kind field set, and limits failure reason/action values to the frozen
   enums. Output frames contain no source bytes, semantic payload, secret,
