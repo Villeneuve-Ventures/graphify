@@ -350,12 +350,16 @@ match before it can be referenced.
 
 Queue completion requires the live claim to persist
 `result:<result_binding_sha256>` in its existing bounded checkpoint, reopen and
-rehash the envelope, and revalidate the same claim, work, source, fence, owner,
-operation epoch, and migration epoch immediately before `complete()`. A
-complete frame, an installed envelope, or a checkpoint alone is not completion
-authority. The terminal public result contains digests and queue watermarks,
-never the fragment, source content, private paths, owner/fence data, secrets,
-or exception text.
+rehash the envelope, and require that reopened SHA-256 to equal the checkpointed
+`result_binding_sha256`. The envelope's `begin_request_sha256` must equal the
+captured digest of the accepted canonical begin frame, and its `repo_uuid` must
+equal that request field. Its `claim_id`, `attempt`, and exact desired work must
+equal the live claim. The same source revision, owner, fence, operation epoch,
+and migration epoch must be revalidated immediately before `complete()`.
+A complete frame, an installed envelope, or a checkpoint alone is not
+completion authority. The terminal public result contains digests and queue
+watermarks, never the fragment, source content, private paths, owner/fence data,
+secrets, or exception text.
 
 The staging file is neither a queue record nor a generation payload,
 certification binding, or completion index. A successor claim ignores an older

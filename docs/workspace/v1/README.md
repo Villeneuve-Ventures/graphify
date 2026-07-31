@@ -129,7 +129,9 @@ remain deferred.
 
 ## Contract-only host-agent semantic worker
 
-The future worker has one exact argv:
+The future worker's public executable is `graphify`. Its only exact argument
+vector after that executable is `workspace semantic-worker --stdio`, producing
+this full invocation:
 
 ```text
 graphify workspace semantic-worker --stdio

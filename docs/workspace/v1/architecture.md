@@ -96,8 +96,8 @@ fragment or accepts the exact `DELETE` tombstone, installs one canonical
 immutable result envelope in private external workspace semantic staging,
 reopens and verifies its SHA-256, persists that digest in the existing bounded
 claim checkpoint, revalidates both under the live grant, and only then calls the
-existing queue completion transition. The queue durable
-format is unchanged. The transport stops before generation staging
+existing queue completion transition. The durable queue format is unchanged.
+The transport stops before generation staging
 finalization, `bind_sealed_inputs()`, certification, promotion, or pointer
 mutation. No runtime implementation or completion receipt exists for this
 READY contract.

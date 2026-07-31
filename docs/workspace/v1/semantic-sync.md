@@ -13,17 +13,19 @@ certification, promotion, or pointer authority.
 
 ## Exact public transport
 
-The only future argv is:
+The public executable is `graphify`. Its only future argument vector after that
+executable is exactly `workspace semantic-worker --stdio`, producing this full
+invocation:
 
 ```text
 graphify workspace semantic-worker --stdio
 ```
 
-Any other, reordered, repeated, or extended argv exits 64 with deterministic
-usage text before installed-authority loading, standard-input reads, source
-discovery, lease allocation, or state access. The valid form loads and composes
-the installed `runtime-manifest.json` authority before it reads the first
-protocol frame.
+Any other, reordered, repeated, or extended argument vector exits 64 with
+deterministic usage text before installed-authority loading, standard-input
+reads, source discovery, lease allocation, or state access. The valid form loads
+and composes the installed `runtime-manifest.json` authority before it reads the
+first protocol frame.
 
 The command is one long-lived process for exactly one queue item. It derives
 the trusted boot, PID, and process-start owner, acquires one
@@ -44,7 +46,8 @@ required `0` before the decimal point. The endpoints are `0` and `1`, not `-0`,
 `0.0`, or `1.0`. Parsers retain those tokens as exact decimal values rather than
 first rounding them through binary floating point. Standard output contains only
 `graphify.workspace.semantic_worker_result` version 1 frames. Standard error is
-empty for a valid invocation; only invalid argv emits plain-text usage.
+empty for a valid invocation; only an invalid argument vector emits plain-text
+usage.
 
 ## Versioned request family
 
@@ -175,8 +178,8 @@ claim follows the post-claim failure rules, exact absence follows the preclaim
 mapping, and ambiguity is `semantic_worker_commit_unknown`.
 
 The process exits 0 only after a `completed` terminal or a truthful `idle`
-terminal with no eligible item. Exit 64 is reserved for invalid argv and emits
-no result frame.
+terminal with no eligible item. Exit 64 is reserved for an invalid argument
+vector and emits no result frame.
 
 Downstream semantic sync may consume a staged result only when the process
 exits 0 and its final frame is exactly one schema-valid `completed` terminal
@@ -296,10 +299,14 @@ The implementation must perform this ordering exactly:
    and SHA-256; same-byte install retry is idempotent, while different bytes at
    the same derived path are a binding conflict;
 9. persist the existing bounded claim checkpoint
-   `result:<result_binding_sha256>`, then reopen and rehash the envelope again;
-10. under the current semantic grant, require the same claim and checkpoint,
-   exact work, source revision, operation and migration epochs, and verified
-   envelope; and
+   `result:<result_binding_sha256>`, then reopen and rehash the envelope again
+   and require that reopened SHA-256 to equal the checkpoint suffix;
+10. parse and revalidate that exact envelope. Require its
+    `begin_request_sha256` to equal the captured digest of the accepted canonical
+    begin frame and its `repo_uuid` to equal that request field; require its
+    `claim_id`, `attempt`, and exact desired work to equal the live claim. Under
+    the current semantic grant, revalidate the same source revision, owner,
+    fence, operation epoch, and migration epoch; and
 11. only then call the existing queue completion transition and emit the
    `completed` result.
 

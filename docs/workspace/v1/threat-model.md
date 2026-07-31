@@ -120,13 +120,14 @@ Backend endpoints and credentials are operator configuration, never repo policy;
 secrets are excluded from argv and persisted state.
 
 The contract-only host-agent semantic-worker child narrows that future boundary
-further. Its only frozen argv is `graphify workspace semantic-worker --stdio`.
-The caller must state an already-active host agent explicitly; the transport
-passes no named backend and never imports or calls `graphify.llm` provider
-discovery or dispatch. Credentials, provider files, ambient backend variables,
-network availability, and an absent API key are neither capability nor
-authority. Source bytes are read-only untrusted data and are never returned in
-public result frames.
+further. Its public executable is `graphify`; its only frozen argument vector
+after that executable is `workspace semantic-worker --stdio`, making the full
+invocation `graphify workspace semantic-worker --stdio`. The caller must state
+an already-active host agent explicitly; the transport passes no named backend
+and never imports or calls `graphify.llm` provider discovery or dispatch.
+Credentials, provider files, ambient backend variables, network availability,
+and an absent API key are neither capability nor authority. Source bytes are
+read-only untrusted data and are never returned in public result frames.
 
 One long-lived process retains one OS-derived semantic owner and fence across
 claim, bounded checkpoints, and terminal completion or failure. This prevents

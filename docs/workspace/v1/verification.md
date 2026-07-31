@@ -471,14 +471,16 @@ verification reviews.
 These gates freeze the sole contract-only READY child. They are future
 implementation acceptance criteria, not evidence that the command exists:
 
-- the only argv is `workspace semantic-worker --stdio`; malformed, reordered,
-  repeated, or extended argv exits 64 before installed-authority loading,
-  standard-input reads, source discovery, lease allocation, or state access;
-- valid argv loads and composes installed runtime authority before consuming
-  one canonical at-most-16-KiB `begin` frame. The single request/result
-  families are version 1, reject duplicate/unknown fields and versions, and
-  bind explicit registry, active-source, operation, migration, queue, and
-  watermark CAS plus a 1--600000 ms absolute deadline;
+- the public executable is `graphify`, and its only argument vector after that
+  executable is `workspace semantic-worker --stdio`; any other, reordered,
+  repeated, or extended argument vector exits 64 before installed-authority
+  loading, standard-input reads, source discovery, lease allocation, or state
+  access;
+- the valid argument vector loads and composes installed runtime authority
+  before consuming one canonical at-most-16-KiB `begin` frame. The single
+  request/result families are version 1, reject duplicate/unknown fields and
+  versions, and bind explicit registry, active-source, operation, migration,
+  queue, and watermark CAS plus a 1--600000 ms absolute deadline;
 - `executor="host_agent"` and Boolean `host_agent_active=true` are required.
   Named/headless backends, provider/model/endpoint/credential fields,
   `graphify.llm` discovery or dispatch, environment inference, network calls,
@@ -527,9 +529,13 @@ implementation acceptance criteria, not evidence that the command exists:
   sync/replace failures, and reopen/rehash verification;
 - queue completion is unreachable until the verified binding digest is stored
   as `result:<sha256>` in the current claim checkpoint, the file is reopened
-  and rehashed again, and exact claim/work/source/owner/fence/operation/migration
-  authority still matches. Injected races at every boundary prove no completion
-  without the binding;
+  and rehashed again, that reopened digest equals the checkpoint suffix, the
+  envelope's begin-request digest equals the captured digest of the accepted
+  canonical begin frame, its repository UUID equals that request field, its
+  claim ID, attempt, and exact desired work equal the live claim, and exact
+  source/owner/fence/operation/migration authority still matches.
+  Substitution vectors vary each digest or binding independently, and injected
+  races at every boundary prove no completion without the exact binding;
 - the seven frozen failure classifications accept only their specified
   retryability. Three are accepted from `fail`; four are transport-only; and
   `semantic_work_unsupported` is also transport-derived when a work frame would
