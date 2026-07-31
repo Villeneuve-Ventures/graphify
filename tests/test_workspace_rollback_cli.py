@@ -27,7 +27,13 @@ from graphify.workspace.composition import (
     WorkspaceAuthorityUnsupported,
 )
 from graphify.workspace.contracts import STATE_SCHEMA_VERSION, canonical_json_bytes
-from graphify.workspace.journal import JournalConflict
+from graphify.workspace.generations import GenerationError
+from graphify.workspace.identity import SourceDiscoveryTimeout
+from graphify.workspace.journal import (
+    JournalConflict,
+    JournalCorrupt,
+    JournalRecoveryRequired,
+)
 from graphify.workspace.leases import LeaseBusy, LeaseExpired, LeaseRecoveryRequired
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -35,7 +41,12 @@ from graphify.workspace.persistence import (
     LockTimeout,
     StateCorrupt,
 )
-from graphify.workspace.pointers import PointerCAS, PointerConflict, PointerCorrupt
+from graphify.workspace.pointers import (
+    PointerCAS,
+    PointerConflict,
+    PointerCorrupt,
+    PointerRecoveryRequired,
+)
 from graphify.workspace.registry import RevisionConflict
 from graphify.workspace.status import EXIT_READY
 from tests.workspace_p3_helpers import REPO_UUID, START, tree_snapshot
@@ -218,9 +229,7 @@ class _Pointers:
             deadline_ns=deadline_ns,
         )
 
-    def rollback(
-        self, grant: object, cas: PointerCAS, **kwargs: object
-    ) -> _PointerDocument:
+    def rollback(self, grant: object, cas: PointerCAS, **kwargs: object) -> _PointerDocument:
         self.rollback_calls.append((grant, cas, kwargs))
         if cas.expected_source_epoch != 3:
             raise PointerConflict("stale rollback target source epoch")
@@ -262,9 +271,7 @@ def _clock(*samples: int) -> Callable[[], int]:
 def _real_rollback_fixture(tmp_path: Any) -> tuple[Any, Any, Any, dict[str, Any]]:
     from tests.test_workspace_pointers import _cas, _promotion_runtime
 
-    harness, journal, _generations, pointers, promote, receipts = _promotion_runtime(
-        tmp_path
-    )
+    harness, journal, _generations, pointers, promote, receipts = _promotion_runtime(tmp_path)
     old = receipts["gen-old"]
     new = receipts["gen-new"]
     pointers.promote(
@@ -286,9 +293,7 @@ def _real_rollback_fixture(tmp_path: Any) -> tuple[Any, Any, Any, dict[str, Any]
     request.update(
         {
             "expected_registry_revision": registry["revision"],
-            "expected_active_source_revision": registry["workspaces"][0][
-                "active_source_revision"
-            ],
+            "expected_active_source_revision": registry["workspaces"][0]["active_source_revision"],
             "expected_operation_epoch": lease_state.operation_epoch,
             "expected_migration_epoch": lease_state.migration_epoch,
             "expected_pointer_revision": 2,
@@ -330,28 +335,18 @@ def test_rollback_schema_freezes_bounded_canonical_request_and_receipt() -> None
     authorization = request["authorization"]
     assert isinstance(authorization, dict)
     invalid_authorization = {**authorization, "action": "PROMOTE"}
-    assert list(
-        request_validator.iter_errors(
-            {**request, "authorization": invalid_authorization}
-        )
-    )
+    assert list(request_validator.iter_errors({**request, "authorization": invalid_authorization}))
     for field in ("nonce", "operator_id", "reason"):
         for value in (" ", " leading", "trailing ", "leading\n", "\ntrailing"):
             invalid_authorization = {**authorization, field: value}
             assert list(
-                request_validator.iter_errors(
-                    {**request, "authorization": invalid_authorization}
-                )
+                request_validator.iter_errors({**request, "authorization": invalid_authorization})
             ), (field, value)
     lowercase_separator = {
         **authorization,
         "issued_at": str(authorization["issued_at"]).replace("T", "t"),
     }
-    assert list(
-        request_validator.iter_errors(
-            {**request, "authorization": lowercase_separator}
-        )
-    )
+    assert list(request_validator.iter_errors({**request, "authorization": lowercase_separator}))
 
     success = {
         "contract": "graphify.workspace.rollback",
@@ -367,9 +362,7 @@ def test_rollback_schema_freezes_bounded_canonical_request_and_receipt() -> None
     }
     assert not list(receipt_validator.iter_errors(success))
     assert not list(
-        receipt_validator.iter_errors(
-            {**success, "pointer_revision": 9_223_372_036_854_775_807}
-        )
+        receipt_validator.iter_errors({**success, "pointer_revision": 9_223_372_036_854_775_807})
     )
     assert list(receipt_validator.iter_errors({**success, "owner": "private"}))
 
@@ -388,7 +381,11 @@ def test_rollback_dispatch_and_help_are_exact_before_authority_or_stdin(
     monkeypatch: pytest.MonkeyPatch, arguments: tuple[str, ...]
 ) -> None:
     workspace_cli = _cli()
-    monkeypatch.setattr(workspace_cli, "load_workspace_runtime_inputs", lambda: pytest.fail("usage must not load authority"))
+    monkeypatch.setattr(
+        workspace_cli,
+        "load_workspace_runtime_inputs",
+        lambda: pytest.fail("usage must not load authority"),
+    )
 
     class UnreadableStdin:
         @property
@@ -449,7 +446,12 @@ def test_rollback_loads_authority_before_reading_stdin(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(sys, "stdin", UnreadableStdin())
     stdout, stderr = StringIO(), StringIO()
-    assert workspace_cli.run_workspace_command(("rollback", "--request-stdin"), stdout=stdout, stderr=stderr) == 20
+    assert (
+        workspace_cli.run_workspace_command(
+            ("rollback", "--request-stdin"), stdout=stdout, stderr=stderr
+        )
+        == 20
+    )
     assert stdout.getvalue() == ""
     assert json.loads(stderr.getvalue())["reason_code"] == "runtime_authority_missing"
 
@@ -831,9 +833,7 @@ def test_rollback_recovers_valid_uncommitted_journal_tail_under_lease(
     with pytest.raises(JournalConflict, match="requires recovery"):
         journal.read_stable(REPO_UUID)
 
-    request_value["expected_operation_epoch"] = harness.leases.inspect(
-        REPO_UUID
-    ).operation_epoch
+    request_value["expected_operation_epoch"] = harness.leases.inspect(REPO_UUID).operation_epoch
     base_monotonic_ns = time.monotonic_ns()
     receipt = _rollback().rollback(
         runtime,
@@ -862,9 +862,7 @@ def test_rollback_rejects_stale_visible_pointer_before_acquiring_lease(
     )
     pointer_path.write_bytes(stale_pointer)
     before = tree_snapshot(harness.state_root)
-    journal_before = tuple(
-        event.to_dict() for event in journal.read_stable(REPO_UUID).events
-    )
+    journal_before = tuple(event.to_dict() for event in journal.read_stable(REPO_UUID).events)
 
     with pytest.raises(PointerCorrupt, match="stale relative"):
         _rollback().rollback(
@@ -875,21 +873,17 @@ def test_rollback_rejects_stale_visible_pointer_before_acquiring_lease(
         )
 
     assert tree_snapshot(harness.state_root) == before
-    assert tuple(
-        event.to_dict() for event in journal.read_stable(REPO_UUID).events
-    ) == journal_before
+    assert (
+        tuple(event.to_dict() for event in journal.read_stable(REPO_UUID).events) == journal_before
+    )
 
 
 def test_rollback_expired_lease_never_writes_pointer_or_journal(tmp_path: Any) -> None:
     runtime, harness, journal, request_value = _real_rollback_fixture(tmp_path)
     request = _parse_request(request_value)
-    pointer_path = (
-        harness.state_root / "workspaces" / REPO_UUID / "pointers.json"
-    )
+    pointer_path = harness.state_root / "workspaces" / REPO_UUID / "pointers.json"
     pointer_before = pointer_path.read_bytes()
-    journal_before = tuple(
-        event.to_dict() for event in journal.read_stable(REPO_UUID).events
-    )
+    journal_before = tuple(event.to_dict() for event in journal.read_stable(REPO_UUID).events)
     base_monotonic_ns = time.monotonic_ns()
 
     with pytest.raises(LeaseExpired):
@@ -904,9 +898,9 @@ def test_rollback_expired_lease_never_writes_pointer_or_journal(tmp_path: Any) -
         )
 
     assert pointer_path.read_bytes() == pointer_before
-    assert tuple(
-        event.to_dict() for event in journal.read_stable(REPO_UUID).events
-    ) == journal_before
+    assert (
+        tuple(event.to_dict() for event in journal.read_stable(REPO_UUID).events) == journal_before
+    )
 
 
 def test_rollback_expired_reload_stops_before_generation_reverification(
@@ -917,9 +911,7 @@ def test_rollback_expired_reload_stops_before_generation_reverification(
     request = _parse_request(request_value)
     pointer_path = harness.state_root / "workspaces" / REPO_UUID / "pointers.json"
     pointer_before = pointer_path.read_bytes()
-    journal_before = tuple(
-        event.to_dict() for event in journal.read_stable(REPO_UUID).events
-    )
+    journal_before = tuple(event.to_dict() for event in journal.read_stable(REPO_UUID).events)
     verify_pointer = runtime.pointers.verify_pointer
     verify_calls = 0
 
@@ -927,13 +919,12 @@ def test_rollback_expired_reload_stops_before_generation_reverification(
         nonlocal verify_calls
         verify_calls += 1
         if verify_calls > 1:
-            raise AssertionError(
-                "expired post-acquisition reload reached generation verification"
-            )
+            raise AssertionError("expired post-acquisition reload reached generation verification")
         return verify_pointer(*args, **kwargs)
 
     runtime.pointers.verify_pointer = verify_once
     deadline_ns = 40_000_000_000
+    before_expiry_ns = deadline_ns - 5_000_000_000
     expired = False
     acquire = runtime.leases.acquire
 
@@ -946,7 +937,7 @@ def test_rollback_expired_reload_stops_before_generation_reverification(
     monkeypatch.setattr(runtime.leases, "acquire", acquire_then_expire)
     monkeypatch.setattr(
         "graphify.workspace.persistence.time.monotonic_ns",
-        lambda: deadline_ns + 1 if expired else deadline_ns - 1,
+        lambda: deadline_ns + 1 if expired else before_expiry_ns,
     )
 
     with pytest.raises(RevisionConflict, match="lease advanced") as raised:
@@ -958,14 +949,12 @@ def test_rollback_expired_reload_stops_before_generation_reverification(
         )
 
     assert isinstance(raised.value.__cause__, LockTimeout)
-    assert _rollback().classify_failure(raised.value).reason_code == (
-        "rollback_authority_conflict"
-    )
+    assert _rollback().classify_failure(raised.value).reason_code == ("rollback_authority_conflict")
     assert verify_calls == 1
     assert pointer_path.read_bytes() == pointer_before
-    assert tuple(
-        event.to_dict() for event in journal.read_stable(REPO_UUID).events
-    ) == journal_before
+    assert (
+        tuple(event.to_dict() for event in journal.read_stable(REPO_UUID).events) == journal_before
+    )
 
 
 @pytest.mark.parametrize(
@@ -1048,17 +1037,63 @@ def test_rollback_fails_closed_for_every_stale_cas_dimension(field: str, value: 
 
 
 @pytest.mark.parametrize(
-    "error, expected_exit, reason_code",
+    "error, expected_exit, reason_code, action_code",
     [
-        (LeaseBusy("private owner"), 10, "lease_busy"),
+        (LeaseBusy("private owner"), 10, "lease_busy", "retry_workspace_rollback"),
+        (
+            SourceDiscoveryTimeout("private source timeout"),
+            10,
+            "lease_busy",
+            "retry_workspace_rollback",
+        ),
         (
             LeaseRecoveryRequired("private recovery"),
             10,
             "workspace_recovery_required",
+            "run_workspace_doctor",
         ),
-        (PointerCorrupt("private pointer"), 20, "state_corrupt"),
-        (StateCorrupt("private state"), 20, "state_corrupt"),
-        (CommitUnknown("private uncertain commit"), 20, "commit_unknown"),
+        (
+            PointerRecoveryRequired("private pointer recovery"),
+            10,
+            "workspace_recovery_required",
+            "run_workspace_doctor",
+        ),
+        (
+            PointerCorrupt("private pointer"),
+            20,
+            "state_corrupt",
+            "run_workspace_repair",
+        ),
+        (
+            JournalRecoveryRequired("private suffix"),
+            20,
+            "state_corrupt",
+            "run_workspace_repair",
+        ),
+        (
+            GenerationError("private generation"),
+            20,
+            "state_corrupt",
+            "run_workspace_repair",
+        ),
+        (
+            JournalCorrupt("private journal"),
+            20,
+            "state_corrupt",
+            "run_workspace_repair",
+        ),
+        (
+            StateCorrupt("private state"),
+            20,
+            "state_corrupt",
+            "run_workspace_repair",
+        ),
+        (
+            CommitUnknown("private uncertain commit"),
+            20,
+            "commit_unknown",
+            "run_workspace_doctor",
+        ),
     ],
 )
 def test_rollback_contention_recovery_corruption_and_commit_unknown_are_redacted(
@@ -1066,11 +1101,14 @@ def test_rollback_contention_recovery_corruption_and_commit_unknown_are_redacted
     error: Exception,
     expected_exit: int,
     reason_code: str,
+    action_code: str,
 ) -> None:
     workspace_cli = _cli()
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(_request_bytes())))
     monkeypatch.setattr(workspace_cli, "compose_workspace_runtime", lambda _inputs: _runtime())
-    monkeypatch.setattr(_rollback(), "rollback", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(
+        _rollback(), "rollback", lambda *_args, **_kwargs: (_ for _ in ()).throw(error)
+    )
     stdout, stderr = StringIO(), StringIO()
     assert (
         workspace_cli.run_workspace_command(
@@ -1084,6 +1122,7 @@ def test_rollback_contention_recovery_corruption_and_commit_unknown_are_redacted
     assert stdout.getvalue() == ""
     payload = json.loads(stderr.getvalue())
     assert payload["reason_code"] == reason_code
+    assert payload["action_code"] == action_code
     Draft202012Validator(
         workspace_cli.load_rollback_receipt_schema(),
         format_checker=FormatChecker(),
@@ -1155,13 +1194,7 @@ def test_rollback_real_missing_or_corrupt_target_is_invalid_without_new_write(
 ) -> None:
     workspace_cli = _cli()
     runtime, harness, journal, request = _real_rollback_fixture(tmp_path)
-    target = (
-        harness.state_root
-        / "workspaces"
-        / REPO_UUID
-        / "generations"
-        / "gen-old"
-    )
+    target = harness.state_root / "workspaces" / REPO_UUID / "generations" / "gen-old"
     if damage == "missing":
         target.rename(harness.state_root / "parked-gen-old")
     else:
@@ -1243,7 +1276,9 @@ def test_rollback_reraises_injected_fault_and_release_cannot_mask_primary_error(
     runtime = _runtime()
     injected = InjectedFault("rollback-fault")
     runtime.pointers.rollback = lambda *_args, **_kwargs: (_ for _ in ()).throw(injected)
-    runtime.leases.release = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("private release"))
+    runtime.leases.release = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        RuntimeError("private release")
+    )
     with pytest.raises(InjectedFault) as raised:
         _rollback().rollback(
             runtime,
@@ -1258,12 +1293,8 @@ def test_rollback_release_injected_fault_never_masks_primary_error() -> None:
     runtime = _runtime()
     primary = PointerConflict("private stale pointer")
     release = InjectedFault("private release fault")
-    runtime.pointers.rollback = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        primary
-    )
-    runtime.leases.release = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        release
-    )
+    runtime.pointers.rollback = lambda *_args, **_kwargs: (_ for _ in ()).throw(primary)
+    runtime.leases.release = lambda *_args, **_kwargs: (_ for _ in ()).throw(release)
 
     with pytest.raises(PointerConflict) as raised:
         _rollback().rollback(
@@ -1298,9 +1329,7 @@ def test_rollback_release_failure_after_success_is_commit_unknown(
     release_error: Exception,
 ) -> None:
     runtime = _runtime()
-    runtime.leases.release = lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        release_error
-    )
+    runtime.leases.release = lambda *_args, **_kwargs: (_ for _ in ()).throw(release_error)
     with pytest.raises(CommitUnknown) as raised:
         _rollback().rollback(
             runtime,
@@ -1362,9 +1391,7 @@ def test_rollback_binary_output_flushes_inside_standard_broken_pipe_guard(
             lambda source, target: duplicated.append((source, target)),
         )
         patch.setattr(workspace_cli.os, "close", closed.append)
-        result = workspace_cli._emit_rollback_output(
-            standard_out, b"{}\n", exit_code=EXIT_READY
-        )
+        result = workspace_cli._emit_rollback_output(standard_out, b"{}\n", exit_code=EXIT_READY)
 
     assert result == EXIT_READY
     assert duplicated == [(99, 1), (99, 2)]

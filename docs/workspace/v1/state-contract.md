@@ -123,6 +123,41 @@ Release is cleanup rather than commit acceptance: the trusted current runtime
 may remove only the exact current owner/fence record even after a source,
 operation, or migration epoch invalidates that lease's commit authority.
 
+## Public pointer-repair transport
+
+The public repair forms introduce no durable document and do not change durable
+state schema v1. Their four CLI-v1 schemas freeze a 16 KiB canonical request
+and canonical redacted result for preview and execute. A preview request names
+the workspace and expected registry, active-source, operation, and migration
+authority; it intentionally has no caller-selected pointer revision or repair
+candidate. A preview result contains the request digest, observed authority,
+classification, and a bounded deterministic decision: candidate and last-good
+references, selected source, prospective revision/action, projected journal
+actions, a redacted digest binding the exact underlying pointer/journal/
+generation evidence, and sorted quarantine IDs. It is the approval object, and its exact
+canonical bytes including the required final newline are SHA-256 input for an
+execute request.
+
+An execute request adds only that approved-preview digest and a five-field
+`OperatorAuthorization` whose action is `REPAIR_EXECUTE`. It has no durable
+completion record: a fresh accepted `REPAIR` lease advances the shared
+workspace-operation epoch. The execute implementation must recompute the same
+decision under the existing mutation locks before it calls the pointer store;
+this applies to `no_op` as well as `repairable`. Any authority, preview, plan,
+or lease mismatch fails before pointer/journal mutation. A completed or
+commit-unknown request is therefore never a license to replay the same request.
+The recovery path is status inspection followed by a fresh preview and execute
+request.
+
+Repair may use only existing pointer, prior-pointer, pending-pointer, journal,
+and generation evidence. It may replace or finalize a pointer and append or
+recover the corresponding journal evidence through `PointerStore`; it may
+quarantine only a corrupt generation absent from the repaired pointer set. It
+does not create repair-specific state, repair registry/lease/path/staged/queue
+state, reconcile GC intent, heal committed-journal corruption, repair arbitrary
+generations reported by GC or rollback, or alter a sealed generation receipt or
+payload.
+
 ## Staged structural-build recovery
 
 `graphify.workspace.staged_build.internal` format version 1 is the bounded,

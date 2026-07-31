@@ -18,6 +18,7 @@ from typing import Any, cast, Mapping, Sequence, TextIO
 
 import graphify.workspace.rollback as rollback_runtime
 import graphify.workspace.gc_command as gc_command_runtime
+import graphify.workspace.repair as repair_runtime
 
 from graphify.workspace.adapters import (
     QueryRejected,
@@ -54,7 +55,7 @@ from graphify.workspace.generations import (
     GenerationError,
 )
 from graphify.workspace.freshness import FreshnessResult
-from graphify.workspace.journal import JournalError
+from graphify.workspace.journal import JournalError, JournalRecoveryRequired
 from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
@@ -95,6 +96,12 @@ from graphify.workspace.registry import (
     RegistryStore,
     RevisionConflict,
     SourceAlreadyActive,
+)
+from graphify.workspace.repair import (
+    RepairExecuteRequest,
+    RepairPreviewRequest,
+    repair_execute,
+    repair_preview,
 )
 from graphify.workspace.semantic_queue import SemanticQueueError
 from graphify.workspace.status import (
@@ -206,6 +213,18 @@ _GC_PURGE_REQUEST_SCHEMA_PATH = (
 _GC_PURGE_RESULT_SCHEMA_PATH = (
     Path(__file__).parent / "schemas" / "cli" / "v1" / "gc-purge-result.schema.json"
 )
+_REPAIR_PREVIEW_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "repair-preview-request.schema.json"
+)
+_REPAIR_PREVIEW_RESULT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "repair-preview-result.schema.json"
+)
+_REPAIR_EXECUTE_REQUEST_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "repair-execute-request.schema.json"
+)
+_REPAIR_EXECUTE_RESULT_SCHEMA_PATH = (
+    Path(__file__).parent / "schemas" / "cli" / "v1" / "repair-execute-result.schema.json"
+)
 _REVISION_RE = re.compile(r"^(?:0|[1-9][0-9]{0,18})$")
 _REGISTER_USAGE = (
     "graphify workspace register <enroll|adopt|rebind|rotate> --repo-uuid UUID "
@@ -218,6 +237,8 @@ _GC_PREVIEW_USAGE = "graphify workspace gc --dry-run --request-stdin"
 _GC_EXECUTE_USAGE = "graphify workspace gc --execute --request-stdin"
 _GC_RECONCILE_USAGE = "graphify workspace gc --reconcile --request-stdin"
 _GC_PURGE_USAGE = "graphify workspace gc --purge --request-stdin"
+_REPAIR_PREVIEW_USAGE = "graphify workspace repair --dry-run --request-stdin"
+_REPAIR_EXECUTE_USAGE = "graphify workspace repair --execute --request-stdin"
 _ACTIVATION_USAGE = (
     "graphify workspace activate --repo-uuid UUID "
     "--expected-registry-revision N --expected-active-source-revision N "
@@ -235,6 +256,8 @@ _USAGE = (
     f"       {_GC_EXECUTE_USAGE}\n"
     f"       {_GC_RECONCILE_USAGE}\n"
     f"       {_GC_PURGE_USAGE}\n"
+    f"       {_REPAIR_PREVIEW_USAGE}\n"
+    f"       {_REPAIR_EXECUTE_USAGE}\n"
     f"       {_ACTIVATION_USAGE}"
 )
 
@@ -955,13 +978,14 @@ def _emit_rollback_output(
     return exit_code
 
 
-def _emit_gc_preview_output(
+def _emit_canonical_result(
     stream: TextIO,
     payload: bytes,
     *,
     exit_code: int,
+    result_label: str,
 ) -> int:
-    """Write one canonical GC preview result as exact UTF-8 bytes."""
+    """Write one canonical workspace result as exact UTF-8 bytes."""
 
     binary_stream = getattr(stream, "buffer", None)
     if binary_stream is None:
@@ -973,7 +997,7 @@ def _emit_gc_preview_output(
     try:
         written = binary_stream.write(payload)
         if written != len(payload):
-            raise OSError(errno.EIO, "incomplete workspace GC preview result")
+            raise OSError(errno.EIO, f"incomplete workspace {result_label}")
         binary_stream.flush()
     except (BrokenPipeError, OSError) as exc:
         if not _silence_standard_streams_after_broken_pipe(stream, exc):
@@ -1056,7 +1080,7 @@ def _classify_registration_error(error: Exception) -> _RegistrationFailure:
             "invalid",
             EXIT_INVALID,
             "state_corrupt",
-            "run_workspace_repair",
+            "inspect_workspace_state",
         )
     if isinstance(error, CommitUnknown):
         return _RegistrationFailure(
@@ -2440,12 +2464,26 @@ def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
             "gc_recovery_required",
             "run_workspace_repair",
         )
+    if isinstance(error, JournalRecoveryRequired):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "gc_recovery_required",
+            "run_workspace_repair",
+        )
     if isinstance(error, StatePathError):
         return _GcPreviewFailure(
             "invalid",
             EXIT_INVALID,
             "unsafe_state_path",
             "configure_safe_state_root",
+        )
+    if isinstance(error, JournalError):
+        return _GcPreviewFailure(
+            "invalid",
+            EXIT_INVALID,
+            "journal_invalid",
+            "inspect_workspace_state",
         )
     if isinstance(error, UnsupportedRuntime):
         return _GcPreviewFailure(
@@ -2463,7 +2501,13 @@ def _classify_gc_preview_error(error: Exception) -> _GcPreviewFailure:
         )
     if isinstance(
         error,
-        (StateCorrupt, PointerCorrupt, ContractError, GenerationError, LeaseError),
+        (
+            ContractError,
+            GenerationError,
+            LeaseError,
+            PointerCorrupt,
+            StateCorrupt,
+        ),
     ):
         return _GcPreviewFailure(
             "invalid",
@@ -2483,10 +2527,11 @@ def _emit_gc_preview_failure(
     errors: TextIO,
     failure: _GcPreviewFailure,
 ) -> int:
-    return _emit_gc_preview_output(
+    return _emit_canonical_result(
         errors,
         _gc_preview_failure_payload(failure),
         exit_code=failure.exit_code,
+        result_label="GC preview result",
     )
 
 
@@ -2567,10 +2612,11 @@ def _run_gc_preview(
                 "run_workspace_doctor",
             ),
         )
-    return _emit_gc_preview_output(
+    return _emit_canonical_result(
         output,
         _gc_preview_success_payload(result),
         exit_code=EXIT_READY,
+        result_label="GC preview result",
     )
 
 
@@ -2630,20 +2676,22 @@ def _run_gc_lifecycle(
                 "runtime_authority_missing",
                 "install_candidate_authority",
             )
-            return _emit_gc_preview_output(
+            return _emit_canonical_result(
                 errors,
                 failure.canonical,
                 exit_code=failure.exit_code,
+                result_label=f"GC {operation} result",
             )
         runtime = compose_workspace_runtime(resolved_inputs)
     except InjectedFault:
         raise
     except Exception as exc:
         failure = gc_command_runtime.classify_failure(exc, operation)
-        return _emit_gc_preview_output(
+        return _emit_canonical_result(
             errors,
             failure.canonical,
             exit_code=failure.exit_code,
+            result_label=f"GC {operation} result",
         )
 
     try:
@@ -2690,15 +2738,134 @@ def _run_gc_lifecycle(
         raise
     except Exception as exc:
         failure = gc_command_runtime.classify_failure(exc, operation)
-        return _emit_gc_preview_output(
+        return _emit_canonical_result(
             errors,
             failure.canonical,
             exit_code=failure.exit_code,
+            result_label=f"GC {operation} result",
         )
-    return _emit_gc_preview_output(
+    return _emit_canonical_result(
         output,
         result.canonical,
         exit_code=EXIT_READY,
+        result_label=f"GC {operation} result",
+    )
+
+
+def _read_repair_request_bytes() -> bytes:
+    binary_input = getattr(sys.stdin, "buffer", None)
+    limit = repair_runtime.REPAIR_REQUEST_MAX_BYTES + 1
+    if binary_input is not None:
+        raw = bytearray()
+        while len(raw) < limit:
+            remaining = limit - len(raw)
+            chunk = binary_input.read(remaining)
+            if not isinstance(chunk, bytes):
+                raise ValueError("repair request input did not return bytes")
+            if len(chunk) > remaining:
+                raise ValueError("repair request input exceeded its bounded read")
+            if chunk == b"":
+                break
+            raw.extend(chunk)
+        return bytes(raw)
+
+    raw = bytearray()
+    while len(raw) < limit:
+        character = sys.stdin.read(1)
+        if not isinstance(character, str) or len(character) > 1:
+            raise ValueError("repair request input did not return text")
+        if character == "":
+            break
+        try:
+            raw.extend(character.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ValueError("repair request input is not UTF-8") from exc
+    return bytes(raw)
+
+
+def _run_repair(
+    operation: str,
+    *,
+    inputs: WorkspaceRuntimeInputs | None,
+    output: TextIO,
+    errors: TextIO,
+) -> int:
+    try:
+        resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+        if resolved_inputs is None:
+            failure = repair_runtime.RepairFailure(
+                operation,
+                "invalid",
+                EXIT_INVALID,
+                "runtime_authority_missing",
+                "install_candidate_authority",
+            )
+            return _emit_canonical_result(
+                errors,
+                failure.canonical,
+                exit_code=failure.exit_code,
+                result_label=f"repair {operation} result",
+            )
+        runtime = compose_workspace_runtime(resolved_inputs)
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = repair_runtime.classify_failure(exc, operation)
+        return _emit_canonical_result(
+            errors,
+            failure.canonical,
+            exit_code=failure.exit_code,
+            result_label=f"repair {operation} result",
+        )
+
+    try:
+        try:
+            raw_request = _read_repair_request_bytes()
+        except (AttributeError, OSError, TypeError, UnicodeError, ValueError) as exc:
+            if operation == "preview":
+                raise repair_runtime.RepairPreviewRequestInvalid(
+                    "repair preview request input cannot be read"
+                ) from exc
+            raise repair_runtime.RepairExecuteRequestInvalid(
+                "repair execute request input cannot be read"
+            ) from exc
+        with (
+            redirect_stdout(_DISCARDED_ENGINE_OUTPUT),
+            redirect_stderr(_DISCARDED_ENGINE_OUTPUT),
+        ):
+            if operation == "preview":
+                request = RepairPreviewRequest.from_bytes(raw_request)
+                result = repair_preview(runtime, request)
+            elif operation == "execute":
+                request = RepairExecuteRequest.from_bytes(raw_request)
+                result = repair_execute(
+                    runtime,
+                    request,
+                    occurred_at=datetime.now(timezone.utc),
+                    monotonic_clock=time.monotonic_ns,
+                )
+            else:  # pragma: no cover - exact dispatcher invariant
+                raise ValueError("unsupported repair operation")
+    except InjectedFault:
+        raise
+    except Exception as exc:
+        failure = repair_runtime.classify_failure(exc, operation)
+        return _emit_canonical_result(
+            errors,
+            failure.canonical,
+            exit_code=failure.exit_code,
+            result_label=f"repair {operation} result",
+        )
+    exit_code = (
+        EXIT_INVALID
+        if operation == "preview" and result.to_dict()["classification"] == "irreparable"
+        else EXIT_READY
+    )
+    return _emit_canonical_result(
+        output,
+        result.canonical,
+        exit_code=exit_code,
+        result_label=f"repair {operation} result",
     )
 
 
@@ -2770,6 +2937,29 @@ def run_workspace_command(
             inputs=inputs,
             output=output,
             errors=errors,
+        )
+    if command and command[0] == "repair":
+        repair_commands: dict[tuple[str, ...], str] = {
+            ("repair", "--dry-run", "--request-stdin"): "preview",
+            ("repair", "--execute", "--request-stdin"): "execute",
+        }
+        operation = repair_commands.get(command)
+        if operation is not None:
+            return _run_repair(
+                operation,
+                inputs=inputs,
+                output=output,
+                errors=errors,
+            )
+        usage = (
+            _REPAIR_EXECUTE_USAGE
+            if "--execute" in command
+            else _REPAIR_PREVIEW_USAGE
+        )
+        return _emit_text_payload(
+            errors,
+            usage + "\n",
+            exit_code=EXIT_USAGE,
         )
     if command and command[0] == "gc":
         if command == ("gc", "--dry-run", "--request-stdin"):
@@ -3010,6 +3200,37 @@ def load_gc_purge_result_schema() -> dict[str, Any]:
     return _load_gc_lifecycle_schema(_GC_PURGE_RESULT_SCHEMA_PATH, "purge result")
 
 
+def _load_repair_schema(path: Path, label: str) -> dict[str, Any]:
+    value = _load_json(path.read_bytes())
+    if not isinstance(value, dict):  # pragma: no cover - packaged artifact invariant
+        raise ValueError(f"workspace repair {label} schema must be a JSON object")
+    return cast(dict[str, Any], value)
+
+
+def load_repair_preview_request_schema() -> dict[str, Any]:
+    """Load the public canonical pointer-repair preview request schema."""
+
+    return _load_repair_schema(_REPAIR_PREVIEW_REQUEST_SCHEMA_PATH, "preview request")
+
+
+def load_repair_preview_result_schema() -> dict[str, Any]:
+    """Load the public redacted pointer-repair preview result schema."""
+
+    return _load_repair_schema(_REPAIR_PREVIEW_RESULT_SCHEMA_PATH, "preview result")
+
+
+def load_repair_execute_request_schema() -> dict[str, Any]:
+    """Load the public canonical fenced pointer-repair execute request schema."""
+
+    return _load_repair_schema(_REPAIR_EXECUTE_REQUEST_SCHEMA_PATH, "execute request")
+
+
+def load_repair_execute_result_schema() -> dict[str, Any]:
+    """Load the public redacted fenced pointer-repair execute result schema."""
+
+    return _load_repair_schema(_REPAIR_EXECUTE_RESULT_SCHEMA_PATH, "execute result")
+
+
 __all__ = [
     "load_activation_schema",
     "load_gc_execute_request_schema",
@@ -3023,6 +3244,10 @@ __all__ = [
     "load_identity_maintenance_schema",
     "load_query_request_schema",
     "load_query_result_schema",
+    "load_repair_execute_request_schema",
+    "load_repair_execute_result_schema",
+    "load_repair_preview_request_schema",
+    "load_repair_preview_result_schema",
     "load_registration_schema",
     "load_rollback_receipt_schema",
     "load_rollback_request_schema",

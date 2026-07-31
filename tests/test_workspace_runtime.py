@@ -2710,6 +2710,106 @@ def test_lease_acquisition_deadline_bounds_mutating_lock_wait(
     assert workspace_path.read_bytes() == workspace_before
 
 
+def test_repair_lease_threads_deadline_through_source_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    owner = LeaseOwner(boot_id="boot-repair", pid=700, process_start_id="700:1")
+    leases = LeaseStore(
+        state_root,
+        registry,
+        capabilities=SUPPORTED,
+        identity_provider=MutableLeaseIdentity(owner),
+    )
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: list[int | None] = []
+    original_discover_source = lease_module.discover_source
+
+    def track_discover_source(
+        source_root: Path,
+        *,
+        deadline_ns: int | None = None,
+        max_bytes: int | None = None,
+    ) -> SourceIdentity:
+        observed.append(deadline_ns)
+        return original_discover_source(
+            source_root,
+            deadline_ns=deadline_ns,
+            max_bytes=max_bytes,
+        )
+
+    monkeypatch.setattr(lease_module, "discover_source", track_discover_source)
+    grant = leases.acquire(
+        REPO_UUID,
+        "REPAIR",
+        owner,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+        monotonic_ns=20_000,
+        ttl_ns=30_000_000_000,
+        deadline_ns=deadline_ns,
+    )
+
+    assert observed == [deadline_ns]
+    leases.release(grant, deadline_ns=deadline_ns)
+
+
+def test_repair_lease_preserves_unrelated_atomic_temporaries(
+    tmp_path: Path,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    owner = LeaseOwner(boot_id="boot-repair", pid=700, process_start_id="700:1")
+    leases = LeaseStore(
+        state_root,
+        registry,
+        capabilities=SUPPORTED,
+        identity_provider=MutableLeaseIdentity(owner),
+    )
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    workspace = state_root / "workspaces" / REPO_UUID
+    before_acquire = workspace / (".pointers.json.tmp-999-" + "a" * 32)
+    before_acquire.write_bytes(b"pointer temporary")
+    before_acquire.chmod(0o600)
+
+    grant = leases.acquire(
+        REPO_UUID,
+        "REPAIR",
+        owner,
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+        monotonic_ns=20_000,
+        ttl_ns=30_000_000_000,
+    )
+
+    assert before_acquire.read_bytes() == b"pointer temporary"
+    before_release = workspace / (".staged-build.json.tmp-999-" + "b" * 32)
+    before_release.write_bytes(b"staged temporary")
+    before_release.chmod(0o600)
+    leases.release(grant)
+    assert before_acquire.read_bytes() == b"pointer temporary"
+    assert before_release.read_bytes() == b"staged temporary"
+
+
 @pytest.mark.parametrize("lock_name", ["registry", "workspace"])
 def test_current_operation_deadline_bounds_mutating_lock_wait(
     tmp_path: Path,
@@ -2827,6 +2927,62 @@ def test_current_operation_deadline_reaches_recovery_reads(
         ("registry", deadline_ns),
         ("workspace", deadline_ns),
         (f"staged-build:{REPO_UUID}", deadline_ns),
+    ]
+
+
+def test_release_deadline_reaches_recovery_and_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    grant = leases.acquire(
+        REPO_UUID,
+        "BUILD",
+        leases.current_owner(),
+        expected_registry_revision=1,
+        expected_active_source_revision=1,
+        expected_operation_epoch=1,
+        expected_migration_epoch=0,
+        acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+        monotonic_ns=20_000,
+        ttl_ns=10_000,
+    )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: list[tuple[str, object]] = []
+    registry_recover = registry.state.recover_record
+    workspace_recover = leases.state.recover_record
+    workspace_commit = leases.state.commit_record
+
+    def track_registry_recovery(**kwargs: Any) -> object:
+        observed.append((f"recover:{kwargs['label']}", kwargs.get("deadline_ns")))
+        return registry_recover(**kwargs)
+
+    def track_workspace_recovery(**kwargs: Any) -> object:
+        observed.append((f"recover:{kwargs['label']}", kwargs.get("deadline_ns")))
+        return workspace_recover(**kwargs)
+
+    def track_workspace_commit(**kwargs: Any) -> object:
+        observed.append((f"commit:{kwargs['label']}", kwargs.get("deadline_ns")))
+        return workspace_commit(**kwargs)
+
+    monkeypatch.setattr(registry.state, "recover_record", track_registry_recovery)
+    monkeypatch.setattr(leases.state, "recover_record", track_workspace_recovery)
+    monkeypatch.setattr(leases.state, "commit_record", track_workspace_commit)
+
+    leases.release(grant, deadline_ns=deadline_ns)
+
+    assert observed == [
+        ("recover:registry", deadline_ns),
+        ("recover:workspace", deadline_ns),
+        ("commit:workspace", deadline_ns),
     ]
 
 

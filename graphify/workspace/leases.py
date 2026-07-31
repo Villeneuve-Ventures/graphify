@@ -23,13 +23,18 @@ from graphify.workspace.contracts import (
     StructuralBuildRequest,
     WorkspaceLeaseState,
 )
-from graphify.workspace.identity import SourceAmbiguousError, discover_source
+from graphify.workspace.identity import (
+    SourceAmbiguousError,
+    SourceDiscoveryTimeout,
+    discover_source,
+)
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
+    StateRecoveryRequired,
     Syscalls,
     WORKSPACE_LOCK_RANK,
     require_before_deadline,
@@ -61,6 +66,14 @@ class LeaseExpired(LeaseError):
 
 class LeaseRecoveryRequired(LeaseError):
     code = "lease_recovery_required"
+
+
+class GcIntentRecoveryRequired(LeaseRecoveryRequired):
+    """A durable GC intent must be reconciled before another lease can start."""
+
+
+class StagedBuildLeaseRecoveryRequired(LeaseRecoveryRequired):
+    """A staged build must resume its exact sync lifecycle before another lease."""
 
 
 class StaleLease(LeaseError):
@@ -424,14 +437,28 @@ class LeaseStore:
                 max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
                 deadline_ns=deadline_ns,
             )
+        except StateRecoveryRequired as exc:
+            raise StagedBuildLeaseRecoveryRequired(
+                f"staged build state requires exact recovery: {exc}"
+            ) from exc
         except (StateCorrupt, StatePathError) as exc:
             raise LeaseRecoveryRequired(f"staged build state requires recovery: {exc}") from exc
 
     @staticmethod
-    def _verify_selected_source(repo_uuid: str, entry: dict[str, Any]) -> Path:
+    def _verify_selected_source(
+        repo_uuid: str,
+        entry: dict[str, Any],
+        *,
+        deadline_ns: int | None = None,
+    ) -> Path:
         recorded_source = entry["active_source"]
         try:
-            discovered = discover_source(Path(recorded_source["path"]))
+            discovered = discover_source(
+                Path(recorded_source["path"]),
+                deadline_ns=deadline_ns,
+            )
+        except SourceDiscoveryTimeout:
+            raise
         except (OSError, RuntimeError) as exc:
             raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
         if discovered.repo_uuid != repo_uuid or discovered.registry_source != recorded_source:
@@ -519,12 +546,14 @@ class LeaseStore:
             "GC",
             "POINTER_RECOVERY",
         }:
-            raise LeaseRecoveryRequired("unresolved GC intent requires fenced reconciliation")
+            raise GcIntentRecoveryRequired(
+                "unresolved GC intent requires fenced reconciliation"
+            )
         pointer_intent = workspace / "pointers.pending.json"
         if self._durable_record_exists(
             pointer_intent,
             deadline_ns=deadline_ns,
-        ) and operation != "POINTER_RECOVERY":
+        ) and operation not in {"POINTER_RECOVERY", "REPAIR"}:
             raise LeaseRecoveryRequired("unresolved pointer intent requires fenced recovery")
         staged_build = self._load_staged_build_locked(
             repo_uuid,
@@ -536,7 +565,7 @@ class LeaseStore:
             and staged_build.abandonment_intent is not None
             and not allow_staged_abandonment
         ):
-            raise LeaseRecoveryRequired(
+            raise StagedBuildLeaseRecoveryRequired(
                 "durable staged abandonment requires exact recovery"
             )
         if (
@@ -548,7 +577,7 @@ class LeaseStore:
             else:
                 allowed = {"BUILD"}
             if operation not in allowed:
-                raise LeaseRecoveryRequired(
+                raise StagedBuildLeaseRecoveryRequired(
                     "unresolved staged build requires request-bound recovery"
                 )
         if operation != "ACTIVATE":
@@ -636,6 +665,7 @@ class LeaseStore:
         self,
         state: WorkspaceLeaseState,
         *,
+        cleanup_parent_atomic_temps: bool = True,
         deadline_ns: int | None = None,
     ) -> WorkspaceLeaseState:
         current, previous, pending = self._paths(state.repo_uuid)
@@ -646,6 +676,7 @@ class LeaseStore:
             pending=pending,
             payload=state.canonical,
             decoder=WorkspaceLeaseState.from_json,
+            cleanup_parent_atomic_temps=cleanup_parent_atomic_temps,
             deadline_ns=deadline_ns,
         )
 
@@ -698,11 +729,15 @@ class LeaseStore:
         ttl_ns: int,
         deadline_ns: int | None = None,
     ) -> LeaseGrant:
-        snapshot = (
-            self.registry.recovered_snapshot()
-            if deadline_ns is None
-            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
-        )
+        existing_only = operation == "REPAIR"
+        if existing_only:
+            snapshot = self.registry.read_only_snapshot(deadline_ns=deadline_ns)
+        else:
+            snapshot = (
+                self.registry.recovered_snapshot()
+                if deadline_ns is None
+                else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+            )
         with snapshot as document:
             return self._acquire_under_registry_lock(
                 document,
@@ -717,6 +752,7 @@ class LeaseStore:
                 monotonic_ns=monotonic_ns,
                 ttl_ns=ttl_ns,
                 verify_active=True,
+                existing_only=existing_only,
                 deadline_ns=deadline_ns,
             )
 
@@ -828,6 +864,7 @@ class LeaseStore:
         staged_request: tuple[str, StructuralBuildRequest] | None = None,
         staged_attempt_sha256: str | None = None,
         allow_stale_staged_authority: bool = False,
+        existing_only: bool = False,
         deadline_ns: int | None = None,
     ) -> LeaseGrant:
         require_before_deadline(
@@ -850,29 +887,48 @@ class LeaseStore:
             if allow_stale_staged_authority:
                 self._assert_staged_recovery_source_boundary(repo_uuid, entry)
             else:
-                source_root = self._verify_selected_source(repo_uuid, entry)
+                source_root = self._verify_selected_source(
+                    repo_uuid,
+                    entry,
+                    deadline_ns=deadline_ns,
+                )
                 self.state.assert_external_to(source_root)
         require_before_deadline(
             deadline_ns,
             "lease acquisition exceeded its deadline",
         )
-        lock = (
-            self.workspace_lock(repo_uuid)
-            if deadline_ns is None
-            else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
-        )
+        if existing_only:
+            lock = self.read_only_workspace_lock(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+        else:
+            lock = (
+                self.workspace_lock(repo_uuid)
+                if deadline_ns is None
+                else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+            )
         with lock:
             if deadline_ns is None:
-                state = self._load_state_locked(document, repo_uuid)
-                staged_build = self._load_staged_build_locked(repo_uuid)
+                state = self._load_state_locked(
+                    document,
+                    repo_uuid,
+                    recover=not existing_only,
+                )
+                staged_build = self._load_staged_build_locked(
+                    repo_uuid,
+                    recover=not existing_only,
+                )
             else:
                 state = self._load_state_locked(
                     document,
                     repo_uuid,
+                    recover=not existing_only,
                     deadline_ns=deadline_ns,
                 )
                 staged_build = self._load_staged_build_locked(
                     repo_uuid,
+                    recover=not existing_only,
                     deadline_ns=deadline_ns,
                 )
             if staged_request is None:
@@ -889,7 +945,7 @@ class LeaseStore:
                     staged_build is not None
                     and staged_build.lifecycle_state not in _STAGED_BUILD_TERMINAL_STATES
                 ):
-                    raise LeaseRecoveryRequired(
+                    raise StagedBuildLeaseRecoveryRequired(
                         "unresolved staged build requires request-bound recovery"
                     )
             else:
@@ -908,6 +964,7 @@ class LeaseStore:
             self._assert_recovery_barriers_locked(
                 repo_uuid,
                 operation,
+                recover=not existing_only,
                 allow_staged_abandonment=allow_stale_staged_authority,
                 deadline_ns=deadline_ns,
             )
@@ -975,6 +1032,7 @@ class LeaseStore:
             )
             committed = self._commit_state_locked(
                 next_state,
+                cleanup_parent_atomic_temps=not existing_only,
                 deadline_ns=deadline_ns,
             )
             return LeaseGrant(
@@ -1317,12 +1375,28 @@ class LeaseStore:
                     migration_epoch=committed.migration_epoch,
                 )
 
-    def release(self, grant: LeaseGrant) -> WorkspaceLeaseState:
-        with self.registry.recovered_snapshot() as document:
+    def release(
+        self,
+        grant: LeaseGrant,
+        *,
+        deadline_ns: int | None = None,
+    ) -> WorkspaceLeaseState:
+        existing_only = str(grant.lease.to_dict()["operation"]) == "REPAIR"
+        if existing_only:
+            snapshot = self.registry.read_only_snapshot(deadline_ns=deadline_ns)
+        else:
+            snapshot = (
+                self.registry.recovered_snapshot()
+                if deadline_ns is None
+                else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+            )
+        with snapshot as document:
             return self._release_under_registry_lock(
                 grant,
                 document,
                 validate_active=False,
+                existing_only=existing_only,
+                deadline_ns=deadline_ns,
             )
 
     def _release_under_registry_lock(
@@ -1331,13 +1405,31 @@ class LeaseStore:
         document: Registry,
         *,
         validate_active: bool,
+        existing_only: bool = False,
+        deadline_ns: int | None = None,
     ) -> WorkspaceLeaseState:
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        with self.workspace_lock(repo_uuid):
+        if existing_only:
+            lock = self.read_only_workspace_lock(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+        else:
+            lock = (
+                self.workspace_lock(repo_uuid)
+                if deadline_ns is None
+                else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+            )
+        with lock:
             if validate_active:
                 self._check_active(document, grant)
-            state = self._load_state_locked(document, repo_uuid)
+            state = self._load_state_locked(
+                document,
+                repo_uuid,
+                recover=not existing_only,
+                deadline_ns=deadline_ns,
+            )
             domain, _current = self._matching_lease(state, grant, require_epochs=False)
             leases = dict(state.leases)
             del leases[domain]
@@ -1356,7 +1448,9 @@ class LeaseStore:
                     leases=leases,
                     lease_epochs=lease_epochs,
                     staged_attempt_sha256=staged_attempt_sha256,
-                )
+                ),
+                cleanup_parent_atomic_temps=not existing_only,
+                deadline_ns=deadline_ns,
             )
 
     def inspect(self, repo_uuid: str) -> WorkspaceLeaseState:
@@ -1370,11 +1464,13 @@ __all__ = [
     "LeaseError",
     "LeaseExpired",
     "LeaseGrant",
+    "GcIntentRecoveryRequired",
     "LeaseIdentityProvider",
     "LeaseOperation",
     "LeaseOwner",
     "LeaseRecoveryRequired",
     "LeaseStore",
+    "StagedBuildLeaseRecoveryRequired",
     "StaleLease",
     "SystemLeaseIdentityProvider",
 ]

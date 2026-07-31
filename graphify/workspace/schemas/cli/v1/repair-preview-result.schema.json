@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/repair-preview-result.schema.json",
+  "title": "Graphify workspace pointer-repair preview result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cli_contract_version",
+    "contract",
+    "schema_version",
+    "state"
+  ],
+  "properties": {
+    "action_code": {"type": "string", "minLength": 1, "maxLength": 128},
+    "classification": {"enum": ["no_op", "repairable", "irreparable"]},
+    "cli_contract_version": {"const": 1},
+    "contract": {"const": "graphify.workspace.repair_preview_result"},
+    "exit_code": {"enum": [10, 20]},
+    "observed_authority": {"$ref": "#/$defs/authority"},
+    "plan": {"$ref": "#/$defs/plan"},
+    "reason_code": {"type": "string", "minLength": 1, "maxLength": 128},
+    "repo_uuid": {"$ref": "#/$defs/uuid"},
+    "request_sha256": {"$ref": "#/$defs/digest"},
+    "schema_version": {"const": 1},
+    "state": {"enum": ["previewed", "conflict", "invalid", "unsupported"]}
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/success"},
+    {"$ref": "#/$defs/failure"}
+  ],
+  "$defs": {
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active_source_revision", "migration_epoch", "operation_epoch", "registry_revision"],
+      "properties": {
+        "active_source_revision": {"$ref": "#/$defs/positive_integer"},
+        "migration_epoch": {"$ref": "#/$defs/nonnegative_integer"},
+        "operation_epoch": {"$ref": "#/$defs/nonnegative_integer"},
+        "registry_revision": {"$ref": "#/$defs/positive_integer"}
+      }
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "generation_id": {"type": "string", "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"},
+    "generation_reference": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["generation_id", "receipt_sha256"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/generation_id"},
+        "receipt_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "journal_action": {
+      "enum": ["recover_head", "discard_torn_tail", "adopt_tail", "append_repair"]
+    },
+    "nonnegative_integer": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+    "positive_integer": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate", "decision_sha256", "journal_actions", "last_good", "next_pointer_revision", "pointer_action", "quarantine", "selected_from"],
+      "properties": {
+        "candidate": {"$ref": "#/$defs/generation_reference"},
+        "decision_sha256": {"$ref": "#/$defs/digest"},
+        "journal_actions": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/journal_action"}
+        },
+        "last_good": {"$ref": "#/$defs/generation_reference"},
+        "next_pointer_revision": {"type": ["integer", "null"], "minimum": 0, "maximum": 9223372036854775807},
+        "pointer_action": {"enum": ["none", "replace", "finalize_pending", "resume_pending", "unsupported"]},
+        "quarantine": {
+          "type": "array",
+          "maxItems": 8,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/generation_id"},
+          "description": "Generation IDs are emitted in canonical sorted order."
+        },
+        "selected_from": {"enum": ["current", "pending", "prior", "last_good", "none"]}
+      }
+    },
+    "success": {
+      "properties": {"state": {"const": "previewed"}},
+      "required": ["classification", "observed_authority", "plan", "repo_uuid", "request_sha256"],
+      "allOf": [
+        {
+          "if": {"properties": {"classification": {"const": "irreparable"}}, "required": ["classification"]},
+          "then": {
+            "properties": {
+              "plan": {
+                "properties": {
+                  "candidate": {"type": "null"},
+                  "journal_actions": {"maxItems": 0},
+                  "last_good": {"type": "null"},
+                  "next_pointer_revision": {"const": 0},
+                  "pointer_action": {"const": "none"},
+                  "quarantine": {"maxItems": 0},
+                  "selected_from": {"const": "none"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"classification": {"const": "no_op"}}, "required": ["classification"]},
+          "then": {
+            "properties": {
+              "plan": {
+                "properties": {
+                  "candidate": {"type": "object"},
+                  "journal_actions": {"maxItems": 0},
+                  "next_pointer_revision": {"$ref": "#/$defs/positive_integer"},
+                  "pointer_action": {"const": "none"},
+                  "quarantine": {"maxItems": 0},
+                  "selected_from": {"const": "current"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"classification": {"const": "repairable"}}, "required": ["classification"]},
+          "then": {
+            "properties": {
+              "plan": {
+                "properties": {
+                  "candidate": {"type": "object"},
+                  "next_pointer_revision": {"$ref": "#/$defs/positive_integer"},
+                  "pointer_action": {"enum": ["none", "replace", "finalize_pending", "resume_pending"]},
+                  "selected_from": {"enum": ["current", "pending", "prior", "last_good"]}
+                },
+                "allOf": [
+                  {
+                    "if": {"properties": {"pointer_action": {"const": "none"}}, "required": ["pointer_action"]},
+                    "then": {"properties": {"journal_actions": {"minItems": 1}}}
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "not": {"anyOf": [{"required": ["action_code"]}, {"required": ["exit_code"]}, {"required": ["reason_code"]}]}
+    },
+    "failure": {
+      "properties": {"state": {"enum": ["conflict", "invalid", "unsupported"]}},
+      "required": ["action_code", "exit_code", "reason_code"],
+      "allOf": [
+        {"if": {"properties": {"state": {"const": "conflict"}}, "required": ["state"]}, "then": {"properties": {"exit_code": {"const": 10}}}},
+        {"if": {"properties": {"state": {"enum": ["invalid", "unsupported"]}}, "required": ["state"]}, "then": {"properties": {"exit_code": {"const": 20}}}}
+      ],
+      "not": {
+        "anyOf": [
+          {"required": ["classification"]},
+          {"required": ["observed_authority"]},
+          {"required": ["plan"]},
+          {"required": ["repo_uuid"]},
+          {"required": ["request_sha256"]}
+        ]
+      }
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    }
+  }
+}

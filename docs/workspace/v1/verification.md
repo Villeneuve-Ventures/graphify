@@ -466,6 +466,52 @@ generation, and freshness suites. P5A also requires the repository gates above,
 exact-head CI, a current Graphify graph, and independent code, architecture, and
 verification reviews.
 
+## P5B2 public fenced pointer-repair CLI gates
+
+- the only accepted repair argv forms are `workspace repair --dry-run
+  --request-stdin` and `workspace repair --execute --request-stdin`;
+  malformed, reordered, repeated, or extended argv exits 64 before authority
+  loading or standard-input reads;
+- the four CLI-v1 schemas freeze canonical duplicate-free UTF-8 requests and
+  redacted results. Both request forms are at most 16 KiB; preview carries only
+  repo UUID, registry/active-source/operation/migration CAS, and a 1--60,000 ms
+  timeout, while execute additionally requires the exact preview digest and
+  five-field `REPAIR_EXECUTE` authorization;
+- dry-run takes only existing registry/workspace/generation locks and does not
+  create a coordination object, lease, fence, recovery record, directory,
+  temporary, cleanup, quarantine, or durable write. Exact recursive state-tree
+  manifests (entry type, mode, size, and content digest) and a write-rejecting
+  persistence seam prove this for success,
+  malformed/canonical failure, stale authority, corrupt pointer, corrupt
+  journal, corrupt generation, and lock-contention paths;
+- canonical preview output is deterministic and bounded: it classifies only
+  `no_op`, `repairable`, or `irreparable`, and contains only observed authority,
+  request digest, candidate/last-good references, selected source, prospective
+  revision/action, projected journal actions, the exact-decision digest, and
+  sorted quarantine IDs. Tests
+  reject paths, authorization, owner/fence, raw durable records, environment
+  values, and raw errors in all public results;
+- execute recomputes the exact preview result and compares the SHA-256 of its
+  canonical bytes including the final newline before it acquires fresh
+  CAS-bound `REPAIR` authority. Under the required locks it recomputes the
+  private exact plan and rejects every preview/authority/plan mismatch before
+  journal recovery, temporary cleanup, pointer mutation, or quarantine;
+- `PointerStore` remains the mutation authority. Focused failpoint tests cover
+  every pointer/journal boundary, a stale preview after lease-epoch advance,
+  wrong authorization, candidate substitution, corrupt excluded-generation
+  quarantine only, fenced no-op behavior, one absolute deadline shared by
+  preview and execution, preserved unsafe-path/timeout/commit-unknown failure
+  classifications, and commit-unknown handling. A commit-unknown caller
+  must inspect status and create a fresh preview/request pair; exact old execute
+  requests cannot apply a second repair;
+- valid GC intent routes to `run_workspace_gc_reconcile`; nonterminal/corrupt
+  staged state, semantic-queue corruption, registry/lease faults, and unsafe
+  paths route to their own stable inspection/resume/configuration action rather
+  than pointer repair; and
+- status and doctor retain existing-only read behavior. Doctor never invokes a
+  repair form, and no test or verification claim treats this implementation
+  delivery as governance or receipt acceptance.
+
 ## P5B2 public offline-GC CLI gates
 
 - the only accepted preview argv is

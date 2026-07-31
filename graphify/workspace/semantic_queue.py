@@ -2074,6 +2074,12 @@ class SemanticQueueStore:
             deadline_ns,
             "semantic queue snapshot read exceeded its deadline",
         )
+        for path in self._paths(repo_uuid):
+            self.state.private_file_exists(path)
+            require_before_deadline(
+                deadline_ns,
+                "semantic queue snapshot read exceeded its deadline",
+            )
         snapshot = self._load_locked(
             repo_uuid,
             recover=False,
@@ -2133,6 +2139,8 @@ class SemanticQueueStore:
         )
         path = cls._certification_binding_path(repo_uuid, generation_id)
         try:
+            if not state.private_file_exists(path):
+                return None
             raw = state.read_optional_existing_bytes(
                 path,
                 max_bytes=_MAX_SEMANTIC_CERTIFICATION_BINDING_BYTES,
@@ -2141,7 +2149,9 @@ class SemanticQueueStore:
             if raw is None:
                 return None
             binding = _SemanticCertificationBinding.from_json(raw)
-        except (ContractError, StateCorrupt, StatePathError) as exc:
+        except StatePathError:
+            raise
+        except (ContractError, StateCorrupt) as exc:
             raise SemanticCertificationBlocked(
                 f"durable semantic certification binding is invalid: {exc}"
             ) from exc

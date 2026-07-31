@@ -40,8 +40,9 @@ from graphify.workspace.identity import (
     AuthorizationError,
     IdentityAction,
     OperatorAuthorization,
+    SourceDiscoveryTimeout,
 )
-from graphify.workspace.journal import JournalError
+from graphify.workspace.journal import JournalError, JournalRecoveryRequired
 from graphify.workspace.leases import (
     LeaseBusy,
     LeaseError,
@@ -83,9 +84,7 @@ _GC_LEASE_TTL_NS = 30_000_000_000
 _MAX_SIGNED_INTEGER = 9_223_372_036_854_775_807
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$")
-_AUTHORIZATION_FIELDS = frozenset(
-    {"action", "issued_at", "nonce", "operator_id", "reason"}
-)
+_AUTHORIZATION_FIELDS = frozenset({"action", "issued_at", "nonce", "operator_id", "reason"})
 _PROTECTION_FIELDS = (
     "active_lease_generations",
     "fixture_generations",
@@ -165,11 +164,7 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
     if operation not in {"execute", "reconcile", "purge"}:
         raise ValueError("unsupported GC lifecycle operation")
     if isinstance(error, WorkspaceAuthorityError):
-        state = (
-            "unsupported"
-            if error.reason_code == "runtime_authority_unsupported"
-            else "invalid"
-        )
+        state = "unsupported" if error.reason_code == "runtime_authority_unsupported" else "invalid"
         return GcLifecycleFailure(
             operation,
             state,
@@ -193,7 +188,7 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
             f"gc_{operation}_request_invalid",
             f"provide_valid_gc_{operation}_request",
         )
-    if isinstance(error, (LeaseBusy, LockTimeout)):
+    if isinstance(error, (LeaseBusy, LockTimeout, SourceDiscoveryTimeout)):
         return GcLifecycleFailure(
             operation,
             "conflict",
@@ -259,9 +254,7 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
         )
     if isinstance(error, CommitUnknown):
         action = (
-            "retry_workspace_gc_purge"
-            if operation == "purge"
-            else "run_workspace_gc_reconcile"
+            "retry_workspace_gc_purge" if operation == "purge" else "run_workspace_gc_reconcile"
         )
         return GcLifecycleFailure(
             operation,
@@ -297,13 +290,13 @@ def classify_failure(error: Exception, operation: str) -> GcLifecycleFailure:
     if isinstance(
         error,
         (
-            StateCorrupt,
-            PointerCorrupt,
             ContractError,
+            GcError,
             GenerationError,
             JournalError,
             LeaseError,
-            GcError,
+            PointerCorrupt,
+            StateCorrupt,
         ),
     ):
         return GcLifecycleFailure(
@@ -345,21 +338,13 @@ def _digest(value: object, label: str) -> str:
 
 def _generation_ids(value: object, label: str) -> frozenset[str]:
     if not isinstance(value, list) or len(value) > GC_PREVIEW_MAX_GENERATIONS:
-        raise GcLifecycleRequestInvalid(
-            f"GC lifecycle request protection {label} is invalid"
-        )
+        raise GcLifecycleRequestInvalid(f"GC lifecycle request protection {label} is invalid")
     generation_ids: list[str] = []
     for generation_id in value:
-        if not isinstance(generation_id, str) or _GENERATION_RE.fullmatch(
-            generation_id
-        ) is None:
-            raise GcLifecycleRequestInvalid(
-                f"GC lifecycle request protection {label} is invalid"
-            )
+        if not isinstance(generation_id, str) or _GENERATION_RE.fullmatch(generation_id) is None:
+            raise GcLifecycleRequestInvalid(f"GC lifecycle request protection {label} is invalid")
         generation_ids.append(generation_id)
-    if generation_ids != sorted(generation_ids) or len(generation_ids) != len(
-        set(generation_ids)
-    ):
+    if generation_ids != sorted(generation_ids) or len(generation_ids) != len(set(generation_ids)):
         raise GcLifecycleRequestInvalid(
             f"GC lifecycle request protection {label} must be unique and sorted"
         )
@@ -399,58 +384,41 @@ def _parse_request(
     try:
         data = json.loads(value.decode("utf-8"), object_pairs_hook=_unique_object)
     except (UnicodeError, json.JSONDecodeError, RecursionError, TypeError, ValueError) as exc:
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request is not valid UTF-8 JSON"
-        ) from exc
+        raise GcLifecycleRequestInvalid("GC lifecycle request is not valid UTF-8 JSON") from exc
     if not isinstance(data, Mapping) or set(data) != _COMMON_REQUEST_FIELDS | extra_fields:
         raise GcLifecycleRequestInvalid("GC lifecycle request fields are invalid")
     request_contract = data["contract"]
     if not isinstance(request_contract, str):
         raise GcLifecycleRequestInvalid("GC lifecycle request contract is invalid")
     if request_contract != contract:
-        raise GcLifecycleRequestUnsupported(
-            "GC lifecycle request contract is unsupported"
-        )
+        raise GcLifecycleRequestUnsupported("GC lifecycle request contract is unsupported")
     for field, expected in (
         ("schema_version", GC_LIFECYCLE_SCHEMA_VERSION),
         ("cli_contract_version", CLI_CONTRACT_VERSION),
     ):
         version = data[field]
         if type(version) is not int:
-            raise GcLifecycleRequestInvalid(
-                f"GC lifecycle request {field} is invalid"
-            )
+            raise GcLifecycleRequestInvalid(f"GC lifecycle request {field} is invalid")
         if version != expected:
-            raise GcLifecycleRequestUnsupported(
-                f"GC lifecycle request {field} is unsupported"
-            )
+            raise GcLifecycleRequestUnsupported(f"GC lifecycle request {field} is unsupported")
     try:
         repo_uuid = WorkspaceLeaseState.canonical_repo_uuid(data["repo_uuid"])
     except ContractError as exc:
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request repo_uuid is invalid"
-        ) from exc
+        raise GcLifecycleRequestInvalid("GC lifecycle request repo_uuid is invalid") from exc
     capacity_value = data["capacity_policy"]
     if not isinstance(capacity_value, Mapping):
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request capacity policy is invalid"
-        )
+        raise GcLifecycleRequestInvalid("GC lifecycle request capacity policy is invalid")
     try:
         capacity_policy = CapacityPolicy.from_mapping(capacity_value)
     except (ContractError, TypeError, ValueError) as exc:
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request capacity policy is invalid"
-        ) from exc
+        raise GcLifecycleRequestInvalid("GC lifecycle request capacity policy is invalid") from exc
     protection_value = data["protections"]
     if not isinstance(protection_value, Mapping) or set(protection_value) != set(
         _PROTECTION_FIELDS
     ):
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request protection fields are invalid"
-        )
+        raise GcLifecycleRequestInvalid("GC lifecycle request protection fields are invalid")
     protection_ids = {
-        field: _generation_ids(protection_value[field], field)
-        for field in _PROTECTION_FIELDS
+        field: _generation_ids(protection_value[field], field) for field in _PROTECTION_FIELDS
     }
     if (
         len(
@@ -462,23 +430,18 @@ def _parse_request(
         )
         > GC_PREVIEW_MAX_GENERATIONS
     ):
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request protections exceed the public bound"
-        )
+        raise GcLifecycleRequestInvalid("GC lifecycle request protections exceed the public bound")
     authorization_value = data["authorization"]
-    if not isinstance(authorization_value, Mapping) or set(
-        authorization_value
-    ) != _AUTHORIZATION_FIELDS:
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request authorization fields are invalid"
-        )
-    if not all(
-        isinstance(authorization_value[field], str)
-        for field in _AUTHORIZATION_FIELDS
-    ) or authorization_value["action"] != action.value:
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request authorization is invalid"
-        )
+    if (
+        not isinstance(authorization_value, Mapping)
+        or set(authorization_value) != _AUTHORIZATION_FIELDS
+    ):
+        raise GcLifecycleRequestInvalid("GC lifecycle request authorization fields are invalid")
+    if (
+        not all(isinstance(authorization_value[field], str) for field in _AUTHORIZATION_FIELDS)
+        or authorization_value["action"] != action.value
+    ):
+        raise GcLifecycleRequestInvalid("GC lifecycle request authorization is invalid")
     try:
         authorization = OperatorAuthorization(
             action=action,
@@ -488,14 +451,10 @@ def _parse_request(
             reason=cast(str, authorization_value["reason"]),
         )
     except AuthorizationError as exc:
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request authorization is invalid"
-        ) from exc
+        raise GcLifecycleRequestInvalid("GC lifecycle request authorization is invalid") from exc
     timeout_ms = _integer(data["timeout_ms"], "timeout_ms", minimum=1)
     if timeout_ms > GC_LIFECYCLE_TIMEOUT_MAX_MS:
-        raise GcLifecycleRequestInvalid(
-            "GC lifecycle request timeout_ms is invalid"
-        )
+        raise GcLifecycleRequestInvalid("GC lifecycle request timeout_ms is invalid")
     common = _ParsedCommon(
         repo_uuid=repo_uuid,
         expected_registry_revision=_integer(
@@ -531,9 +490,7 @@ def _parse_request(
             active_lease_generations=protection_ids["active_lease_generations"],
             fixture_generations=protection_ids["fixture_generations"],
             proof_generations=protection_ids["proof_generations"],
-            rollback_artifact_generations=protection_ids[
-                "rollback_artifact_generations"
-            ],
+            rollback_artifact_generations=protection_ids["rollback_artifact_generations"],
         ),
         authorization=authorization,
     )
@@ -787,9 +744,10 @@ class GcPurgeResult:
 
     def __post_init__(self) -> None:
         WorkspaceLeaseState.canonical_repo_uuid(self.repo_uuid)
-        if _DIGEST_RE.fullmatch(self.request_sha256) is None or _DIGEST_RE.fullmatch(
-            self.plan_sha256
-        ) is None:
+        if (
+            _DIGEST_RE.fullmatch(self.request_sha256) is None
+            or _DIGEST_RE.fullmatch(self.plan_sha256) is None
+        ):
             raise ValueError("GC purge result digest is invalid")
         _validate_public_generation_ids(self.purged, "purge")
 
@@ -848,11 +806,7 @@ def _equivalent_protected_projection(
     return tuple(
         (
             generation_id,
-            tuple(
-                reason
-                for reason in reasons
-                if reason != "shared_lock" or len(reasons) == 1
-            ),
+            tuple(reason for reason in reasons if reason != "shared_lock" or len(reasons) == 1),
         )
         for generation_id, reasons in protected
     )
@@ -911,9 +865,7 @@ def _release_grant(
             raise
     except Exception as exc:
         if primary is None:
-            raise CommitUnknown(
-                f"GC {operation} lease release outcome is uncertain"
-            ) from exc
+            raise CommitUnknown(f"GC {operation} lease release outcome is uncertain") from exc
     if primary is not None:
         error, traceback = primary
         raise error.with_traceback(traceback)
@@ -942,9 +894,7 @@ def execute_gc(
         protections=request.protections,
         deadline_ns=deadline_ns,
     )
-    approved_preview_sha256 = hashlib.sha256(
-        gc_preview_result_bytes(preview)
-    ).hexdigest()
+    approved_preview_sha256 = hashlib.sha256(gc_preview_result_bytes(preview)).hexdigest()
     if approved_preview_sha256 != request.approved_preview_sha256:
         raise GcApprovedPreviewMismatch(
             "approved preview SHA-256 does not match the current public preview bytes"

@@ -31,6 +31,7 @@ from graphify.workspace import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "workspace" / "v1"
 SCHEMAS = Path(__file__).parents[1] / "graphify" / "workspace" / "schemas" / "v1"
+CLI_SCHEMAS = SCHEMAS.parent / "cli" / "v1"
 REGISTRY_SOURCE_PATH = ("workspaces", 0, "active_source", "path")
 REGISTRY_REMOTE_URL_PATH = (
     "workspaces",
@@ -602,6 +603,60 @@ def test_schema_catalog_is_complete_and_self_consistent(schema_registry: SchemaR
 
     assert len(wrapper_ids) == 14
     assert schema_registry
+
+
+def test_published_cli_v1_failure_action_mappings_remain_frozen() -> None:
+    def reason_actions(schema: dict, reason_code: str) -> set[str]:
+        actions: set[str] = set()
+
+        def visit(value: object) -> None:
+            if isinstance(value, dict):
+                properties = value.get("properties")
+                if isinstance(properties, dict):
+                    reason = properties.get("reason_code")
+                    action = properties.get("action_code")
+                    reason_matches = isinstance(reason, dict) and (
+                        reason.get("const") == reason_code
+                        or (
+                            isinstance(reason.get("enum"), list)
+                            and reason_code in reason["enum"]
+                        )
+                    )
+                    if reason_matches:
+                        if isinstance(action, dict) and isinstance(action.get("const"), str):
+                            actions.add(action["const"])
+                        elif isinstance(action, dict) and isinstance(action.get("enum"), list):
+                            actions.update(item for item in action["enum"] if isinstance(item, str))
+                for item in value.values():
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(schema)
+        return actions
+
+    query = _json(CLI_SCHEMAS / "query-result.schema.json")
+    gc_preview = _json(CLI_SCHEMAS / "gc-preview-result.schema.json")
+    sync = _json(CLI_SCHEMAS / "sync-receipt.schema.json")
+    rollback = _json(CLI_SCHEMAS / "rollback-receipt.schema.json")
+
+    enum_probe = {
+        "properties": {
+            "reason_code": {"enum": ["state_corrupt", "other_reason"]},
+            "action_code": {"enum": ["run_workspace_repair"]},
+        }
+    }
+    assert reason_actions(enum_probe, "state_corrupt") == {"run_workspace_repair"}
+
+    assert reason_actions(query, "state_corrupt") == {"run_workspace_repair"}
+    assert reason_actions(gc_preview, "gc_coordination_unavailable") == {
+        "run_workspace_repair"
+    }
+    assert reason_actions(gc_preview, "gc_recovery_required") == {"run_workspace_repair"}
+    assert reason_actions(gc_preview, "state_corrupt") == {"run_workspace_repair"}
+    assert "inspect_workspace_state" not in json.dumps(sync, sort_keys=True)
+    assert "inspect_workspace_state" not in json.dumps(rollback, sort_keys=True)
 
 
 def test_schema_catalog_has_an_explicit_frozen_member_set() -> None:

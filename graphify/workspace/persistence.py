@@ -13,7 +13,7 @@ import re
 import stat
 import subprocess
 import time
-from typing import Callable, Iterator, Protocol, Sequence, TypeVar
+from typing import Callable, Generic, Iterator, Protocol, Sequence, TypeVar
 import uuid
 
 
@@ -225,6 +225,23 @@ class PosixSyscalls:
 
 
 RecordT = TypeVar("RecordT")
+
+
+@dataclass(frozen=True)
+class DurableRecordRecovery(Generic[RecordT]):
+    """Read-only projection of one durable current/previous/pending recovery."""
+
+    record: RecordT | None
+    selected_name: str | None
+    selected_bytes: bytes | None
+    current_bytes: bytes | None
+    install_current: bool
+    retain_current: bool
+    remove_pending: bool
+
+    @property
+    def requires_recovery(self) -> bool:
+        return self.install_current or self.retain_current or self.remove_pending
 
 
 class DurableStateRoot:
@@ -1490,9 +1507,11 @@ class DurableStateRoot:
         data: bytes,
         *,
         label: str,
+        deadline_ns: int | None = None,
     ) -> Path:
         """Durably install immutable bytes once, preserving a stable inode on retry."""
 
+        require_before_deadline(deadline_ns, "immutable install exceeded its deadline")
         self._ensure_root()
         path = self.path(relative)
         self._ensure_parent(path)
@@ -1501,7 +1520,7 @@ class DurableStateRoot:
         except FileNotFoundError:
             pass
         else:
-            if self._read_regular(path) != data:
+            if self._read_regular(path, deadline_ns=deadline_ns) != data:
                 raise StateCorrupt(f"immutable state conflicts at {path}")
             return path
         visible = False
@@ -1512,14 +1531,19 @@ class DurableStateRoot:
             self.fault_hook(f"{label}:installed")
 
         try:
-            self._atomic_replace(path, data, after_replace=replaced)
+            self._atomic_replace(
+                path,
+                data,
+                after_replace=replaced,
+                deadline_ns=deadline_ns,
+            )
         except BaseException as exc:
             if visible:
                 raise CommitUnknown(
                     f"{label} became visible before durability acknowledgement"
                 ) from exc
             raise
-        if self._read_regular(path) != data:
+        if self._read_regular(path, deadline_ns=deadline_ns) != data:
             raise StateCorrupt(f"immutable state verification failed at {path}")
         return path
 
@@ -1529,6 +1553,7 @@ class DurableStateRoot:
         data: bytes,
         *,
         label: str,
+        deadline_ns: int | None = None,
     ) -> Path:
         """Durably replace one contained record and surface uncertain visibility."""
 
@@ -1541,7 +1566,12 @@ class DurableStateRoot:
             self.fault_hook(f"{label}:replaced")
 
         try:
-            self._atomic_replace(destination, data, after_replace=replaced)
+            self._atomic_replace(
+                destination,
+                data,
+                after_replace=replaced,
+                deadline_ns=deadline_ns,
+            )
         except BaseException as exc:
             if visible:
                 raise CommitUnknown(
@@ -1556,9 +1586,11 @@ class DurableStateRoot:
         destination: str | Path,
         *,
         label: str,
+        deadline_ns: int | None = None,
     ) -> Path:
         """Atomically move one private directory and sync both held parents."""
 
+        require_before_deadline(deadline_ns, "state rename exceeded its deadline")
         self._ensure_root()
         source_path = self.path(source)
         destination_path = self.path(destination)
@@ -1593,6 +1625,10 @@ class DurableStateRoot:
                             f"rename destination already exists: {destination_path}"
                         )
                     self.fault_hook(f"{label}:before_rename")
+                    require_before_deadline(
+                        deadline_ns,
+                        "state rename exceeded its deadline",
+                    )
                     try:
                         self.syscalls.replace_at(
                             source_path.name,
@@ -1656,6 +1692,68 @@ class DurableStateRoot:
             self.syscalls.fsync(descriptor)
         finally:
             os.close(descriptor)
+
+    def inspect_atomic_temps(
+        self,
+        relative: str | Path,
+        *,
+        destination_name: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> tuple[Path, ...]:
+        """List exact safe atomic-temp orphans without changing state."""
+
+        require_before_deadline(
+            deadline_ns,
+            "atomic-temp inspection exceeded its deadline",
+        )
+        directory = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
+        relative_directory = (
+            Path(".") if directory == self.root else directory.relative_to(self.root)
+        )
+        result: list[Path] = []
+        with self._existing_private_directory(
+            relative_directory,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                return ()
+            try:
+                names = sorted(entry.name for entry in os.scandir(descriptor))
+            except OSError as exc:
+                raise StatePathError(
+                    f"atomic-temp parent cannot be enumerated safely: {directory}: {exc}"
+                ) from exc
+            for name in names:
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic-temp inspection exceeded its deadline",
+                )
+                match = _ATOMIC_TEMP_RE.fullmatch(name)
+                if match is None or (
+                    destination_name is not None and match.group("destination") != destination_name
+                ):
+                    continue
+                entry = directory / name
+                try:
+                    entry_details = os.stat(
+                        name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"atomic-temp orphan cannot be inspected safely: {entry}"
+                    ) from exc
+                try:
+                    self._require_regular_details(
+                        entry_details,
+                        entry,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                except StatePathError as exc:
+                    raise StatePathError(f"atomic-temp orphan is unsafe: {entry}") from exc
+                result.append(entry)
+        return tuple(result)
 
     def cleanup_atomic_temps(
         self,
@@ -1930,7 +2028,7 @@ class DurableStateRoot:
             raise StateCorrupt(f"{label} has divergent records at revision {current_revision}")
         return current_record
 
-    def recover_record(
+    def _project_record_recovery(
         self,
         *,
         label: str,
@@ -1942,7 +2040,7 @@ class DurableStateRoot:
         allow_missing: bool = False,
         max_bytes: int | None = None,
         deadline_ns: int | None = None,
-    ) -> RecordT | None:
+    ) -> DurableRecordRecovery[RecordT]:
         if max_bytes is not None and max_bytes < 0:
             raise ValueError("max_bytes must be nonnegative")
         require_before_deadline(
@@ -1957,18 +2055,6 @@ class DurableStateRoot:
         parents = {path.parent for path in paths.values()}
         if len(parents) != 1:
             raise StatePathError(f"{label} record paths must share one directory")
-        parent = next(iter(parents))
-        if deadline_ns is None:
-            self.cleanup_atomic_temps(parent.relative_to(self.root))
-        else:
-            self.cleanup_atomic_temps(
-                parent.relative_to(self.root),
-                deadline_ns=deadline_ns,
-            )
-        require_before_deadline(
-            deadline_ns,
-            "state record recovery exceeded its deadline",
-        )
         candidates: dict[str, tuple[bytes, RecordT, int]] = {}
         invalid: dict[str, Exception] = {}
         for name, path in paths.items():
@@ -2002,7 +2088,15 @@ class DurableStateRoot:
 
         if not candidates:
             if allow_missing and not invalid:
-                return None
+                return DurableRecordRecovery(
+                    record=None,
+                    selected_name=None,
+                    selected_bytes=None,
+                    current_bytes=None,
+                    install_current=False,
+                    retain_current=False,
+                    remove_pending=False,
+                )
             detail = (
                 "; ".join(f"{name}: {invalid[name]}" for name in sorted(invalid))
                 or "all records are missing"
@@ -2025,24 +2119,107 @@ class DurableStateRoot:
         )
         selected = candidates[preferred_name]
         current_candidate = candidates.get("current")
-        if current_candidate is None or current_candidate[0] != selected[0]:
-            if current_candidate is not None:
+        install_current = current_candidate is None or current_candidate[0] != selected[0]
+        return DurableRecordRecovery(
+            record=selected[1],
+            selected_name=preferred_name,
+            selected_bytes=selected[0],
+            current_bytes=None if current_candidate is None else current_candidate[0],
+            install_current=install_current,
+            retain_current=install_current and current_candidate is not None,
+            remove_pending="pending" in candidates,
+        )
+
+    def project_record_recovery(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Callable[[bytes], RecordT],
+        revision: Callable[[RecordT], int],
+        allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> DurableRecordRecovery[RecordT]:
+        """Project durable-record recovery without cleanup or any state mutation."""
+
+        return self._project_record_recovery(
+            label=label,
+            current=current,
+            previous=previous,
+            pending=pending,
+            decoder=decoder,
+            revision=revision,
+            allow_missing=allow_missing,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    def recover_record(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Callable[[bytes], RecordT],
+        revision: Callable[[RecordT], int],
+        allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> RecordT | None:
+        paths = {
+            "current": self.path(current),
+            "pending": self.path(pending),
+            "previous": self.path(previous),
+        }
+        parents = {path.parent for path in paths.values()}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        parent = next(iter(parents))
+        relative_parent = parent.relative_to(self.root)
+        if deadline_ns is None:
+            self.cleanup_atomic_temps(relative_parent)
+        else:
+            self.cleanup_atomic_temps(
+                relative_parent,
+                deadline_ns=deadline_ns,
+            )
+        projection = self._project_record_recovery(
+            label=label,
+            current=current,
+            previous=previous,
+            pending=pending,
+            decoder=decoder,
+            revision=revision,
+            allow_missing=allow_missing,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+        if projection.record is None:
+            return None
+        if projection.install_current:
+            if projection.retain_current:
+                assert projection.current_bytes is not None
                 require_before_deadline(
                     deadline_ns,
                     "state record recovery exceeded its deadline",
                 )
                 self._atomic_replace(
                     paths["previous"],
-                    current_candidate[0],
+                    projection.current_bytes,
                     deadline_ns=deadline_ns,
                 )
             require_before_deadline(
                 deadline_ns,
                 "state record recovery exceeded its deadline",
             )
+            assert projection.selected_bytes is not None
             self._atomic_replace(
                 paths["current"],
-                selected[0],
+                projection.selected_bytes,
                 deadline_ns=deadline_ns,
             )
             self.fault_hook(f"{label}:recovered")
@@ -2058,7 +2235,7 @@ class DurableStateRoot:
             deadline_ns,
             "state record recovery exceeded its deadline",
         )
-        return selected[1]
+        return projection.record
 
     def commit_record(
         self,
@@ -2069,6 +2246,7 @@ class DurableStateRoot:
         pending: str | Path,
         payload: bytes,
         decoder: Callable[[bytes], RecordT],
+        cleanup_parent_atomic_temps: bool = True,
         deadline_ns: int | None = None,
     ) -> RecordT:
         require_before_deadline(
@@ -2083,13 +2261,14 @@ class DurableStateRoot:
         if len(parents) != 1:
             raise StatePathError(f"{label} record paths must share one directory")
         parent = next(iter(parents))
-        if deadline_ns is None:
-            self.cleanup_atomic_temps(parent.relative_to(self.root))
-        else:
-            self.cleanup_atomic_temps(
-                parent.relative_to(self.root),
-                deadline_ns=deadline_ns,
-            )
+        if cleanup_parent_atomic_temps:
+            if deadline_ns is None:
+                self.cleanup_atomic_temps(parent.relative_to(self.root))
+            else:
+                self.cleanup_atomic_temps(
+                    parent.relative_to(self.root),
+                    deadline_ns=deadline_ns,
+                )
         commit_may_recover = False
 
         def pending_replaced() -> None:
@@ -2108,15 +2287,27 @@ class DurableStateRoot:
             )
             self.fault_hook(f"{label}:pending_durable")
 
-            current_bytes = self.read_optional_existing_bytes(current)
+            current_bytes = self.read_optional_existing_bytes(
+                current,
+                deadline_ns=deadline_ns,
+            )
             if current_bytes is not None:
                 decoder(current_bytes)
-                self._atomic_replace(previous_path, current_bytes)
+                self._atomic_replace(
+                    previous_path,
+                    current_bytes,
+                    deadline_ns=deadline_ns,
+                )
                 self.fault_hook(f"{label}:previous_durable")
 
-            self._atomic_replace(current_path, payload, after_replace=current_replaced)
+            self._atomic_replace(
+                current_path,
+                payload,
+                after_replace=current_replaced,
+                deadline_ns=deadline_ns,
+            )
             self.fault_hook(f"{label}:current_durable")
-            self._unlink_and_sync(pending_path)
+            self._unlink_and_sync(pending_path, deadline_ns=deadline_ns)
             self.fault_hook(f"{label}:pending_cleared")
         except BaseException as exc:
             if commit_may_recover:
@@ -2361,6 +2552,7 @@ class DurableStateRoot:
 
 __all__ = [
     "CommitUnknown",
+    "DurableRecordRecovery",
     "DurableStateRoot",
     "FaultHook",
     "GENERATION_LOCK_RANK",
