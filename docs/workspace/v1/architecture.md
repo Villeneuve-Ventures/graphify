@@ -309,8 +309,10 @@ for each queue mutation but keeps one process alive between mutations so the
 same OS-derived owner and fence remain current. Its begin request supplies an
 absolute deadline and explicit registry, source, operation, migration, queue,
 and watermark CAS. The deadline begins after the canonical begin frame is
-accepted and bounds both the start and observed return of completion or a
-caller-requested failure. After expiry, checkpoints and completion are
+accepted and bounds `work`/`checkpointed` stdout delivery plus both the start
+and observed return of completion or a caller-requested failure. Every result
+frame also has a five-second delivery deadline; terminal delivery grants no
+mutation or lease authority. After expiry, checkpoints and completion are
 forbidden and heartbeats stop; while the claim remains live, the only exception
 is one transport-owned `host_agent_timeout=true` failure and lease release
 before the unchanged lease liveness deadline. A checkpoint or terminal

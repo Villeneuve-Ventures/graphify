@@ -173,7 +173,11 @@ observation is retryable `source_unavailable`. Pre-mutation registry or lease
 corruption uses existing invalid-state routes; post-mutation ambiguity is
 commit-unknown. Catchable interruption after `complete` remains classifiable
 until queue mutation begins; an accepted `fail` retains its caller classification.
-A stdout record becomes a frame only after complete newline-terminated delivery.
+A non-draining stdout reader cannot retain a live claim indefinitely: every
+frame has a five-second delivery deadline, and `work` or `checkpointed` uses the
+earlier absolute work deadline. Terminal delivery grants no mutation or lease
+authority. A stdout record becomes a frame only after complete
+newline-terminated delivery.
 A partial trailing record is not a frame, and a `completed` terminal requires
 exit 0 to become public authority.
 

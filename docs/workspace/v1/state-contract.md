@@ -403,9 +403,13 @@ A completed source observation proving different content or presence is
 `source_content_changed=false`; an incomplete observation is
 `source_unavailable=true`. Pre-mutation registry or lease-state corruption uses
 the existing `registry_invalid` or `workspace_state_invalid` route; ambiguity
-after a possible mutation remains commit-unknown. Result output uses bounded
-write-all plus flush, and partial bytes are not a frame. Failed `work` or
-`checkpointed` delivery closes a live claim through `host_agent_interrupted`; a
+after a possible mutation remains commit-unknown. Result output uses
+deadline-aware write-all plus flush. Every frame has a five-second delivery
+deadline; `work` and `checkpointed` use the earlier absolute work deadline, and
+terminal delivery grants no mutation or lease authority. Partial bytes are not
+a frame. Work-deadline expiry while emitting `work` or `checkpointed` closes a
+live claim through `host_agent_timeout`; delivery-deadline expiry while work
+time remains, or another delivery failure, uses `host_agent_interrupted`. A
 lost `completed` terminal is not public completion authority.
 
 The worker stops before `bind_sealed_inputs()`, generation staging completion,

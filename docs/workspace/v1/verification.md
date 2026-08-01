@@ -645,14 +645,26 @@ implementation acceptance criteria, not evidence that the command exists:
   current completed queue item retains no result digest;
 - every public output frame is canonical and at most 64 KiB, uses one exact
   per-kind field set, and limits failure reason/action values to the frozen
-  enums. Output frames contain no source bytes, semantic payload, secret,
+  enums. Result-schema vectors require integer `1` versions, the exact
+  outcome/exit-code pairs, canonical UUID and digest strings, positive attempts
+  and byte counts, nonnegative queue revisions and watermarks, and the exact
+  typed six-field work object. They reject Booleans, quoted or fractional
+  integers, negative values, zero in positive fields, invalid UUID/digest/work
+  values, mismatched byte counts or queue snapshots, and idle watermarks with
+  completed greater than desired. Values above the binary64 exact-integer range
+  round-trip without narrowing. Output frames contain no source bytes, semantic
+  payload, secret,
   credential, provider/model data, private absolute path, owner/fence detail,
   environment value, raw exception, or extension text. Output-writer tests prove
   short-write retry and fail closed on partial-then-error, zero progress, broken
-  pipe, closed output, or flush failure. They reject partial records; route failed
-  `work`/`checkpointed` delivery through one interruption failure; forbid a
-  replacement frame; require exit 20 for delivery failures; and reject a lost
-  `completed` terminal as consumable authority;
+  pipe, closed output, or flush failure. A full pipe with a non-draining reader
+  exercises a near-64-KiB frame and proves readiness, writes, and flush cannot
+  outlive the five-second delivery deadline; `work` and `checkpointed` use the
+  earlier work deadline. Tests reject partial records, route work-deadline expiry
+  through one timeout failure, route delivery-deadline expiry while work time
+  remains and every other failed delivery through one interruption failure,
+  forbid a replacement frame, require exit 20 for delivery failures, and reject
+  a lost `completed` terminal as consumable authority;
 - recursive source, Git, real `HOME`, real `XDG_STATE_HOME`, real
   `CODEX_HOME`, graph, receipt, and global-install snapshots remain unchanged.
   The only permitted writes are the reviewed queue/lease transitions and

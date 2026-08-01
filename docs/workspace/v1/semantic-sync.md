@@ -161,6 +161,25 @@ fields are `begin_request_sha256`, `repo_uuid`, `claim_id`, `attempt`,
 `queue_revision`, `desired_watermark`, and `completed_watermark`. Neither
 outcome has `reason_code` or `action_code`.
 
+Result scalars are closed as follows:
+
+| Fields | Exact JSON type and rule |
+|---|---|
+| `contract`; `schema_version`; `cli_contract_version` | The result-family string above; integer `1`; integer `1` |
+| `kind`; `outcome`; `payload_kind`; `reason_code`; `action_code` | Strings limited to the frozen values in this section |
+| `exit_code` | Integer `0` for `completed` or `idle`, `10` for `retry_scheduled` or `withheld`, and `20` for `dead_lettered`, `invalid`, or `commit_unknown` |
+| `repo_uuid`; `claim_id`; every `*_sha256` | The canonical UUID string above; exactly 64 lowercase hexadecimal digits for the claim ID and each digest |
+| `attempt`; `source_epoch`; `desired_revision`; `payload_bytes`; `result_binding_bytes` | Integers greater than zero |
+| `queue_revision`; `desired_watermark`; `completed_watermark` | Integers greater than or equal to zero |
+| Nested work `operation`; `path`; policy/content digests | `UPSERT` or `DELETE`; the canonical source-relative string above; the same digest rule. Every value equals the live claim |
+
+Integers are arbitrary precision; Booleans, quoted integers, and fractional
+tokens are invalid. The byte counts equal their recomputed preimage lengths and
+obey the applicable limits. Every queue value equals the observed durable
+snapshot, and `idle` additionally requires
+`completed_watermark <= desired_watermark`. Any type, range, equality, or enum
+violation is not a schema-valid result.
+
 `payload_kind` is exactly `semantic_fragment` for `UPSERT` or
 `delete_tombstone` for `DELETE`. `payload_bytes` and `payload_sha256` cover the
 exact canonical bytes, including the final newline, of the whole validated
@@ -253,13 +272,18 @@ whose begin-request, work, payload, and result-binding digests match the
 captured session. `idle` is never semantic completion authority. A `work` or
 `checkpointed` frame is never result or queue-completion authority.
 
-Each result frame is fully encoded before a bounded write-all and flush. A
-positive short write advances the byte offset and is retried. Emission succeeds
-only after every byte, including the final newline, is written and the flush
-succeeds. Closed output, zero progress, partial-then-error, broken pipe, or flush
-failure is an output-delivery failure. A receiver accepts only a complete
-canonical newline-terminated frame. Partial trailing bytes are not a frame, and
-complete-looking bytes are not completion authority without the required exit 0.
+Each result frame is fully encoded before a deadline-aware write-all and flush.
+The delivery deadline is five seconds after encoding; `work` and `checkpointed`
+use the earlier absolute work deadline. A terminal delivery window, whether
+before `begin` or after work-deadline cleanup, grants no queue or lease authority
+and extends neither deadline. The writer uses nonblocking readiness waits or an
+equivalent primitive; short-write retries and any buffering-layer flush share
+the delivery deadline. Emission succeeds only after every byte, including the
+final newline, is written and flushed. Deadline exhaustion, closed output, zero
+progress, partial-then-error, broken pipe, or flush failure is an output-delivery
+failure. A receiver accepts only a complete canonical newline-terminated frame.
+Partial trailing bytes are not a frame, and complete-looking bytes are not
+completion authority without the required exit 0.
 
 ## Claim and source authority
 
@@ -482,8 +506,9 @@ the same retry-budget/dead-letter rule.
 
 One absolute work deadline begins after the canonical begin frame is accepted
 and bounds source verification, lease acquisition, frame waits, checkpoints,
-payload validation and sanitization, result installation and reopen, and the
-start and observed return of queue completion or caller-requested failure.
+payload validation and sanitization, result installation and reopen, every
+`work` or `checkpointed` readiness/write/flush wait, and the start and observed
+return of queue completion or caller-requested failure.
 Heartbeats preserve the same owner and fence under a fixed 30-second lease TTL,
 every 10 seconds while work time remains, but never extend the work deadline.
 
@@ -504,8 +529,10 @@ applies these phase rules:
 - before a current-session claim, leave the queue unchanged after any required
   lease cleanup;
 - while emitting `work` or `checkpointed` before queue completion or failure
-  mutation, take the `host_agent_interrupted=true` failure route once while the
-  claim is live, then apply normal failure cleanup; and
+  mutation, work-deadline expiry takes the `host_agent_timeout=true` route.
+  Delivery-deadline expiry while work time remains, or any other delivery
+  failure, takes `host_agent_interrupted=true` once while the claim is live,
+  then applies normal failure cleanup; and
 - while emitting a terminal, do not repeat the determined queue transition or
   lease release. A lost `idle` leaves the queue unchanged; a lost `completed` is
   publicly `commit_unknown` because the queue cannot reconstruct its result
