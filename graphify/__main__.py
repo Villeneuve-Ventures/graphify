@@ -523,6 +523,38 @@ def _run_cli() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
             except Exception:
                 pass
+    _SEMANTIC_WORKER_FREE_TEXT_CMDS = {"query", "explain", "path", "save-result"}
+    semantic_worker_arguments = tuple(sys.argv[1:])
+    semantic_worker_command = (
+        "semantic-worker" in semantic_worker_arguments
+        and bool(semantic_worker_arguments)
+        and semantic_worker_arguments[0] not in _SEMANTIC_WORKER_FREE_TEXT_CMDS
+        and (
+            semantic_worker_arguments[0]
+            in {
+                "semantic-worker",
+                "--help",
+                "-h",
+                "-?",
+                "--version",
+                "version",
+                "install",
+                "uninstall",
+            }
+            or "workspace" in semantic_worker_arguments
+            or "--stdio" in semantic_worker_arguments
+        )
+    )
+    if semantic_worker_command and semantic_worker_arguments != (
+        "workspace",
+        "semantic-worker",
+        "--stdio",
+    ):
+        from graphify.workspace.cli import run_workspace_command
+
+        raise SystemExit(
+            run_workspace_command(("workspace", *semantic_worker_arguments))
+        )
     # Check all known skill install locations for a stale version stamp.
     # Skip during install/uninstall (hook writes trigger a fresh check anyway).
     # Skip during hook-check — it runs on every editor tool use and must be silent.
@@ -536,6 +568,7 @@ def _run_cli() -> None:
         ("workspace", "repair"),
         ("workspace", "activate"),
         ("workspace", "rollback"),
+        ("workspace", "semantic-worker"),
     }
     if not bounded_workspace_command and not any(arg in _silent_cmds for arg in sys.argv):
         # Resolve each platform's real user-scope destination so per-platform
@@ -573,6 +606,8 @@ def _run_cli() -> None:
         print("                            activate one identity-bound workspace source")
         print("  workspace rollback --request-stdin")
         print("                            roll back to the pointer's exact last-good generation")
+        print("  workspace semantic-worker --stdio")
+        print("                            run one host-agent semantic queue lifecycle")
         print("  workspace status --json  emit versioned read-only workspace status JSON")
         print("  workspace doctor         run read-only workspace diagnostics")
         print("  install [--platform P]  copy skill to platform config dir (claude|windows|codebuddy|codex|opencode|aider|amp|agents|claw|droid|trae|trae-cn|gemini|cursor|antigravity|hermes|kiro|pi|devin)")
@@ -763,7 +798,7 @@ def _run_cli() -> None:
     # (e.g. "cursor install --help" was silently installing into Cursor, #821).
     # Exempt: free-text commands (user string may contain these tokens), and
     # "install"/"uninstall" which have their own per-subcommand help handlers.
-    _FREE_TEXT_CMDS = {"query", "explain", "path", "save-result", "install", "uninstall"}
+    _FREE_TEXT_CMDS = _SEMANTIC_WORKER_FREE_TEXT_CMDS | {"install", "uninstall"}
     bounded_workspace_transport = tuple(sys.argv[1:3]) in {
         ("workspace", "sync"),
         ("workspace", "query"),
@@ -771,6 +806,7 @@ def _run_cli() -> None:
         ("workspace", "repair"),
         ("workspace", "activate"),
         ("workspace", "rollback"),
+        ("workspace", "semantic-worker"),
     }
     if (
         cmd not in _FREE_TEXT_CMDS

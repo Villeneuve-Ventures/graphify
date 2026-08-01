@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from io import StringIO
 import hashlib
+import importlib
 import json
 from pathlib import Path
 import subprocess
@@ -363,17 +364,100 @@ def test_result_binding_revalidates_the_closed_post_sanitize_rationale_shape() -
         begin_request_sha256=BEGIN_SHA256,
         repo_uuid=REPO_UUID,
         claim=claim,
-        work_sha256=WORK_SHA256,
+        work_sha256=semantic_worker.sha256(
+            semantic_worker.canonical_protocol_bytes(claim.work.to_dict())
+        ),
         payload=validated,
     )
 
     assert semantic_worker.parse_result_binding(binding.canonical) == binding
 
 
+def test_post_sanitize_rationale_accepts_only_the_frozen_multi_label_separator() -> None:
+    payload = cast(Any, deepcopy(_complete_value()["payload"]))
+    fragment = payload["fragment"]
+    first = "First rationale explains why the README node remains the correct semantic target."
+    second = "Second rationale independently explains why the same README node remains useful."
+    rationale = fragment["nodes"][1]
+    rationale["file_type"] = "rationale"
+    rationale["label"] = first
+    fragment["edges"][0].update(
+        {
+            "source": rationale["id"],
+            "target": "readme",
+            "relation": "rationale_for",
+        }
+    )
+    second_node = deepcopy(rationale)
+    second_node.update({"id": "workspace-second-rationale", "label": second})
+    fragment["nodes"].append(second_node)
+    second_edge = deepcopy(fragment["edges"][0])
+    second_edge["source"] = second_node["id"]
+    fragment["edges"].append(second_edge)
+
+    validated = semantic_worker.validate_completion_payload(payload, _work())
+
+    nodes = cast(Any, validated.value["fragment"])["nodes"]
+    assert len(nodes) == 1
+    assert nodes[0]["rationale"] == first + "\n\n" + second
+
+
 def test_rationale_projection_rejects_oversize_before_joining() -> None:
     assert semantic_worker._bounded_rationale_text(["one", "two"]) == "one\n\ntwo"
     with pytest.raises(semantic_worker.SemanticResultInvalid, match="rationale"):
         semantic_worker._bounded_rationale_text(["a" * 8192, "b" * 8192])
+
+
+def test_public_and_internal_work_digests_bind_the_exact_work_object() -> None:
+    work = _work()
+    work_sha256 = semantic_worker.sha256(semantic_worker.canonical_protocol_bytes(work.to_dict()))
+    work_result: dict[str, object] = {
+        **_result_common(),
+        "attempt": 1,
+        "begin_request_sha256": BEGIN_SHA256,
+        "claim_id": CLAIM_ID,
+        "kind": "work",
+        "repo_uuid": REPO_UUID,
+        "work": work.to_dict(),
+        "work_sha256": work_sha256,
+    }
+    assert (
+        semantic_worker.parse_result_frame(semantic_worker.canonical_result_bytes(work_result))
+        == work_result
+    )
+
+    substituted = {**work_result, "work_sha256": "0" * 64}
+    with pytest.raises(semantic_worker.SemanticResultInvalid, match="work digest"):
+        semantic_worker.canonical_result_bytes(substituted)
+    with pytest.raises(semantic_worker.SemanticResultInvalid, match="work digest"):
+        semantic_worker.parse_result_frame(semantic_worker.canonical_protocol_bytes(substituted))
+
+    validated = semantic_worker.validate_completion_payload(
+        deepcopy(_complete_value()["payload"]),
+        work,
+    )
+    claim = SemanticClaim(
+        work=work,
+        claim_id=CLAIM_ID,
+        fence_token=1,
+        operation_epoch=1,
+        migration_epoch=0,
+        active_source_revision=1,
+        attempt=1,
+        owner={"boot_id": "boot", "pid": 1, "process_start_id": "start"},
+    )
+    binding = semantic_worker.build_result_binding(
+        begin_request_sha256=BEGIN_SHA256,
+        repo_uuid=REPO_UUID,
+        claim=claim,
+        work_sha256=work_sha256,
+        payload=validated,
+    )
+    substituted_binding = {**binding.value, "work_sha256": "0" * 64}
+    with pytest.raises(semantic_worker.SemanticResultInvalid, match="work digest"):
+        semantic_worker.parse_result_binding(
+            semantic_worker.canonical_protocol_bytes(substituted_binding)
+        )
 
 
 @pytest.mark.parametrize(
@@ -407,6 +491,109 @@ def test_semantic_worker_usage_is_exact_before_authority_or_stdin(
     assert workspace_cli.run_workspace_command(arguments, stdout=stdout, stderr=stderr) == 64
     assert stdout.getvalue() == ""
     assert stderr.getvalue() == _USAGE + "\n"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("workspace", "semantic-worker"),
+        ("workspace", "--stdio", "semantic-worker"),
+        ("workspace", "semantic-worker", "--stdio", "extra"),
+        ("workspace", "semantic-worker", "--stdio", "--stdio"),
+        ("workspace", "semantic-worker", "--help"),
+        ("workspace", "semantic-worker", "-h"),
+        ("workspace", "semantic-worker", "-?"),
+        ("semantic-worker", "--stdio"),
+        ("--stdio", "workspace", "semantic-worker"),
+        ("--version", "workspace", "semantic-worker", "--stdio"),
+        ("--help", "workspace", "semantic-worker", "--stdio"),
+        ("--version", "semantic-worker", "--stdio"),
+        ("--help", "semantic-worker"),
+        ("-h", "semantic-worker"),
+        ("-?", "semantic-worker"),
+        ("--version", "semantic-worker"),
+        ("version", "semantic-worker"),
+        ("install", "workspace", "semantic-worker", "--stdio"),
+        ("uninstall", "workspace", "semantic-worker", "--stdio"),
+        ("install", "semantic-worker"),
+        ("uninstall", "semantic-worker"),
+    ],
+)
+def test_public_semantic_worker_negative_vectors_use_exact_usage_before_ambient_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    arguments: tuple[str, ...],
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    monkeypatch.setattr(
+        mainmod,
+        "_check_skill_version",
+        lambda _path: pytest.fail("semantic-worker must not inspect ambient installs"),
+    )
+    monkeypatch.setattr(sys, "argv", ["graphify", *arguments])
+
+    with pytest.raises(SystemExit) as raised:
+        mainmod._run_cli()
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 64
+    assert captured.out == ""
+    assert captured.err == _USAGE + "\n"
+
+
+def test_public_semantic_worker_exact_vector_skips_ambient_install_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    monkeypatch.setattr(
+        mainmod,
+        "_check_skill_version",
+        lambda _path: pytest.fail("semantic-worker must not inspect ambient installs"),
+    )
+    monkeypatch.setattr(mainmod, "dispatch_install_cli", lambda _command: False)
+    observed: list[str] = []
+    monkeypatch.setattr(mainmod, "dispatch_command", observed.append)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "workspace", "semantic-worker", "--stdio"],
+    )
+
+    mainmod._run_cli()
+
+    assert observed == ["workspace"]
+
+
+def test_semantic_worker_tokens_remain_free_text_for_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _path: None)
+    monkeypatch.setattr(mainmod, "dispatch_install_cli", lambda _command: False)
+    observed: list[str] = []
+    monkeypatch.setattr(mainmod, "dispatch_command", observed.append)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "query", "workspace", "semantic-worker", "--stdio"],
+    )
+
+    mainmod._run_cli()
+
+    assert observed == ["query"]
+
+
+def test_top_level_help_lists_the_semantic_worker_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _path: None)
+    monkeypatch.setattr(sys, "argv", ["graphify", "--help"])
+
+    mainmod._run_cli()
+
+    assert "workspace semantic-worker --stdio" in capsys.readouterr().out
 
 
 def test_general_workspace_usage_lists_semantic_worker() -> None:
@@ -772,6 +959,22 @@ def _active_session(
     return session
 
 
+def _assert_live_claim_timeout(
+    runtime: WorkspaceRuntime,
+    output: _ProtocolOutput,
+    exit_code: int,
+) -> None:
+    assert exit_code == 10
+    terminal = semantic_worker.parse_result_frame(output.frames[-1])
+    assert terminal["outcome"] == "retry_scheduled"
+    assert terminal["reason_code"] == "host_agent_timeout"
+    item = runtime.semantic_queue.inspect(HARNESS_REPO_UUID).items[0]
+    assert item.status == "pending"
+    assert item.failure_count == 1
+    assert item.last_error == "host_agent_timeout"
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
 def test_semantic_worker_same_process_stages_checkpoints_completes_and_releases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -815,6 +1018,156 @@ def test_semantic_worker_same_process_stages_checkpoints_completes_and_releases(
     assert staged.is_file()
     assert staged.stat().st_mode & 0o777 == 0o600
     assert staged.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_post_claim_read_timeout_fails_once_and_releases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+
+    def timeout_read(
+        _session: semantic_worker._WorkerSession,
+        *,
+        deadline_ns: int,
+    ) -> SemanticClaim:
+        assert deadline_ns > 0
+        raise semantic_worker.LockTimeout("post-claim read deadline")
+
+    monkeypatch.setattr(semantic_worker._WorkerSession, "_read_current_claim", timeout_read)
+
+    result = semantic_worker.run_semantic_worker(
+        runtime,
+        stdin=_OneFrameInput(semantic_worker.canonical_protocol_bytes(begin)),  # type: ignore[arg-type]
+        stdout=output,  # type: ignore[arg-type]
+    )
+
+    _assert_live_claim_timeout(runtime, output, result)
+
+
+def test_optional_checkpoint_lock_timeout_fails_once_and_releases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+
+    def timeout_checkpoint(*_args: object, **_kwargs: object) -> SemanticClaim:
+        raise semantic_worker.LockTimeout("checkpoint before visibility")
+
+    def checkpoint_request(work: Mapping[str, object]) -> bytes:
+        return semantic_worker.canonical_protocol_bytes(
+            {
+                "action": "checkpoint",
+                "begin_request_sha256": work["begin_request_sha256"],
+                "claim_id": work["claim_id"],
+                "cli_contract_version": 1,
+                "contract": "graphify.workspace.semantic_worker_request",
+                "progress_code": "extract:parsed",
+                "schema_version": 1,
+            }
+        )
+
+    monkeypatch.setattr(runtime.semantic_queue, "checkpoint", timeout_checkpoint)
+    result = semantic_worker.run_semantic_worker(
+        runtime,
+        stdin=_RequestAfterWorkInput(
+            semantic_worker.canonical_protocol_bytes(begin),
+            output,
+            checkpoint_request,
+        ),  # type: ignore[arg-type]
+        stdout=output,  # type: ignore[arg-type]
+    )
+
+    _assert_live_claim_timeout(runtime, output, result)
+
+
+@pytest.mark.parametrize("boundary", ["inspect", "install", "reopen", "checkpoint"])
+def test_completion_previsibility_deadlines_fail_once_and_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+    state = runtime.semantic_queue.state
+
+    def is_staging(relative: str | Path) -> bool:
+        return "semantic-staging" in Path(relative).parts
+
+    if boundary == "inspect":
+        original = state.read_optional_existing_bytes
+
+        def timeout_inspect(relative: str | Path, **kwargs: Any) -> bytes | None:
+            if is_staging(relative):
+                raise semantic_worker.LockTimeout("staging inspect deadline")
+            return original(relative, **kwargs)
+
+        monkeypatch.setattr(state, "read_optional_existing_bytes", timeout_inspect)
+    elif boundary == "install":
+        original_install = state.install_once_bytes
+
+        def timeout_install(relative: str | Path, data: bytes, **kwargs: Any) -> Path:
+            if is_staging(relative):
+                raise semantic_worker.LockTimeout("staging install before visibility")
+            return original_install(relative, data, **kwargs)
+
+        monkeypatch.setattr(state, "install_once_bytes", timeout_install)
+    elif boundary == "reopen":
+        original_read = state.read_existing_bytes
+
+        def timeout_reopen(relative: str | Path, **kwargs: Any) -> bytes:
+            if is_staging(relative):
+                raise semantic_worker.LockTimeout("staging reopen deadline")
+            return original_read(relative, **kwargs)
+
+        monkeypatch.setattr(state, "read_existing_bytes", timeout_reopen)
+    else:
+        def timeout_result_checkpoint(*_args: object, **_kwargs: object) -> SemanticClaim:
+            raise semantic_worker.LockTimeout("result checkpoint before visibility")
+
+        monkeypatch.setattr(runtime.semantic_queue, "checkpoint", timeout_result_checkpoint)
+
+    result = semantic_worker.run_semantic_worker(
+        runtime,
+        stdin=_CompleteAfterWorkInput(
+            semantic_worker.canonical_protocol_bytes(begin),
+            output,
+            deepcopy(_complete_value()["payload"]),
+        ),  # type: ignore[arg-type]
+        stdout=output,  # type: ignore[arg-type]
+    )
+
+    _assert_live_claim_timeout(runtime, output, result)
+
+
+def test_completion_transition_previsibility_timeout_fails_once_and_releases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+
+    def timeout_complete(*_args: object, **_kwargs: object) -> object:
+        raise semantic_worker.LockTimeout("completion before visibility")
+
+    monkeypatch.setattr(runtime.semantic_queue, "complete", timeout_complete)
+    result = semantic_worker.run_semantic_worker(
+        runtime,
+        stdin=_CompleteAfterWorkInput(
+            semantic_worker.canonical_protocol_bytes(begin),
+            output,
+            deepcopy(_complete_value()["payload"]),
+        ),  # type: ignore[arg-type]
+        stdout=output,  # type: ignore[arg-type]
+    )
+
+    _assert_live_claim_timeout(runtime, output, result)
 
 
 @pytest.mark.parametrize(

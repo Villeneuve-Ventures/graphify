@@ -338,6 +338,14 @@ def canonical_protocol_bytes(
     return (encoded + "\n").encode("utf-8")
 
 
+def _work_digest(
+    work: SemanticDesiredWork,
+    *,
+    progress: Callable[[], object] | None = None,
+) -> str:
+    return sha256(canonical_protocol_bytes(work.to_dict(), progress=progress))
+
+
 def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     value: dict[str, object] = {}
     for key, item in pairs:
@@ -499,6 +507,17 @@ def _semantic_text(value: object, label: str) -> str:
     return value
 
 
+def _semantic_rationale(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise SemanticResultInvalid(f"{label} must be nonempty and trimmed")
+    if len(value.encode("utf-8")) > SEMANTIC_TEXT_MAX_BYTES:
+        raise SemanticResultInvalid(f"{label} exceeds the UTF-8 byte limit")
+    segments = value.split("\n\n")
+    for index, segment in enumerate(segments):
+        _semantic_text(segment, f"{label}[{index}]")
+    return value
+
+
 def _source_location(value: object, label: str) -> None:
     if value is None:
         return
@@ -603,7 +622,7 @@ def _validate_fragment(
         if "rationale" in raw_node:
             if not post_sanitize:
                 raise SemanticResultInvalid(f"nodes[{index}] field set is invalid")
-            _semantic_text(raw_node["rationale"], f"nodes[{index}].rationale")
+            _semantic_rationale(raw_node["rationale"], f"nodes[{index}].rationale")
 
     for index, raw_edge in enumerate(edges):
         _report_progress(progress, index)
@@ -1170,6 +1189,8 @@ def parse_result_binding(
         work = SemanticDesiredWork.from_mapping(cast(Mapping[str, object], value.get("work")))
     except (ContractError, TypeError, ValueError) as exc:
         raise SemanticResultInvalid("result binding authority is invalid") from exc
+    if value.get("work_sha256") != _work_digest(work, progress=progress):
+        raise SemanticResultInvalid("result binding work digest is invalid")
     payload = validate_bound_payload(
         value.get("payload"),
         work,
@@ -1259,9 +1280,11 @@ def _validate_result_value(value: Mapping[str, object]) -> None:
         _result_digest(value.get("work_sha256"), "work_sha256")
         try:
             WorkspaceLeaseState.canonical_repo_uuid(value.get("repo_uuid"))
-            SemanticDesiredWork.from_mapping(cast(Mapping[str, object], value.get("work")))
+            work = SemanticDesiredWork.from_mapping(cast(Mapping[str, object], value.get("work")))
         except (ContractError, TypeError, ValueError) as exc:
             raise SemanticResultInvalid("work result authority is invalid") from exc
+        if value.get("work_sha256") != _work_digest(work):
+            raise SemanticResultInvalid("work result work digest is invalid")
         return
     if kind == "checkpointed":
         expected = common | {
@@ -2941,6 +2964,8 @@ class _WorkerSession:
         try:
             existing = read()
             self._ensure_work_time()
+        except _FrameDeadline, LockTimeout:
+            raise
         except Exception as exc:
             raise CommitUnknown("semantic result binding cannot be inspected") from exc
         if existing is not None:
@@ -2996,6 +3021,8 @@ class _WorkerSession:
                 max_bytes=COMPLETE_MAX_BYTES,
                 deadline_ns=self.deadline_ns,
             )
+        except _FrameDeadline, LockTimeout:
+            raise
         except Exception as exc:
             raise CommitUnknown("semantic result binding reopen is ambiguous") from exc
         if raw != binding.canonical or sha256(raw) != binding.sha256:
@@ -3234,6 +3261,8 @@ class _WorkerSession:
                 expected_desired_watermark=expected_watermark,
                 deadline_ns=completion_deadline,
             )
+        except LockTimeout:
+            raise
         except StaleSemanticClaim, StaleLease, LeaseExpired, SemanticQueueConflict:
             self._release(success_required=False)
             return self._withheld("semantic_authority_stale")
@@ -3333,7 +3362,7 @@ class _WorkerSession:
                         emit_terminal=True,
                     )
                 return self._process_complete(request)
-            except _FrameDeadline:
+            except LockTimeout, _FrameDeadline:
                 return self._fail_current("host_agent_timeout", True, emit_terminal=True)
             except _FrameEof, KeyboardInterrupt:
                 return self._fail_current("host_agent_interrupted", True, emit_terminal=True)
@@ -3529,7 +3558,7 @@ class _WorkerSession:
                 progress=self._ensure_work_time,
             )
             self._read_current_claim(deadline_ns=self.deadline_ns)
-        except _FrameDeadline:
+        except LockTimeout, _FrameDeadline:
             return self._fail_current("host_agent_timeout", True, emit_terminal=True)
         except KeyboardInterrupt:
             return self._fail_current("host_agent_interrupted", True, emit_terminal=True)
