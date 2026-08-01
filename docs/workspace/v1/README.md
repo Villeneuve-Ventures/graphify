@@ -529,6 +529,16 @@ state, its [accepted receipts](receipts/) own completion evidence, and the
 external plans retain only cross-repository dependencies and P6-P12 portfolio
 sequencing. Direct operator instruction alone owns execution authorization.
 
+The canonical index of independently justified findings that were outside the
+delivery which surfaced them is the
+[justified out-of-scope follow-up register](governance.md#justified-out-of-scope-follow-up-register).
+It stores source, tracking state, activation trigger, and closure evidence
+without changing phase readiness or granting execution. Normative behavior
+stays in the linked contract, implementation document, or accepted receipt;
+the register does not duplicate it. Host-local or ignored `.omx/` artifacts are
+historical execution evidence and never override this repository authority
+set.
+
 | Area | Owner/status | Stable boundary |
 |---|---|---|
 | Host-agent semantic worker | P5B2 host-agent semantic-worker transport (`READY`, contract-only) | [`semantic-sync.md`](semantic-sync.md) freezes only one long-lived `workspace semantic-worker --stdio` host-agent queue lifecycle with a verified staged-result binding before completion. No runtime implementation or receipt exists. |
@@ -553,8 +563,11 @@ sequencing. Direct operator instruction alone owns execution authorization.
 Historical deferrals for the labeling-order test, candidate packaging warnings,
 vulnerable optional/development dependencies, high-severity Bandit findings,
 and Gemini model-override test isolation are closed by later merged work and are
-not carried forward as debt. Deliberately rejected review suggestions likewise
-do not become backlog merely because their GitHub threads remain unresolved.
+not carried forward as debt. Only an independently supported, justified finding
+with a durable source, exact activation trigger, and testable closure evidence
+enters the follow-up register. Deliberately rejected suggestions, fixed
+findings, and addressed workflow residue do not become backlog merely because
+their GitHub threads remain unresolved.
 
 Authorization standard input is one JSON object with exactly the five string
 fields shown here; `action` is the uppercase operator intent, not the lowercase

@@ -1,5 +1,32 @@
 # Verification contract
 
+## Exact-head GitHub review disposition gate
+
+GitHub review evidence is repository- and revision-bound. Every GitHub CLI call
+used for Graphify review or closeout must specify
+`--repo Villeneuve-Ventures/graphify`; an unqualified result is not authority.
+Before classifying a finding, record the full base commit, exact reviewed head
+commit and tree, changed-file manifest, and current resolved/outdated state of
+the substantive thread. Invalidate the classification if the head or governing
+instructions change.
+
+Each substantive thread receives exactly one evidence-backed disposition:
+
+- `fixed at <full-sha>` requires the final behavior plus a focused regression or
+  other exact-head proof;
+- `rejected: <reason>` requires a demonstrated invariant, compatibility rule,
+  or reproduced evidence showing that the suggestion is not a defect; or
+- `deferred: <JOS-ID>` requires a matching entry in the
+  [justified out-of-scope follow-up register](governance.md#justified-out-of-scope-follow-up-register),
+  including its activation trigger and closure evidence.
+
+Resolved, unresolved, and outdated are GitHub workflow states, not technical
+dispositions. An unresolved thread alone cannot create debt, and a resolved or
+outdated thread cannot substitute for exact-head verification. Review
+classification grants no authority to comment, reply, resolve a thread, change
+ready state, merge, or clean up; every such GitHub mutation remains separately
+authorized.
+
 ## P1 schema and model gates
 
 - every positive fixture passes its normative Draft 2020-12 schema and Python

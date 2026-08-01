@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-07-31T03:40:39Z`
+Ledger refresh: `2026-08-01T03:54:13Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -34,6 +34,12 @@ receipt authority under the same execution-authorization limit.
    sequencing.
 6. Historical snapshots never override a higher-precedence current source.
 
+Host-local or ignored `.omx/` artifacts are historical execution evidence, not
+current Graphify-local status or execution authority. A newly activated
+workflow may use its own bounded plan state, but that state cannot override a
+direct operator instruction, this ledger, an accepted receipt, or a frozen
+product contract.
+
 `READY` means that dependencies and the recorded live preflight permit a
 bounded prompt to be reviewed. It does not authorize implementation. A
 document edit cannot grant execution authority, and an implementation change
@@ -44,12 +50,11 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical checkout | Repository root on `workspace/v1` at `d70219f07b37f96b2406c9f97c7a40e5c2592486`, tree `d85946828ecd45f2bd6f72ee6761c63cd15ea7b6`; local upstream divergence `0/0`. It remained clean at the fail-closed pre-edit preflight. |
-| Current canonical branch | Live GitHub and `origin/workspace/v1` at merge/current commit `d70219f07b37f96b2406c9f97c7a40e5c2592486`, current tree `d85946828ecd45f2bd6f72ee6761c63cd15ea7b6`. |
-| Worktrees | Two worktrees exist: the clean canonical checkout and this isolated contract-only worktree on `codex/workspace-p5b2-host-agent-semantic-contract`, created from the canonical commit above. No delivery or competing governance worktree exists. |
-| GitHub | PR [#42](https://github.com/Villeneuve-Ventures/graphify/pull/42) is merged at the canonical commit above; the fork repository has no open pull requests. |
-| P5B2 public fenced pointer-repair governance acceptance | PR #42 exact head `bd616e737ea67e88f35a1a8168f2ed736c5c96c2`; merge/current commit `d70219f07b37f96b2406c9f97c7a40e5c2592486`; merge/current tree `d85946828ecd45f2bd6f72ee6761c63cd15ea7b6`. PR-head CI [30600458869](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30600458869) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` status context succeeded. |
-| Contract-only successor preflight | The canonical branch, HEAD, tree, cleanliness, divergence, worktree inventory, merged PR #42, and empty open-PR inventory were revalidated before this isolated worktree was created. No GitHub review thread was replied to, resolved, or otherwise mutated. |
+| Canonical base | The pre-edit checkout and live `origin/workspace/v1` both resolved to `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`, tree `27f7259fc3d716a78a3b28417204b1968c05d421`, with divergence `0/0` and a clean working tree. |
+| Worktrees | One worktree exists. It is now on `codex/workspace-followup-governance`, created directly from the canonical base above. No competing delivery or governance worktree existed at preflight. |
+| GitHub | PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) is merged at the canonical base above; the fork repository had no open pull requests before this branch was created. |
+| P5B2 host-agent semantic-worker contract delivery | PR #43 exact head `1f202c9134ee0993e4bba40482fa8113f598920a`; merge/current commit `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`; merge/current tree `27f7259fc3d716a78a3b28417204b1968c05d421`. Exact-head CI [30681324681](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30681324681) passed `skillgen-check`, `test (3.14)`, and `security-scan`. |
+| Follow-up-governance preflight | The canonical repository, branch, HEAD, tree, cleanliness, divergence, worktree inventory, merged PR #43, and empty open-PR inventory were revalidated with GitHub calls pinned to `Villeneuve-Ventures/graphify`. No GitHub review thread was replied to, resolved, or otherwise mutated. |
 | Support baseline | Observed host CPython `3.14.6`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
@@ -96,6 +101,42 @@ Statements in accepted boundary freezes below that a receipt promoted no later
 child describe that receipt's authority. They do not override the sole current
 READY row above, which is established only by this contract-only batch and
 carries no implementation or acceptance evidence.
+
+## Justified out-of-scope follow-up register
+
+This register indexes only findings that were independently supported and
+justified, but outside the delivery that surfaced them. It does not own phase
+state, change an accepted receipt, authorize implementation, or turn a review
+thread's unresolved UI state into technical debt.
+
+The tracking states below are local to this register and are not Graphify phase
+statuses. `JOS` means `justified out-of-scope`:
+
+- `DOCUMENTED_NONCLAIM` points to an already-frozen boundary and creates no new
+  work;
+- `TRIGGER_GATED` remains inactive until its exact compatibility trigger occurs;
+- `OPPORTUNISTIC` permits a behavior-preserving cleanup only when adjacent
+  authorized work already touches the named surface;
+- `GUARDED` records that an executable guard exists and must be revalidated when
+  its dependency changes; and
+- `SEPARATE_AUTHORIZATION_REQUIRED` identifies a bounded successor candidate but
+  grants no implementation or acceptance authority.
+
+| ID | Source | Tracking state | Justification and scope boundary | Activation trigger and closure evidence |
+|---|---|---|---|---|
+| `JOS-GC-CAPACITY-V1` | PR [#35](https://github.com/Villeneuve-Ventures/graphify/pull/35) and governance PR [#36](https://github.com/Villeneuve-Ventures/graphify/pull/36) | `DOCUMENTED_NONCLAIM` | The published capacity-policy representation is compatibility-sensitive, while the accepted preview makes no performance/resource or bounded pre-enumeration claim. Those are legitimate future boundaries, but the delivery and receipt were limited to the read-only preview. | Index only. The boundary remains owned by the [workspace ownership map](README.md#governance-and-deferred-work-ownership) and the [accepted preview receipt](receipts/p5b2-offline-gc-preview.md). Activate only through a separately authorized versioned compatibility change or qualification batch. |
+| `JOS-GC-PREVIEW-VERSION` | PR [#37](https://github.com/Villeneuve-Ventures/graphify/pull/37) | `TRIGGER_GATED` | [`gc_preview_result_bytes()`](../../../graphify/workspace/gc_command.py) selects `GC_LIFECYCLE_SCHEMA_VERSION`, so a future lifecycle-v2 change could drift frozen preview-v1 bytes. Current v1 behavior is not defective, and the lifecycle delivery did not authorize a speculative version refactor. | Activate before changing either lifecycle or preview schema versioning. Closure must independently freeze preview-version selection and prove preview-v1 canonical bytes remain unchanged across a lifecycle-version change. |
+| `JOS-BOUNDED-INPUT-READERS` | PR [#39](https://github.com/Villeneuve-Ventures/graphify/pull/39) | `OPPORTUNISTIC` | Repeated bounded-input readers across established commands are justified maintainability debt, but consolidating them was a cross-command refactor outside the pointer-repair PR's surgical behavior fixes. | Activate only when an authorized batch adds another `--request-stdin` command or changes more than one established reader. Closure requires regression-locked parser behavior and must preserve each command's bounds, canonicality, error mapping, authority-loading order, and deadline semantics. |
+| `JOS-PR-AGENT-DRAIN` | PR [#40](https://github.com/Villeneuve-Ventures/graphify/pull/40) | `GUARDED` | The pinned PR-Agent revision relies on a private drain-aware runner, which creates a real pin-upgrade compatibility risk. The current exact pin imports and executes it successfully, so this is not a defect in the delivered workflow. | The [policy regression](../../../tests/test_pr_agent_policy.py) requires the exact import and call. Reactivate on any PR-Agent pin or runner-import change. Closure requires an exact-import smoke test and proof that review/description completion remains drain-aware with no silent legacy fallback. |
+| `JOS-SEMANTIC-WORKER-CONFORMANCE` | Contract PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) | `SEPARATE_AUTHORIZATION_REQUIRED` | The frozen prose contract has no machine-readable request/result schema, equivalent closed runtime validator, conformance suite, or implementation. PR #43 was contract-only and explicitly excluded that work. | Activate only through explicit operator authorization for the implementation successor. Closure requires schemas or equivalent closed validators, conformance tests, and implementation of the frozen exact-decimal, checkpoint-capacity, uncertainty-recovery, and deadline-aware delivery behavior in [`semantic-sync.md`](semantic-sync.md). Full semantic sync and every explicit backend remain excluded, and completion still requires a separate governance-only receipt. |
+
+PR #37's separate note about a `.codex` parent path and 100 ms timing cases is
+not registered as justified debt because it does not identify a reproducible,
+independently actionable packet. It may enter only after exact tests, commands,
+environment, and failure evidence are reproduced; path portability and timing
+stability must receive separate IDs if both survive that gate. Generic
+docstring coverage, disproven workflow-syntax warnings, fixed findings, and
+addressed workflow residue are likewise absent by design.
 
 ## P5C1 boundary freeze
 
