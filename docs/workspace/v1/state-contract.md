@@ -342,7 +342,8 @@ epochs, and the canonical payload object, byte count, and SHA-256. An `UPSERT`
 payload is exactly the whole
 `{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}` object after
 worker-specific closed nested-schema, lossless exact-decimal helper encoding,
-fixed-point, and bounded indexed-sanitizer validation. A `DELETE` payload is
+fixed-point, pairwise-distinct hyperedge-member, and bounded indexed-sanitizer
+validation. A `DELETE` payload is
 exactly the kind-only
 `{"kind":"delete_tombstone"}` object. The payload byte count and digest cover
 that whole canonical object including its final newline, and the envelope stores
@@ -397,6 +398,15 @@ later durable-schema decision. It remains `commit_unknown`; manual durable-state
 inspection is required, and downstream semantic sync must not consume the staged
 result without the exact exit-0 terminal receipt. This direct session outcome
 adds no status reason or action.
+
+A completed source observation proving different content or presence is
+`source_content_changed=false`; an incomplete observation is
+`source_unavailable=true`. Pre-mutation registry or lease-state corruption uses
+the existing `registry_invalid` or `workspace_state_invalid` route; ambiguity
+after a possible mutation remains commit-unknown. Result output uses bounded
+write-all plus flush, and partial bytes are not a frame. Failed `work` or
+`checkpointed` delivery closes a live claim through `host_agent_interrupted`; a
+lost `completed` terminal is not public completion authority.
 
 The worker stops before `bind_sealed_inputs()`, generation staging completion,
 certification, promotion, pointer mutation, and full semantic sync. This is a

@@ -140,8 +140,9 @@ validator receives retained exact decimals through a lossless canonical-number
 encoder while the sanitizer runs through a preflighted linear `rationale_for`
 index. Unknown keys, non-work-path provenance, noncanonical fixed-point scores,
 oversized semantic text, dangling references, and projected rationale or payload
-amplification are rejected before sanitizer allocation. `DELETE` accepts only
-the exact kind-only tombstone. An immutable canonical result envelope is then
+amplification, including duplicate hyperedge members, are rejected before
+sanitizer allocation. `DELETE` accepts only the exact kind-only tombstone. An
+immutable canonical result envelope is then
 installed under private external workspace staging, its exact bytes and digest
 are reopened and verified, and that digest is persisted in and revalidated
 against the live claim checkpoint. The source digest or absence is checked a
@@ -166,6 +167,15 @@ is not cleanup authority. If queue completion may have committed before its
 terminal public frame, including uncertainty during the intervening lease
 release, the absence of a durable queue/result association is reported as
 commit-unknown rather than inferred success.
+
+Only a completed source observation can prove content drift; an incomplete
+observation is retryable `source_unavailable`. Pre-mutation registry or lease
+corruption uses existing invalid-state routes; post-mutation ambiguity is
+commit-unknown. Catchable interruption after `complete` remains classifiable
+until queue mutation begins; an accepted `fail` retains its caller classification.
+A stdout record becomes a frame only after complete newline-terminated delivery.
+A partial trailing record is not a frame, and a `completed` terminal requires
+exit 0 to become public authority.
 
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted

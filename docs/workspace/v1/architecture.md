@@ -324,12 +324,12 @@ headroom for the mandatory result checkpoint without a durable reservation
 field. Optional and mandatory
 checkpoint uncertainty uses an exact live-claim reread: adopt the requested
 value, retry the exact prior value within both deadlines, otherwise
-commit-unknown. If
-completion or failure begins but its observed return or terminal public frame
-is lost, the mutation is unproven and the outcome is commit-unknown, never
-inferred success.
-After completion clears the claim, the current queue format also cannot
-reconstruct the result association.
+commit-unknown. Source I/O unavailability, pre-mutation registry or lease
+corruption, catchable pre-mutation interruption, and stdout delivery failure
+each have a frozen fail-closed route; only a completed source observation proves
+content drift. An unobserved completion or failure return is commit-unknown. So
+is a lost `completed` terminal, because completion clears the result association.
+Neither permits inferred success.
 
 P5B2b reuses the P5B2b0 registry-before-workspace order and installs the exact
 `REQUESTED` record before acquiring its request-bound `BUILD` lease. A

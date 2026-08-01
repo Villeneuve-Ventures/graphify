@@ -116,14 +116,15 @@ by this process.
 | `semantic_policy_refused` | `false` |
 | `semantic_work_unsupported` | `false` |
 
-Five additional exact classifications are transport-only after a live queue
+Six additional exact classifications are transport-only after a live queue
 claim exists:
 `host_agent_timeout=true`, `host_agent_interrupted=true`,
-`semantic_result_invalid=true`, `source_content_changed=false`, and
-`semantic_result_binding_conflict=false`. The transport derives those only from
-the local deadline, EOF/interruption while waiting for a post-claim frame,
-bounded canonical parsing and result validation, exact source verification, or
-an exact different-byte result-staging conflict described below. They are not
+`semantic_result_invalid=true`, `source_unavailable=true`,
+`source_content_changed=false`, and `semantic_result_binding_conflict=false`.
+The transport derives those only from the local deadline, EOF or catchable
+interruption after claim, bounded canonical parsing and result validation, an
+incomplete source observation, a completed source observation proving mismatch,
+or an exact different-byte result-staging conflict described below. They are not
 accepted from a `fail` frame. The caller-accepted
 `semantic_work_unsupported=false` pair is shared: the transport also derives it
 when the exact work frame would exceed the public output bound.
@@ -192,10 +193,10 @@ contains raw diagnostics:
 
 | `outcome` / exit | Exact reason codes | Action code |
 |---|---|---|
-| `retry_scheduled` / 10 | `host_agent_transient`, `host_agent_timeout`, `host_agent_interrupted`, `semantic_result_invalid` | `drain_semantic_queue` |
+| `retry_scheduled` / 10 | `host_agent_transient`, `host_agent_timeout`, `host_agent_interrupted`, `semantic_result_invalid`, `source_unavailable` | `drain_semantic_queue`, except `source_unavailable` uses `restore_source` |
 | `withheld` / 10 | `semantic_claim_contended`, `semantic_authority_stale`, `semantic_worker_preclaim_timeout`, `semantic_worker_preclaim_interrupted`, `semantic_checkpoint_capacity_unavailable`, `workspace_config_unavailable`, `semantic_capability_unavailable`, `staged_build_recovery_required` | `retry_status`, except `semantic_checkpoint_capacity_unavailable` uses `inspect_semantic_queue`, `semantic_capability_unavailable` uses `inspect_workspace_state`, and `staged_build_recovery_required` uses `resume_exact_workspace_sync` |
 | `dead_lettered` / 20 | any frozen caller or transport failure classification | `inspect_semantic_queue` |
-| `invalid` / 20 | `semantic_worker_request_invalid`, `runtime_authority_missing`, `runtime_authority_invalid`, `runtime_authority_unsupported`, `unsafe_state_path`, `workspace_config_invalid`, `semantic_queue_invalid` | respectively `none`, `install_candidate_authority`, `install_candidate_authority`, `install_supported_candidate`, `configure_safe_state_root`, `inspect_workspace_state`, `inspect_semantic_queue` |
+| `invalid` / 20 | `semantic_worker_request_invalid`, `runtime_authority_missing`, `runtime_authority_invalid`, `runtime_authority_unsupported`, `unsafe_state_path`, `workspace_config_invalid`, `semantic_queue_invalid`, `registry_invalid`, `workspace_state_invalid` | respectively `none`, `install_candidate_authority`, `install_candidate_authority`, `install_supported_candidate`, `configure_safe_state_root`, `inspect_workspace_state`, `inspect_semantic_queue`, `inspect_workspace_state`, `inspect_workspace_state` |
 | `commit_unknown` / 20 | `semantic_worker_commit_unknown` | `none` |
 
 Before an accepted `begin`, observed EOF, a catchable interruption, or malformed,
@@ -229,6 +230,14 @@ also proves that no item is eligible, and then emits truthful `idle`. Any other
 absent-claim state, unreadable state, or ambiguity is
 `semantic_worker_commit_unknown`; absence alone is not a preclaim-failure route.
 
+Registry corruption proved before any potentially mutating store call is
+`registry_invalid`; lease-state corruption proved at that boundary is
+`workspace_state_invalid`. Both are `invalid` / `inspect_workspace_state`, do
+not call the current-session queue failure transition, and do not claim release.
+If acquisition, heartbeat, or release may have mutated durable state, unreadable
+or ambiguous state follows the phase-specific
+`semantic_worker_commit_unknown` rules instead.
+
 The process exits 0 only after a `completed` terminal or a truthful `idle`
 terminal with no eligible item. Exit 64 is reserved for an invalid argument
 vector and emits no result frame.
@@ -243,6 +252,14 @@ exits 0 and its final frame is exactly one schema-valid `completed` terminal
 whose begin-request, work, payload, and result-binding digests match the
 captured session. `idle` is never semantic completion authority. A `work` or
 `checkpointed` frame is never result or queue-completion authority.
+
+Each result frame is fully encoded before a bounded write-all and flush. A
+positive short write advances the byte offset and is retried. Emission succeeds
+only after every byte, including the final newline, is written and the flush
+succeeds. Closed output, zero progress, partial-then-error, broken pipe, or flush
+failure is an output-delivery failure. A receiver accepts only a complete
+canonical newline-terminated frame. Partial trailing bytes are not a frame, and
+complete-looking bytes are not completion authority without the required exit 0.
 
 ## Claim and source authority
 
@@ -280,8 +297,13 @@ reopens the contained active-source path without following links. `UPSERT`
 requires a regular file whose streamed SHA-256 exactly equals
 `content_sha256`; `DELETE` requires that path to remain absent. A mismatch under
 a still-current claim is the transport-owned non-retryable
-`source_content_changed` failure. Activation, migration, or lease drift instead
-withholds stale authority and does not rewrite it as a queue failure.
+`source_content_changed` failure only after a completed observation proves the
+different content or presence state. An open, stat, permission, or read error,
+including a short-read fault that leaves the observation unable to prove the
+expected bytes or absence, is the transport-owned retryable
+`source_unavailable` failure.
+Activation, migration, or lease drift instead withholds stale authority and does
+not rewrite it as either queue failure.
 
 The host agent treats the verified source file as untrusted data and keeps
 Graphify's extraction instructions separate from source content. The transport
@@ -305,7 +327,8 @@ no alias or unknown nested key is accepted:
 
 Node and hyperedge IDs and every edge endpoint/member use the existing semantic
 ID grammar and length bound. Node IDs are unique, hyperedge IDs are unique, all
-edge endpoints name input nodes, and every hyperedge member names an input node.
+edge endpoints name input nodes, and every hyperedge has 2--256 pairwise-distinct
+members that name input nodes.
 `label` is a nonempty, trimmed string of at most 16 KiB in UTF-8 and contains no
 Unicode general-category `Cc` code point. `file_type` is one of `code`,
 `document`, `paper`, `image`, `rationale`, or `concept`. Edge `relation` is one
@@ -332,14 +355,17 @@ by the sanitizer's exact double-newline separator and is at most 16 KiB in
 UTF-8. The post-sanitize schema otherwise retains the exact field sets and
 value rules above, permits only `code`, `document`, `paper`, or `image` as
 surviving file types, and requires every retained edge and hyperedge member to
-name a surviving node.
+name a surviving node. Every retained hyperedge has at least two
+pairwise-distinct members. Duplicate input members are rejected before the
+sanitizer, not deduplicated by it.
 
 The implementation must perform this ordering exactly:
 
 1. enforce the complete-frame and payload byte limits before unbounded parse;
 2. for `UPSERT`, enforce the closed pre-sanitize schema plus the existing
-   semantic limits: at most 10,000 nodes, 100,000 edges, 10,000 hyperedges, 256
-   members per hyperedge, and 256 characters per semantic ID, then run
+   semantic limits: at most 10,000 nodes, 100,000 edges, 10,000 hyperedges,
+   2--256 pairwise-distinct members per hyperedge, and 256 characters per
+   semantic ID. Reject duplicate members before sanitizer invocation, then run
    `validate_semantic_fragment()` through the exact-decimal encoder hook above;
 3. build one `rationale_for` source-to-target index in a single edge pass,
    identify rationale candidates in one node pass, and precompute expansion
@@ -436,13 +462,17 @@ only while the explicit queue retry budget permits; otherwise, and for every
 non-retryable classification, the item becomes durable `dead_letter`.
 Dead-letter work continues to block reconciliation completion.
 
-Once a queue claim exists, the worker maps deadline expiry to
-`host_agent_timeout`, EOF or interruption before a terminal request to
-`host_agent_interrupted`, malformed, noncanonical, unknown, oversized, or
-invalid result data to `semantic_result_invalid`, and exact source mismatch to
-`source_content_changed`. An exact different-byte staging conflict maps to
-`semantic_result_binding_conflict`. It attempts one `fail()` while the claim
-remains live.
+With a live claim, the transport maps deadline expiry to `host_agent_timeout`;
+EOF while awaiting a request or catchable interruption before terminal
+acceptance to `host_agent_interrupted`; invalid result data to
+`semantic_result_invalid`; incomplete source observation to
+`source_unavailable`; proven source mismatch to `source_content_changed`; and an
+exact different-byte staging conflict to `semantic_result_binding_conflict`.
+After an accepted `complete`, the interruption route remains available through
+validation, sanitization, hashing, installation, and other work until queue
+completion or failure mutation begins. After an accepted `fail`, its caller
+classification remains primary until that failure transition starts. Each
+transport-owned failure attempts one `fail()` while the claim remains live.
 Unknown caller classifications, invalid Boolean retryability, stale claims, and
 activation or migration drift are not rewritten into caller-selected queue
 failures. They fail closed or withhold stale authority. If the worker process
@@ -468,6 +498,22 @@ recovery remains permitted as specified above. The same current-session
 no-claim rule applies to interruption, checkout, configuration, capability,
 CAS, contention, capacity, and staged-barrier rejection.
 
+Output-delivery failure never triggers another write. The worker exits 20 and
+applies these phase rules:
+
+- before a current-session claim, leave the queue unchanged after any required
+  lease cleanup;
+- while emitting `work` or `checkpointed` before queue completion or failure
+  mutation, take the `host_agent_interrupted=true` failure route once while the
+  claim is live, then apply normal failure cleanup; and
+- while emitting a terminal, do not repeat the determined queue transition or
+  lease release. A lost `idle` leaves the queue unchanged; a lost `completed` is
+  publicly `commit_unknown` because the queue cannot reconstruct its result
+  association.
+
+Downstream consumption remains forbidden even if all frame bytes reached the
+receiver before the writer observed failure.
+
 After that deadline, checkpoints and completion are forbidden and heartbeats
 stop. If the claim is still live, the worker may attempt only the one
 transport-owned `host_agent_timeout=true` failure and lease release before the
@@ -490,7 +536,9 @@ Commit uncertainty is phase-specific and fail-closed:
   deadlines remain. Absence, replacement, or expiry withholds stale authority;
   any other or unreadable state is `semantic_worker_commit_unknown`. No
   checkpoint, completion, or failure may proceed from the pre-heartbeat grant
-  until that reread proves one of those states;
+  until that reread proves one of those states. A deterministic registry or
+  lease-state corruption proved before heartbeat mutation instead follows the
+  named `registry_invalid` or `workspace_state_invalid` route above;
 - uncertain result installation is adopted only after a no-follow reopen proves
   the exact expected bytes and digest; absence may retry under the same live
   claim. Exact different bytes follow the binding-conflict failure route only
@@ -513,10 +561,13 @@ Commit uncertainty is phase-specific and fail-closed:
   An `idle` success path applies the same proof before its terminal.
   An observed release return or one locked reread proving that exact owner/fence
   absent permits the frame; the exact unchanged record may retry only before
-  its liveness deadline. Unreadable or ambiguous state is `commit_unknown`, so
-  no success frame has yet been emitted. Release remains cleanup rather than
-  commit acceptance: release-only failure or uncertainty after proven
-  completion is `commit_unknown`, while release cannot mask a primary failure.
+  its liveness deadline. Deterministic registry or lease-state corruption proved
+  before release mutation follows its named invalid route and permits no success
+  frame. When release may have mutated, unreadable or ambiguous state is
+  `commit_unknown`, so no success frame has yet been emitted. Release is cleanup,
+  not commit acceptance: any other release-only failure or uncertainty after
+  proven completion is `commit_unknown`, and release cannot mask a primary
+  failure.
 
 The current completed queue item does not retain a result digest after
 `complete()` clears its claim. Therefore a crash after completion begins but

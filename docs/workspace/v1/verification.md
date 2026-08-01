@@ -504,8 +504,11 @@ implementation acceptance criteria, not evidence that the command exists:
   source-relative work frame. `UPSERT` stream-hashes the exact regular file and
   `DELETE` requires absence before emitting `work`, again before staging, and a
   final time after envelope/authority validation immediately before
-  `complete()`. A source change during validation, installation, or checkpoint
-  follows `source_content_changed` rather than advancing the watermark.
+  `complete()`. Only a completed observation proving mismatch follows
+  `source_content_changed` rather than advancing the watermark.
+  Open/stat/permission/read faults, including short-read faults that leave the
+  observation incomplete, instead exercise retryable
+  `source_unavailable` / `restore_source` without claiming content drift.
   Activation, migration, lease expiry, queue drift, and replacement desired work
   invalidate the stale session at every mutation boundary;
 - `complete` accepts exactly one operation-matched payload: an `UPSERT`
@@ -513,8 +516,9 @@ implementation acceptance criteria, not evidence that the command exists:
   kind-only `DELETE` tombstone. Before the general validator or sanitizer, tests
   enforce the exact worker-specific node/edge/hyperedge field sets, types,
   enums, unique and referentially valid IDs, exact `work.path` provenance, null
-  metadata fields, 16-KiB semantic-text limits, and rejection of every unknown
-  nested field. Tests reject smuggling through absolute-path, raw-source,
+  metadata fields, two through 256 pairwise-distinct members per hyperedge,
+  16-KiB semantic-text limits, and rejection of duplicate members and every
+  unknown nested field. Tests reject smuggling through absolute-path, raw-source,
   credential-metadata, and provider-data extension keys; only the explicitly
   bounded semantic text slots remain, and none is copied to public output;
 - fixed-point canonicality vectors accept bounded scores such as `0.75` and the
@@ -573,14 +577,15 @@ implementation acceptance criteria, not evidence that the command exists:
   `completed`. Substitution vectors vary each digest or binding independently,
   and injected races at every boundary prove no completion without the exact
   binding and no success frame before released-lease proof;
-- the eight frozen failure classifications accept only their specified
-  retryability. Three are accepted from `fail`; five are transport-only; and
+- the nine frozen failure classifications accept only their specified
+  retryability. Three are accepted from `fail`; six are transport-only; and
   `semantic_work_unsupported` is also transport-derived when a work frame would
   exceed the public bound. Timeout, EOF/interruption, malformed or invalid
-  result data, source mismatch, and result-binding conflict attempt exactly one
-  worker-owned `fail()` under the live claim. Failure count advances once; retry
-  occurs only within the explicit budget, while non-retryable or exhausted work
-  becomes durable dead-letter and blocks completed watermark advancement. A
+  result data, source unavailability or mismatch, and result-binding conflict
+  attempt exactly one worker-owned `fail()` under the live claim. Failure count
+  advances once; retry occurs only within the explicit budget, while
+  non-retryable or exhausted work becomes durable dead-letter and blocks
+  completed watermark advancement. A
   worker crash before that transition is recovered only through the existing
   `claim_expired` rule;
 - deadline tests start one absolute work deadline only after the canonical
@@ -604,6 +609,17 @@ implementation acceptance criteria, not evidence that the command exists:
   reject checkpoints, completion, and further heartbeats and permit exactly one
   transport-owned `host_agent_timeout=true` failure plus lease release before
   the unchanged lease liveness deadline;
+- interruption vectors inject a catchable interruption after an accepted
+  `complete` at validation, sanitization, hashing, installation, and the last
+  pre-mutation boundary. They exercise exactly one
+  `host_agent_interrupted=true` failure before queue completion/failure begins.
+  A vector after accepted `fail` preserves its exact caller classification;
+  interruption after either queue mutation begins is commit-unknown;
+- registry and lease corruption vectors distinguish deterministic read failures
+  before acquisition, heartbeat, or release mutation from post-mutation
+  ambiguity. The former emit `registry_invalid` or `workspace_state_invalid` /
+  `inspect_workspace_state` without a current-session queue failure; the latter
+  follow the phase-specific commit-unknown reread rules;
 - post-commit fault injection at lease acquisition adopts only the unique exact
   next owner/fence/domain-epoch record derived from the retained pre-acquisition
   snapshot; absence, contention, authority drift, and ambiguity exercise their
@@ -631,7 +647,12 @@ implementation acceptance criteria, not evidence that the command exists:
   per-kind field set, and limits failure reason/action values to the frozen
   enums. Output frames contain no source bytes, semantic payload, secret,
   credential, provider/model data, private absolute path, owner/fence detail,
-  environment value, raw exception, or extension text;
+  environment value, raw exception, or extension text. Output-writer tests prove
+  short-write retry and fail closed on partial-then-error, zero progress, broken
+  pipe, closed output, or flush failure. They reject partial records; route failed
+  `work`/`checkpointed` delivery through one interruption failure; forbid a
+  replacement frame; require exit 20 for delivery failures; and reject a lost
+  `completed` terminal as consumable authority;
 - recursive source, Git, real `HOME`, real `XDG_STATE_HOME`, real
   `CODEX_HOME`, graph, receipt, and global-install snapshots remain unchanged.
   The only permitted writes are the reviewed queue/lease transitions and
