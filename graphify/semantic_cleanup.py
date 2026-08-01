@@ -91,7 +91,7 @@ def validate_semantic_fragment(
         if not isinstance(node, dict):
             errors.append(f"nodes[{i}] must be an object")
             continue
-        _validate_semantic_id(errors, f"nodes[{i}].id", node.get("id"))
+        validate_semantic_id(errors, f"nodes[{i}].id", node.get("id"))
         file_type = node.get("file_type")
         if file_type is not None and file_type not in VALID_SEMANTIC_FILE_TYPES:
             errors.append(
@@ -105,8 +105,8 @@ def validate_semantic_fragment(
         if not isinstance(edge, dict):
             errors.append(f"edges[{i}] must be an object")
             continue
-        _validate_semantic_id(errors, f"edges[{i}].source", edge.get("source"))
-        _validate_semantic_id(errors, f"edges[{i}].target", edge.get("target"))
+        validate_semantic_id(errors, f"edges[{i}].source", edge.get("source"))
+        validate_semantic_id(errors, f"edges[{i}].target", edge.get("target"))
 
     hyperedges = fragment.get("hyperedges", [])
     if hyperedges is None:
@@ -129,7 +129,7 @@ def validate_semantic_fragment(
             # an alias-keyed hyperedge isn't rejected here for "nodes must be a
             # list" before it ever reaches build's normalization.
             _normalize_hyperedge_members(he)
-            _validate_semantic_id(errors, f"hyperedges[{i}].id", he.get("id"))
+            validate_semantic_id(errors, f"hyperedges[{i}].id", he.get("id"))
             he_nodes = he.get("nodes")
             if not isinstance(he_nodes, list):
                 errors.append(f"hyperedges[{i}].nodes must be a list")
@@ -142,7 +142,7 @@ def validate_semantic_fragment(
             for j, ref in enumerate(he_nodes):
                 if progress is not None and j % 256 == 0:
                     progress()
-                _validate_semantic_id(errors, f"hyperedges[{i}].nodes[{j}]", ref)
+                validate_semantic_id(errors, f"hyperedges[{i}].nodes[{j}]", ref)
 
     return errors
 
@@ -171,7 +171,9 @@ def load_validated_semantic_fragment(path: Path) -> tuple[dict | None, list[str]
     return (None, errors) if errors else (fragment, [])
 
 
-def _validate_semantic_id(errors: list[str], field: str, value: object) -> None:
+def validate_semantic_id(errors: list[str], field: str, value: object) -> None:
+    """Append stable validation errors for one semantic identifier."""
+
     if not isinstance(value, str):
         errors.append(f"{field} must be a string")
         return
@@ -184,6 +186,9 @@ def _validate_semantic_id(errors: list[str], field: str, value: object) -> None:
         errors.append(f"{field} must not contain path separators or '..'")
     if not _SEMANTIC_ID_RE.fullmatch(value):
         errors.append(f"{field} contains unsupported characters")
+
+
+_validate_semantic_id = validate_semantic_id
 
 
 def sanitize_semantic_fragment(
@@ -254,11 +259,11 @@ def sanitize_semantic_fragment(
         if ft in _invalid_ft:
             # Explicitly-invalid file_type ("rationale" or "concept"): if
             # the label looks like a sentence we may convert to attribute.
-            if _is_sentence_like_rationale_label(label):
+            if is_sentence_like_rationale_label(label):
                 rationale_candidates.append(n)
             remove_ids.add(nid)
             continue
-        if nid in rationale_targets and _is_sentence_like_rationale_label(label):
+        if nid in rationale_targets and is_sentence_like_rationale_label(label):
             # Allowed file_type, but the node sources a `rationale_for` edge
             # AND its label is sentence-like prose. Treat it as rationale
             # cleanup material rather than a real graph entity.
@@ -331,7 +336,7 @@ def sanitize_semantic_fragment(
     return fragment
 
 
-def _is_sentence_like_rationale_label(label: str) -> bool:
+def is_sentence_like_rationale_label(label: str) -> bool:
     """Return True if *label* looks like prose / rationale text rather than an
     entity or concept name.
 
@@ -350,6 +355,9 @@ def _is_sentence_like_rationale_label(label: str) -> bool:
             return False
     # Must look like actual prose: has sentence-ending punctuation or a colon.
     return bool(re.search(r"[.!?:]", label))
+
+
+_is_sentence_like_rationale_label = is_sentence_like_rationale_label
 
 
 def _append_rationale_attr(node: dict, texts: list[str]) -> None:

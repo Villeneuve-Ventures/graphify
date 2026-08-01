@@ -529,7 +529,7 @@ def _fixed_point(value: object, label: str) -> Decimal:
 
 def _semantic_id(value: object, label: str) -> str:
     errors: list[str] = []
-    semantic_cleanup._validate_semantic_id(errors, label, value)
+    semantic_cleanup.validate_semantic_id(errors, label, value)
     if errors:
         raise SemanticResultInvalid(errors[0])
     return cast(str, value)
@@ -714,10 +714,10 @@ def _project_sanitized_fragment(
         node_id = cast(str, node["id"])
         label = cast(str, node["label"])
         if node.get("file_type") in {"rationale", "concept"}:
-            if semantic_cleanup._is_sentence_like_rationale_label(label):
+            if semantic_cleanup.is_sentence_like_rationale_label(label):
                 rationale_candidates.append(node)
             remove_ids.add(node_id)
-        elif node_id in rationale_targets and semantic_cleanup._is_sentence_like_rationale_label(
+        elif node_id in rationale_targets and semantic_cleanup.is_sentence_like_rationale_label(
             label
         ):
             rationale_candidates.append(node)

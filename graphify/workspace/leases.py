@@ -44,6 +44,7 @@ from graphify.workspace.registry import RegistryStore, RevisionConflict
 
 
 _MAX_STAGED_BUILD_STATE_BYTES = 64 * 1024
+_MAX_WORKSPACE_LEASE_STATE_BYTES = 64 * 1024
 _STAGED_BUILD_TERMINAL_STATES = frozenset({"PROMOTED", "ABANDONED"})
 _STAGED_ATTEMPT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -403,6 +404,7 @@ class LeaseStore:
         pending_present = self.state.private_file_exists(pending)
         raw = self.state.read_optional_existing_bytes(
             current,
+            max_bytes=_MAX_WORKSPACE_LEASE_STATE_BYTES,
             deadline_ns=deadline_ns,
         )
         if raw is None:

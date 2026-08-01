@@ -1314,7 +1314,10 @@ class SemanticQueueStore:
                 "allow_missing": True,
             }
             if recover:
-                snapshot = self.state.recover_record(**kwargs)
+                snapshot = self.state.recover_record(
+                    **kwargs,
+                    deadline_ns=deadline_ns,
+                )
             else:
                 snapshot = self.state.read_stable_record(
                     **kwargs,
@@ -2273,6 +2276,7 @@ class SemanticQueueStore:
         pending_present = self.state.private_file_exists(pending)
         raw = self.state.read_optional_existing_bytes(
             current,
+            max_bytes=self.policy.max_bytes,
             deadline_ns=deadline_ns,
         )
         if raw is None:

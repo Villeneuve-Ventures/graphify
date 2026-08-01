@@ -19,7 +19,6 @@ from typing import Any, cast, Mapping, Sequence, TextIO
 import graphify.workspace.rollback as rollback_runtime
 import graphify.workspace.gc_command as gc_command_runtime
 import graphify.workspace.repair as repair_runtime
-import graphify.workspace.semantic_worker as semantic_worker_runtime
 
 from graphify.workspace.adapters import (
     QueryRejected,
@@ -2908,6 +2907,8 @@ def run_workspace_command(
                 _SEMANTIC_WORKER_USAGE + "\n",
                 exit_code=EXIT_USAGE,
             )
+        import graphify.workspace.semantic_worker as semantic_worker_runtime
+
         protocol_input = getattr(sys.stdin, "buffer", sys.stdin)
         protocol_output = getattr(output, "buffer", output)
         try:
@@ -3290,11 +3291,15 @@ def load_repair_execute_result_schema() -> dict[str, Any]:
 def load_semantic_worker_request_schema() -> dict[str, Any]:
     """Load the public canonical semantic-worker request schema."""
 
+    import graphify.workspace.semantic_worker as semantic_worker_runtime
+
     return semantic_worker_runtime.load_request_schema()
 
 
 def load_semantic_worker_result_schema() -> dict[str, Any]:
     """Load the public redacted semantic-worker result schema."""
+
+    import graphify.workspace.semantic_worker as semantic_worker_runtime
 
     return semantic_worker_runtime.load_result_schema()
 

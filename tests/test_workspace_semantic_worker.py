@@ -422,6 +422,26 @@ def test_general_workspace_usage_lists_semantic_worker() -> None:
     assert _USAGE in stderr.getvalue()
 
 
+def test_workspace_cli_import_does_not_eagerly_load_semantic_worker() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import graphify.workspace.cli; "
+                "raise SystemExit(int('graphify.workspace.semantic_worker' in sys.modules))"
+            ),
+        ],
+        cwd=Path(__file__).parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_valid_semantic_worker_dispatch_loads_and_composes_before_protocol_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,7 +461,7 @@ def test_valid_semantic_worker_dispatch_loads_and_composes_before_protocol_read(
         lambda value: events.append("compose") or (runtime if value is inputs else None),
     )
     monkeypatch.setattr(
-        workspace_cli.semantic_worker_runtime,
+        semantic_worker,
         "run_semantic_worker",
         lambda value, **_kwargs: events.append("protocol") or (0 if value is runtime else 20),
     )
@@ -1214,6 +1234,95 @@ def test_semantic_worker_never_replays_uncertain_queue_completion(
             )
     assert pending is True
     assert snapshot.items[0].status == "completed"
+
+
+def test_uncertain_state_reads_apply_deadlines_and_byte_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _begin = _runtime_with_one_readme_work(tmp_path)
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: dict[str, tuple[int | None, int | None]] = {}
+
+    with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns) as document:
+        with runtime.leases.read_only_workspace_lock(
+            HARNESS_REPO_UUID,
+            deadline_ns=deadline_ns,
+        ):
+            original_lease_read = runtime.leases.state.read_optional_existing_bytes
+            original_queue_read = runtime.semantic_queue.state.read_optional_existing_bytes
+
+            def bounded_lease_read(relative: str | Path, **kwargs: Any) -> bytes | None:
+                observed[Path(relative).name] = (
+                    kwargs.get("max_bytes"),
+                    kwargs.get("deadline_ns"),
+                )
+                return original_lease_read(relative, **kwargs)
+
+            def bounded_queue_read(relative: str | Path, **kwargs: Any) -> bytes | None:
+                observed[Path(relative).name] = (
+                    kwargs.get("max_bytes"),
+                    kwargs.get("deadline_ns"),
+                )
+                return original_queue_read(relative, **kwargs)
+
+            monkeypatch.setattr(
+                runtime.leases.state,
+                "read_optional_existing_bytes",
+                bounded_lease_read,
+            )
+            monkeypatch.setattr(
+                runtime.semantic_queue.state,
+                "read_optional_existing_bytes",
+                bounded_queue_read,
+            )
+            runtime.leases.read_uncertain_snapshot_locked(
+                document,
+                HARNESS_REPO_UUID,
+                deadline_ns=deadline_ns,
+            )
+            runtime.semantic_queue.read_uncertain_snapshot_locked(
+                HARNESS_REPO_UUID,
+                deadline_ns=deadline_ns,
+            )
+
+    lease_bound, lease_deadline = observed["workspace.json"]
+    queue_bound, queue_deadline = observed["semantic.jsonl"]
+    assert lease_bound is not None and lease_bound > 0
+    assert queue_bound == runtime.semantic_queue.policy.max_bytes
+    assert lease_deadline == queue_deadline == deadline_ns
+
+
+def test_semantic_queue_recovery_propagates_worker_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _begin = _runtime_with_one_readme_work(tmp_path)
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed_deadlines: list[int | None] = []
+
+    with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns):
+        with runtime.leases.read_only_workspace_lock(
+            HARNESS_REPO_UUID,
+            deadline_ns=deadline_ns,
+        ):
+            original_recover = runtime.semantic_queue.state.recover_record
+
+            def recover_record(**kwargs: Any) -> object:
+                observed_deadlines.append(kwargs.get("deadline_ns"))
+                return original_recover(**kwargs)
+
+            monkeypatch.setattr(
+                runtime.semantic_queue.state,
+                "recover_record",
+                recover_record,
+            )
+            runtime.semantic_queue._load_locked(
+                HARNESS_REPO_UUID,
+                deadline_ns=deadline_ns,
+            )
+
+    assert observed_deadlines == [deadline_ns]
 
 
 def test_semantic_worker_truthful_idle_releases_before_terminal(
