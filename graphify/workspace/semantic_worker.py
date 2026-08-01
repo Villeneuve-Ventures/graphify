@@ -1153,6 +1153,8 @@ def parse_result_binding(
             parse_int=int,
             parse_constant=_reject_constant,
         )
+    except RecursionError as exc:
+        raise SemanticResultInvalid("result binding nesting is too deep") from exc
     except Exception as exc:
         raise SemanticResultInvalid("result binding is not valid JSON") from exc
     _report_progress(progress)
@@ -1477,6 +1479,8 @@ def parse_result_frame(raw: bytes) -> Mapping[str, object]:
             parse_int=int,
             parse_constant=_reject_constant,
         )
+    except RecursionError as exc:
+        raise SemanticResultInvalid("public result nesting is too deep") from exc
     except Exception as exc:
         raise SemanticResultInvalid("public result is not valid JSON") from exc
     if not isinstance(parsed, dict):

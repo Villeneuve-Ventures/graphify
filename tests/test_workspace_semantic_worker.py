@@ -401,7 +401,7 @@ def test_result_binding_parser_rejects_an_under_limit_payload_depth_bomb() -> No
         ),
         payload=validated,
     )
-    depth_bomb = b"[" * 1_000 + b"0" + b"]" * 1_000
+    depth_bomb = b"[" * 10_000 + b"0" + b"]" * 10_000
     fragment_end = b'},"kind":"semantic_fragment"}'
     poisoned_payload = validated.canonical[:-1].replace(
         fragment_end,
@@ -413,7 +413,7 @@ def test_result_binding_parser_rejects_an_under_limit_payload_depth_bomb() -> No
 
     with pytest.raises(
         semantic_worker.SemanticResultInvalid,
-        match="bound payload nesting is too deep",
+        match="(?:result binding|bound payload) nesting is too deep",
     ):
         semantic_worker.parse_result_binding(raw)
 
@@ -2260,7 +2260,7 @@ def test_semantic_worker_rejects_an_under_limit_request_depth_bomb() -> None:
 
 
 def test_result_parser_rejects_an_under_limit_depth_bomb() -> None:
-    depth_bomb = b"[" * 1_000 + b"0" + b"]" * 1_000
+    depth_bomb = b"[" * 10_000 + b"0" + b"]" * 10_000
     result = b'{"zz":' + depth_bomb + b"}\n"
     assert len(result) < semantic_worker.RESULT_MAX_BYTES
 
