@@ -3,14 +3,23 @@
 ## Exact-head GitHub review disposition gate
 
 GitHub review evidence is repository- and revision-bound. Every GitHub CLI call
-used for Graphify review or closeout must specify
-`--repo Villeneuve-Ventures/graphify`; an unqualified result is not authority.
+used for Graphify review or closeout must be repository-qualified. Commands
+that accept `--repo` must specify `--repo Villeneuve-Ventures/graphify`;
+repository-specific REST `gh api` calls must use an explicit
+`repos/Villeneuve-Ventures/graphify/...` endpoint; and `gh api graphql` calls
+must bind explicit `owner=Villeneuve-Ventures` and `repo=graphify` variables.
+An unqualified result is not authority.
+
 Before classifying a finding, record the canonical repository, pull request
-number, immutable review-thread node ID, current path and line anchor, full base
-commit, exact reviewed head commit and tree, changed-file manifest, and the
-thread's explicit `isResolved` and `isOutdated` values. `isResolved=false`
-records the thread as unresolved. Invalidate the classification if the head or
-governing instructions change.
+number, source kind, and immutable source node ID when GitHub provides one. For
+a review thread, also record its immutable thread node ID, current and original
+path and line anchors, and explicit `isResolved` and `isOutdated` values;
+`isResolved=false` records the thread as unresolved. For a PR-description or
+top-level-comment source, preserve the exact claim in the durable record and
+record thread identity, location, and state as `not-applicable` rather than
+inventing them. Every source record also includes the full base commit, exact
+reviewed head commit and tree, and an exact-SHA changed-file manifest. Invalidate
+the classification if the head or governing instructions change.
 
 Each substantive thread receives exactly one evidence-backed disposition:
 

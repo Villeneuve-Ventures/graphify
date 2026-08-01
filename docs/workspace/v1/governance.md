@@ -125,11 +125,83 @@ statuses. `JOS` means `justified out-of-scope`:
 
 | ID | Source | Tracking state | Justification and scope boundary | Activation trigger and closure evidence |
 |---|---|---|---|---|
-| `JOS-GC-CAPACITY-V1` | PR [#35](https://github.com/Villeneuve-Ventures/graphify/pull/35) and governance PR [#36](https://github.com/Villeneuve-Ventures/graphify/pull/36) | `DOCUMENTED_NONCLAIM` | The published capacity-policy representation is compatibility-sensitive, while the accepted preview makes no performance/resource or bounded pre-enumeration claim. Those are legitimate future boundaries, but the delivery and receipt were limited to the read-only preview. | The boundary remains owned by the [workspace ownership map](README.md#governance-and-deferred-work-ownership). Closure is not applicable while this entry remains `DOCUMENTED_NONCLAIM`; the [accepted preview receipt](receipts/p5b2-offline-gc-preview.md) is its permanent boundary evidence. Activate only through a separately authorized versioned compatibility change or qualification batch, which must define its own closure receipt or qualification test before changing the boundary. |
-| `JOS-GC-PREVIEW-VERSION` | PR [#37](https://github.com/Villeneuve-Ventures/graphify/pull/37) | `TRIGGER_GATED` | [`gc_preview_result_bytes()`](../../../graphify/workspace/gc_command.py) selects `GC_LIFECYCLE_SCHEMA_VERSION`, so a future lifecycle-v2 change could drift frozen preview-v1 bytes. Current v1 behavior is not defective, and the lifecycle delivery did not authorize a speculative version refactor. | Activate before changing either lifecycle or preview schema versioning. Closure must independently freeze preview-version selection and prove preview-v1 canonical bytes remain unchanged across a lifecycle-version change. |
-| `JOS-BOUNDED-INPUT-READERS` | PR [#39](https://github.com/Villeneuve-Ventures/graphify/pull/39) | `OPPORTUNISTIC` | Repeated bounded-input readers across established commands are justified maintainability debt, but consolidating them was a cross-command refactor outside the pointer-repair PR's surgical behavior fixes. | Activate only when an authorized batch adds another `--request-stdin` command or changes more than one established reader. Closure requires regression-locked parser behavior and must preserve each command's bounds, canonicality, error mapping, authority-loading order, and deadline semantics. |
-| `JOS-PR-AGENT-DRAIN` | PR [#40](https://github.com/Villeneuve-Ventures/graphify/pull/40) | `GUARDED` | The pinned PR-Agent revision relies on a private drain-aware runner, which creates a real pin-upgrade compatibility risk. The current exact pin imports and executes it successfully, so this is not a defect in the delivered workflow. | The [policy regression](../../../tests/test_pr_agent_policy.py) requires the exact import and call. Reactivate on any PR-Agent pin or runner-import change. Closure requires an exact-import smoke test and proof that review/description completion remains drain-aware with no silent legacy fallback. |
-| `JOS-SEMANTIC-WORKER-CONFORMANCE` | Contract PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) | `SEPARATE_AUTHORIZATION_REQUIRED` | The frozen prose contract has no machine-readable request/result schema, equivalent closed runtime validator, conformance suite, or implementation. PR #43 was contract-only and explicitly excluded that work. | Activate only through explicit operator authorization for the implementation successor. Closure requires schemas or equivalent closed validators, conformance tests, and implementation of the frozen exact-decimal, checkpoint-capacity, uncertainty-recovery, and deadline-aware delivery behavior in [`semantic-sync.md`](semantic-sync.md). Full semantic sync and every explicit backend remain excluded, and completion still requires a separate governance-only receipt. |
+| `JOS-GC-CAPACITY-V1` | PR [#35](https://github.com/Villeneuve-Ventures/graphify/pull/35) and governance PR [#36](https://github.com/Villeneuve-Ventures/graphify/pull/36); [exact-head evidence](#jos-gc-capacity-v1-evidence) | `DOCUMENTED_NONCLAIM` | The published capacity-policy representation is compatibility-sensitive, while the accepted preview makes no performance/resource or bounded pre-enumeration claim. Those are legitimate future boundaries, but the delivery and receipt were limited to the read-only preview. | The boundary remains owned by the [workspace ownership map](README.md#governance-and-deferred-work-ownership). Closure is not applicable while this entry remains `DOCUMENTED_NONCLAIM`; the [accepted preview receipt](receipts/p5b2-offline-gc-preview.md) is its permanent boundary evidence. Activate only through a separately authorized versioned compatibility change or qualification batch, which must define its own closure receipt or qualification test before changing the boundary. |
+| `JOS-GC-PREVIEW-VERSION` | PR [#37](https://github.com/Villeneuve-Ventures/graphify/pull/37); [exact-head evidence](#jos-gc-preview-version-evidence) | `TRIGGER_GATED` | [`gc_preview_result_bytes()`](../../../graphify/workspace/gc_command.py) selects `GC_LIFECYCLE_SCHEMA_VERSION`, so a future lifecycle-v2 change could drift frozen preview-v1 bytes. Current v1 behavior is not defective, and the lifecycle delivery did not authorize a speculative version refactor. | Activate before changing either lifecycle or preview schema versioning. Closure must independently freeze preview-version selection and prove preview-v1 canonical bytes remain unchanged across a lifecycle-version change. |
+| `JOS-BOUNDED-INPUT-READERS` | PR [#39](https://github.com/Villeneuve-Ventures/graphify/pull/39); [exact-head evidence](#jos-bounded-input-readers-evidence) | `OPPORTUNISTIC` | Repeated bounded-input readers across established commands are justified maintainability debt, but consolidating them was a cross-command refactor outside the pointer-repair PR's surgical behavior fixes. | Activate only when an authorized batch adds another `--request-stdin` command or changes more than one established reader. Closure requires regression-locked parser behavior and must preserve each command's bounds, canonicality, error mapping, authority-loading order, and deadline semantics. |
+| `JOS-PR-AGENT-DRAIN` | PR [#40](https://github.com/Villeneuve-Ventures/graphify/pull/40); [exact-head evidence](#jos-pr-agent-drain-evidence) | `GUARDED` | The pinned PR-Agent revision relies on a private drain-aware runner, which creates a real pin-upgrade compatibility risk. The current exact pin imports and executes it successfully, so this is not a defect in the delivered workflow. | The [policy regression](../../../tests/test_pr_agent_policy.py) requires the exact import and call. Reactivate on any PR-Agent pin or runner-import change. Closure requires an exact-import smoke test and proof that review/description completion remains drain-aware with no silent legacy fallback. |
+| `JOS-SEMANTIC-WORKER-CONFORMANCE` | Contract PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43); [exact-head evidence](#jos-semantic-worker-conformance-evidence) | `SEPARATE_AUTHORIZATION_REQUIRED` | The frozen prose contract has no machine-readable request/result schema, equivalent closed runtime validator, conformance suite, or implementation. PR #43 was contract-only and explicitly excluded that work. | Activate only through explicit operator authorization for the implementation successor. Closure requires schemas or equivalent closed validators, conformance tests, and implementation of the frozen exact-decimal, checkpoint-capacity, uncertainty-recovery, and deadline-aware delivery behavior in [`semantic-sync.md`](semantic-sync.md). Full semantic sync and every explicit backend remain excluded, and completion still requires a separate governance-only receipt. |
+
+### Exact-head source evidence
+
+These records were refreshed at `2026-08-01T04:32:53Z` for canonical repository
+`Villeneuve-Ventures/graphify`. Each exact-SHA compare link is the changed-file
+manifest for its recorded base and head.
+`not-applicable` is explicit when a finding came from a PR description or a
+top-level comment instead of a review thread; thread identity, location, or
+workflow state is never inferred.
+
+#### JOS-GC-CAPACITY-V1 evidence
+
+- Source record: `PR_DESCRIPTION_NONCLAIM`; PR #35's “Non-blocking architecture
+  watch” and PR #36's “Residual nonclaims” preserve the exact claim that the
+  capacity-policy representation is compatibility-sensitive and the accepted
+  preview makes no performance/resource or bounded pre-enumeration claim.
+- PR #35 revision: base `129e4d561a10061f2629780b5f5c221c0f19449b`, head
+  `b32503e0aabf802970d9d7032a07e0a322f41c28`, tree
+  `1104ac8a74b4abd1bf2e46cb1439cc3d29d6639a`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/129e4d561a10061f2629780b5f5c221c0f19449b...b32503e0aabf802970d9d7032a07e0a322f41c28).
+- PR #36 confirmation: base `864a3e77a66f83a45e3ee9395180dc511b4bf059`,
+  head `e95960b9f1d852c45405a96ffee39eb4e8811d94`, tree
+  `cda837c38f16fa6a17599cdc41efbfe99f9ba5ab`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/864a3e77a66f83a45e3ee9395180dc511b4bf059...e95960b9f1d852c45405a96ffee39eb4e8811d94).
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`.
+
+#### JOS-GC-PREVIEW-VERSION evidence
+
+- Source record: `TOP_LEVEL_COMMENT`; Qodo's [PR #37 assessment](https://github.com/Villeneuve-Ventures/graphify/pull/37#issuecomment-5108919612),
+  node `IC_kwDOTZvP8s8AAAABMIPtPA`, states that a future lifecycle
+  version should select the frozen preview version independently.
+- Exact revision: base `1af466d58e91541fc95b3af66c3c18a2ce0b70a6`, head
+  `b2454ea78ce80b0e3aa25c7c73d2a073da4ca38a`, tree
+  `02bb3582b055bec478d3f1caea31baf797417889`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/1af466d58e91541fc95b3af66c3c18a2ce0b70a6...b2454ea78ce80b0e3aa25c7c73d2a073da4ca38a).
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`; the source is a top-level comment created and last updated
+  `2026-07-28T19:46:32Z`.
+
+#### JOS-BOUNDED-INPUT-READERS evidence
+
+- Source record: `PR_DESCRIPTION_DEFERRED`; PR #39's “Whole-PR AI slop cleanup”
+  preserves the exact claim that repeated bounded-input readers were deferred
+  as a cross-command refactor outside the pointer-repair delivery.
+- Exact revision: base `73dea771e50a1b066cbd971f85b0a5a196d34804`, head
+  `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b`, tree
+  `5ceef4cf831093b0562413971ec2208c036c0920`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/73dea771e50a1b066cbd971f85b0a5a196d34804...8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b).
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`.
+
+#### JOS-PR-AGENT-DRAIN evidence
+
+- Source record: `REVIEW_THREAD`; thread `PRRT_kwDOTZvP8s6VMBab`, Qodo
+  [comment `PRRC_kwDOTZvP8s7bopkX`](https://github.com/Villeneuve-Ventures/graphify/pull/40#discussion_r3684866327).
+- Exact revision: base `e7953df65a2bb0996f5422f9c9ca343cf1ee3828`, reviewed
+  head `1e47b513ae23c3e197d10cb33955201385a3a8b1`, tree
+  `1bc9a98b64911de421357c499efe82d8ca6e1550`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/e7953df65a2bb0996f5422f9c9ca343cf1ee3828...1e47b513ae23c3e197d10cb33955201385a3a8b1).
+- Anchor/state at the evidence refresh: current and original path
+  `.github/workflows/pr-agent.yml`, current and original line `357`, original
+  comment commit `1bc1d8a324c105458738247390d4fb3b094364e5`,
+  `isResolved=false`, `isOutdated=false`.
+
+#### JOS-SEMANTIC-WORKER-CONFORMANCE evidence
+
+- Source record: `PR_DESCRIPTION_DEFERRED` plus `TOP_LEVEL_COMMENT`; PR #43's
+  “Deferred justified follow-up” and Qodo's [assessment](https://github.com/Villeneuve-Ventures/graphify/pull/43#issuecomment-5139204878),
+  node `IC_kwDOTZvP8s8AAAABMlILDg`, preserve the machine-readable
+  schema/closed-validator and conformance-test successor boundary.
+- Exact revision: base `d70219f07b37f96b2406c9f97c7a40e5c2592486`, head
+  `1f202c9134ee0993e4bba40482fa8113f598920a`, tree
+  `27f7259fc3d716a78a3b28417204b1968c05d421`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/d70219f07b37f96b2406c9f97c7a40e5c2592486...1f202c9134ee0993e4bba40482fa8113f598920a).
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`; the top-level source comment was created and last updated
+  `2026-07-31T04:16:54Z`.
 
 PR #37's separate note about a `.codex` parent path and 100 ms timing cases is
 not registered as justified debt because it does not identify a reproducible,
