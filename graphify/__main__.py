@@ -119,6 +119,7 @@ from graphify.install import (  # noqa: E402,F401
     _PLATFORM_CONFIG,
 )
 from graphify.cli import (  # noqa: E402,F401
+    _NON_INSTALL_TOP_LEVEL_COMMANDS,
     dispatch_command,
     _StageTimer,
     _clone_repo,
@@ -524,25 +525,36 @@ def _run_cli() -> None:
             except Exception:
                 pass
     _SEMANTIC_WORKER_FREE_TEXT_CMDS = {"query", "explain", "path", "save-result"}
+    _SEMANTIC_WORKER_PREFIXES = {
+        "semantic-worker",
+        "--stdio",
+        "--help",
+        "-h",
+        "-?",
+        "--version",
+        "version",
+        "install",
+        "uninstall",
+    }
     semantic_worker_arguments = tuple(sys.argv[1:])
+    unbound_semantic_worker = any(
+        argument == "semantic-worker"
+        and (index == 0 or not semantic_worker_arguments[index - 1].startswith("-"))
+        for index, argument in enumerate(semantic_worker_arguments)
+    )
     semantic_worker_command = (
         "semantic-worker" in semantic_worker_arguments
         and bool(semantic_worker_arguments)
-        and semantic_worker_arguments[0] not in _SEMANTIC_WORKER_FREE_TEXT_CMDS
         and (
-            semantic_worker_arguments[0]
-            in {
-                "semantic-worker",
-                "--help",
-                "-h",
-                "-?",
-                "--version",
-                "version",
-                "install",
-                "uninstall",
-            }
-            or "workspace" in semantic_worker_arguments
-            or "--stdio" in semantic_worker_arguments
+            semantic_worker_arguments[0] == "workspace"
+            or (
+                semantic_worker_arguments[0] not in _NON_INSTALL_TOP_LEVEL_COMMANDS
+                and (
+                    semantic_worker_arguments[0] in _SEMANTIC_WORKER_PREFIXES
+                    or unbound_semantic_worker
+                    or "--stdio" in semantic_worker_arguments
+                )
+            )
         )
     )
     if semantic_worker_command and semantic_worker_arguments != (

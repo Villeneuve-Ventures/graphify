@@ -48,6 +48,13 @@ def validate_semantic_fragment(
     rejected before it touches the graph. Parameter is `object` (not `dict`)
     because we may be handed arbitrary deserialized JSON — the first check
     rejects anything that isn't a dict.
+
+    ``canonical_encoder`` is an optional trusted, lossless JSON encoder used
+    for payload-size accounting when values such as exact decimals cannot use
+    the default encoder. It must return ``bytes``; ``TypeError``, ``ValueError``,
+    and ``RecursionError`` are returned as validation errors. ``progress`` is
+    called before and after encoding and once per 256 nodes, edges, hyperedges,
+    and hyperedge members; callback exceptions propagate to the caller.
     """
     if not isinstance(fragment, dict):
         return ["fragment must be a JSON object"]
@@ -61,7 +68,7 @@ def validate_semantic_fragment(
             if canonical_encoder is None
             else canonical_encoder(fragment)
         )
-    except (TypeError, ValueError) as exc:
+    except (RecursionError, TypeError, ValueError) as exc:
         return [f"fragment is not JSON-serializable: {exc}"]
     if progress is not None:
         progress()

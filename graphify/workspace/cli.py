@@ -2932,13 +2932,7 @@ def run_workspace_command(
                 reason_code="unsafe_state_path",
                 action_code="configure_safe_state_root",
             )
-        except UnsupportedRuntime:
-            return semantic_worker_runtime.emit_pre_begin_failure(
-                protocol_output,
-                reason_code="runtime_authority_unsupported",
-                action_code="install_supported_candidate",
-            )
-        except UnsupportedCompatibility:
+        except (UnsupportedRuntime, UnsupportedCompatibility):
             return semantic_worker_runtime.emit_pre_begin_failure(
                 protocol_output,
                 reason_code="runtime_authority_unsupported",

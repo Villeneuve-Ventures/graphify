@@ -164,22 +164,6 @@
         "completed_watermark": {"$ref": "#/$defs/nonnegative_integer"}
       }
     },
-    "failure_terminal_common": {
-      "type": "object",
-      "properties": {
-        "contract": {"const": "graphify.workspace.semantic_worker_result"},
-        "schema_version": {"const": 1},
-        "cli_contract_version": {"const": 1},
-        "kind": {"const": "terminal"},
-        "outcome": {
-          "enum": ["retry_scheduled", "withheld", "dead_lettered", "invalid", "commit_unknown"]
-        },
-        "exit_code": {"enum": [10, 20]},
-        "reason_code": {"type": "string"},
-        "action_code": {"type": "string"},
-        "begin_request_sha256": {"$ref": "#/$defs/digest"}
-      }
-    },
     "failure_pairs": {
       "oneOf": [
         {

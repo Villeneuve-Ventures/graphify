@@ -9,14 +9,6 @@
     {"$ref": "#/$defs/fail"}
   ],
   "$defs": {
-    "common": {
-      "type": "object",
-      "properties": {
-        "contract": {"const": "graphify.workspace.semantic_worker_request"},
-        "schema_version": {"const": 1},
-        "cli_contract_version": {"const": 1}
-      }
-    },
     "uuid": {
       "type": "string",
       "format": "uuid",
@@ -37,7 +29,8 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 256,
-      "pattern": "^[A-Za-z0-9._:-]+$"
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "not": {"pattern": "\\.\\."}
     },
     "semantic_text": {
       "type": "string",

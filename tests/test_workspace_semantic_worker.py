@@ -177,6 +177,9 @@ def test_semantic_worker_request_and_result_schemas_are_closed() -> None:
     }
     for request in (checkpoint, _complete_value(), fail):
         assert not list(request_validator.iter_errors(cast(Any, request)))
+    invalid_semantic_id: Any = _complete_value()
+    invalid_semantic_id["payload"]["fragment"]["nodes"][0]["id"] = "node..name"
+    assert list(request_validator.iter_errors(invalid_semantic_id))
     assert list(
         request_validator.iter_errors({**checkpoint, "progress_code": "result:" + "0" * 64})
     )
@@ -373,6 +376,45 @@ def test_result_binding_revalidates_the_closed_post_sanitize_rationale_shape() -
     assert semantic_worker.parse_result_binding(binding.canonical) == binding
 
 
+def test_result_binding_parser_rejects_an_under_limit_payload_depth_bomb() -> None:
+    work = _work()
+    validated = semantic_worker.validate_completion_payload(
+        deepcopy(_complete_value()["payload"]),
+        work,
+    )
+    claim = SemanticClaim(
+        work=work,
+        claim_id=CLAIM_ID,
+        fence_token=1,
+        operation_epoch=1,
+        migration_epoch=0,
+        active_source_revision=1,
+        attempt=1,
+        owner={"boot_id": "boot", "pid": 1, "process_start_id": "start"},
+    )
+    binding = semantic_worker.build_result_binding(
+        begin_request_sha256=BEGIN_SHA256,
+        repo_uuid=REPO_UUID,
+        claim=claim,
+        work_sha256=semantic_worker.sha256(
+            semantic_worker.canonical_protocol_bytes(work.to_dict())
+        ),
+        payload=validated,
+    )
+    depth_bomb = b"[" * 1_000 + b"0" + b"]" * 1_000
+    fragment_end = b'},"kind":"semantic_fragment"}'
+    poisoned_payload = validated.canonical[:-1].replace(
+        fragment_end,
+        b',"zz":' + depth_bomb + fragment_end,
+        1,
+    )
+    raw = binding.canonical.replace(validated.canonical[:-1], poisoned_payload, 1)
+    assert len(raw) < semantic_worker.COMPLETE_MAX_BYTES
+
+    with pytest.raises(semantic_worker.SemanticResultInvalid):
+        semantic_worker.parse_result_binding(raw)
+
+
 def test_post_sanitize_rationale_accepts_only_the_frozen_multi_label_separator() -> None:
     payload = cast(Any, deepcopy(_complete_value()["payload"]))
     fragment = payload["fragment"]
@@ -517,6 +559,7 @@ def test_semantic_worker_usage_is_exact_before_authority_or_stdin(
         ("uninstall", "workspace", "semantic-worker", "--stdio"),
         ("install", "semantic-worker"),
         ("uninstall", "semantic-worker"),
+        ("extra", "workspace", "semantic-worker", "--stdio"),
     ],
 )
 def test_public_semantic_worker_negative_vectors_use_exact_usage_before_ambient_checks(
@@ -529,6 +572,11 @@ def test_public_semantic_worker_negative_vectors_use_exact_usage_before_ambient_
         mainmod,
         "_check_skill_version",
         lambda _path: pytest.fail("semantic-worker must not inspect ambient installs"),
+    )
+    monkeypatch.setattr(
+        mainmod,
+        "Path",
+        lambda *_args, **_kwargs: pytest.fail("semantic-worker must not inspect paths"),
     )
     monkeypatch.setattr(sys, "argv", ["graphify", *arguments])
 
@@ -583,6 +631,44 @@ def test_semantic_worker_tokens_remain_free_text_for_query(
     assert observed == ["query"]
 
 
+def test_semantic_worker_tokens_in_extract_values_do_not_change_command_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _path: None)
+    monkeypatch.setattr(mainmod, "dispatch_install_cli", lambda _command: False)
+    observed: list[str] = []
+    monkeypatch.setattr(mainmod, "dispatch_command", observed.append)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "extract", "workspace", "--out", "semantic-worker"],
+    )
+
+    mainmod._run_cli()
+
+    assert observed == ["extract"]
+
+
+def test_semantic_worker_token_in_implicit_path_output_does_not_change_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mainmod = importlib.import_module("graphify.__main__")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _path: None)
+    monkeypatch.setattr(mainmod, "dispatch_install_cli", lambda _command: False)
+    observed: list[str] = []
+    monkeypatch.setattr(mainmod, "dispatch_command", observed.append)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", ".", "--out", "semantic-worker"],
+    )
+
+    mainmod._run_cli()
+
+    assert observed == ["."]
+
+
 def test_top_level_help_lists_the_semantic_worker_transport(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -624,6 +710,7 @@ def test_workspace_cli_import_does_not_eagerly_load_semantic_worker() -> None:
         check=False,
         capture_output=True,
         text=True,
+        timeout=30,
     )
 
     assert result.returncode == 0, result.stderr
@@ -1346,6 +1433,207 @@ def test_claim_interruption_reconciles_then_ends_at_the_claim_boundary(
     assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
 
 
+@pytest.mark.parametrize("phase", ["build", "validate", "emit"])
+def test_work_frame_interruption_fails_and_releases_the_live_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+    interrupted = False
+
+    if phase == "build":
+        original_work_result = semantic_worker._WorkerSession._work_result
+
+        def interrupt_work_result(
+            session: semantic_worker._WorkerSession,
+        ) -> dict[str, object]:
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return original_work_result(session)
+
+        monkeypatch.setattr(
+            semantic_worker._WorkerSession,
+            "_work_result",
+            interrupt_work_result,
+        )
+    elif phase == "validate":
+        original_canonical_result_bytes = semantic_worker.canonical_result_bytes
+
+        def interrupt_result_validation(
+            value: Mapping[str, object],
+        ) -> bytes:
+            nonlocal interrupted
+            if value.get("kind") == "work" and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return original_canonical_result_bytes(value)
+
+        monkeypatch.setattr(
+            semantic_worker,
+            "canonical_result_bytes",
+            interrupt_result_validation,
+        )
+    else:
+        original_write = output.write
+
+        def interrupt_work_write(value: bytes) -> int:
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return original_write(value)
+
+        monkeypatch.setattr(output, "write", interrupt_work_write)
+
+    try:
+        exit_code = semantic_worker.run_semantic_worker(
+            runtime,
+            stdin=_OneFrameInput(semantic_worker.canonical_protocol_bytes(begin)),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+    except KeyboardInterrupt:
+        pytest.fail(f"{phase} interruption escaped the live-claim cleanup route")
+
+    assert interrupted
+    if phase == "emit":
+        assert exit_code == 20
+        assert output.frames == []
+    else:
+        assert exit_code == 10
+        terminal = semantic_worker.parse_result_frame(output.frames[-1])
+        assert terminal["outcome"] == "retry_scheduled"
+        assert terminal["reason_code"] == "host_agent_interrupted"
+    item = runtime.semantic_queue.inspect(HARNESS_REPO_UUID).items[0]
+    assert item.status == "pending"
+    assert item.failure_count == 1
+    assert item.last_error == "host_agent_interrupted"
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
+@pytest.mark.parametrize("action", ["complete", "fail"])
+def test_terminal_write_interruption_does_not_repeat_the_queue_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+    original_write = output.write
+    interrupted = False
+
+    def interrupt_terminal_write(value: bytes) -> int:
+        nonlocal interrupted
+        if output.frames and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return original_write(value)
+
+    def terminal_request(work: Mapping[str, object]) -> bytes:
+        if action == "complete":
+            value = {
+                **_complete_value(),
+                "begin_request_sha256": work["begin_request_sha256"],
+                "claim_id": work["claim_id"],
+            }
+        else:
+            value = {
+                "action": "fail",
+                "begin_request_sha256": work["begin_request_sha256"],
+                "claim_id": work["claim_id"],
+                "cli_contract_version": 1,
+                "contract": "graphify.workspace.semantic_worker_request",
+                "error_code": "host_agent_transient",
+                "retryable": True,
+                "schema_version": 1,
+            }
+        return semantic_worker.canonical_protocol_bytes(value)
+
+    monkeypatch.setattr(output, "write", interrupt_terminal_write)
+    try:
+        exit_code = semantic_worker.run_semantic_worker(
+            runtime,
+            stdin=_RequestAfterWorkInput(
+                semantic_worker.canonical_protocol_bytes(begin),
+                output,
+                terminal_request,
+            ),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+    except KeyboardInterrupt:
+        pytest.fail(f"{action} terminal interruption escaped delivery cleanup")
+
+    assert interrupted
+    assert exit_code == 20
+    assert len(output.frames) == 1
+    item = runtime.semantic_queue.inspect(HARNESS_REPO_UUID).items[0]
+    if action == "complete":
+        assert item.status == "completed"
+        assert item.failure_count == 0
+        assert item.last_error is None
+    else:
+        assert item.status == "pending"
+        assert item.failure_count == 1
+        assert item.last_error == "host_agent_transient"
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
+def test_checkpoint_write_interruption_fails_without_a_replacement_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+    original_write = output.write
+    interrupted = False
+
+    def interrupt_checkpoint_write(value: bytes) -> int:
+        nonlocal interrupted
+        if output.frames and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return original_write(value)
+
+    def checkpoint_request(work: Mapping[str, object]) -> bytes:
+        return semantic_worker.canonical_protocol_bytes(
+            {
+                "action": "checkpoint",
+                "begin_request_sha256": work["begin_request_sha256"],
+                "claim_id": work["claim_id"],
+                "cli_contract_version": 1,
+                "contract": "graphify.workspace.semantic_worker_request",
+                "progress_code": "extract:parsed",
+                "schema_version": 1,
+            }
+        )
+
+    monkeypatch.setattr(output, "write", interrupt_checkpoint_write)
+    exit_code = semantic_worker.run_semantic_worker(
+        runtime,
+        stdin=_RequestAfterWorkInput(
+            semantic_worker.canonical_protocol_bytes(begin),
+            output,
+            checkpoint_request,
+        ),  # type: ignore[arg-type]
+        stdout=output,  # type: ignore[arg-type]
+    )
+
+    assert interrupted
+    assert exit_code == 20
+    assert len(output.frames) == 1
+    item = runtime.semantic_queue.inspect(HARNESS_REPO_UUID).items[0]
+    assert item.status == "pending"
+    assert item.failure_count == 1
+    assert item.last_error == "host_agent_interrupted"
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
 def test_current_claim_read_rejects_an_unexpected_checkpoint_revision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1947,6 +2235,36 @@ def test_semantic_worker_rejects_bad_begin_without_runtime_mutation(tmp_path: Pa
     assert "begin_request_sha256" not in terminal
 
 
+def test_semantic_worker_rejects_an_under_limit_request_depth_bomb() -> None:
+    begin = semantic_worker.canonical_protocol_bytes(_begin_value())
+    depth_bomb = b"[" * 1_000 + b"0" + b"]" * 1_000
+    request = begin[:-2] + b',"zz":' + depth_bomb + b"}\n"
+    assert len(request) < semantic_worker.BEGIN_MAX_BYTES
+    output = _ProtocolOutput()
+
+    assert (
+        semantic_worker.run_semantic_worker(
+            object(),
+            stdin=_OneFrameInput(request),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+        == 20
+    )
+
+    terminal = semantic_worker.parse_result_frame(output.frames[0])
+    assert terminal["outcome"] == "invalid"
+    assert terminal["reason_code"] == "semantic_worker_request_invalid"
+
+
+def test_result_parser_rejects_an_under_limit_depth_bomb() -> None:
+    depth_bomb = b"[" * 1_000 + b"0" + b"]" * 1_000
+    result = b'{"zz":' + depth_bomb + b"}\n"
+    assert len(result) < semantic_worker.RESULT_MAX_BYTES
+
+    with pytest.raises(semantic_worker.SemanticResultInvalid):
+        semantic_worker.parse_result_frame(result)
+
+
 def test_semantic_worker_preclaim_deadline_never_attributes_queue_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2015,6 +2333,96 @@ def test_semantic_worker_caller_failure_retries_once_and_releases(
     assert item.status == "pending"
     assert item.failure_count == 1
     assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
+def test_caller_failure_interruption_before_mutation_preserves_classification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+    interrupted = False
+    original_fail_current = semantic_worker._WorkerSession._fail_current
+
+    def interrupt_before_failure_mutation(
+        session: semantic_worker._WorkerSession,
+        error_code: str,
+        retryable: bool,
+        *,
+        emit_terminal: bool,
+    ) -> int:
+        nonlocal interrupted
+        if error_code == "host_agent_transient" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return original_fail_current(
+            session,
+            error_code,
+            retryable,
+            emit_terminal=emit_terminal,
+        )
+
+    def failure(work: Mapping[str, object]) -> bytes:
+        return semantic_worker.canonical_protocol_bytes(
+            {
+                "action": "fail",
+                "begin_request_sha256": work["begin_request_sha256"],
+                "claim_id": work["claim_id"],
+                "cli_contract_version": 1,
+                "contract": "graphify.workspace.semantic_worker_request",
+                "error_code": "host_agent_transient",
+                "retryable": True,
+                "schema_version": 1,
+            }
+        )
+
+    monkeypatch.setattr(
+        semantic_worker._WorkerSession,
+        "_fail_current",
+        interrupt_before_failure_mutation,
+    )
+    assert (
+        semantic_worker.run_semantic_worker(
+            runtime,
+            stdin=_RequestAfterWorkInput(
+                semantic_worker.canonical_protocol_bytes(begin),
+                output,
+                failure,
+            ),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+        == 10
+    )
+
+    assert interrupted
+    terminal = semantic_worker.parse_result_frame(output.frames[-1])
+    assert terminal["outcome"] == "retry_scheduled"
+    assert terminal["reason_code"] == "host_agent_transient"
+    item = runtime.semantic_queue.inspect(HARNESS_REPO_UUID).items[0]
+    assert item.failure_count == 1
+    assert item.last_error == "host_agent_transient"
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
+def test_caller_failure_after_deadline_becomes_transport_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    output = _ProtocolOutput()
+    session = _active_session(runtime, begin, output)
+    session.deadline_ns = session.monotonic_clock()
+
+    assert session._fail_accepted_request("host_agent_transient", True) == 10
+
+    terminal = semantic_worker.parse_result_frame(output.frames[-1])
+    assert terminal["outcome"] == "retry_scheduled"
+    assert terminal["reason_code"] == "host_agent_timeout"
+    item = runtime.semantic_queue.inspect(HARNESS_REPO_UUID).items[0]
+    assert item.failure_count == 1
+    assert item.last_error == "host_agent_timeout"
 
 
 def test_semantic_worker_late_caller_failure_return_is_commit_unknown(

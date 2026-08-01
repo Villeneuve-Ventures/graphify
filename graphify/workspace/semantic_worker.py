@@ -901,7 +901,7 @@ def parse_request_frame(
         raise SemanticWorkerRequestInvalid("request frame exceeds its action byte limit")
     try:
         canonical = canonical_protocol_bytes(request_value, progress=progress)
-    except (TypeError, ValueError) as exc:
+    except (RecursionError, TypeError, ValueError) as exc:
         raise SemanticWorkerRequestInvalid("request frame is not canonically encodable") from exc
     if canonical != raw:
         raise SemanticWorkerRequestInvalid("request frame is not canonical")
@@ -932,6 +932,15 @@ class ValidatedPayload:
     @property
     def kind(self) -> str:
         return cast(str, self.value["kind"])
+
+
+def _canonical_fragment_encoder(
+    progress: Callable[[], object] | None,
+) -> Callable[[object], bytes]:
+    def encode(candidate: object) -> bytes:
+        return canonical_protocol_bytes(candidate, progress=progress)
+
+    return encode
 
 
 def validate_completion_payload(
@@ -965,10 +974,7 @@ def validate_completion_payload(
         post_sanitize=False,
         progress=progress,
     )
-    canonical_encoder = lambda candidate: canonical_protocol_bytes(
-        candidate,
-        progress=progress,
-    )
+    canonical_encoder = _canonical_fragment_encoder(progress)
     validation_errors = semantic_cleanup.validate_semantic_fragment(
         fragment,
         canonical_encoder=canonical_encoder,
@@ -1040,7 +1046,10 @@ def validate_bound_payload(
     if not isinstance(payload, dict):
         raise SemanticResultInvalid("bound payload must be an object")
     _report_progress(progress)
-    value = deepcopy(cast(dict[str, object], payload))
+    try:
+        value = deepcopy(cast(dict[str, object], payload))
+    except RecursionError as exc:
+        raise SemanticResultInvalid("bound payload nesting is too deep") from exc
     _report_progress(progress)
     if validated_work.operation == "DELETE":
         if value != {"kind": "delete_tombstone"}:
@@ -1057,10 +1066,7 @@ def validate_bound_payload(
     )
     errors = semantic_cleanup.validate_semantic_fragment(
         fragment,
-        canonical_encoder=lambda candidate: canonical_protocol_bytes(
-            candidate,
-            progress=progress,
-        ),
+        canonical_encoder=_canonical_fragment_encoder(progress),
         progress=progress,
     )
     if errors:
@@ -1450,8 +1456,11 @@ def _result_digest(value: object, label: str) -> str:
 
 
 def canonical_result_bytes(value: Mapping[str, object]) -> bytes:
-    _validate_result_value(value)
-    encoded = canonical_protocol_bytes(value)
+    try:
+        _validate_result_value(value)
+        encoded = canonical_protocol_bytes(value)
+    except RecursionError as exc:
+        raise SemanticResultInvalid("public result nesting is too deep") from exc
     if len(encoded) > RESULT_MAX_BYTES:
         raise SemanticResultInvalid("public result exceeds the 64-KiB limit")
     return encoded
@@ -1484,9 +1493,13 @@ def parse_result_frame(raw: bytes) -> Mapping[str, object]:
             for nested in item:
                 reject_decimal(nested)
 
-    reject_decimal(value)
-    _validate_result_value(value)
-    if canonical_protocol_bytes(value) != raw:
+    try:
+        reject_decimal(value)
+        _validate_result_value(value)
+        canonical = canonical_protocol_bytes(value)
+    except RecursionError as exc:
+        raise SemanticResultInvalid("public result nesting is too deep") from exc
+    if canonical != raw:
         raise SemanticResultInvalid("public result is not canonical")
     return value
 
@@ -1633,7 +1646,7 @@ def emit_pre_begin_failure(
     )
     try:
         _write_result_frame(stdout, value, monotonic_clock=clock)
-    except SemanticOutputDeliveryError:
+    except (KeyboardInterrupt, SemanticOutputDeliveryError):
         return 20
     return 20
 
@@ -2126,12 +2139,15 @@ class _WorkerSession:
         return now
 
     def _emit(self, value: Mapping[str, object], *, work_bounded: bool = False) -> None:
-        _write_result_frame(
-            self.stdout,
-            value,
-            monotonic_clock=self.monotonic_clock,
-            work_deadline_ns=self.deadline_ns if work_bounded else None,
-        )
+        try:
+            _write_result_frame(
+                self.stdout,
+                value,
+                monotonic_clock=self.monotonic_clock,
+                work_deadline_ns=self.deadline_ns if work_bounded else None,
+            )
+        except KeyboardInterrupt as exc:
+            raise SemanticOutputDeliveryError("result output interrupted") from exc
 
     def _emit_route(
         self,
@@ -3053,67 +3069,88 @@ class _WorkerSession:
         mutation_deadline = (
             min(self.deadline_ns, liveness_deadline) if work_bounded else liveness_deadline
         )
+
         try:
-            snapshot = self.runtime.semantic_queue.fail(
-                grant,
-                claim,
-                error_code=error_code,
-                retryable=retryable,
-                monotonic_ns=monotonic_ns,
-                expected_registry_revision=grant.registry_revision,
-                expected_queue_revision=expected_revision,
-                expected_desired_watermark=expected_watermark,
-                deadline_ns=mutation_deadline,
+            try:
+                snapshot = self.runtime.semantic_queue.fail(
+                    grant,
+                    claim,
+                    error_code=error_code,
+                    retryable=retryable,
+                    monotonic_ns=monotonic_ns,
+                    expected_registry_revision=grant.registry_revision,
+                    expected_queue_revision=expected_revision,
+                    expected_desired_watermark=expected_watermark,
+                    deadline_ns=mutation_deadline,
+                )
+            except StaleSemanticClaim, StaleLease, LeaseExpired, SemanticQueueConflict:
+                self._release(success_required=False)
+                if not emit_terminal:
+                    return 20
+                return self._withheld("semantic_authority_stale")
+            except BaseException:
+                self._release(success_required=False)
+                if not emit_terminal:
+                    return 20
+                return self._commit_unknown()
+            self.claim = None
+            matching = [
+                item
+                for item in snapshot.items
+                if item.work.coalescing_key == claim.work.coalescing_key
+                and item.work == claim.work
+            ]
+            if (
+                snapshot.revision != expected_revision + 1
+                or snapshot.desired_watermark != expected_watermark
+                or len(matching) != 1
+                or matching[0].status not in {"pending", "dead_letter"}
+                or matching[0].last_error != error_code
+                or matching[0].claim is not None
+            ):
+                self._release(success_required=False)
+                if not emit_terminal:
+                    return 20
+                return self._commit_unknown()
+            self.expected_queue_revision = snapshot.revision
+            status = matching[0].status
+            observed_late = work_bounded and self.monotonic_clock() >= self.deadline_ns
+            self._release(success_required=False)
+            if not emit_terminal:
+                return 20
+            if observed_late:
+                return self._commit_unknown()
+            outcome = "retry_scheduled" if status == "pending" else "dead_lettered"
+            exit_code = 10 if outcome == "retry_scheduled" else 20
+            action = (
+                _FAILURE_ACTIONS[(outcome, error_code)]
+                if outcome == "retry_scheduled"
+                else "inspect_semantic_queue"
             )
-        except StaleSemanticClaim, StaleLease, LeaseExpired, SemanticQueueConflict:
-            self._release(success_required=False)
-            if not emit_terminal:
-                return 20
-            return self._withheld("semantic_authority_stale")
-        except BaseException:
-            self._release(success_required=False)
-            if not emit_terminal:
-                return 20
-            return self._commit_unknown()
-        self.claim = None
-        matching = [
-            item
-            for item in snapshot.items
-            if item.work.coalescing_key == claim.work.coalescing_key and item.work == claim.work
-        ]
-        if (
-            snapshot.revision != expected_revision + 1
-            or snapshot.desired_watermark != expected_watermark
-            or len(matching) != 1
-            or matching[0].status not in {"pending", "dead_letter"}
-            or matching[0].last_error != error_code
-            or matching[0].claim is not None
-        ):
+            return self._emit_route(
+                outcome=outcome,
+                reason_code=error_code,
+                action_code=action,
+                exit_code=exit_code,
+            )
+        except KeyboardInterrupt:
             self._release(success_required=False)
             if not emit_terminal:
                 return 20
             return self._commit_unknown()
-        self.expected_queue_revision = snapshot.revision
-        status = matching[0].status
-        observed_late = work_bounded and self.monotonic_clock() >= self.deadline_ns
+
+    def _fail_accepted_request(self, error_code: str, retryable: bool) -> int:
+        for _attempt in range(2):
+            try:
+                return self._fail_current(
+                    error_code,
+                    retryable,
+                    emit_terminal=True,
+                )
+            except KeyboardInterrupt:
+                continue
         self._release(success_required=False)
-        if not emit_terminal:
-            return 20
-        if observed_late:
-            return self._commit_unknown()
-        outcome = "retry_scheduled" if status == "pending" else "dead_lettered"
-        exit_code = 10 if outcome == "retry_scheduled" else 20
-        action = (
-            _FAILURE_ACTIONS[(outcome, error_code)]
-            if outcome == "retry_scheduled"
-            else "inspect_semantic_queue"
-        )
-        return self._emit_route(
-            outcome=outcome,
-            reason_code=error_code,
-            action_code=action,
-            exit_code=exit_code,
-        )
+        return self._commit_unknown()
 
     def _output_failure(self) -> int:
         code = (
@@ -3356,10 +3393,9 @@ class _WorkerSession:
                         return self._output_failure()
                     continue
                 if request.action == "fail":
-                    return self._fail_current(
+                    return self._fail_accepted_request(
                         cast(str, request.value["error_code"]),
                         cast(bool, request.value["retryable"]),
-                        emit_terminal=True,
                     )
                 return self._process_complete(request)
             except LockTimeout, _FrameDeadline:
@@ -3572,9 +3608,15 @@ class _WorkerSession:
         except CommitUnknown, InjectedFault:
             self._release(success_required=False)
             return self._commit_unknown()
-        work_result = self._work_result()
         try:
+            work_result = self._work_result()
             canonical_result_bytes(work_result)
+        except KeyboardInterrupt:
+            return self._fail_current(
+                "host_agent_interrupted",
+                True,
+                emit_terminal=True,
+            )
         except SemanticResultInvalid:
             return self._fail_current(
                 "semantic_work_unsupported",
@@ -3628,7 +3670,7 @@ def run_semantic_worker(
         )
         try:
             _write_result_frame(output_stream, value, monotonic_clock=clock)
-        except SemanticOutputDeliveryError:
+        except (KeyboardInterrupt, SemanticOutputDeliveryError):
             return 20
         return 10
     timeout_ms = cast(int, begin.value["timeout_ms"])

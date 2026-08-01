@@ -48,6 +48,18 @@ def test_validate_semantic_fragment_accepts_lossless_encoder_hook_without_changi
     assert default_errors == []
 
 
+def test_validate_semantic_fragment_returns_encoder_recursion_as_an_error():
+    def recursive_encoder(_value: object) -> bytes:
+        raise RecursionError("encoder recursion")
+
+    errors = sc.validate_semantic_fragment(
+        _valid_fragment(),
+        canonical_encoder=recursive_encoder,
+    )
+
+    assert errors == ["fragment is not JSON-serializable: encoder recursion"]
+
+
 def test_validate_semantic_fragment_rejects_non_object():
     errors = sc.validate_semantic_fragment(["not", "an", "object"])
     assert any("object" in e.lower() for e in errors)
