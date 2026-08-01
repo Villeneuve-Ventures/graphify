@@ -19,6 +19,7 @@ from typing import Any, cast, Mapping, Sequence, TextIO
 import graphify.workspace.rollback as rollback_runtime
 import graphify.workspace.gc_command as gc_command_runtime
 import graphify.workspace.repair as repair_runtime
+import graphify.workspace.semantic_worker as semantic_worker_runtime
 
 from graphify.workspace.adapters import (
     QueryRejected,
@@ -239,6 +240,7 @@ _GC_RECONCILE_USAGE = "graphify workspace gc --reconcile --request-stdin"
 _GC_PURGE_USAGE = "graphify workspace gc --purge --request-stdin"
 _REPAIR_PREVIEW_USAGE = "graphify workspace repair --dry-run --request-stdin"
 _REPAIR_EXECUTE_USAGE = "graphify workspace repair --execute --request-stdin"
+_SEMANTIC_WORKER_USAGE = "graphify workspace semantic-worker --stdio"
 _ACTIVATION_USAGE = (
     "graphify workspace activate --repo-uuid UUID "
     "--expected-registry-revision N --expected-active-source-revision N "
@@ -258,6 +260,7 @@ _USAGE = (
     f"       {_GC_PURGE_USAGE}\n"
     f"       {_REPAIR_PREVIEW_USAGE}\n"
     f"       {_REPAIR_EXECUTE_USAGE}\n"
+    f"       {_SEMANTIC_WORKER_USAGE}\n"
     f"       {_ACTIVATION_USAGE}"
 )
 
@@ -2898,6 +2901,59 @@ def run_workspace_command(
     output = sys.stdout if stdout is None else stdout
     errors = sys.stderr if stderr is None else stderr
     command = tuple(arguments)
+    if "semantic-worker" in command:
+        if command != ("semantic-worker", "--stdio"):
+            return _emit_text_payload(
+                errors,
+                _SEMANTIC_WORKER_USAGE + "\n",
+                exit_code=EXIT_USAGE,
+            )
+        protocol_input = getattr(sys.stdin, "buffer", sys.stdin)
+        protocol_output = getattr(output, "buffer", output)
+        try:
+            resolved_inputs = load_workspace_runtime_inputs() if inputs is None else inputs
+            if resolved_inputs is None:
+                return semantic_worker_runtime.emit_pre_begin_failure(
+                    protocol_output,
+                    reason_code="runtime_authority_missing",
+                    action_code="install_candidate_authority",
+                )
+            runtime = compose_workspace_runtime(resolved_inputs)
+        except WorkspaceAuthorityError as exc:
+            return semantic_worker_runtime.emit_pre_begin_failure(
+                protocol_output,
+                reason_code=exc.reason_code,
+                action_code=exc.action_code,
+            )
+        except StatePathError:
+            return semantic_worker_runtime.emit_pre_begin_failure(
+                protocol_output,
+                reason_code="unsafe_state_path",
+                action_code="configure_safe_state_root",
+            )
+        except UnsupportedRuntime:
+            return semantic_worker_runtime.emit_pre_begin_failure(
+                protocol_output,
+                reason_code="runtime_authority_unsupported",
+                action_code="install_supported_candidate",
+            )
+        except UnsupportedCompatibility:
+            return semantic_worker_runtime.emit_pre_begin_failure(
+                protocol_output,
+                reason_code="runtime_authority_unsupported",
+                action_code="install_supported_candidate",
+            )
+        except ContractError, TypeError, ValueError:
+            return semantic_worker_runtime.emit_pre_begin_failure(
+                protocol_output,
+                reason_code="runtime_authority_invalid",
+                action_code="install_candidate_authority",
+            )
+        return semantic_worker_runtime.run_semantic_worker(
+            runtime,
+            stdin=protocol_input,
+            stdout=protocol_output,
+        )
     if command and command[0] == "activate":
         request = _parse_activation_request(command)
         if request is None:
@@ -3231,6 +3287,18 @@ def load_repair_execute_result_schema() -> dict[str, Any]:
     return _load_repair_schema(_REPAIR_EXECUTE_RESULT_SCHEMA_PATH, "execute result")
 
 
+def load_semantic_worker_request_schema() -> dict[str, Any]:
+    """Load the public canonical semantic-worker request schema."""
+
+    return semantic_worker_runtime.load_request_schema()
+
+
+def load_semantic_worker_result_schema() -> dict[str, Any]:
+    """Load the public redacted semantic-worker result schema."""
+
+    return semantic_worker_runtime.load_result_schema()
+
+
 __all__ = [
     "load_activation_schema",
     "load_gc_execute_request_schema",
@@ -3253,5 +3321,7 @@ __all__ = [
     "load_rollback_request_schema",
     "load_sync_receipt_schema",
     "load_sync_request_schema",
+    "load_semantic_worker_request_schema",
+    "load_semantic_worker_result_schema",
     "run_workspace_command",
 ]

@@ -239,12 +239,20 @@ class RegistryStore:
                 raise StateCorrupt("remote evidence digest does not match source record")
             self._persist_evidence(item)
 
-    def read_evidence(self, digest: str) -> dict[str, Any]:
+    def read_evidence(
+        self,
+        digest: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> dict[str, Any]:
         if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
             raise StateCorrupt("evidence digest is not lowercase SHA-256")
         path = self.state.path(Path("evidence") / f"{digest}.json")
         try:
-            payload = self.state.read_existing_bytes(path.relative_to(self.state.root))
+            payload = self.state.read_existing_bytes(
+                path.relative_to(self.state.root),
+                deadline_ns=deadline_ns,
+            )
             value = json.loads(payload)
         except (StateCorrupt, StatePathError, OSError, ValueError) as exc:
             raise StateCorrupt(f"evidence {digest} is unreadable: {exc}") from exc

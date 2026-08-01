@@ -17,6 +17,7 @@ from uuid import UUID
 
 from graphify.workspace.contracts import (
     CapacityReservationState,
+    ContractError,
     FencedLease,
     Registry,
     StagedBuildState,
@@ -383,6 +384,84 @@ class LeaseStore:
             "workspace lease snapshot read exceeded its deadline",
         )
         return state
+
+    def read_uncertain_snapshot_locked(
+        self,
+        document: Registry,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> tuple[WorkspaceLeaseState, bool]:
+        """Read the installed current lease bytes without resolving pending intent."""
+
+        require_before_deadline(
+            deadline_ns,
+            "uncertain workspace lease snapshot read exceeded its deadline",
+        )
+        entry = _registry_entry(document, repo_uuid)
+        current, _previous, pending = self._paths(repo_uuid)
+        pending_present = self.state.private_file_exists(pending)
+        raw = self.state.read_optional_existing_bytes(
+            current,
+            deadline_ns=deadline_ns,
+        )
+        if raw is None:
+            raise StateCorrupt("workspace lease current record is missing")
+        try:
+            observed = WorkspaceLeaseState.from_json(raw)
+        except ContractError as exc:
+            raise StateCorrupt("workspace lease current record is invalid") from exc
+        if observed.repo_uuid != repo_uuid:
+            raise StateCorrupt("workspace lease state is installed under the wrong UUID")
+        active_evidence = entry["active_source_evidence"]
+        state = WorkspaceLeaseState(
+            repo_uuid=observed.repo_uuid,
+            revision=observed.revision,
+            fence_high_watermark=max(
+                observed.fence_high_watermark,
+                int(active_evidence["fence_token"]),
+            ),
+            operation_epoch=max(
+                observed.operation_epoch,
+                int(active_evidence["operation_epoch"]),
+            ),
+            migration_epoch=observed.migration_epoch,
+            leases=dict(observed.leases),
+            lease_epochs=dict(observed.lease_epochs),
+            staged_attempt_sha256=observed.staged_attempt_sha256,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "uncertain workspace lease snapshot read exceeded its deadline",
+        )
+        return state, pending_present
+
+    def recover_uncertain_snapshot(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> WorkspaceLeaseState:
+        """Finish lease persistence recovery after exact current bytes are proved."""
+
+        snapshot = (
+            self.registry.recovered_snapshot()
+            if deadline_ns is None
+            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+        )
+        with snapshot as document:
+            lock = (
+                self.workspace_lock(repo_uuid)
+                if deadline_ns is None
+                else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+            )
+            with lock:
+                return self._load_state_locked(
+                    document,
+                    repo_uuid,
+                    recover=True,
+                    deadline_ns=deadline_ns,
+                )
 
     def _paths(self, repo_uuid: str) -> tuple[Path, Path, Path]:
         directory = self._directory(repo_uuid)
@@ -1187,13 +1266,33 @@ class LeaseStore:
         if int(entry["active_source_revision"]) != grant.active_source_revision:
             raise StaleLease("stale_source: active source revision advanced")
 
-    def assert_current(self, grant: LeaseGrant, *, monotonic_ns: int) -> FencedLease:
+    def assert_current(
+        self,
+        grant: LeaseGrant,
+        *,
+        monotonic_ns: int,
+        deadline_ns: int | None = None,
+    ) -> FencedLease:
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        with self.registry.recovered_snapshot() as document:
-            with self.workspace_lock(repo_uuid):
+        snapshot = (
+            self.registry.recovered_snapshot()
+            if deadline_ns is None
+            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+        )
+        with snapshot as document:
+            lock = (
+                self.workspace_lock(repo_uuid)
+                if deadline_ns is None
+                else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+            )
+            with lock:
                 self._check_active(document, grant)
-                state = self._load_state_locked(document, repo_uuid)
+                state = self._load_state_locked(
+                    document,
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
                 _domain, current = self._matching_lease(state, grant)
                 if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
                     raise LeaseExpired("liveness deadline has passed")
@@ -1338,15 +1437,37 @@ class LeaseStore:
         heartbeat_at: datetime,
         monotonic_ns: int,
         ttl_ns: int,
+        expected_registry_revision: int | None = None,
+        deadline_ns: int | None = None,
     ) -> LeaseGrant:
         if ttl_ns <= 0:
             raise LeaseError("ttl_ns must be positive")
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
-        with self.registry.recovered_snapshot() as document:
-            with self.workspace_lock(repo_uuid):
+        snapshot = (
+            self.registry.recovered_snapshot()
+            if deadline_ns is None
+            else self.registry.recovered_snapshot(deadline_ns=deadline_ns)
+        )
+        with snapshot as document:
+            lock = (
+                self.workspace_lock(repo_uuid)
+                if deadline_ns is None
+                else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
+            )
+            with lock:
+                if (
+                    expected_registry_revision is not None
+                    and int(document.to_dict()["revision"])
+                    != expected_registry_revision
+                ):
+                    raise StaleLease("stale_registry: registry revision advanced")
                 self._check_active(document, grant)
-                state = self._load_state_locked(document, repo_uuid)
+                state = self._load_state_locked(
+                    document,
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
                 domain, current = self._matching_lease(state, grant)
                 if monotonic_ns >= int(current.to_dict()["liveness_deadline_monotonic_ns"]):
                     raise LeaseExpired("liveness deadline has passed")
@@ -1365,7 +1486,8 @@ class LeaseStore:
                         leases=leases,
                         lease_epochs=dict(state.lease_epochs),
                         staged_attempt_sha256=state.staged_attempt_sha256,
-                    )
+                    ),
+                    deadline_ns=deadline_ns,
                 )
                 return LeaseGrant(
                     lease=committed.leases[domain],

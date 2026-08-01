@@ -1,6 +1,7 @@
 """Tests for graphify.semantic_cleanup.validate_semantic_fragment (#825)."""
 
 import json
+from decimal import Decimal
 
 from graphify import semantic_cleanup as sc
 
@@ -15,6 +16,22 @@ def _valid_fragment():
 
 def test_validate_semantic_fragment_accepts_valid():
     assert sc.validate_semantic_fragment(_valid_fragment()) == []
+
+
+def test_validate_semantic_fragment_accepts_lossless_encoder_hook_without_changing_default():
+    fragment = _valid_fragment()
+    fragment["edges"][0]["confidence_score"] = Decimal("0.75")
+    observed: list[object] = []
+
+    def encode(value: object) -> bytes:
+        observed.append(value)
+        return b'{"lossless":true}\n'
+
+    assert sc.validate_semantic_fragment(fragment, canonical_encoder=encode) == []
+    assert observed == [fragment]
+
+    default_errors = sc.validate_semantic_fragment(_valid_fragment())
+    assert default_errors == []
 
 
 def test_validate_semantic_fragment_rejects_non_object():

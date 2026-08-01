@@ -43,6 +43,7 @@ WORKSPACE_USAGE = (
     "       graphify workspace gc --purge --request-stdin\n"
     "       graphify workspace repair --dry-run --request-stdin\n"
     "       graphify workspace repair --execute --request-stdin\n"
+    "       graphify workspace semantic-worker --stdio\n"
     "       graphify workspace activate --repo-uuid UUID "
     "--expected-registry-revision N --expected-active-source-revision N "
     "--expected-operation-epoch N --expected-migration-epoch N "

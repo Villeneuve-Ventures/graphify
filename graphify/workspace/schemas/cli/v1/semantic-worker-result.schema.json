@@ -1,0 +1,390 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/semantic-worker-result.schema.json",
+  "title": "Graphify workspace semantic-worker result family v1",
+  "oneOf": [
+    {"$ref": "#/$defs/work_result"},
+    {"$ref": "#/$defs/checkpointed_result"},
+    {"$ref": "#/$defs/completed_terminal"},
+    {"$ref": "#/$defs/idle_terminal"},
+    {"$ref": "#/$defs/failure_terminal_without_begin"},
+    {"$ref": "#/$defs/failure_terminal_with_begin"}
+  ],
+  "x-graphify-utf8-max-bytes": 65536,
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "positive_integer": {"type": "integer", "minimum": 1},
+    "nonnegative_integer": {"type": "integer", "minimum": 0},
+    "work": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_epoch",
+        "policy_sha256",
+        "operation",
+        "path",
+        "content_sha256",
+        "desired_revision"
+      ],
+      "properties": {
+        "source_epoch": {"$ref": "#/$defs/positive_integer"},
+        "policy_sha256": {"$ref": "#/$defs/digest"},
+        "operation": {"enum": ["UPSERT", "DELETE"]},
+        "path": {"type": "string", "minLength": 1},
+        "content_sha256": {"$ref": "#/$defs/digest"},
+        "desired_revision": {"$ref": "#/$defs/positive_integer"}
+      }
+    },
+    "work_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "kind",
+        "begin_request_sha256",
+        "repo_uuid",
+        "claim_id",
+        "attempt",
+        "work_sha256",
+        "work"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_result"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "kind": {"const": "work"},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"},
+        "repo_uuid": {"$ref": "#/$defs/uuid"},
+        "claim_id": {"$ref": "#/$defs/digest"},
+        "attempt": {"$ref": "#/$defs/positive_integer"},
+        "work_sha256": {"$ref": "#/$defs/digest"},
+        "work": {"$ref": "#/$defs/work"}
+      }
+    },
+    "checkpointed_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "kind",
+        "begin_request_sha256",
+        "claim_id",
+        "checkpoint_sha256"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_result"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "kind": {"const": "checkpointed"},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"},
+        "claim_id": {"$ref": "#/$defs/digest"},
+        "checkpoint_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "completed_terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "kind",
+        "outcome",
+        "exit_code",
+        "begin_request_sha256",
+        "repo_uuid",
+        "claim_id",
+        "attempt",
+        "work_sha256",
+        "payload_kind",
+        "payload_bytes",
+        "payload_sha256",
+        "result_binding_bytes",
+        "result_binding_sha256",
+        "queue_revision",
+        "completed_watermark"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_result"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "kind": {"const": "terminal"},
+        "outcome": {"const": "completed"},
+        "exit_code": {"const": 0},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"},
+        "repo_uuid": {"$ref": "#/$defs/uuid"},
+        "claim_id": {"$ref": "#/$defs/digest"},
+        "attempt": {"$ref": "#/$defs/positive_integer"},
+        "work_sha256": {"$ref": "#/$defs/digest"},
+        "payload_kind": {"enum": ["semantic_fragment", "delete_tombstone"]},
+        "payload_bytes": {"$ref": "#/$defs/positive_integer"},
+        "payload_sha256": {"$ref": "#/$defs/digest"},
+        "result_binding_bytes": {"$ref": "#/$defs/positive_integer"},
+        "result_binding_sha256": {"$ref": "#/$defs/digest"},
+        "queue_revision": {"$ref": "#/$defs/nonnegative_integer"},
+        "completed_watermark": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "idle_terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "kind",
+        "outcome",
+        "exit_code",
+        "begin_request_sha256",
+        "repo_uuid",
+        "queue_revision",
+        "desired_watermark",
+        "completed_watermark"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_result"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "kind": {"const": "terminal"},
+        "outcome": {"const": "idle"},
+        "exit_code": {"const": 0},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"},
+        "repo_uuid": {"$ref": "#/$defs/uuid"},
+        "queue_revision": {"$ref": "#/$defs/nonnegative_integer"},
+        "desired_watermark": {"$ref": "#/$defs/nonnegative_integer"},
+        "completed_watermark": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "failure_terminal_common": {
+      "type": "object",
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_result"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "kind": {"const": "terminal"},
+        "outcome": {
+          "enum": ["retry_scheduled", "withheld", "dead_lettered", "invalid", "commit_unknown"]
+        },
+        "exit_code": {"enum": [10, 20]},
+        "reason_code": {"type": "string"},
+        "action_code": {"type": "string"},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "failure_pairs": {
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {"const": "retry_scheduled"},
+            "exit_code": {"const": 10},
+            "reason_code": {
+              "enum": [
+                "host_agent_transient",
+                "host_agent_timeout",
+                "host_agent_interrupted",
+                "semantic_result_invalid"
+              ]
+            },
+            "action_code": {"const": "drain_semantic_queue"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "retry_scheduled"},
+            "exit_code": {"const": 10},
+            "reason_code": {"const": "source_unavailable"},
+            "action_code": {"const": "restore_source"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "withheld"},
+            "exit_code": {"const": 10},
+            "reason_code": {
+              "enum": [
+                "semantic_claim_contended",
+                "semantic_authority_stale",
+                "semantic_worker_preclaim_timeout",
+                "semantic_worker_preclaim_interrupted",
+                "workspace_config_unavailable"
+              ]
+            },
+            "action_code": {"const": "retry_status"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "withheld"},
+            "exit_code": {"const": 10},
+            "reason_code": {"const": "semantic_checkpoint_capacity_unavailable"},
+            "action_code": {"const": "inspect_semantic_queue"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "withheld"},
+            "exit_code": {"const": 10},
+            "reason_code": {"const": "semantic_capability_unavailable"},
+            "action_code": {"const": "inspect_workspace_state"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "withheld"},
+            "exit_code": {"const": 10},
+            "reason_code": {"const": "staged_build_recovery_required"},
+            "action_code": {"const": "resume_exact_workspace_sync"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "dead_lettered"},
+            "exit_code": {"const": 20},
+            "reason_code": {
+              "enum": [
+                "host_agent_transient",
+                "semantic_policy_refused",
+                "semantic_work_unsupported",
+                "host_agent_timeout",
+                "host_agent_interrupted",
+                "semantic_result_invalid",
+                "source_unavailable",
+                "source_content_changed",
+                "semantic_result_binding_conflict"
+              ]
+            },
+            "action_code": {"const": "inspect_semantic_queue"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "invalid"},
+            "exit_code": {"const": 20},
+            "reason_code": {"const": "unsafe_state_path"},
+            "action_code": {"const": "configure_safe_state_root"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "invalid"},
+            "exit_code": {"const": 20},
+            "reason_code": {"const": "workspace_config_invalid"},
+            "action_code": {"const": "inspect_workspace_state"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "invalid"},
+            "exit_code": {"const": 20},
+            "reason_code": {"const": "semantic_queue_invalid"},
+            "action_code": {"const": "inspect_semantic_queue"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "invalid"},
+            "exit_code": {"const": 20},
+            "reason_code": {"enum": ["registry_invalid", "workspace_state_invalid"]},
+            "action_code": {"const": "inspect_workspace_state"}
+          }
+        },
+        {
+          "properties": {
+            "outcome": {"const": "commit_unknown"},
+            "exit_code": {"const": 20},
+            "reason_code": {"const": "semantic_worker_commit_unknown"},
+            "action_code": {"const": "none"}
+          }
+        }
+      ]
+    },
+    "failure_terminal_without_begin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "kind",
+        "outcome",
+        "exit_code",
+        "reason_code",
+        "action_code"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_result"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "kind": {"const": "terminal"},
+        "outcome": {"const": "invalid"},
+        "exit_code": {"const": 20},
+        "reason_code": {"type": "string"},
+        "action_code": {"type": "string"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "reason_code": {"const": "semantic_worker_request_invalid"},
+            "action_code": {"const": "none"}
+          }
+        },
+        {
+          "properties": {
+            "reason_code": {"enum": ["runtime_authority_missing", "runtime_authority_invalid"]},
+            "action_code": {"const": "install_candidate_authority"}
+          }
+        },
+        {
+          "properties": {
+            "reason_code": {"const": "runtime_authority_unsupported"},
+            "action_code": {"const": "install_supported_candidate"}
+          }
+        },
+        {
+          "properties": {
+            "reason_code": {"const": "unsafe_state_path"},
+            "action_code": {"const": "configure_safe_state_root"}
+          }
+        }
+      ]
+    },
+    "failure_terminal_with_begin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "kind",
+        "outcome",
+        "exit_code",
+        "reason_code",
+        "action_code",
+        "begin_request_sha256"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_result"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "kind": {"const": "terminal"},
+        "outcome": {
+          "enum": ["retry_scheduled", "withheld", "dead_lettered", "invalid", "commit_unknown"]
+        },
+        "exit_code": {"enum": [10, 20]},
+        "reason_code": {"type": "string"},
+        "action_code": {"type": "string"},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "allOf": [{"$ref": "#/$defs/failure_pairs"}]
+    }
+  }
+}
