@@ -1,7 +1,11 @@
 # State contracts
 
 All hashed JSON uses UTF-8, NFC-normalized strings, lexicographically sorted
-object keys, compact separators, a final newline, and no floating-point values.
+object keys, compact separators, and a final newline. Binary floating-point
+values are forbidden. The only v1 non-integer JSON numbers are the exact bounded
+fixed-point semantic `confidence_score` and `weight` slots frozen in
+[`semantic-sync.md`](semantic-sync.md); every other hashed numeric field is an
+integer.
 Paths inside payload manifests are normalized, non-escaping POSIX relative
 paths. Payload arrays are sorted by path and contain unique regular files only.
 
@@ -308,6 +312,109 @@ P5A certification requests and receipts carry the schema-valid
 binding only when that marker is present; pre-P5A receipts without it, including
 legacy positive-watermark receipts permitted by the frozen schema, remain
 readable without being retroactively treated as P5A authority.
+
+## Contract-only host-agent result staging
+
+The future host-agent semantic-worker transport is frozen in
+[`semantic-sync.md`](semantic-sync.md). It does not revise
+`graphify.workspace.semantic_queue.internal` or any public durable schema. The
+exact command is `graphify workspace semantic-worker --stdio`, and one process
+must retain the same OS-derived `SEMANTIC_CLAIM` owner from claim through
+optional checkpoints, the terminal request and queue transition, and release.
+
+The single request/result families are
+`graphify.workspace.semantic_worker_request` version 1 and
+`graphify.workspace.semantic_worker_result` version 1. A canonical begin frame
+binds explicit registry, active-source, operation, migration, queue, and
+watermark CAS plus an absolute deadline, `executor="host_agent"`, and the
+Boolean `host_agent_active=true`. There is no backend, provider, network,
+credential, model, endpoint, or fallback field.
+
+Validated successful output is staged only at the derived external path
+`workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`.
+The file is one immutable canonical
+`graphify.workspace.semantic_result_binding.internal` format-version-1
+envelope with exactly the closed field set and object grammar frozen in
+[`semantic-sync.md`](semantic-sync.md#result-validation-and-binding). It binds
+the begin-request digest, repository UUID, claim ID, attempt, exact desired work
+and its canonical digest, active-source revision, operation and migration
+epochs, and the canonical payload object, byte count, and SHA-256. An `UPSERT`
+payload is exactly the whole
+`{"kind":"semantic_fragment","fragment":SANITIZED_FRAGMENT}` object after
+worker-specific closed nested-schema, lossless exact-decimal helper encoding,
+fixed-point, pairwise-distinct hyperedge-member, and bounded indexed-sanitizer
+validation. A `DELETE` payload is
+exactly the kind-only
+`{"kind":"delete_tombstone"}` object. The payload byte count and digest cover
+that whole canonical object including its final newline, and the envelope stores
+the same object once. Existing no-follow
+install-once semantics apply: exact same bytes are idempotent, different bytes
+at the same derived path are a conflict, and a reopened regular `0600` file must
+match before it can be referenced. Under a provably current claim, an exact
+different-byte conflict is the non-retryable
+`semantic_result_binding_conflict=false` failure. One queue failure transition
+dead-letters the item; unreadable or ambiguous staging state is commit-unknown.
+
+Claim admission and every later queue mutation preserve exact canonical-byte
+headroom for the mandatory `result:<64-lowercase-hex>` checkpoint by projecting
+that value into the live claim before applying `max_bytes`. This is capacity
+accounting, not a new durable reservation field. Admission that cannot preserve
+the headroom installs no current-session claim and returns
+`semantic_checkpoint_capacity_unavailable` / `inspect_semantic_queue`; existing
+deterministic predecessor `claim_expired` recovery remains attributable to the
+predecessor attempt.
+
+Queue completion requires the live claim to persist
+`result:<result_binding_sha256>` in its existing bounded checkpoint, reopen and
+rehash the envelope, and require that reopened SHA-256 to equal the checkpointed
+`result_binding_sha256`. The envelope's `begin_request_sha256` must equal the
+captured digest of the accepted canonical begin frame, and its `repo_uuid` must
+equal that request field. Its `claim_id`, `attempt`, and exact desired work must
+equal the live claim. The same source revision, owner, fence, operation epoch,
+and migration epoch must be revalidated, followed by one final no-follow source
+reopen that proves the claimed `UPSERT` content digest or `DELETE` absence
+immediately before `complete()`. After the completion return is observed, the
+exact semantic lease must be released and that owner/fence proved absent before
+the `completed` frame is emitted. A complete frame, an installed envelope, a
+checkpoint, or a queue completion without that released-lease proof is not
+public completion authority. The terminal result contains digests and queue
+watermarks, never the fragment, source content, private paths, owner/fence data,
+secrets, or exception text.
+
+Before every optional progress or mandatory result checkpoint, the worker
+retains the exact live claim and prior checkpoint. Post-commit uncertainty
+adopts only the same live claim with the requested value, retries only from the
+exact retained pre-call claim while both deadlines remain, and otherwise is
+commit-unknown. Optional public checkpoint codes cannot use the reserved
+`result:` prefix.
+
+The staging file is neither a queue record nor a generation payload,
+certification binding, or completion index. A successor claim ignores an older
+session directory, and this first child performs no cleanup. Because the
+existing `complete()` transition clears the claim/checkpoint and stores no
+result digest, uncertainty after completion begins or during its pre-terminal
+lease release cannot be recovered as a successful public receipt without a
+later durable-schema decision. It remains `commit_unknown`; manual durable-state
+inspection is required, and downstream semantic sync must not consume the staged
+result without the exact exit-0 terminal receipt. This direct session outcome
+adds no status reason or action.
+
+A completed source observation proving different content or presence is
+`source_content_changed=false`; an incomplete observation is
+`source_unavailable=true`. Pre-mutation registry or lease-state corruption uses
+the existing `registry_invalid` or `workspace_state_invalid` route; ambiguity
+after a possible mutation remains commit-unknown. Result output uses
+deadline-aware write-all plus flush. Every frame has a five-second delivery
+deadline; `work` and `checkpointed` use the earlier absolute work deadline, and
+terminal delivery grants no mutation or lease authority. Partial bytes are not
+a frame. Work-deadline expiry while emitting `work` or `checkpointed` closes a
+live claim through `host_agent_timeout`; delivery-deadline expiry while work
+time remains, or another delivery failure, uses `host_agent_interrupted`. A
+lost `completed` terminal is not public completion authority.
+
+The worker stops before `bind_sealed_inputs()`, generation staging completion,
+certification, promotion, pointer mutation, and full semantic sync. This is a
+READY contract only and supplies no implementation or acceptance evidence.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

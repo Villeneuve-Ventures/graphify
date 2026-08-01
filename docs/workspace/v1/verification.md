@@ -466,6 +466,215 @@ generation, and freshness suites. P5A also requires the repository gates above,
 exact-head CI, a current Graphify graph, and independent code, architecture, and
 verification reviews.
 
+## P5B2 host-agent semantic-worker contract gates
+
+These gates freeze the sole contract-only READY child. They are future
+implementation acceptance criteria, not evidence that the command exists:
+
+- the public executable is `graphify`, and its only argument vector after that
+  executable is `workspace semantic-worker --stdio`; any other, reordered,
+  repeated, or extended argument vector exits 64 before installed-authority
+  loading, standard-input reads, source discovery, lease allocation, or state
+  access;
+- the valid argument vector loads and composes installed runtime authority
+  before consuming one canonical at-most-16-KiB `begin` frame. The single
+  request/result families are version 1, reject duplicate/unknown fields and
+  versions, and bind explicit registry, active-source, operation, migration,
+  queue, and watermark CAS plus a 1--600000 ms absolute deadline. Observed EOF,
+  catchable interruption, and malformed or oversized input before an accepted
+  `begin` emit only `invalid` / `semantic_worker_request_invalid` / `none`, omit
+  a begin digest, and perform no source, lease, or queue mutation;
+- begin-field vectors require a canonical lowercase hyphenated RFC-variant UUID
+  of version 1 through 8; positive 64-bit registry, active-source, and operation
+  coordinates; and nonnegative 64-bit migration, queue, and watermark
+  coordinates. They reject Booleans, strings, negative values, zero where
+  positive is required, and values above 9223372036854775807 as request-invalid
+  before authority comparison;
+- `executor="host_agent"` and Boolean `host_agent_active=true` are required.
+  Named/headless backends, provider/model/endpoint/credential fields,
+  `graphify.llm` discovery or dispatch, environment inference, network calls,
+  and automatic fallback are absent and denied;
+- one long-lived process derives one trusted boot/PID/process-start owner,
+  acquires one `SEMANTIC_CLAIM` lease, and retains that exact owner and fence
+  through at most one claim, eight bounded checkpoints, one terminal `complete`
+  or `fail` request, its queue transition, and release. Tests prove separate
+  subprocesses cannot continue the claim;
+- the current working directory is the exact active Git top level; existing
+  bounded no-follow policy and checkout verification precede the redacted
+  source-relative work frame. `UPSERT` stream-hashes the exact regular file and
+  `DELETE` requires absence before emitting `work`, again before staging, and a
+  final time after envelope/authority validation immediately before
+  `complete()`. Only a completed observation proving mismatch follows
+  `source_content_changed` rather than advancing the watermark.
+  Open/stat/permission/read faults, including short-read faults that leave the
+  observation incomplete, instead exercise retryable
+  `source_unavailable` / `restore_source` without claiming content drift.
+  Activation, migration, lease expiry, queue drift, and replacement desired work
+  invalidate the stale session at every mutation boundary;
+- `complete` accepts exactly one operation-matched payload: an `UPSERT`
+  semantic fragment with exactly `nodes`, `edges`, and `hyperedges`, or the
+  kind-only `DELETE` tombstone. Before the general validator or sanitizer, tests
+  enforce the exact worker-specific node/edge/hyperedge field sets, types,
+  enums, unique and referentially valid IDs, exact `work.path` provenance, null
+  metadata fields, two through 256 pairwise-distinct members per hyperedge,
+  16-KiB semantic-text limits, and rejection of duplicate members and every
+  unknown nested field. Tests reject smuggling through absolute-path, raw-source,
+  credential-metadata, and provider-data extension keys; only the explicitly
+  bounded semantic text slots remain, and none is copied to public output;
+- fixed-point canonicality vectors accept bounded scores such as `0.75` and the
+  endpoint `1`, reject binary floats, exponent notation, negative zero,
+  excessive precision, `1.0`, NaN, and infinity, and prove parse/serialize/hash
+  parity without binary-floating-point rounding. The future helper extension
+  preserves the existing `validate_semantic_fragment()` default for current
+  callers, emits retained decimal values as unquoted canonical number tokens for
+  both worker calls, and proves the sanitizer preserves every surviving numeric
+  value without float or string coercion. No other request or result field
+  admits a non-integer JSON number;
+- sanitizer-amplification tests construct the `rationale_for` index in one edge
+  pass, instrument work as `O(nodes + edges + rationale_fanout)`, and reject
+  before concatenation when any projected rationale exceeds 16 KiB or the
+  sanitized fragment would exceed 25 MiB. The actual sanitized copy is then
+  checked against the closed post-sanitize schema and the same bounds;
+- digest vectors prove `begin_request_sha256` covers the entire canonical
+  `begin` frame, `work_sha256` covers only the exact canonical six-field work
+  object, and `checkpoint_sha256` covers the entire canonical checkpoint frame,
+  each including its final newline. Additional vectors prove `payload_bytes`
+  and `payload_sha256` cover the exact whole canonical `complete.payload` wrapper
+  plus its final newline for both `UPSERT` and `DELETE`, never only the nested
+  fragment or the result envelope. The result-binding parser accepts only the
+  exact format-version-1 object grammar, rejects missing, unknown, renamed, or
+  nested fields, and requires the work/payload byte metadata to recompute
+  exactly. `result_binding_bytes` and `result_binding_sha256` cover that whole
+  envelope containing the payload object exactly once. Host-agent output never
+  appears in a public result;
+- successful output is atomically installed only at the derived private
+  external path
+  `workspaces/<repo_uuid>/semantic-staging/<begin_request_sha256>/result.json`
+  as one canonical immutable binding. Tests cover no-follow `0700`/`0600`
+  containment, same-byte idempotence, short writes, sync/replace failures, and
+  reopen/rehash verification. Exact different bytes under a provably current
+  claim exercise the non-retryable `semantic_result_binding_conflict=false` /
+  `dead_lettered` / `inspect_semantic_queue` route; stale, unreadable, or
+  ambiguous conflict state never becomes a queue failure or success;
+- tight-boundary capacity vectors project the exact claim with the maximum
+  `result:<64-lowercase-hex>` checkpoint before claim admission and before every
+  later queue mutation. They prove a claim fitting only with `checkpoint=null`
+  is withheld as `semantic_checkpoint_capacity_unavailable` without a
+  current-session claim, and that concurrent enqueue, reconciliation, and
+  optional checkpoints cannot consume the reserved canonical-byte headroom;
+- queue completion is unreachable until the verified binding digest is stored
+  as `result:<sha256>` in the current claim checkpoint, the file is reopened
+  and rehashed again, that reopened digest equals the checkpoint suffix, the
+  envelope's begin-request digest equals the captured digest of the accepted
+  canonical begin frame, its repository UUID equals that request field, its
+  claim ID, attempt, exact desired work, and work digest equal the live claim and
+  captured work result, its payload object/byte count/digest equal the validated
+  payload, and exact source/owner/fence/operation/migration authority still
+  matches. The contained source is then reopened without following links and
+  must still prove the exact `UPSERT` digest or `DELETE` absence immediately
+  before `complete()`. After an observed completion return, tests release the
+  exact semantic lease and prove that owner/fence absent before emitting
+  `completed`. Substitution vectors vary each digest or binding independently,
+  and injected races at every boundary prove no completion without the exact
+  binding and no success frame before released-lease proof;
+- the nine frozen failure classifications accept only their specified
+  retryability. Three are accepted from `fail`; six are transport-only; and
+  `semantic_work_unsupported` is also transport-derived when a work frame would
+  exceed the public bound. Timeout, EOF/interruption, malformed or invalid
+  result data, source unavailability or mismatch, and result-binding conflict
+  attempt exactly one worker-owned `fail()` under the live claim. Failure count
+  advances once; retry occurs only within the explicit budget, while
+  non-retryable or exhausted work becomes durable dead-letter and blocks
+  completed watermark advancement. A
+  worker crash before that transition is recovered only through the existing
+  `claim_expired` rule;
+- deadline tests start one absolute work deadline only after the canonical
+  `begin` frame is accepted and prove it bounds source verification, lease
+  acquisition, protocol waits, validation, staging, checkpoint, and both the
+  start and observed return of completion or caller-requested failure.
+  Heartbeats use the fixed 30-second TTL and 10-second cadence without extending
+  that deadline. Expiry before a claim, including during preflight or
+  acquisition, emits `withheld` / `semantic_worker_preclaim_timeout` /
+  `retry_status`, never calls `fail()`, and attributes no failure increment to
+  the current session. Catchable preclaim interruption, checkout, configuration,
+  capability, CAS, contention, capacity, and staged-barrier rejection likewise
+  exercise their exact frozen terminal route without a current-session queue
+  failure. Separate vectors prove `claim()` may apply the existing predecessor
+  `claim_expired` transition and return no current claim; that increment belongs
+  to the predecessor, and an exact recovery-only snapshot yields `idle` only
+  when no item remains eligible. An uncertain `claim()` call adopts an exact
+  installed claim, retries only from the exact unchanged candidate state, and
+  treats every other absent-claim or unreadable state as commit-unknown. After
+  expiry with a live claim, tests
+  reject checkpoints, completion, and further heartbeats and permit exactly one
+  transport-owned `host_agent_timeout=true` failure plus lease release before
+  the unchanged lease liveness deadline;
+- interruption vectors inject a catchable interruption after an accepted
+  `complete` at validation, sanitization, hashing, installation, and the last
+  pre-mutation boundary. They exercise exactly one
+  `host_agent_interrupted=true` failure before queue completion/failure begins.
+  A vector after accepted `fail` preserves its exact caller classification;
+  interruption after either queue mutation begins is commit-unknown;
+- registry and lease corruption vectors distinguish deterministic read failures
+  before acquisition, heartbeat, or release mutation from post-mutation
+  ambiguity. The former emit `registry_invalid` or `workspace_state_invalid` /
+  `inspect_workspace_state` without a current-session queue failure; the latter
+  follow the phase-specific commit-unknown reread rules;
+- post-commit fault injection at lease acquisition adopts only the unique exact
+  next owner/fence/domain-epoch record derived from the retained pre-acquisition
+  snapshot; absence, contention, authority drift, and ambiguity exercise their
+  distinct retry/withhold/commit-unknown paths. Heartbeat fault injection adopts
+  only the exact requested timestamp and liveness deadline, permits retry only
+  from the exact unchanged record, and forbids later claim mutation from an
+  unproven grant;
+- result-install and checkpoint commit uncertainty may be adopted only by exact
+  reread. Optional progress codes reject the reserved `result:` prefix. For each
+  optional or mandatory checkpoint, fault injection retains the exact prior
+  claim, adopts only the same live claim with the requested value, retries only
+  from the exact prior value while both deadlines remain, and maps a different
+  checkpoint, absent/stale claim, or unreadable state to `commit_unknown`.
+  Adopted progress emits the digest of its full canonical request frame;
+  adopted result checkpoints still require envelope reopen and revalidation.
+  Uncertainty after completion or failure begins, ambiguous lease mutation, or
+  release-only uncertainty is `commit_unknown`, never success or replay
+  authority. Release fault injection retains the exact lease, accepts an
+  observed return or a locked reread proving that owner/fence absent, retries
+  only from the exact unchanged record before liveness expiry, and proves no
+  `completed` or post-grant `idle` frame preceded that result. It is a direct
+  session result with action `none`; it invents no status route because the
+  current completed queue item retains no result digest;
+- every public output frame is canonical and at most 64 KiB, uses one exact
+  per-kind field set, and limits failure reason/action values to the frozen
+  enums. Result-schema vectors require integer `1` versions, the exact
+  outcome/exit-code pairs, canonical UUID and digest strings, positive attempts
+  and byte counts, nonnegative queue revisions and watermarks, and the exact
+  typed six-field work object. They reject Booleans, quoted or fractional
+  integers, negative values, zero in positive fields, invalid UUID/digest/work
+  values, mismatched byte counts or queue snapshots, and idle watermarks with
+  completed greater than desired. Values above the binary64 exact-integer range
+  round-trip without narrowing. Output frames contain no source bytes, semantic
+  payload, secret,
+  credential, provider/model data, private absolute path, owner/fence detail,
+  environment value, raw exception, or extension text. Output-writer tests prove
+  short-write retry and fail closed on partial-then-error, zero progress, broken
+  pipe, closed output, or flush failure. A full pipe with a non-draining reader
+  exercises a near-64-KiB frame and proves readiness, writes, and flush cannot
+  outlive the five-second delivery deadline; `work` and `checkpointed` use the
+  earlier work deadline. Tests reject partial records, route work-deadline expiry
+  through one timeout failure, route delivery-deadline expiry while work time
+  remains and every other failed delivery through one interruption failure,
+  forbid a replacement frame, require exit 20 for delivery failures, and reject
+  a lost `completed` terminal as consumable authority;
+- recursive source, Git, real `HOME`, real `XDG_STATE_HOME`, real
+  `CODEX_HOME`, graph, receipt, and global-install snapshots remain unchanged.
+  The only permitted writes are the reviewed queue/lease transitions and
+  semantic-staging file beneath a disposable configured external state root;
+  and
+- no gate calls `bind_sealed_inputs()`, completes generation staging, certifies
+  or promotes a generation, moves a pointer, performs migrate/GC/repair,
+  retains a service/watch loop, consumes or cleans staged semantic output, or
+  claims full semantic sync or governance acceptance.
+
 ## P5B2 public fenced pointer-repair CLI gates
 
 - the only accepted repair argv forms are `workspace repair --dry-run

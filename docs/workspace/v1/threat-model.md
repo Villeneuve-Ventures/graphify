@@ -119,6 +119,68 @@ source, staging-only writes, and host-agent instruction/data separation.
 Backend endpoints and credentials are operator configuration, never repo policy;
 secrets are excluded from argv and persisted state.
 
+The contract-only host-agent semantic-worker child narrows that future boundary
+further. Its public executable is `graphify`; its only frozen argument vector
+after that executable is `workspace semantic-worker --stdio`, making the full
+invocation `graphify workspace semantic-worker --stdio`. The caller must state
+an already-active host agent explicitly; the transport passes no named backend
+and never imports or calls `graphify.llm` provider discovery or dispatch.
+Credentials, provider files, ambient backend variables, network availability,
+and an absent API key are neither capability nor authority. Source bytes are
+read-only untrusted data and are never returned in public result frames.
+
+One long-lived process retains one OS-derived semantic owner and fence across
+claim, bounded checkpoints, the terminal request and queue transition, and
+release. This prevents separate subprocesses, a replaced caller, source
+activation, migration, lease expiry, or a successor attempt from inheriting
+semantic commit authority.
+Successful `UPSERT` output is treated as untrusted until the existing semantic
+fragment validator is surrounded by the worker's closed nested schema and the
+validator receives retained exact decimals through a lossless canonical-number
+encoder while the sanitizer runs through a preflighted linear `rationale_for`
+index. Unknown keys, non-work-path provenance, noncanonical fixed-point scores,
+oversized semantic text, dangling references, and projected rationale or payload
+amplification, including duplicate hyperedge members, are rejected before
+sanitizer allocation. `DELETE` accepts only the exact kind-only tombstone. An
+immutable canonical result envelope is then
+installed under private external workspace staging, its exact bytes and digest
+are reopened and verified, and that digest is persisted in and revalidated
+against the live claim checkpoint. The source digest or absence is checked a
+final time immediately before queue completion, and the public success frame is
+withheld until the exact semantic lease is provably released. Queue completion
+before those checks is forbidden. Claim admission and every later queue mutation
+project the maximum mandatory result checkpoint before enforcing canonical-byte
+capacity, so an accepted claim cannot have its binding stranded by ordinary
+queue growth.
+
+The private envelope admits source-derived text only in the schema's bounded
+semantic `label` and sanitizer-produced `rationale` fields; it has no separate
+raw-source or arbitrary metadata field. That private `0600` payload is not
+claimed to be secret-free or non-verbatim. Public receipts contain no semantic
+text, credential, private absolute path, raw exception, provider/model data, or
+lease owner or fence detail. Same-path different-byte installation, unsafe
+paths, links, special files, oversized fragments, identifier/path tricks,
+unknown fields, stale claims, and epoch drift fail closed. An exact
+different-byte binding under a current claim is a non-retryable queue failure;
+unreadable or ambiguous staging state is commit-unknown. Orphan result staging
+is not cleanup authority. If queue completion may have committed before its
+terminal public frame, including uncertainty during the intervening lease
+release, the absence of a durable queue/result association is reported as
+commit-unknown rather than inferred success.
+
+Only a completed source observation can prove content drift; an incomplete
+observation is retryable `source_unavailable`. Pre-mutation registry or lease
+corruption uses existing invalid-state routes; post-mutation ambiguity is
+commit-unknown. Catchable interruption after `complete` remains classifiable
+until queue mutation begins; an accepted `fail` retains its caller classification.
+A non-draining stdout reader cannot retain a live claim indefinitely: every
+frame has a five-second delivery deadline, and `work` or `checkpointed` uses the
+earlier absolute work deadline. Terminal delivery grants no mutation or lease
+authority. A stdout record becomes a frame only after complete
+newline-terminated delivery.
+A partial trailing record is not a frame, and a `completed` terminal requires
+exit 0 to become public authority.
+
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted
 `SEMANTIC_CLAIM` lease and an explicit live capability decision. At the claim
@@ -177,6 +239,14 @@ V1 does not claim automatic, online, service, arbitrary-history, registry,
 lease, path, staged-build, semantic-queue, or GC repair from the public pointer
 repair lifecycle. It adds no durable repair completion index and makes no
 governance or receipt-acceptance claim.
+
+The READY host-agent semantic-worker document is likewise not runtime or
+acceptance authority. It does not claim named/headless backend execution,
+network access, API-key handling, provider fallback, durable post-completion
+receipt recovery, staging cleanup, sealed-input finalization, generation
+certification or promotion, pointer mutation, retained service/watch behavior,
+full semantic sync, or content-level DLP classification of admitted semantic
+prose.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication
