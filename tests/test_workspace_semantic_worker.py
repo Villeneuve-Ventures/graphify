@@ -411,7 +411,10 @@ def test_result_binding_parser_rejects_an_under_limit_payload_depth_bomb() -> No
     raw = binding.canonical.replace(validated.canonical[:-1], poisoned_payload, 1)
     assert len(raw) < semantic_worker.COMPLETE_MAX_BYTES
 
-    with pytest.raises(semantic_worker.SemanticResultInvalid):
+    with pytest.raises(
+        semantic_worker.SemanticResultInvalid,
+        match="bound payload nesting is too deep",
+    ):
         semantic_worker.parse_result_binding(raw)
 
 
@@ -2261,7 +2264,10 @@ def test_result_parser_rejects_an_under_limit_depth_bomb() -> None:
     result = b'{"zz":' + depth_bomb + b"}\n"
     assert len(result) < semantic_worker.RESULT_MAX_BYTES
 
-    with pytest.raises(semantic_worker.SemanticResultInvalid):
+    with pytest.raises(
+        semantic_worker.SemanticResultInvalid,
+        match="public result nesting is too deep",
+    ):
         semantic_worker.parse_result_frame(result)
 
 
@@ -2423,6 +2429,7 @@ def test_caller_failure_after_deadline_becomes_transport_timeout(
     item = runtime.semantic_queue.inspect(HARNESS_REPO_UUID).items[0]
     assert item.failure_count == 1
     assert item.last_error == "host_agent_timeout"
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
 
 
 def test_semantic_worker_late_caller_failure_return_is_commit_unknown(
