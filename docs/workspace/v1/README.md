@@ -535,8 +535,9 @@ delivery which surfaced them is the
 It stores source, tracking state, activation trigger, and closure evidence
 without changing phase readiness or granting execution. Normative behavior
 stays in the linked contract, implementation document, or accepted receipt;
-the register does not duplicate it. Host-local or ignored `.omx/` artifacts are
-historical execution evidence and never override this repository authority
+the register does not duplicate it. Uncommitted host-local `.omx/` artifacts,
+including artifacts hidden by a local Git exclude such as `.git/info/exclude`,
+are historical execution evidence and never override this repository authority
 set.
 
 | Area | Owner/status | Stable boundary |

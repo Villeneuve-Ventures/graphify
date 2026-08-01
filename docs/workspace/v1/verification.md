@@ -5,10 +5,12 @@
 GitHub review evidence is repository- and revision-bound. Every GitHub CLI call
 used for Graphify review or closeout must specify
 `--repo Villeneuve-Ventures/graphify`; an unqualified result is not authority.
-Before classifying a finding, record the full base commit, exact reviewed head
-commit and tree, changed-file manifest, and current resolved/outdated state of
-the substantive thread. Invalidate the classification if the head or governing
-instructions change.
+Before classifying a finding, record the canonical repository, pull request
+number, immutable review-thread node ID, current path and line anchor, full base
+commit, exact reviewed head commit and tree, changed-file manifest, and the
+thread's explicit `isResolved` and `isOutdated` values. `isResolved=false`
+records the thread as unresolved. Invalidate the classification if the head or
+governing instructions change.
 
 Each substantive thread receives exactly one evidence-backed disposition:
 
