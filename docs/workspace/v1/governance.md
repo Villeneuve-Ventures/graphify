@@ -133,7 +133,7 @@ statuses. `JOS` means `justified out-of-scope`:
 
 ### Exact-head source evidence
 
-These records were refreshed at `2026-08-01T04:32:53Z` for canonical repository
+These records were refreshed at `2026-08-01T05:03:37Z` for canonical repository
 `Villeneuve-Ventures/graphify`. Each exact-SHA compare link is the changed-file
 manifest for its recorded base and head.
 `not-applicable` is explicit when a finding came from a PR description or a
@@ -146,6 +146,8 @@ workflow state is never inferred.
   watch” and PR #36's “Residual nonclaims” preserve the exact claim that the
   capacity-policy representation is compatibility-sensitive and the accepted
   preview makes no performance/resource or bounded pre-enumeration claim.
+- Immutable source node IDs: PR #35 `PR_kwDOTZvP8s73RkdK`; PR #36
+  `PR_kwDOTZvP8s73isnH`.
 - PR #35 revision: base `129e4d561a10061f2629780b5f5c221c0f19449b`, head
   `b32503e0aabf802970d9d7032a07e0a322f41c28`, tree
   `1104ac8a74b4abd1bf2e46cb1439cc3d29d6639a`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/129e4d561a10061f2629780b5f5c221c0f19449b...b32503e0aabf802970d9d7032a07e0a322f41c28).
@@ -172,6 +174,7 @@ workflow state is never inferred.
 - Source record: `PR_DESCRIPTION_DEFERRED`; PR #39's “Whole-PR AI slop cleanup”
   preserves the exact claim that repeated bounded-input readers were deferred
   as a cross-command refactor outside the pointer-repair delivery.
+- Immutable source node ID: `PR_kwDOTZvP8s730dHx`.
 - Exact revision: base `73dea771e50a1b066cbd971f85b0a5a196d34804`, head
   `8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b`, tree
   `5ceef4cf831093b0562413971ec2208c036c0920`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/73dea771e50a1b066cbd971f85b0a5a196d34804...8dc93e4b5f554e05cb0d7dd4f533e8618cdcad0b).
@@ -189,6 +192,7 @@ workflow state is never inferred.
   `.github/workflows/pr-agent.yml`, current and original line `357`, original
   comment commit `1bc1d8a324c105458738247390d4fb3b094364e5`,
   `isResolved=false`, `isOutdated=false`.
+- Disposition: `deferred: JOS-PR-AGENT-DRAIN`.
 
 #### JOS-SEMANTIC-WORKER-CONFORMANCE evidence
 
@@ -196,6 +200,7 @@ workflow state is never inferred.
   “Deferred justified follow-up” and Qodo's [assessment](https://github.com/Villeneuve-Ventures/graphify/pull/43#issuecomment-5139204878),
   node `IC_kwDOTZvP8s8AAAABMlILDg`, preserve the machine-readable
   schema/closed-validator and conformance-test successor boundary.
+- Immutable PR-description source node ID: `PR_kwDOTZvP8s742UQL`.
 - Exact revision: base `d70219f07b37f96b2406c9f97c7a40e5c2592486`, head
   `1f202c9134ee0993e4bba40482fa8113f598920a`, tree
   `27f7259fc3d716a78a3b28417204b1968c05d421`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/d70219f07b37f96b2406c9f97c7a40e5c2592486...1f202c9134ee0993e4bba40482fa8113f598920a).
