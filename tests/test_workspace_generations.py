@@ -55,6 +55,7 @@ from tests.workspace_p3_helpers import (
     authorization,
     create_harness,
     create_repo,
+    git_output,
     metadata_snapshot,
     trust_source_observations,
     tree_snapshot,
@@ -2422,6 +2423,54 @@ def test_certification_reobserves_source_before_trusting_reconciliation(
     assert allocation.staging_path.is_dir()
 
 
+def test_create_repo_has_deterministic_seed_commit_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ambient_hooks = tmp_path / "ambient-hooks"
+    ambient_hooks.mkdir()
+    pre_commit_hook = ambient_hooks / "pre-commit"
+    pre_commit_hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    pre_commit_hook.chmod(0o755)
+
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "commit.gpgsign")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "core.hooksPath")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", str(ambient_hooks))
+    first_identity = {
+        "GIT_AUTHOR_NAME": "Ambient Author One",
+        "GIT_AUTHOR_EMAIL": "ambient-one@example.com",
+        "GIT_AUTHOR_DATE": "2001-01-01T00:00:00+00:00",
+        "GIT_COMMITTER_NAME": "Ambient Committer One",
+        "GIT_COMMITTER_EMAIL": "ambient-committer-one@example.com",
+        "GIT_COMMITTER_DATE": "2001-01-01T00:00:00+00:00",
+    }
+    second_identity = {
+        "GIT_AUTHOR_NAME": "Ambient Author Two",
+        "GIT_AUTHOR_EMAIL": "ambient-two@example.com",
+        "GIT_AUTHOR_DATE": "2031-01-01T00:00:00+00:00",
+        "GIT_COMMITTER_NAME": "Ambient Committer Two",
+        "GIT_COMMITTER_EMAIL": "ambient-committer-two@example.com",
+        "GIT_COMMITTER_DATE": "2031-01-01T00:00:00+00:00",
+    }
+
+    for key, value in first_identity.items():
+        monkeypatch.setenv(key, value)
+    first = create_repo(tmp_path / "first")
+
+    for key, value in second_identity.items():
+        monkeypatch.setenv(key, value)
+    second = create_repo(tmp_path / "second")
+
+    assert git_output(first, "rev-parse", "HEAD^{tree}") == git_output(
+        second,
+        "rev-parse",
+        "HEAD^{tree}",
+    )
+    assert git_output(first, "rev-parse", "HEAD") == git_output(second, "rev-parse", "HEAD")
+
+
 def test_certification_rejects_persistent_source_replacement_during_reobservation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2435,6 +2484,9 @@ def test_certification_rejects_persistent_source_replacement_during_reobservatio
         cwd=replacement,
         check=True,
     )
+    trusted_source_commit = git_output(harness.repo, "rev-parse", "HEAD")
+    assert git_output(replacement, "rev-parse", "HEAD^") == trusted_source_commit
+    assert git_output(replacement, "rev-parse", "HEAD") != trusted_source_commit
     grant = acquire(harness, "BUILD", tick=1)
     journal = JournalStore(
         harness.state_root,
