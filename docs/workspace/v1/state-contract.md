@@ -313,11 +313,13 @@ binding only when that marker is present; pre-P5A receipts without it, including
 legacy positive-watermark receipts permitted by the frozen schema, remain
 readable without being retroactively treated as P5A authority.
 
-## Contract-only host-agent result staging
+## Accepted host-agent result staging
 
-The future host-agent semantic-worker transport is frozen in
-[`semantic-sync.md`](semantic-sync.md). It does not revise
-`graphify.workspace.semantic_queue.internal` or any public durable schema. The
+The accepted host-agent semantic-worker transport is frozen in
+[`semantic-sync.md`](semantic-sync.md) and bound to the
+[P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md). The accepted
+staging does not revise `graphify.workspace.semantic_queue.internal` or any
+public durable schema. The
 exact command is `graphify workspace semantic-worker --stdio`, and one process
 must retain the same OS-derived `SEMANTIC_CLAIM` owner from claim through
 optional checkpoints, the terminal request and queue transition, and release.
@@ -413,8 +415,10 @@ time remains, or another delivery failure, uses `host_agent_interrupted`. A
 lost `completed` terminal is not public completion authority.
 
 The worker stops before `bind_sealed_inputs()`, generation staging completion,
-certification, promotion, pointer mutation, and full semantic sync. This is a
-READY contract only and supplies no implementation or acceptance evidence.
+certification, promotion, pointer mutation, and full semantic sync. The accepted
+implementation and evidence are limited to the exact transport bound by the
+[P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md); no excluded
+successor authority is added.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

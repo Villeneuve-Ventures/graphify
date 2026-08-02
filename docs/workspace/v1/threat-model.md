@@ -35,8 +35,11 @@ claims, bounded retries/dead letters, and stable-watermark certification.
 P5B2a adds only the initial enrollment and verified clone/fork adoption command.
 P5B2b0 adds internal request-bound staged-build recovery and terminal stale
 abandonment. P5B2b adds only provider-neutral structural
-`workspace sync --code-only`; all other public workspace commands, service,
-installation, route, publication, and live-cutover transitions remain absent.
+`workspace sync --code-only`. Separately accepted P5B2 children expose only the
+bounded commands listed in the [workspace contract](README.md), including the
+host-agent semantic worker. Full semantic sync, every unlisted public workspace
+command, service, installation, route, publication, and live-cutover transitions
+remain absent.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -119,8 +122,8 @@ source, staging-only writes, and host-agent instruction/data separation.
 Backend endpoints and credentials are operator configuration, never repo policy;
 secrets are excluded from argv and persisted state.
 
-The contract-only host-agent semantic-worker child narrows that future boundary
-further. Its public executable is `graphify`; its only frozen argument vector
+The accepted host-agent semantic-worker child narrows that boundary further.
+Its public executable is `graphify`; its only frozen argument vector
 after that executable is `workspace semantic-worker --stdio`, making the full
 invocation `graphify workspace semantic-worker --stdio`. The caller must state
 an already-active host agent explicitly; the transport passes no named backend
@@ -240,13 +243,13 @@ lease, path, staged-build, semantic-queue, or GC repair from the public pointer
 repair lifecycle. It adds no durable repair completion index and makes no
 governance or receipt-acceptance claim.
 
-The READY host-agent semantic-worker document is likewise not runtime or
-acceptance authority. It does not claim named/headless backend execution,
-network access, API-key handling, provider fallback, durable post-completion
-receipt recovery, staging cleanup, sealed-input finalization, generation
-certification or promotion, pointer mutation, retained service/watch behavior,
-full semantic sync, or content-level DLP classification of admitted semantic
-prose.
+The accepted host-agent semantic-worker implementation and
+[receipt](receipts/p5b2-semantic-worker.md) are authority only for the exact
+transport boundary. They do not claim named/headless backend execution, network
+access, API-key handling, provider fallback, durable post-completion receipt
+recovery, staging cleanup, sealed-input finalization, generation certification
+or promotion, pointer mutation, retained service/watch behavior, full semantic
+sync, or content-level DLP classification of admitted semantic prose.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

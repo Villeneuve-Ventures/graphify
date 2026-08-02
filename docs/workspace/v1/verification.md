@@ -504,10 +504,12 @@ generation, and freshness suites. P5A also requires the repository gates above,
 exact-head CI, a current Graphify graph, and independent code, architecture, and
 verification reviews.
 
-## P5B2 host-agent semantic-worker contract gates
+## P5B2 host-agent semantic-worker acceptance gates
 
-These gates freeze the sole contract-only READY child. They are future
-implementation acceptance criteria, not evidence that the command exists:
+These gates freeze the implemented and accepted transport boundary. The exact
+delivery and validation evidence is bound by the
+[P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md); the gates do
+not authorize full semantic sync or any successor:
 
 - the public executable is `graphify`, and its only argument vector after that
   executable is `workspace semantic-worker --stdio`; any other, reordered,
@@ -562,9 +564,9 @@ implementation acceptance criteria, not evidence that the command exists:
 - fixed-point canonicality vectors accept bounded scores such as `0.75` and the
   endpoint `1`, reject binary floats, exponent notation, negative zero,
   excessive precision, `1.0`, NaN, and infinity, and prove parse/serialize/hash
-  parity without binary-floating-point rounding. The future helper extension
-  preserves the existing `validate_semantic_fragment()` default for current
-  callers, emits retained decimal values as unquoted canonical number tokens for
+  parity without binary-floating-point rounding. The implemented helper
+  extension preserves the existing `validate_semantic_fragment()` default for
+  other callers, emits retained decimal values as unquoted canonical number tokens for
   both worker calls, and proves the sanitizer preserves every surviving numeric
   value without float or string coercion. No other request or result field
   admits a non-integer JSON number;

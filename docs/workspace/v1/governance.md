@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-08-01T03:54:13Z`
+Ledger refresh: `2026-08-02T04:55:01Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -51,12 +51,13 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical base | The pre-edit checkout and live `origin/workspace/v1` both resolved to `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`, tree `27f7259fc3d716a78a3b28417204b1968c05d421`, with divergence `0/0` and a clean working tree. |
-| Worktrees | One worktree exists. It is now on `codex/workspace-followup-governance`, created directly from the canonical base above. No competing delivery or governance worktree existed at preflight. |
-| GitHub | PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) is merged at the canonical base above; the fork repository had no open pull requests before this branch was created. |
-| P5B2 host-agent semantic-worker contract delivery | PR #43 exact head `1f202c9134ee0993e4bba40482fa8113f598920a`; merge/current commit `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`; merge/current tree `27f7259fc3d716a78a3b28417204b1968c05d421`. Exact-head CI [30681324681](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30681324681) passed `skillgen-check`, `test (3.14)`, and `security-scan`. |
-| Follow-up-governance preflight | The canonical repository, branch, HEAD, tree, cleanliness, divergence, worktree inventory, merged PR #43, and empty open-PR inventory were revalidated with GitHub calls pinned to `Villeneuve-Ventures/graphify`. No GitHub review thread was replied to, resolved, or otherwise mutated. |
-| Support baseline | Observed host CPython `3.14.6`; uv `0.11.30` |
+| Canonical base | The pre-edit checkout and live `origin/workspace/v1` both resolved to `36b2e3426ebe3095a0b81c36656789b6790f103f`, tree `06d20480337bc94edba4de37c06d2dbf1ab595f2`, with divergence `0/0` and a clean working tree. |
+| Worktrees | Two worktrees existed at preflight. This checkout is now on `codex/p5b2-semantic-worker-governance`, created directly from the canonical base above. The separate detached Codex worktree was clean at the same commit; no competing delivery or governance branch was active there. |
+| GitHub | PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45) is merged at the canonical base above; the fork repository had no open pull requests before this branch was created. |
+| P5B2 host-agent semantic-worker contract provenance | PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) exact head `1f202c9134ee0993e4bba40482fa8113f598920a`; merge `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`; tree `27f7259fc3d716a78a3b28417204b1968c05d421`. Exact-head CI [30681324681](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30681324681) passed `skillgen-check`, `test (3.14)`, and `security-scan`. |
+| P5B2 host-agent semantic-worker implementation delivery | PR #45 exact base `99af03803a44d575123a18f1c0eafa48149df492`; head `5f57e565bd188789c984bc1370943caa758148c3`; merge/current commit `36b2e3426ebe3095a0b81c36656789b6790f103f`; delivery/merge/current tree `06d20480337bc94edba4de37c06d2dbf1ab595f2`. Exact-head CI [30730561721](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30730561721) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. |
+| Semantic-worker-governance preflight | The canonical repository, branch, HEAD, tree, cleanliness, divergence, worktree inventory, merged PR #45, exact delivery manifest, review/thread disposition, and empty open-PR inventory were revalidated with GitHub calls pinned to `Villeneuve-Ventures/graphify`. No GitHub review thread was replied to, resolved, or otherwise mutated. |
+| Support baseline | Observed host CPython `3.14.6`; project CPython `3.14.3`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
 orientation only and cannot justify execution.
@@ -73,10 +74,10 @@ orientation only and cannot justify execution.
 | H1 | P4F | COMPLETE | Inherited labeling-order test stabilization closed. |
 | H2 | H1 | COMPLETE | Candidate packaging, dependency, and blocking security hygiene closed. |
 | H3 | H2 | DEFERRED | Full-repository Pyright and medium-severity Bandit debt remains non-blocking. |
-| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children are complete; one contract-only P5B2 child is READY, while its implementation, remaining P5B2, and the broad P5C gate are not. |
+| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, are complete. Remaining P5B2 and the broad P5C gate are not. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | Delivered children remain complete. The contract-only host-agent semantic-worker transport is the sole READY child; its implementation, full semantic sync, explicit backend integration, migrate, broader repair, broader mutation or query authority, and all other commands remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, are complete. Full semantic sync, explicit backend integration, migrate, broader repair, broader mutation or query authority, and all other undelivered commands remain waiting. No successor is promoted. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
@@ -88,7 +89,7 @@ orientation only and cannot justify execution.
 | P5B2b0 | P5B2a | COMPLETE | Request-bound staged-build recovery prerequisite closed. |
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
 | P5B2c | P5C1 | COMPLETE | Accepted receipt: [`P5B2c`](receipts/p5b2c.md). One-shot certified `workspace query --request-stdin` transport only. |
-| P5B2 host-agent semantic-worker transport | P5A, P5C1 | READY | Contract-only exact `workspace semantic-worker --stdio` host-agent lifecycle in [`semantic-sync.md`](semantic-sync.md). P5A directly supplies queue semantics; P5C1 supplies installed runtime authority and transitively includes P5B1. No implementation or completion receipt exists; READY does not authorize implementation. |
+| P5B2 host-agent semantic-worker transport | P5A, P5C1 | COMPLETE | Accepted exact `workspace semantic-worker --stdio` host-agent lifecycle in [`semantic-sync.md`](semantic-sync.md). P5A directly supplies queue semantics; P5C1 supplies installed runtime authority and transitively includes P5B1. Completion evidence: [`P5B2 host-agent semantic worker`](receipts/p5b2-semantic-worker.md). |
 | Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command require separate review. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
@@ -99,9 +100,8 @@ cross-repository ordering remains in the external portfolio plan, and all
 remain waiting at this handoff.
 
 Statements in accepted boundary freezes below that a receipt promoted no later
-child describe that receipt's authority. They do not override the sole current
-READY row above, which is established only by this contract-only batch and
-carries no implementation or acceptance evidence.
+child describe that receipt's authority at its acceptance point. They do not
+override the current ledger. This acceptance promotes no successor to `READY`.
 
 ## Justified out-of-scope follow-up register
 
@@ -119,9 +119,12 @@ statuses. `JOS` means `justified out-of-scope`:
 - `OPPORTUNISTIC` permits a behavior-preserving cleanup only when adjacent
   authorized work already touches the named surface;
 - `GUARDED` records that an executable guard exists and must be revalidated when
-  its dependency changes; and
+  its dependency changes;
 - `SEPARATE_AUTHORIZATION_REQUIRED` identifies a bounded successor candidate but
-  grants no implementation or acceptance authority.
+  grants no implementation or acceptance authority; and
+- `CLOSED` records a historical follow-up whose stated closure evidence was
+  delivered and independently accepted. It grants no broader phase,
+  implementation, execution, or successor authority.
 
 | ID | Source | Tracking state | Justification and scope boundary | Activation trigger and closure evidence |
 |---|---|---|---|---|
@@ -129,11 +132,15 @@ statuses. `JOS` means `justified out-of-scope`:
 | `JOS-GC-PREVIEW-VERSION` | PR [#37](https://github.com/Villeneuve-Ventures/graphify/pull/37); [exact-head evidence](#jos-gc-preview-version-evidence) | `TRIGGER_GATED` | [`gc_preview_result_bytes()`](../../../graphify/workspace/gc_command.py) selects `GC_LIFECYCLE_SCHEMA_VERSION`, so a future lifecycle-v2 change could drift frozen preview-v1 bytes. Current v1 behavior is not defective, and the lifecycle delivery did not authorize a speculative version refactor. | Activate before changing either lifecycle or preview schema versioning. Closure must independently freeze preview-version selection and prove preview-v1 canonical bytes remain unchanged across a lifecycle-version change. |
 | `JOS-BOUNDED-INPUT-READERS` | PR [#39](https://github.com/Villeneuve-Ventures/graphify/pull/39); [exact-head evidence](#jos-bounded-input-readers-evidence) | `OPPORTUNISTIC` | Repeated bounded-input readers across established commands are justified maintainability debt, but consolidating them was a cross-command refactor outside the pointer-repair PR's surgical behavior fixes. | Activate only when an authorized batch adds another `--request-stdin` command or changes more than one established reader. Closure requires regression-locked parser behavior and must preserve each command's bounds, canonicality, error mapping, authority-loading order, and deadline semantics. |
 | `JOS-PR-AGENT-DRAIN` | PR [#40](https://github.com/Villeneuve-Ventures/graphify/pull/40); [exact-head evidence](#jos-pr-agent-drain-evidence) | `GUARDED` | The pinned PR-Agent revision relies on a private drain-aware runner, which creates a real pin-upgrade compatibility risk. The current exact pin imports and executes it successfully, so this is not a defect in the delivered workflow. | The [policy regression](../../../tests/test_pr_agent_policy.py) requires the exact import and call. Reactivate on any PR-Agent pin or runner-import change. Closure requires an exact-import smoke test and proof that review/description completion remains drain-aware with no silent legacy fallback. |
-| `JOS-SEMANTIC-WORKER-CONFORMANCE` | Contract PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43); [exact-head evidence](#jos-semantic-worker-conformance-evidence) | `SEPARATE_AUTHORIZATION_REQUIRED` | The frozen prose contract has no machine-readable request/result schema, equivalent closed runtime validator, conformance suite, or implementation. PR #43 was contract-only and explicitly excluded that work. | Activate only through explicit operator authorization for the implementation successor. Closure requires schemas or equivalent closed validators, conformance tests, and implementation of the frozen exact-decimal, checkpoint-capacity, uncertainty-recovery, and deadline-aware delivery behavior in [`semantic-sync.md`](semantic-sync.md). Full semantic sync and every explicit backend remain excluded, and completion still requires a separate governance-only receipt. |
+| `JOS-SEMANTIC-WORKER-CONFORMANCE` | Contract PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43), delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45), and [`P5B2 semantic-worker receipt`](receipts/p5b2-semantic-worker.md); [exact-head evidence](#jos-semantic-worker-conformance-evidence) | `CLOSED` | PR #43 froze the prose contract and explicitly deferred machine-readable schemas, closed runtime validation, conformance tests, and implementation. PR #45 delivered those exact conformance surfaces, and the separate receipt independently accepts only the frozen transport. | Historical closure only: PR #45 plus the accepted receipt satisfy the stated schema/validator, conformance-suite, exact-decimal, checkpoint-capacity, uncertainty-recovery, and deadline-aware delivery evidence. Full semantic sync and every explicit backend remain excluded. `CLOSED` grants no broader phase, implementation, execution, or successor authority. |
+| `JOS-BACKEND-DETECTION-TEST-ISOLATION` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-backend-detection-test-isolation-evidence) | `SEPARATE_AUTHORIZATION_REQUIRED` | Three backend-detection tests clear only part of the provider-selector priority set, so an ambient higher-priority selector can change their expected result. This is test-fixture isolation debt, not a semantic-worker transport defect. | Owner: separately authorized repository test-harness maintenance. No code or test fix is authorized here. Closure requires provider-neutral fixtures that clear the full selector set and a focused regression proving the tests are independent of ambient provider credentials. |
+| `JOS-GIT-SEED-HISTORY-STABILITY` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-git-seed-history-stability-evidence) | `SEPARATE_AUTHORIZATION_REQUIRED` | The persistent-source-replacement test derives shared seed history from helper commits whose identity can diverge across a one-second timestamp boundary. The delivery stabilized its synthetic timestamps only for the final run; changing the shared helper was unrelated to P5B2. | Owner: separately authorized repository test-fixture maintenance. No helper or test fix is authorized here. Closure requires deterministic seed commit identity across wall-clock boundaries plus the exact persistent-source-replacement regression. |
+| `JOS-SEMANTIC-RATIONALE-PROJECTION` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-semantic-rationale-projection-evidence) | `OPPORTUNISTIC` | Bounded rationale projection/classification is duplicated across semantic cleanup and worker validation. Consolidation is maintainability work, not a current conformance mismatch, and would broaden this acceptance. | Owner: semantic sanitizer/projection maintenance. The entry remains inactive until a separately authorized sanitizer, projection, or full semantic-sync batch already touches that behavior. Closure requires behavior-locked projection bounds, classification, and sanitizer output parity. This row grants no standalone implementation authority. |
+| `JOS-TOP-LEVEL-COMMAND-INVENTORY` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-top-level-command-inventory-evidence) | `TRIGGER_GATED` | A derived consistency harness for the repository-wide top-level command inventory is justified maintainability work, but it spans unrelated commands and no current classifier mismatch was reproduced. | Owner: top-level CLI dispatcher/classifier maintenance. Activate only when the top-level dispatcher or semantic-worker classifier changes; adding or changing a nested workspace subcommand alone is not a trigger. Closure requires a derived canonical inventory plus targeted parity coverage for top-level dispatch and semantic-worker classification. |
 
 ### Exact-head source evidence
 
-These records were refreshed at `2026-08-01T05:03:37Z` for canonical repository
+These records were refreshed at `2026-08-02T04:55:01Z` for canonical repository
 `Villeneuve-Ventures/graphify`. Each exact-SHA compare link is the changed-file
 manifest for its recorded base and head.
 `not-applicable` is explicit when a finding came from a PR description or a
@@ -196,17 +203,87 @@ workflow state is never inferred.
 
 #### JOS-SEMANTIC-WORKER-CONFORMANCE evidence
 
-- Source record: `PR_DESCRIPTION_DEFERRED` plus `TOP_LEVEL_COMMENT`; PR #43's
-  “Deferred justified follow-up” and Qodo's [assessment](https://github.com/Villeneuve-Ventures/graphify/pull/43#issuecomment-5139204878),
+- Original source record: `PR_DESCRIPTION_DEFERRED` plus `TOP_LEVEL_COMMENT`;
+  PR #43's “Deferred justified follow-up” and Qodo's [assessment](https://github.com/Villeneuve-Ventures/graphify/pull/43#issuecomment-5139204878),
   node `IC_kwDOTZvP8s8AAAABMlILDg`, preserve the machine-readable
   schema/closed-validator and conformance-test successor boundary.
-- Immutable PR-description source node ID: `PR_kwDOTZvP8s742UQL`.
-- Exact revision: base `d70219f07b37f96b2406c9f97c7a40e5c2592486`, head
+- Immutable PR #43 description source node ID: `PR_kwDOTZvP8s742UQL`.
+- Contract revision: base `d70219f07b37f96b2406c9f97c7a40e5c2592486`, head
   `1f202c9134ee0993e4bba40482fa8113f598920a`, tree
   `27f7259fc3d716a78a3b28417204b1968c05d421`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/d70219f07b37f96b2406c9f97c7a40e5c2592486...1f202c9134ee0993e4bba40482fa8113f598920a).
+- Closure delivery: PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45),
+  immutable node `PR_kwDOTZvP8s75bnmy`; base
+  `99af03803a44d575123a18f1c0eafa48149df492`, head
+  `5f57e565bd188789c984bc1370943caa758148c3`, delivery tree
+  `06d20480337bc94edba4de37c06d2dbf1ab595f2`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/99af03803a44d575123a18f1c0eafa48149df492...5f57e565bd188789c984bc1370943caa758148c3).
+- Closure acceptance: the
+  [`P5B2 semantic-worker receipt`](receipts/p5b2-semantic-worker.md) binds the
+  merged delivery, exact-head hosted validation, focused conformance evidence,
+  review disposition, and exclusions. Together with PR #45, it satisfies the
+  original PR #43 closure contract and transitions this entry to `CLOSED`.
 - Thread identity, path/line, `isResolved`, and `isOutdated`:
   `not-applicable`; the top-level source comment was created and last updated
   `2026-07-31T04:16:54Z`.
+
+#### JOS-BACKEND-DETECTION-TEST-ISOLATION evidence
+
+- Source record: `PR_DESCRIPTION_DEFERRED`; PR #45's “Justified deferrals”
+  preserves the exact claim that three backend-detection tests inherit ambient
+  provider selectors instead of clearing the complete priority set.
+- Immutable source node ID: `PR_kwDOTZvP8s75bnmy`; exact body SHA-256 at
+  refresh: `8b3ab5a6a3a28c05fa1c142da5c2c5c5767ec453efb73fc2e7fdc9c69d8fb50f`.
+- Exact revision: base `99af03803a44d575123a18f1c0eafa48149df492`, head
+  `5f57e565bd188789c984bc1370943caa758148c3`, tree
+  `06d20480337bc94edba4de37c06d2dbf1ab595f2`, [changed-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/99af03803a44d575123a18f1c0eafa48149df492...5f57e565bd188789c984bc1370943caa758148c3).
+- Reproduction: with `GEMINI_API_KEY=governance-evidence`, the focused
+  backend-detection selection reported `3 failed, 1 passed, 9 deselected, 1
+  warning`; the Ollama, Kimi-over-Ollama, and no-provider cases each observed
+  `gemini` from the ambient selector.
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`.
+
+#### JOS-GIT-SEED-HISTORY-STABILITY evidence
+
+- Source record: `PR_DESCRIPTION_DEFERRED`; PR #45's “Justified deferrals”
+  preserves the exact claim that shared seed commits can diverge across a
+  one-second timestamp boundary.
+- Immutable source node ID: `PR_kwDOTZvP8s75bnmy`; exact revision and body
+  digest are the PR #45 values recorded immediately above.
+- Reproduction: a disposable bare-repository probe held tree, author,
+  committer, and message constant while shifting author/committer time by one
+  second. The commit IDs differed:
+  `6e51d74b1e04ae12a0e8f0d24cd3f96edaa5dac7` versus
+  `9730502641837cb4f8ac399b4d772156dc4b61d2`.
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`.
+
+#### JOS-SEMANTIC-RATIONALE-PROJECTION evidence
+
+- Source record: `PR_DESCRIPTION_DEFERRED`; PR #45's “Justified deferrals”
+  preserves the exact claim that duplicated bounded rationale
+  projection/classification is a nonblocking cross-module cleanup packet whose
+  refactor would broaden the conformance batch.
+- Immutable source node ID: `PR_kwDOTZvP8s75bnmy`; exact revision and body
+  digest are the PR #45 values recorded above.
+- Activation is inactive until separately authorized sanitizer, projection, or
+  full semantic-sync work already changes this behavior. The accepted worker
+  alone supplies no standalone refactor authority.
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`.
+
+#### JOS-TOP-LEVEL-COMMAND-INVENTORY evidence
+
+- Source record: `PR_DESCRIPTION_DEFERRED`; PR #45's “Justified deferrals”
+  preserves the exact claim that a derived repository-wide top-level command
+  inventory is reasonable maintainability work but no current conformance
+  mismatch exists.
+- Immutable source node ID: `PR_kwDOTZvP8s75bnmy`; exact revision and body
+  digest are the PR #45 values recorded above.
+- Activation requires a top-level dispatcher or semantic-worker classifier
+  change. A nested workspace subcommand addition or change alone is expressly
+  not a trigger.
+- Thread identity, path/line, `isResolved`, and `isOutdated`:
+  `not-applicable`.
 
 PR #37's separate note about a `.codex` parent path and 100 ms timing cases is
 not registered as justified debt because it does not identify a reproducible,
@@ -258,16 +335,18 @@ every broader query or workspace-command authority remain excluded. The
 bounded delivery is complete under the accepted
 [`P5B2c` receipt](receipts/p5b2c.md); that receipt promoted no later child.
 
-## P5B2 host-agent semantic-worker contract freeze
+## P5B2 host-agent semantic-worker accepted boundary freeze
 
-The sole current READY child is the contract-only future transport:
+The completed child is limited to the exact transport:
 
 ```text
 graphify workspace semantic-worker --stdio
 ```
 
 The exact protocol and lifecycle are frozen in
-[`semantic-sync.md`](semantic-sync.md). One long-lived process owns one
+[`semantic-sync.md`](semantic-sync.md), with completion evidence in the
+[`P5B2 semantic-worker receipt`](receipts/p5b2-semantic-worker.md). One
+long-lived process owns one
 `SEMANTIC_CLAIM` lease from claim through optional checkpoints and terminal
 completion or classified failure. The caller must state `host_agent_active`
 as the Boolean `true`; the transport passes no explicit backend and performs no
@@ -282,8 +361,8 @@ checkpoint. The current queue state machine is not redesigned.
 Commit uncertainty after queue completion begins is not replay or success
 authority because the completed queue item does not retain that result digest.
 
-This READY record does not authorize implementation and is not completion
-evidence. It adds no named/headless backend, network, `graphify.llm` provider
+This acceptance authorizes no implementation beyond the merged exact transport.
+It adds no named/headless backend, network, `graphify.llm` provider
 discovery, API-key handling, automatic fallback, full semantic sync,
 `bind_sealed_inputs()` finalization, generation certification, promotion,
 pointer mutation, migrate, repair, GC, service/watch, publication, or cleanup
@@ -423,9 +502,10 @@ not performance or resource qualification.
 This acceptance adds no automatic, online, or service GC; semantic sync;
 migrate; repair; mutation beyond this exact lifecycle; broader query authority;
 production installation; watch/service; publication; performance or resource
-proof; H3; P6+; or cleanup authority. P5 and P5B2 remain `IN_PROGRESS`. This
-receipt did not promote a later child; the separately reviewed host-agent
-semantic-worker contract is the sole current READY child.
+proof; H3; P6+; or cleanup authority. P5 and P5B2 remain `IN_PROGRESS`. At this
+earlier receipt's acceptance point, the separately reviewed host-agent
+semantic-worker contract was the sole `READY` child; the later semantic-worker
+acceptance supersedes that live status without expanding this GC receipt.
 
 ## P5B2 public fenced pointer-repair lifecycle boundary freeze
 
