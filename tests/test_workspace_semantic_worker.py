@@ -10,6 +10,7 @@ from io import StringIO
 import hashlib
 import importlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -1781,6 +1782,54 @@ def test_uncertain_heartbeat_proven_absence_is_stale_authority(
         session._heartbeat()
 
 
+def test_uncertain_heartbeat_uses_semantic_epoch_after_workspace_epoch_advances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    session = _active_session(runtime, begin, _ProtocolOutput())
+    semantic_grant = cast(LeaseGrant, session.grant)
+    registry = runtime.registry.load()
+    entry = registry.to_dict()["workspaces"][0]
+    state = runtime.leases.inspect(HARNESS_REPO_UUID)
+    monotonic_ns = time.monotonic_ns()
+    workspace_grant = runtime.leases.acquire(
+        HARNESS_REPO_UUID,
+        "BUILD",
+        runtime.leases.current_owner(),
+        expected_registry_revision=registry.to_dict()["revision"],
+        expected_active_source_revision=entry["active_source_revision"],
+        expected_operation_epoch=state.operation_epoch,
+        expected_migration_epoch=state.migration_epoch,
+        acquired_at=datetime.now(timezone.utc),
+        monotonic_ns=monotonic_ns,
+        ttl_ns=30_000_000_000,
+        deadline_ns=session.deadline_ns,
+    )
+    advanced = runtime.leases.inspect(HARNESS_REPO_UUID)
+    assert advanced.operation_epoch == workspace_grant.operation_epoch
+    assert advanced.operation_epoch != semantic_grant.operation_epoch
+    assert advanced.lease_epochs["semantic"] == semantic_grant.operation_epoch
+
+    original_heartbeat = runtime.leases.heartbeat
+    calls = 0
+
+    def uncertain_once(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise InjectedFault("heartbeat")
+        return original_heartbeat(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runtime.leases, "heartbeat", uncertain_once)
+    session._heartbeat()
+
+    assert calls == 2
+    assert cast(LeaseGrant, session.grant).operation_epoch == semantic_grant.operation_epoch
+    runtime.leases.release(workspace_grant, deadline_ns=session.deadline_ns)
+
+
 def test_heartbeat_interruption_adopts_then_fails_the_live_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2078,6 +2127,40 @@ def test_semantic_worker_idle_coordinate_drift_is_authority_stale(
     assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
 
 
+def test_semantic_worker_config_digest_drift_is_authority_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    source_root = runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root
+    monkeypatch.chdir(source_root)
+    before = runtime.semantic_queue.inspect(HARNESS_REPO_UUID)
+    original_claim = runtime.semantic_queue.claim
+
+    def claim_after_config_drift(*args: object, **kwargs: object) -> object:
+        config_path = source_root / ".graphify/workspace.toml"
+        config_path.write_bytes(config_path.read_bytes() + b"\n# digest drift\n")
+        return original_claim(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runtime.semantic_queue, "claim", claim_after_config_drift)
+    output = _ProtocolOutput()
+    assert (
+        semantic_worker.run_semantic_worker(
+            runtime,
+            stdin=_OneFrameInput(semantic_worker.canonical_protocol_bytes(begin)),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+        == 10
+    )
+
+    terminal = semantic_worker.parse_result_frame(output.frames[0])
+    assert terminal["outcome"] == "withheld"
+    assert terminal["reason_code"] == "semantic_authority_stale"
+    assert terminal["action_code"] == "retry_status"
+    assert runtime.semantic_queue.inspect(HARNESS_REPO_UUID) == before
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
 def test_semantic_worker_idle_release_interruption_is_commit_unknown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2214,6 +2297,79 @@ def test_source_observation_rechecks_deadline_after_final_read(
             deadline_ns=1,
             monotonic_clock=lambda: now[0],
         )
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "mkfifo") or not hasattr(os, "O_NONBLOCK"),
+    reason="FIFO nonblocking-open semantics are unavailable",
+)
+def test_source_observation_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    os.mkfifo(tmp_path / "README.md")
+    script = """
+import sys
+import time
+from pathlib import Path
+
+from graphify.workspace.semantic_queue import SemanticDesiredWork
+from graphify.workspace.semantic_worker import SemanticSourceUnavailable, _source_observation
+
+work = SemanticDesiredWork(
+    source_epoch=1,
+    policy_sha256="d" * 64,
+    operation="UPSERT",
+    path="README.md",
+    content_sha256="e" * 64,
+    desired_revision=1,
+)
+try:
+    _source_observation(
+        Path(sys.argv[1]),
+        work,
+        deadline_ns=time.monotonic_ns() + 10_000_000_000,
+        monotonic_clock=time.monotonic_ns,
+    )
+except SemanticSourceUnavailable:
+    raise SystemExit(0)
+raise SystemExit("FIFO source was accepted")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_registry_snapshot_propagates_worker_deadline_to_evidence_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, _begin = _runtime_with_one_readme_work(tmp_path)
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: list[int | None] = []
+    original_read_evidence = runtime.registry.read_evidence
+
+    def tracked_read_evidence(
+        digest: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> dict[str, Any]:
+        observed.append(deadline_ns)
+        if deadline_ns is None:
+            return original_read_evidence(digest)
+        return original_read_evidence(digest, deadline_ns=deadline_ns)
+
+    monkeypatch.setattr(runtime.registry, "read_evidence", tracked_read_evidence)
+    with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns):
+        pass
+
+    assert observed
+    assert set(observed) == {deadline_ns}
 
 
 def test_semantic_worker_rejects_bad_begin_without_runtime_mutation(tmp_path: Path) -> None:

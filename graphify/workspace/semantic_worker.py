@@ -1977,6 +1977,7 @@ def _source_observation(
         raise SemanticSourceUnavailable("claimed source path is not contained")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+    file_flags = flags | getattr(os, "O_NONBLOCK", 0)
     descriptors: list[int] = []
     try:
         root_descriptor = os.open(source_root, directory_flags)
@@ -1999,7 +2000,7 @@ def _source_observation(
             check_progress()
             raise SemanticSourceChanged("DELETE source is present")
         try:
-            descriptor = os.open(name, flags, dir_fd=parent)
+            descriptor = os.open(name, file_flags, dir_fd=parent)
         except OSError as exc:
             raise SemanticSourceUnavailable("UPSERT source could not be opened") from exc
         descriptors.append(descriptor)
@@ -2816,7 +2817,6 @@ class _WorkerSession:
                 if (
                     registry_revision != grant.registry_revision
                     or active_revision != grant.active_source_revision
-                    or observed.operation_epoch != grant.operation_epoch
                     or observed.migration_epoch != grant.migration_epoch
                     or observed.lease_epochs.get("semantic") not in {None, grant.operation_epoch}
                 ):
@@ -3521,6 +3521,8 @@ class _WorkerSession:
                 return self._invalid("workspace_config_invalid")
             if "workspace_config_unavailable" in reason:
                 return self._withheld("workspace_config_unavailable")
+            if "workspace_config_mismatch" in reason:
+                return self._withheld("semantic_authority_stale")
             return self._withheld("semantic_capability_unavailable")
         except RevisionConflict, SemanticQueueConflict, StaleSemanticClaim, StaleLease:
             if not self._release(success_required=True):

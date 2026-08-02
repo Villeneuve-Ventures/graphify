@@ -128,12 +128,20 @@ class RegistryStore:
         recover: bool = True,
         deadline_ns: int | None = None,
     ) -> Registry | None:
+        decoder = (
+            self._decode_registry
+            if deadline_ns is None
+            else lambda payload: self._decode_registry(
+                payload,
+                deadline_ns=deadline_ns,
+            )
+        )
         kwargs = {
             "label": "registry",
             "current": self.CURRENT,
             "previous": self.PREVIOUS,
             "pending": self.PENDING,
-            "decoder": self._decode_registry,
+            "decoder": decoder,
             "revision": lambda document: int(document.to_dict()["revision"]),
             "allow_missing": allow_missing,
         }
@@ -205,9 +213,14 @@ class RegistryStore:
         with self.recovered_snapshot() as document:
             return document
 
-    def _decode_registry(self, payload: bytes) -> Registry:
+    def _decode_registry(
+        self,
+        payload: bytes,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Registry:
         document = cast(Registry, Registry.from_json(payload))
-        self._validate_runtime_registry(document)
+        self._validate_runtime_registry(document, deadline_ns=deadline_ns)
         return document
 
     def _check_revision(
@@ -270,8 +283,13 @@ class RegistryStore:
         allowed_actions: set[str],
         maximum_registry_revision: int,
         bound_sources: list[dict[str, Any]],
+        deadline_ns: int | None = None,
     ) -> dict[str, Any]:
-        evidence = self.read_evidence(digest)
+        evidence = (
+            self.read_evidence(digest)
+            if deadline_ns is None
+            else self.read_evidence(digest, deadline_ns=deadline_ns)
+        )
         action = evidence.get("action")
         authorization = evidence.get("authorization")
         if (
@@ -326,7 +344,12 @@ class RegistryStore:
                 raise StateCorrupt(f"identity evidence {digest} has an invalid {field}")
         return evidence
 
-    def _validate_runtime_registry(self, document: Registry) -> None:
+    def _validate_runtime_registry(
+        self,
+        document: Registry,
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
         value = document.to_dict()
         revision = int(value["revision"])
         workspaces = value["workspaces"]
@@ -359,7 +382,14 @@ class RegistryStore:
                     raise StateCorrupt(f"Git common directory is bound to multiple UUIDs: {path}")
             for source in bound_sources:
                 for remote in source["remote_aliases"]:
-                    evidence = self.read_evidence(remote["evidence_sha256"])
+                    evidence = (
+                        self.read_evidence(remote["evidence_sha256"])
+                        if deadline_ns is None
+                        else self.read_evidence(
+                            remote["evidence_sha256"],
+                            deadline_ns=deadline_ns,
+                        )
+                    )
                     if (
                         evidence.get("kind") != "graphify.workspace.remote_evidence"
                         or evidence.get("url") != remote["url"]
@@ -375,6 +405,7 @@ class RegistryStore:
                 allowed_actions={"ENROLL"},
                 maximum_registry_revision=revision,
                 bound_sources=bound_sources,
+                deadline_ns=deadline_ns,
             )
             current = self._validate_identity_evidence(
                 enrollment["current_evidence_sha256"],
@@ -382,6 +413,7 @@ class RegistryStore:
                 allowed_actions={"ENROLL", "ADOPT", "REBIND", "ROTATE"},
                 maximum_registry_revision=revision,
                 bound_sources=bound_sources,
+                deadline_ns=deadline_ns,
             )
             active_evidence = entry["active_source_evidence"]
             rebind = self._validate_identity_evidence(
@@ -390,6 +422,7 @@ class RegistryStore:
                 allowed_actions={"ENROLL", "ACTIVATE"},
                 maximum_registry_revision=revision,
                 bound_sources=[active],
+                deadline_ns=deadline_ns,
             )
             expected_active_hash = canonical_sha256(active)
             if (
