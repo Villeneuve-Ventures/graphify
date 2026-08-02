@@ -1,9 +1,10 @@
 # Host-agent semantic-worker contract
 
-This document freezes one contract-only P5B2 child: the future public
-host-agent semantic-worker transport. The child is `READY` for a separately
-authorized implementation review; it is not implemented, accepted, or
-authorized by this document. Full semantic sync remains waiting.
+This document freezes the implemented P5B2 public host-agent semantic-worker
+transport. The separately authorized delivery in PR #45 is accepted only at
+this exact boundary by the
+[P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md). Full semantic
+sync remains waiting, and this contract grants no successor authority.
 
 The boundary reuses the existing `SemanticQueueStore`, `SEMANTIC_CLAIM` lease
 domain, installed runtime authority, active-source policy, external durable
@@ -13,9 +14,9 @@ certification, promotion, or pointer authority.
 
 ## Exact public transport
 
-The public executable is `graphify`. Its only future argument vector after that
-executable is exactly `workspace semantic-worker --stdio`, producing this full
-invocation:
+The public executable is `graphify`. Its only accepted argument vector after
+that executable is exactly `workspace semantic-worker --stdio`, producing this
+full invocation:
 
 ```text
 graphify workspace semantic-worker --stdio
@@ -49,9 +50,9 @@ first rounding them through binary floating point. Standard output contains only
 empty for a valid invocation; only an invalid argument vector emits plain-text
 usage.
 
-The future implementation must extend `validate_semantic_fragment()` with a
-lossless canonical-number encoder hook while preserving its current default for
-all existing callers. Both worker calls to that helper use the hook to encode
+The implementation extends `validate_semantic_fragment()` with a lossless
+canonical-number encoder hook while preserving its default for all other
+callers. Both worker calls to that helper use the hook to encode
 the retained exact-decimal values as their original canonical, unquoted JSON
 number tokens. Coercion to binary float or JSON string is forbidden.
 `sanitize_semantic_fragment()` receives a copy that retains the exact-decimal
@@ -647,7 +648,8 @@ redacts designated semantic prose by content, rather than by the closed schema
 above, requires a separately reviewed contract and implementation packet.
 
 Source checkout bytes and modes, Git metadata, and real `HOME`,
-`XDG_STATE_HOME`, and `CODEX_HOME` remain unchanged in verification. A future
-implementation may write only the reviewed external workspace state described
-above, under disposable configured roots in tests. No receipt, governance
-acceptance, or implementation evidence exists for this contract-only child.
+`XDG_STATE_HOME`, and `CODEX_HOME` remain unchanged in verification. The
+accepted implementation writes only the reviewed external workspace state
+described above, under disposable configured roots in tests. Its bounded
+implementation and governance evidence is recorded in the
+[P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md).

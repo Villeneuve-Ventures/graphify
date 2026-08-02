@@ -4,7 +4,8 @@ Implemented contract scope through the one-step P5B2 exact-last-good rollback
 CLI, the unnumbered P5B2 active-source activation CLI, the unnumbered P5B2
 identity-maintenance CLI, P5B2c one-shot certified workspace query, the
 bounded P5B2 GC preview CLI, the public fenced offline-GC lifecycle, and the
-accepted bounded public fenced pointer-repair lifecycle,
+accepted bounded public fenced pointer-repair lifecycle, the accepted P5B2
+host-agent semantic-worker transport,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -13,11 +14,12 @@ adapter, and observed-current library runtime for
 `graphifyy 0.9.16+workspace.1`. Durable state schema v1 and runtime-manifest
 format v1 remain frozen; public status JSON is schema v2.
 
-The contract-only future P5B2 host-agent semantic-worker transport is the sole
-READY child. Its exact `graphify workspace semantic-worker --stdio` boundary is
-frozen in [Host-agent semantic-worker contract](semantic-sync.md), but no
-runtime command, schema, receipt, or implementation evidence exists. Full
-semantic sync and every explicit backend remain waiting.
+The P5B2 host-agent semantic-worker transport is implemented and accepted only
+at the exact `graphify workspace semantic-worker --stdio` boundary frozen in
+[Host-agent semantic-worker contract](semantic-sync.md). Its completion evidence
+is the [P5B2 semantic-worker acceptance receipt](receipts/p5b2-semantic-worker.md).
+Full semantic sync and every explicit backend remain waiting; no successor is
+promoted by this accepted child.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -127,9 +129,9 @@ not perform an advisory status probe. Provider selection, networking, semantic
 execution, mutation, retained service/watch, and every broader query authority
 remain deferred.
 
-## Contract-only host-agent semantic worker
+## Host-agent semantic worker
 
-The future worker's public executable is `graphify`. Its only exact argument
+The accepted worker's public executable is `graphify`. Its only exact argument
 vector after that executable is `workspace semantic-worker --stdio`, producing
 this full invocation:
 
@@ -154,10 +156,11 @@ receipt, not semantic content. The detailed request/result, deadline,
 retry/dead-letter, race, crash, result-binding, and status-routing contract is
 [semantic-sync.md](semantic-sync.md).
 
-This is a READY contract only. It does not call `graphify.llm`, infer a
-provider from credentials or environment, invoke a network or named backend,
-finalize `bind_sealed_inputs()`, certify or promote a generation, move a
-pointer, retain a service, or implement full semantic sync.
+This is the complete accepted transport boundary recorded by the
+[P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md). It does not
+call `graphify.llm`, infer a provider from credentials or environment, invoke a
+network or named backend, finalize `bind_sealed_inputs()`, certify or promote a
+generation, move a pointer, retain a service, or implement full semantic sync.
 
 ## P5B2c one-shot certified query
 
@@ -542,7 +545,7 @@ set.
 
 | Area | Owner/status | Stable boundary |
 |---|---|---|
-| Host-agent semantic worker | P5B2 host-agent semantic-worker transport (`READY`, contract-only) | [`semantic-sync.md`](semantic-sync.md) freezes only one long-lived `workspace semantic-worker --stdio` host-agent queue lifecycle with a verified staged-result binding before completion. No runtime implementation or receipt exists. |
+| Host-agent semantic worker | P5B2 host-agent semantic-worker transport (`COMPLETE`) | [`semantic-sync.md`](semantic-sync.md) freezes the one long-lived `workspace semantic-worker --stdio` host-agent queue lifecycle with a verified staged-result binding before completion. Accepted receipt: [`P5B2 semantic worker`](receipts/p5b2-semantic-worker.md). |
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is implemented. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and result-consumption contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
@@ -557,7 +560,7 @@ set.
 | Service, release, and resource proof | Remaining P5C | Watch/service supervision, publication, representative-corpus performance and resource accounting, record admission budgets, retained production query/service authority beyond the P5B2c one-shot transport, and any shared workspace read-lock optimization remain waiting outside P5C1. |
 | Static-analysis baseline | H3 | Inherited full-repository Pyright and medium-severity Bandit debt remains deferred and non-blocking after H2 established blocking high-severity and dependency-audit gates. |
 | Portfolio migration and cutover | P6-P12 | Shadow migrations precede the P9 global installation and stable-route activation; legacy pruning remains separately authorized after the observation window. |
-| Semantic capability selection | P5B2 host-agent semantic-worker transport (`READY`, contract-only) | The sole frozen child requires an already-active host agent to be stated explicitly and never infers capability from an absent credential. Direct headless Codex OAuth fallback, named backends, network access, and provider discovery remain unimplemented and waiting. |
+| Semantic capability selection | P5B2 host-agent semantic-worker transport (`COMPLETE`) | The accepted worker requires an already-active host agent to be stated explicitly and never infers capability from an absent credential. Direct headless Codex OAuth fallback, named backends, network access, provider discovery, and full semantic sync remain unimplemented and waiting. |
 | Contract and support horizon | Unranked future contract decisions | Possible v2 sorted-array admission, broader host/filesystem support, sudden-power-loss claims, automatic online GC, historical-generation query, and upstreaming are retained decisions or nonclaims, not current phase gates. |
 | Extraction diagnostics | Outside workspace phase gates | Zero-node fixture notices and missing optional SQL/DM parser extras remain non-blocking diagnostics unless a later requirement explicitly promotes their corpus coverage. |
 
@@ -599,8 +602,9 @@ or fork engine logic inside the package.
   of durable documents, CLI requests and receipts, versioned status output,
   and the TOML-to-object representation of repo policy. Registration, identity-
   maintenance, active-source activation, sync request/receipt, one-shot query
-  request/result, GC preview request/result, and pointer-repair preview/execute
-  request/result contracts are CLI v1; status JSON is schema v2.
+  request/result, semantic-worker request/result, GC preview request/result,
+  and pointer-repair preview/execute request/result contracts are CLI v1;
+  status JSON is schema v2.
 - `graphify.workspace` supplies dependency-free canonical reference models,
   exact v1 rejection, SHA-256 inputs, and journal frame encoding. Its
   cross-field and cross-document validation is normative where JSON Schema
@@ -612,15 +616,18 @@ or fork engine logic inside the package.
   own P5B2b0's bounded internal staged-build, successor-lease, and stale-
   abandonment recovery. `.sync` composes those existing APIs for the sole
   public code-only structural sync path. `.adapters` and `.freshness` implement
-  the bounded P4 read-only engine/query boundary. `.semantic_queue` implements the bounded
-  P5A durable queue and certification boundary. `.composition` owns the
+  the bounded P4 read-only engine/query boundary. `.semantic_queue` implements
+  the bounded P5A durable queue and certification boundary. `.semantic_worker`
+  implements the accepted P5B2 host-agent request/result transport, private
+  staging, validation, and queue-transition composition. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
   P5B2a registration command plus the bounded rebind/rotation identity-
   maintenance slice and standalone active-source activation with bounded
   authority, authorization, policy, Git-discovery, and four-part CAS inputs,
   the P5B2b sync request/receipt transport, the P5B2c one-shot query transport,
-  the bounded read-only GC preview transport, and the bounded public
+  the P5B2 host-agent semantic-worker transport, the bounded read-only GC
+  preview transport, and the bounded public
   pointer-repair transport; it reuses `.identity`, `.registry`, `.sync`,
   `.freshness`, `.gc`, `.pointers`, `.journal`, and existing lease authority
   without adding another persistence path. Lifecycle mutation fails closed outside

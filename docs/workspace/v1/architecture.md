@@ -81,7 +81,7 @@ advisory status probe. The existing freshness authority owns query bounds,
 locks, two-sided observation, and release; the CLI releases raw native UTF-8
 output only for `release` / `observed_current` and otherwise withholds output.
 
-The sole contract-only READY successor is the future
+The accepted P5B2 host-agent child is the exact
 `graphify workspace semantic-worker --stdio` transport described in
 [`semantic-sync.md`](semantic-sync.md). Unlike provider-owning extraction, it
 does not invoke a model. One long-lived CLI process derives one trusted owner,
@@ -101,8 +101,10 @@ completion transition. A public `completed` frame follows only after the exact
 semantic lease is provably released. The durable queue format is unchanged.
 The transport stops before generation staging
 finalization, `bind_sealed_inputs()`, certification, promotion, or pointer
-mutation. No runtime implementation or completion receipt exists for this
-READY contract.
+mutation. Runtime implementation and completion evidence are limited to the
+boundary bound by the
+[P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md); full semantic
+sync and every successor remain outside it.
 
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
@@ -251,7 +253,7 @@ Each certification file is a separate immutable, store-owned internal record
 binding one generation and certification request to the revalidated queue view
 and exact sealed staged-input manifest.
 
-The contract-only host-agent worker reserves this future private staging
+The accepted host-agent worker uses this private staging
 layout relative to the configured external state root:
 
 ```text
@@ -304,7 +306,7 @@ newer desired work later advances the queue; a staged receipt alone is never
 queue authority. The receipt remains the idempotent boundary for the subsequent
 generation install and journal transition.
 
-The contract-only semantic worker retains the registry-before-workspace order
+The accepted semantic worker retains the registry-before-workspace order
 for each queue mutation but keeps one process alive between mutations so the
 same OS-derived owner and fence remain current. Its begin request supplies an
 absolute deadline and explicit registry, source, operation, migration, queue,
