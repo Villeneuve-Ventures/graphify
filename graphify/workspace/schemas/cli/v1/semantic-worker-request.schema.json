@@ -1,0 +1,325 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.dev/schemas/workspace/cli/v1/semantic-worker-request.schema.json",
+  "title": "Graphify workspace semantic-worker request family v1",
+  "oneOf": [
+    {"$ref": "#/$defs/begin"},
+    {"$ref": "#/$defs/checkpoint"},
+    {"$ref": "#/$defs/complete"},
+    {"$ref": "#/$defs/fail"}
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "positive_integer": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "nonnegative_integer": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "semantic_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "not": {"pattern": "\\.\\."}
+    },
+    "semantic_text": {
+      "type": "string",
+      "minLength": 1,
+      "x-graphify-trimmed": true,
+      "x-graphify-forbid-unicode-category": "Cc",
+      "x-graphify-utf8-max-bytes": 16384
+    },
+    "source_location": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "string",
+          "pattern": "^L[1-9][0-9]*$",
+          "x-graphify-utf8-max-bytes": 32
+        }
+      ]
+    },
+    "fixed_point": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "x-graphify-canonical-fixed-point": {
+        "maximum_fractional_digits": 6,
+        "forbid_binary_float": true,
+        "forbid_exponent": true,
+        "forbid_negative_zero": true,
+        "canonical_endpoints": ["0", "1"]
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "file_type",
+        "source_file",
+        "source_location",
+        "source_url",
+        "captured_at",
+        "author",
+        "contributor"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/semantic_id"},
+        "label": {"$ref": "#/$defs/semantic_text"},
+        "file_type": {
+          "enum": ["code", "document", "paper", "image", "rationale", "concept"]
+        },
+        "source_file": {"type": "string", "minLength": 1},
+        "source_location": {"$ref": "#/$defs/source_location"},
+        "source_url": {"type": "null"},
+        "captured_at": {"type": "null"},
+        "author": {"type": "null"},
+        "contributor": {"type": "null"}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "target",
+        "relation",
+        "confidence",
+        "confidence_score",
+        "source_file",
+        "source_location",
+        "weight"
+      ],
+      "properties": {
+        "source": {"$ref": "#/$defs/semantic_id"},
+        "target": {"$ref": "#/$defs/semantic_id"},
+        "relation": {
+          "enum": [
+            "calls",
+            "implements",
+            "references",
+            "cites",
+            "conceptually_related_to",
+            "shares_data_with",
+            "semantically_similar_to",
+            "rationale_for"
+          ]
+        },
+        "confidence": {"enum": ["EXTRACTED", "INFERRED", "AMBIGUOUS"]},
+        "confidence_score": {"$ref": "#/$defs/fixed_point"},
+        "source_file": {"type": "string", "minLength": 1},
+        "source_location": {"$ref": "#/$defs/source_location"},
+        "weight": {"$ref": "#/$defs/fixed_point"}
+      }
+    },
+    "hyperedge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "nodes",
+        "relation",
+        "confidence",
+        "confidence_score",
+        "source_file"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/semantic_id"},
+        "label": {"$ref": "#/$defs/semantic_text"},
+        "nodes": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/semantic_id"}
+        },
+        "relation": {"enum": ["participate_in", "implement", "form"]},
+        "confidence": {"enum": ["EXTRACTED", "INFERRED"]},
+        "confidence_score": {"$ref": "#/$defs/fixed_point"},
+        "source_file": {"type": "string", "minLength": 1}
+      }
+    },
+    "fragment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "hyperedges"],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {"$ref": "#/$defs/node"}
+        },
+        "edges": {
+          "type": "array",
+          "maxItems": 100000,
+          "items": {"$ref": "#/$defs/edge"}
+        },
+        "hyperedges": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {"$ref": "#/$defs/hyperedge"}
+        }
+      }
+    },
+    "begin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "action",
+        "repo_uuid",
+        "expected_registry_revision",
+        "expected_active_source_revision",
+        "expected_operation_epoch",
+        "expected_migration_epoch",
+        "expected_queue_revision",
+        "expected_desired_watermark",
+        "executor",
+        "host_agent_active",
+        "timeout_ms"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_request"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "action": {"const": "begin"},
+        "repo_uuid": {"$ref": "#/$defs/uuid"},
+        "expected_registry_revision": {"$ref": "#/$defs/positive_integer"},
+        "expected_active_source_revision": {"$ref": "#/$defs/positive_integer"},
+        "expected_operation_epoch": {"$ref": "#/$defs/positive_integer"},
+        "expected_migration_epoch": {"$ref": "#/$defs/nonnegative_integer"},
+        "expected_queue_revision": {"$ref": "#/$defs/nonnegative_integer"},
+        "expected_desired_watermark": {"$ref": "#/$defs/nonnegative_integer"},
+        "executor": {"const": "host_agent"},
+        "host_agent_active": {"const": true},
+        "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 600000}
+      }
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "action",
+        "begin_request_sha256",
+        "claim_id",
+        "progress_code"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_request"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "action": {"const": "checkpoint"},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"},
+        "claim_id": {"$ref": "#/$defs/digest"},
+        "progress_code": {
+          "type": "string",
+          "pattern": "^(?!result:)[a-z][a-z0-9_.:-]{0,63}$"
+        }
+      }
+    },
+    "complete": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "action",
+        "begin_request_sha256",
+        "claim_id",
+        "payload"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_request"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "action": {"const": "complete"},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"},
+        "claim_id": {"$ref": "#/$defs/digest"},
+        "payload": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "fragment"],
+              "properties": {
+                "kind": {"const": "semantic_fragment"},
+                "fragment": {"$ref": "#/$defs/fragment"}
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {"kind": {"const": "delete_tombstone"}}
+            }
+          ]
+        }
+      }
+    },
+    "fail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "cli_contract_version",
+        "action",
+        "begin_request_sha256",
+        "claim_id",
+        "error_code",
+        "retryable"
+      ],
+      "properties": {
+        "contract": {"const": "graphify.workspace.semantic_worker_request"},
+        "schema_version": {"const": 1},
+        "cli_contract_version": {"const": 1},
+        "action": {"const": "fail"},
+        "begin_request_sha256": {"$ref": "#/$defs/digest"},
+        "claim_id": {"$ref": "#/$defs/digest"},
+        "error_code": {
+          "enum": [
+            "host_agent_transient",
+            "semantic_policy_refused",
+            "semantic_work_unsupported"
+          ]
+        },
+        "retryable": {"type": "boolean"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "error_code": {"const": "host_agent_transient"},
+            "retryable": {"const": true}
+          }
+        },
+        {
+          "properties": {
+            "error_code": {
+              "enum": ["semantic_policy_refused", "semantic_work_unsupported"]
+            },
+            "retryable": {"const": false}
+          }
+        }
+      ]
+    }
+  }
+}

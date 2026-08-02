@@ -73,6 +73,12 @@ class SemanticQueueCapacityExceeded(SemanticQueueError):
     code = "semantic_queue_capacity_exceeded"
 
 
+class SemanticCheckpointCapacityUnavailable(SemanticQueueCapacityExceeded):
+    """A claim cannot reserve its mandatory result-checkpoint headroom."""
+
+    code = "semantic_checkpoint_capacity_unavailable"
+
+
 class SemanticQueueCorrupt(SemanticQueueError):
     code = "semantic_queue_corrupt"
 
@@ -1308,7 +1314,10 @@ class SemanticQueueStore:
                 "allow_missing": True,
             }
             if recover:
-                snapshot = self.state.recover_record(**kwargs)
+                snapshot = self.state.recover_record(
+                    **kwargs,
+                    deadline_ns=deadline_ns,
+                )
             else:
                 snapshot = self.state.read_stable_record(
                     **kwargs,
@@ -1322,6 +1331,7 @@ class SemanticQueueStore:
             raise SemanticQueueCorrupt("queue is installed under the wrong workspace")
         if snapshot.queue_policy != self.policy:
             raise SemanticQueueConflict("durable queue policy differs from the active policy")
+        self._bounded(snapshot)
         return snapshot
 
     def _bounded(self, snapshot: SemanticQueueSnapshot) -> None:
@@ -1333,11 +1343,30 @@ class SemanticQueueStore:
             raise SemanticQueueCapacityExceeded(
                 f"byte capacity {self.policy.max_bytes} would be exceeded"
             )
+        projected_items = tuple(
+            replace(
+                item,
+                claim=replace(
+                    item.claim,
+                    checkpoint="result:" + ("0" * 64),
+                ),
+            )
+            if item.status == "claimed" and item.claim is not None
+            else item
+            for item in snapshot.items
+        )
+        projected = replace(snapshot, items=projected_items)
+        if projected.queue_bytes > self.policy.max_bytes:
+            raise SemanticQueueCapacityExceeded(
+                f"byte capacity {self.policy.max_bytes} would be exceeded"
+            )
 
     def _commit_locked(
         self,
         current: SemanticQueueSnapshot,
         candidate: SemanticQueueSnapshot,
+        *,
+        deadline_ns: int | None = None,
     ) -> SemanticQueueSnapshot:
         document = replace(candidate, revision=current.revision + 1)
         validated = SemanticQueueSnapshot.from_mapping(document.to_dict())
@@ -1351,9 +1380,25 @@ class SemanticQueueStore:
                 pending=pending_path,
                 payload=validated.canonical,
                 decoder=SemanticQueueSnapshot.from_json,
+                deadline_ns=deadline_ns,
             )
         except StateCorrupt as exc:
             raise SemanticQueueCorrupt(str(exc)) from exc
+
+    def _commit_for_deadline(
+        self,
+        current: SemanticQueueSnapshot,
+        candidate: SemanticQueueSnapshot,
+        *,
+        deadline_ns: int | None,
+    ) -> SemanticQueueSnapshot:
+        if deadline_ns is None:
+            return self._commit_locked(current, candidate)
+        return self._commit_locked(
+            current,
+            candidate,
+            deadline_ns=deadline_ns,
+        )
 
     @contextmanager
     def _semantic_operation(
@@ -1361,6 +1406,7 @@ class SemanticQueueStore:
         grant: LeaseGrant,
         *,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> Iterator[LeaseOperation]:
         try:
             with self.leases.current_operation(
@@ -1368,6 +1414,7 @@ class SemanticQueueStore:
                 monotonic_ns=monotonic_ns,
                 allowed_operations=frozenset({"SEMANTIC_CLAIM"}),
                 registry_required=True,
+                deadline_ns=deadline_ns,
             ) as operation:
                 yield operation
         except (LeaseExpired, StaleLease) as exc:
@@ -1391,8 +1438,14 @@ class SemanticQueueStore:
         recorded = cast(dict[str, Any], entries[0]["active_source"])
         active_evidence = cast(dict[str, Any], entries[0]["active_source_evidence"])
         try:
-            evidence = self.leases.registry.read_evidence(
-                cast(str, active_evidence["rebind_evidence_sha256"])
+            evidence_digest = cast(str, active_evidence["rebind_evidence_sha256"])
+            evidence = (
+                self.leases.registry.read_evidence(evidence_digest)
+                if deadline_ns is None
+                else self.leases.registry.read_evidence(
+                    evidence_digest,
+                    deadline_ns=deadline_ns,
+                )
             )
         except (OSError, StateCorrupt, StatePathError) as exc:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
@@ -1471,6 +1524,28 @@ class SemanticQueueStore:
             return
         if snapshot.active_source_revision != operation.grant.active_source_revision:
             raise SemanticQueueConflict("active source changed; exact reconciliation is required")
+
+    @staticmethod
+    def _require_expected_worker_coordinates(
+        snapshot: SemanticQueueSnapshot,
+        operation: LeaseOperation,
+        *,
+        expected_registry_revision: int | None,
+        expected_queue_revision: int | None,
+        expected_desired_watermark: int | None,
+    ) -> None:
+        if (
+            expected_registry_revision is not None
+            and int(operation.registry.to_dict()["revision"]) != expected_registry_revision
+        ):
+            raise SemanticQueueConflict("workspace registry revision changed")
+        if expected_queue_revision is not None and snapshot.revision != expected_queue_revision:
+            raise SemanticQueueConflict("semantic queue revision changed")
+        if (
+            expected_desired_watermark is not None
+            and snapshot.desired_watermark != expected_desired_watermark
+        ):
+            raise SemanticQueueConflict("semantic desired watermark changed")
 
     def enqueue(
         self,
@@ -1710,20 +1785,32 @@ class SemanticQueueStore:
         host_agent_active: bool,
         explicit_backend: str | None,
         monotonic_ns: int,
+        expected_registry_revision: int | None = None,
+        expected_queue_revision: int | None = None,
+        expected_desired_watermark: int | None = None,
+        deadline_ns: int | None = None,
     ) -> SemanticClaim | None:
         """Claim work only after deriving authority at this mutation boundary."""
 
         repo_uuid = cast(str, grant.lease.to_dict()["repo_uuid"])
         policy_deadline_ns = time.monotonic_ns() + _WORKSPACE_CONFIG_READ_TIMEOUT_NS
+        if deadline_ns is not None:
+            policy_deadline_ns = min(policy_deadline_ns, deadline_ns)
         # The pre-lock and locked reads are the two policy observations required
         # to reject replacement/ABA without repeating full source discovery.
         try:
-            observed_registry = self.leases.registry.load()
+            observed_snapshot = (
+                self.leases.registry.recovered_snapshot()
+                if deadline_ns is None
+                else self.leases.registry.recovered_snapshot(deadline_ns=policy_deadline_ns)
+            )
+            with observed_snapshot as observed_registry:
+                observed_registry_value = observed_registry.to_dict()
             observed_entries = [
                 entry
                 for entry in cast(
                     list[dict[str, Any]],
-                    observed_registry.to_dict()["workspaces"],
+                    observed_registry_value["workspaces"],
                 )
                 if entry["repo_uuid"] == repo_uuid
             ]
@@ -1739,7 +1826,11 @@ class SemanticQueueStore:
             raise
         except (OSError, IdentityError, StateCorrupt, StatePathError) as exc:
             raise SemanticCapabilityUnavailable("workspace_config_unavailable") from exc
-        with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
+        with self._semantic_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            deadline_ns=deadline_ns,
+        ) as operation:
             try:
                 validated_config = cast(
                     WorkspaceConfig,
@@ -1765,8 +1856,18 @@ class SemanticQueueStore:
             )
             if not capability.available:
                 raise SemanticCapabilityUnavailable(capability.reason)
-            current = self._load_locked(operation.repo_uuid)
+            current = self._load_locked(
+                operation.repo_uuid,
+                deadline_ns=deadline_ns,
+            )
             self._require_current_source(current, operation)
+            self._require_expected_worker_coordinates(
+                current,
+                operation,
+                expected_registry_revision=expected_registry_revision,
+                expected_queue_revision=expected_queue_revision,
+                expected_desired_watermark=expected_desired_watermark,
+            )
             changed = False
             recovered: list[SemanticQueueItem] = []
             active: SemanticClaim | None = None
@@ -1809,9 +1910,10 @@ class SemanticQueueStore:
                 ]
             if active is not None or not eligible:
                 if changed:
-                    self._commit_locked(
+                    self._commit_for_deadline(
                         current,
                         replace(current, items=self._sorted_items(recovered)),
+                        deadline_ns=deadline_ns,
                     )
                 return active
             selected_operation = self._next_operation(
@@ -1836,13 +1938,27 @@ class SemanticQueueStore:
                 else item
                 for item in recovered
             ]
-            committed = self._commit_locked(
+            claim_candidate = replace(
                 current,
-                replace(
-                    current,
-                    last_served_operation=selected_operation,
-                    items=self._sorted_items(claimed_items),
-                ),
+                last_served_operation=selected_operation,
+                items=self._sorted_items(claimed_items),
+            )
+            try:
+                self._bounded(replace(claim_candidate, revision=current.revision + 1))
+            except SemanticQueueCapacityExceeded as exc:
+                if changed:
+                    self._commit_for_deadline(
+                        current,
+                        replace(current, items=self._sorted_items(recovered)),
+                        deadline_ns=deadline_ns,
+                    )
+                raise SemanticCheckpointCapacityUnavailable(
+                    "mandatory result checkpoint headroom is unavailable"
+                ) from exc
+            committed = self._commit_for_deadline(
+                current,
+                claim_candidate,
+                deadline_ns=deadline_ns,
             )
             match = next(
                 (
@@ -1885,20 +2001,36 @@ class SemanticQueueStore:
         *,
         checkpoint: str,
         monotonic_ns: int,
+        expected_registry_revision: int | None = None,
+        expected_queue_revision: int | None = None,
+        expected_desired_watermark: int | None = None,
+        deadline_ns: int | None = None,
     ) -> SemanticClaim:
         checkpoint_value = _optional_text(checkpoint, "$.checkpoint", maximum=256)
         if checkpoint_value is None:
             raise ContractError("$.checkpoint: expected non-empty string")
-        with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
-            current = self._load_locked(operation.repo_uuid)
+        with self._semantic_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            deadline_ns=deadline_ns,
+        ) as operation:
+            current = self._load_locked(operation.repo_uuid, deadline_ns=deadline_ns)
             self._require_current_source(current, operation)
+            self._require_expected_worker_coordinates(
+                current,
+                operation,
+                expected_registry_revision=expected_registry_revision,
+                expected_queue_revision=expected_queue_revision,
+                expected_desired_watermark=expected_desired_watermark,
+            )
             index, item = self._claimed_item(current, claim, operation)
             updated_claim = replace(cast(SemanticClaim, item.claim), checkpoint=checkpoint_value)
             items = list(current.items)
             items[index] = replace(item, claim=updated_claim)
-            committed = self._commit_locked(
+            committed = self._commit_for_deadline(
                 current,
                 replace(current, items=self._sorted_items(items)),
+                deadline_ns=deadline_ns,
             )
             committed_item = next(
                 (
@@ -1931,10 +2063,25 @@ class SemanticQueueStore:
         claim: SemanticClaim,
         *,
         monotonic_ns: int,
+        expected_registry_revision: int | None = None,
+        expected_queue_revision: int | None = None,
+        expected_desired_watermark: int | None = None,
+        deadline_ns: int | None = None,
     ) -> SemanticQueueSnapshot:
-        with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
-            current = self._load_locked(operation.repo_uuid)
+        with self._semantic_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            deadline_ns=deadline_ns,
+        ) as operation:
+            current = self._load_locked(operation.repo_uuid, deadline_ns=deadline_ns)
             self._require_current_source(current, operation)
+            self._require_expected_worker_coordinates(
+                current,
+                operation,
+                expected_registry_revision=expected_registry_revision,
+                expected_queue_revision=expected_queue_revision,
+                expected_desired_watermark=expected_desired_watermark,
+            )
             index, item = self._claimed_item(current, claim, operation)
             items = list(current.items)
             items[index] = replace(
@@ -1946,13 +2093,14 @@ class SemanticQueueStore:
             completed_watermark = current.completed_watermark
             if self._all_reconciled_complete(current.reconciliation, items):
                 completed_watermark = current.desired_watermark
-            return self._commit_locked(
+            return self._commit_for_deadline(
                 current,
                 replace(
                     current,
                     completed_watermark=completed_watermark,
                     items=self._sorted_items(items),
                 ),
+                deadline_ns=deadline_ns,
             )
 
     def fail(
@@ -1963,13 +2111,28 @@ class SemanticQueueStore:
         error_code: str,
         retryable: bool,
         monotonic_ns: int,
+        expected_registry_revision: int | None = None,
+        expected_queue_revision: int | None = None,
+        expected_desired_watermark: int | None = None,
+        deadline_ns: int | None = None,
     ) -> SemanticQueueSnapshot:
         if _ERROR_RE.fullmatch(error_code) is None:
             raise SemanticQueueError("error_code must be a stable lowercase classification")
         retryable = _boolean(retryable, "$.retryable")
-        with self._semantic_operation(grant, monotonic_ns=monotonic_ns) as operation:
-            current = self._load_locked(operation.repo_uuid)
+        with self._semantic_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            deadline_ns=deadline_ns,
+        ) as operation:
+            current = self._load_locked(operation.repo_uuid, deadline_ns=deadline_ns)
             self._require_current_source(current, operation)
+            self._require_expected_worker_coordinates(
+                current,
+                operation,
+                expected_registry_revision=expected_registry_revision,
+                expected_queue_revision=expected_queue_revision,
+                expected_desired_watermark=expected_desired_watermark,
+            )
             index, item = self._claimed_item(current, claim, operation)
             failures = item.failure_count + 1
             status = (
@@ -1983,9 +2146,10 @@ class SemanticQueueStore:
                 last_error=error_code,
                 claim=None,
             )
-            return self._commit_locked(
+            return self._commit_for_deadline(
                 current,
                 replace(current, items=self._sorted_items(items)),
+                deadline_ns=deadline_ns,
             )
 
     def bind_sealed_inputs(
@@ -2095,6 +2259,76 @@ class SemanticQueueStore:
             "semantic queue snapshot validation exceeded its deadline",
         )
         return snapshot
+
+    def read_uncertain_snapshot_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> tuple[SemanticQueueSnapshot, bool]:
+        """Read installed current queue bytes without resolving pending intent."""
+
+        require_before_deadline(
+            deadline_ns,
+            "uncertain semantic queue snapshot read exceeded its deadline",
+        )
+        current, _previous, pending = self._paths(repo_uuid)
+        pending_present = self.state.private_file_exists(pending)
+        raw = self.state.read_optional_existing_bytes(
+            current,
+            max_bytes=self.policy.max_bytes,
+            deadline_ns=deadline_ns,
+        )
+        if raw is None:
+            snapshot = SemanticQueueSnapshot.initial(repo_uuid, self.policy)
+        else:
+            try:
+                snapshot = SemanticQueueSnapshot.from_json(raw)
+            except ContractError as exc:
+                raise SemanticQueueCorrupt("semantic queue current record is invalid") from exc
+        if snapshot.repo_uuid != repo_uuid:
+            raise SemanticQueueCorrupt("queue is installed under the wrong workspace")
+        if snapshot.queue_policy != self.policy:
+            raise SemanticQueueConflict("durable queue policy differs from the active policy")
+        self._bounded(snapshot)
+        require_before_deadline(
+            deadline_ns,
+            "uncertain semantic queue snapshot read exceeded its deadline",
+        )
+        return snapshot, pending_present
+
+    def recover_uncertain_snapshot(
+        self,
+        grant: LeaseGrant,
+        *,
+        monotonic_ns: int,
+        expected_registry_revision: int | None = None,
+        expected_queue_revision: int | None = None,
+        expected_desired_watermark: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> SemanticQueueSnapshot:
+        """Finish persistence recovery only after a caller proves exact current bytes."""
+
+        with self._semantic_operation(
+            grant,
+            monotonic_ns=monotonic_ns,
+            deadline_ns=deadline_ns,
+        ) as operation:
+            snapshot = self._load_locked(
+                operation.repo_uuid,
+                recover=True,
+                deadline_ns=deadline_ns,
+            )
+            self._require_current_source(snapshot, operation)
+            self._require_expected_worker_coordinates(
+                snapshot,
+                operation,
+                expected_registry_revision=expected_registry_revision,
+                expected_queue_revision=expected_queue_revision,
+                expected_desired_watermark=expected_desired_watermark,
+            )
+            self._bounded(snapshot)
+            return snapshot
 
     def inspect(
         self,
@@ -2370,6 +2604,7 @@ __all__ = [
     "SemanticCertificationBlocked",
     "SemanticCertificationView",
     "SemanticClaim",
+    "SemanticCheckpointCapacityUnavailable",
     "SemanticDesiredWork",
     "SemanticQueueCapacityExceeded",
     "SemanticQueueConflict",

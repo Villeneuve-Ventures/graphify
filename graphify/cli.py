@@ -13,6 +13,42 @@ from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 from pathlib import Path
 
 
+_NON_INSTALL_TOP_LEVEL_COMMANDS = frozenset(
+    {
+        "workspace",
+        "provider",
+        "prs",
+        "hook",
+        "query",
+        "affected",
+        "save-result",
+        "reflect",
+        "path",
+        "explain",
+        "diagnose",
+        "add",
+        "watch",
+        "cluster-only",
+        "label",
+        "update",
+        "hook-check",
+        "hook-guard",
+        "check-update",
+        "tree",
+        "merge-driver",
+        "merge-graphs",
+        "clone",
+        "export",
+        "benchmark",
+        "global",
+        "extract",
+        "cache-check",
+        "merge-chunks",
+        "merge-semantic",
+    }
+)
+
+
 _SEARCH_NUDGE = json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "PreToolUse",

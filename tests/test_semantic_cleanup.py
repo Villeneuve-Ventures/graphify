@@ -1,6 +1,7 @@
 """Tests for graphify.semantic_cleanup.validate_semantic_fragment (#825)."""
 
 import json
+from decimal import Decimal
 
 from graphify import semantic_cleanup as sc
 
@@ -15,6 +16,48 @@ def _valid_fragment():
 
 def test_validate_semantic_fragment_accepts_valid():
     assert sc.validate_semantic_fragment(_valid_fragment()) == []
+
+
+def test_semantic_cleanup_exposes_stable_worker_validation_helpers():
+    errors: list[str] = []
+
+    sc.validate_semantic_id(errors, "node.id", "module_func")
+
+    assert errors == []
+    assert sc.is_sentence_like_rationale_label(
+        "This sentence contains enough words to be recognized as rationale text."
+    )
+
+
+def test_validate_semantic_fragment_accepts_lossless_encoder_hook_without_changing_default():
+    from graphify.workspace.semantic_worker import canonical_protocol_bytes
+
+    fragment = _valid_fragment()
+    fragment["edges"][0]["confidence_score"] = Decimal("0.75")
+    observed: list[object] = []
+
+    def encode(value: object) -> bytes:
+        observed.append(value)
+        return canonical_protocol_bytes(value)
+
+    assert sc.validate_semantic_fragment(fragment, canonical_encoder=encode) == []
+    assert observed == [fragment]
+    assert b'"confidence_score":0.75' in encode(fragment)
+
+    default_errors = sc.validate_semantic_fragment(_valid_fragment())
+    assert default_errors == []
+
+
+def test_validate_semantic_fragment_returns_encoder_recursion_as_an_error():
+    def recursive_encoder(_value: object) -> bytes:
+        raise RecursionError("encoder recursion")
+
+    errors = sc.validate_semantic_fragment(
+        _valid_fragment(),
+        canonical_encoder=recursive_encoder,
+    )
+
+    assert errors == ["fragment is not JSON-serializable: encoder recursion"]
 
 
 def test_validate_semantic_fragment_rejects_non_object():

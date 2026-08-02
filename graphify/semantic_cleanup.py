@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Callable
 
 from .build import _normalize_hyperedge_members
 
@@ -34,7 +35,12 @@ VALID_SEMANTIC_FILE_TYPES = frozenset({"code", "document", "paper", "image", "ra
 _SEMANTIC_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
-def validate_semantic_fragment(fragment: object) -> list[str]:
+def validate_semantic_fragment(
+    fragment: object,
+    *,
+    canonical_encoder: Callable[[object], bytes] | None = None,
+    progress: Callable[[], object] | None = None,
+) -> list[str]:
     """Return validation errors for an untrusted semantic extraction fragment.
 
     Empty list means valid. Called by skill merge code before
@@ -42,15 +48,32 @@ def validate_semantic_fragment(fragment: object) -> list[str]:
     rejected before it touches the graph. Parameter is `object` (not `dict`)
     because we may be handed arbitrary deserialized JSON — the first check
     rejects anything that isn't a dict.
+
+    ``canonical_encoder`` is an optional trusted, lossless JSON encoder used
+    for payload-size accounting when values such as exact decimals cannot use
+    the default encoder. It must return ``bytes``; ``TypeError``, ``ValueError``,
+    and ``RecursionError`` are returned as validation errors. ``progress`` is
+    called before and after encoding and once per 256 nodes, edges, hyperedges,
+    and hyperedge members; callback exceptions propagate to the caller.
     """
     if not isinstance(fragment, dict):
         return ["fragment must be a JSON object"]
 
     errors: list[str] = []
+    if progress is not None:
+        progress()
     try:
-        payload = json.dumps(fragment, ensure_ascii=False).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+        payload = (
+            json.dumps(fragment, ensure_ascii=False).encode("utf-8")
+            if canonical_encoder is None
+            else canonical_encoder(fragment)
+        )
+    except (RecursionError, TypeError, ValueError) as exc:
         return [f"fragment is not JSON-serializable: {exc}"]
+    if progress is not None:
+        progress()
+    if not isinstance(payload, bytes):
+        return ["fragment encoder must return bytes"]
 
     if len(payload) > MAX_SEMANTIC_FRAGMENT_BYTES:
         errors.append(f"payload is {len(payload)} bytes; max is {MAX_SEMANTIC_FRAGMENT_BYTES}")
@@ -70,10 +93,12 @@ def validate_semantic_fragment(fragment: object) -> list[str]:
         errors.append(f"edges has {len(edges)} entries; max is {MAX_SEMANTIC_FRAGMENT_EDGES}")
 
     for i, node in enumerate(nodes):
+        if progress is not None and i % 256 == 0:
+            progress()
         if not isinstance(node, dict):
             errors.append(f"nodes[{i}] must be an object")
             continue
-        _validate_semantic_id(errors, f"nodes[{i}].id", node.get("id"))
+        validate_semantic_id(errors, f"nodes[{i}].id", node.get("id"))
         file_type = node.get("file_type")
         if file_type is not None and file_type not in VALID_SEMANTIC_FILE_TYPES:
             errors.append(
@@ -82,11 +107,13 @@ def validate_semantic_fragment(fragment: object) -> list[str]:
             )  # validate file_type before any sanitize path can run
 
     for i, edge in enumerate(edges):
+        if progress is not None and i % 256 == 0:
+            progress()
         if not isinstance(edge, dict):
             errors.append(f"edges[{i}] must be an object")
             continue
-        _validate_semantic_id(errors, f"edges[{i}].source", edge.get("source"))
-        _validate_semantic_id(errors, f"edges[{i}].target", edge.get("target"))
+        validate_semantic_id(errors, f"edges[{i}].source", edge.get("source"))
+        validate_semantic_id(errors, f"edges[{i}].target", edge.get("target"))
 
     hyperedges = fragment.get("hyperedges", [])
     if hyperedges is None:
@@ -100,6 +127,8 @@ def validate_semantic_fragment(fragment: object) -> list[str]:
                 f"max is {MAX_SEMANTIC_FRAGMENT_HYPEREDGES}"
             )
         for i, he in enumerate(hyperedges):
+            if progress is not None and i % 256 == 0:
+                progress()
             if not isinstance(he, dict):
                 errors.append(f"hyperedges[{i}] must be an object")
                 continue
@@ -107,7 +136,7 @@ def validate_semantic_fragment(fragment: object) -> list[str]:
             # an alias-keyed hyperedge isn't rejected here for "nodes must be a
             # list" before it ever reaches build's normalization.
             _normalize_hyperedge_members(he)
-            _validate_semantic_id(errors, f"hyperedges[{i}].id", he.get("id"))
+            validate_semantic_id(errors, f"hyperedges[{i}].id", he.get("id"))
             he_nodes = he.get("nodes")
             if not isinstance(he_nodes, list):
                 errors.append(f"hyperedges[{i}].nodes must be a list")
@@ -118,7 +147,9 @@ def validate_semantic_fragment(fragment: object) -> list[str]:
                     f"max is {MAX_SEMANTIC_HYPEREDGE_NODES}"
                 )
             for j, ref in enumerate(he_nodes):
-                _validate_semantic_id(errors, f"hyperedges[{i}].nodes[{j}]", ref)
+                if progress is not None and j % 256 == 0:
+                    progress()
+                validate_semantic_id(errors, f"hyperedges[{i}].nodes[{j}]", ref)
 
     return errors
 
@@ -147,7 +178,9 @@ def load_validated_semantic_fragment(path: Path) -> tuple[dict | None, list[str]
     return (None, errors) if errors else (fragment, [])
 
 
-def _validate_semantic_id(errors: list[str], field: str, value: object) -> None:
+def validate_semantic_id(errors: list[str], field: str, value: object) -> None:
+    """Append stable validation errors for one semantic identifier."""
+
     if not isinstance(value, str):
         errors.append(f"{field} must be a string")
         return
@@ -162,7 +195,14 @@ def _validate_semantic_id(errors: list[str], field: str, value: object) -> None:
         errors.append(f"{field} contains unsupported characters")
 
 
-def sanitize_semantic_fragment(fragment: dict) -> dict:
+_validate_semantic_id = validate_semantic_id
+
+
+def sanitize_semantic_fragment(
+    fragment: dict,
+    *,
+    progress: Callable[[], object] | None = None,
+) -> dict:
     """Clean up a semantic extraction fragment in-place.
 
     Operations:
@@ -191,25 +231,32 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
 
     # ---- build lookup maps --------------------------------------------------
     node_by_id: dict[str, dict] = {}
-    for n in nodes:
+    for index, n in enumerate(nodes):
+        if progress is not None and index % 256 == 0:
+            progress()
         nid = n.get("id", "")
         if nid:
             node_by_id[nid] = n
 
     # Pre-collect node IDs that source a `rationale_for` edge — these are
     # candidates for sentence-like cleanup even when file_type is allowed.
-    rationale_for_sources: set[str] = set()
-    for e in edges:
+    rationale_targets: dict[str, list[str]] = {}
+    for index, e in enumerate(edges):
+        if progress is not None and index % 256 == 0:
+            progress()
         if e.get("relation") == "rationale_for":
             src = e.get("source", "")
-            if src:
-                rationale_for_sources.add(src)
+            target = e.get("target", "")
+            if src and target:
+                rationale_targets.setdefault(src, []).append(target)
 
     # ---- pass 1: identify nodes to remove + rationale candidates -----------
     rationale_candidates: list[dict] = []
     remove_ids: set[str] = set()
     keep_nodes: list[dict] = []
-    for n in nodes:
+    for index, n in enumerate(nodes):
+        if progress is not None and index % 256 == 0:
+            progress()
         nid = n.get("id", "")
         if not nid:
             # Node without an id cannot be referenced — discard.
@@ -219,11 +266,11 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
         if ft in _invalid_ft:
             # Explicitly-invalid file_type ("rationale" or "concept"): if
             # the label looks like a sentence we may convert to attribute.
-            if _is_sentence_like_rationale_label(label):
+            if is_sentence_like_rationale_label(label):
                 rationale_candidates.append(n)
             remove_ids.add(nid)
             continue
-        if nid in rationale_for_sources and _is_sentence_like_rationale_label(label):
+        if nid in rationale_targets and is_sentence_like_rationale_label(label):
             # Allowed file_type, but the node sources a `rationale_for` edge
             # AND its label is sentence-like prose. Treat it as rationale
             # cleanup material rather than a real graph entity.
@@ -238,26 +285,27 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
     # attribute-propagation paths — that would corrupt unrelated nodes by
     # attaching rationale meant for a different target.
     rationale_attrs: dict[str, list[str]] = {}
-    for rn in rationale_candidates:
+    for index, rn in enumerate(rationale_candidates):
+        if progress is not None and index % 256 == 0:
+            progress()
         rn_id = rn.get("id", "")
         text = rn.get("label", "").strip()
-        for e in edges:
-            if e.get("relation") != "rationale_for":
-                continue
-            if e.get("source") != rn_id:
-                continue
-            target_id = e.get("target")
+        for target_id in rationale_targets.get(rn_id, ()):
             if target_id not in node_by_id or target_id in remove_ids:
                 continue
             rationale_attrs.setdefault(target_id, []).append(text)
 
-    for target_id, texts in rationale_attrs.items():
+    for index, (target_id, texts) in enumerate(rationale_attrs.items()):
+        if progress is not None and index % 256 == 0:
+            progress()
         if target_id in node_by_id and target_id not in remove_ids:
             _append_rationale_attr(node_by_id[target_id], texts)
 
     # ---- pass 3: strip edges referencing removed nodes ----------------------
     keep_edges: list[dict] = []
-    for e in edges:
+    for index, e in enumerate(edges):
+        if progress is not None and index % 256 == 0:
+            progress()
         src = e.get("source", "")
         tgt = e.get("target", "")
         if src in remove_ids or tgt in remove_ids:
@@ -268,7 +316,9 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
     surviving_ids: set[str] = {n.get("id", "") for n in keep_nodes}
     surviving_ids.discard("")
     keep_hyperedges: list[dict] = []
-    for he in hyperedges:
+    for index, he in enumerate(hyperedges):
+        if progress is not None and index % 256 == 0:
+            progress()
         if not isinstance(he, dict):
             continue
         # Fold alias member keys (members/node_ids) onto `nodes` (#1561) so an
@@ -293,7 +343,7 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
     return fragment
 
 
-def _is_sentence_like_rationale_label(label: str) -> bool:
+def is_sentence_like_rationale_label(label: str) -> bool:
     """Return True if *label* looks like prose / rationale text rather than an
     entity or concept name.
 
@@ -312,6 +362,9 @@ def _is_sentence_like_rationale_label(label: str) -> bool:
             return False
     # Must look like actual prose: has sentence-ending punctuation or a colon.
     return bool(re.search(r"[.!?:]", label))
+
+
+_is_sentence_like_rationale_label = is_sentence_like_rationale_label
 
 
 def _append_rationale_attr(node: dict, texts: list[str]) -> None:
