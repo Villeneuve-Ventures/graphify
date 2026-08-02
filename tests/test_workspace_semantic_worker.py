@@ -12,6 +12,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 import time
@@ -1830,6 +1831,36 @@ def test_uncertain_heartbeat_uses_semantic_epoch_after_workspace_epoch_advances(
     runtime.leases.release(workspace_grant, deadline_ns=session.deadline_ns)
 
 
+def test_heartbeat_wait_is_bounded_by_the_live_lease_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    monkeypatch.chdir(runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root)
+    session = _active_session(runtime, begin, _ProtocolOutput())
+    grant = cast(LeaseGrant, session.grant)
+    liveness_deadline = cast(
+        int,
+        grant.lease.to_dict()["liveness_deadline_monotonic_ns"],
+    )
+    session.deadline_ns = liveness_deadline + 10_000_000_000
+    session.monotonic_clock = lambda: liveness_deadline - 1
+    before = runtime.leases.inspect(HARNESS_REPO_UUID)
+    observed_deadlines: list[int | None] = []
+
+    def blocked_heartbeat(*_args: object, **kwargs: object) -> object:
+        observed_deadlines.append(cast(int | None, kwargs.get("deadline_ns")))
+        raise semantic_worker.LockTimeout("heartbeat lock wait expired")
+
+    monkeypatch.setattr(runtime.leases, "heartbeat", blocked_heartbeat)
+
+    with pytest.raises(semantic_worker.LeaseExpired):
+        session._heartbeat()
+
+    assert observed_deadlines == [liveness_deadline]
+    assert runtime.leases.inspect(HARNESS_REPO_UUID) == before
+
+
 def test_heartbeat_interruption_adopts_then_fails_the_live_claim(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2067,6 +2098,121 @@ def test_semantic_worker_preflight_lease_recovery_is_workspace_invalid(
     assert terminal["reason_code"] == "workspace_state_invalid"
 
 
+def test_semantic_worker_preflight_queue_policy_drift_is_authority_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin = _runtime_with_one_readme_work(tmp_path)
+    source_root = runtime.registry.resolve_active_source(HARNESS_REPO_UUID).root
+    monkeypatch.chdir(source_root)
+    queue_path = runtime.semantic_queue.state.path(
+        runtime.semantic_queue._paths(HARNESS_REPO_UUID)[0]
+    )
+    before = queue_path.read_bytes()
+    drifted_policy = replace(
+        runtime.semantic_queue.policy,
+        max_items=runtime.semantic_queue.policy.max_items + 1,
+    )
+    runtime = replace(
+        runtime,
+        semantic_queue=SemanticQueueStore(
+            runtime.semantic_queue.state.root,
+            runtime.leases,
+            policy=drifted_policy,
+            capabilities=runtime.semantic_queue.state.capabilities,
+        ),
+    )
+    output = _ProtocolOutput()
+
+    assert (
+        semantic_worker.run_semantic_worker(
+            runtime,
+            stdin=_OneFrameInput(semantic_worker.canonical_protocol_bytes(begin)),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+        == 10
+    )
+
+    terminal = semantic_worker.parse_result_frame(output.frames[0])
+    assert terminal["outcome"] == "withheld"
+    assert terminal["reason_code"] == "semantic_authority_stale"
+    assert queue_path.read_bytes() == before
+    assert "semantic" not in runtime.leases.inspect(HARNESS_REPO_UUID).leases
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_semantic_worker_acquire_registry_corruption_is_registry_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persistent: bool,
+) -> None:
+    runtime, begin, source_root = _idle_runtime(tmp_path)
+    monkeypatch.chdir(source_root)
+    lease_path = runtime.leases.state.path(runtime.leases._paths(HARNESS_REPO_UUID)[0])
+    before = lease_path.read_bytes()
+    output = _ProtocolOutput()
+    original_load = runtime.registry._load_locked
+    calls = 0
+
+    def corrupt_after_preflight(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1 or (not persistent and calls > 2):
+            return original_load(*args, **kwargs)  # type: ignore[arg-type]
+        raise semantic_worker.StateCorrupt("registry current record is invalid")
+
+    monkeypatch.setattr(runtime.registry, "_load_locked", corrupt_after_preflight)
+
+    assert (
+        semantic_worker.run_semantic_worker(
+            runtime,
+            stdin=_OneFrameInput(semantic_worker.canonical_protocol_bytes(begin)),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+        == 20
+    )
+
+    terminal = semantic_worker.parse_result_frame(output.frames[0])
+    assert terminal["outcome"] == "invalid"
+    assert terminal["reason_code"] == "registry_invalid"
+    if not persistent:
+        assert runtime.registry.load().to_dict()["revision"] == 1
+    assert lease_path.read_bytes() == before
+
+
+def test_semantic_worker_acquire_lease_corruption_remains_workspace_invalid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, begin, source_root = _idle_runtime(tmp_path)
+    monkeypatch.chdir(source_root)
+    output = _ProtocolOutput()
+    original_load = runtime.leases._load_state_locked
+    calls = 0
+
+    def corrupt_after_preflight(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_load(*args, **kwargs)  # type: ignore[arg-type]
+        raise semantic_worker.StateCorrupt("workspace lease current record is invalid")
+
+    monkeypatch.setattr(runtime.leases, "_load_state_locked", corrupt_after_preflight)
+
+    assert (
+        semantic_worker.run_semantic_worker(
+            runtime,
+            stdin=_OneFrameInput(semantic_worker.canonical_protocol_bytes(begin)),  # type: ignore[arg-type]
+            stdout=output,  # type: ignore[arg-type]
+        )
+        == 20
+    )
+
+    terminal = semantic_worker.parse_result_frame(output.frames[0])
+    assert terminal["outcome"] == "invalid"
+    assert terminal["reason_code"] == "workspace_state_invalid"
+
+
 def test_semantic_worker_idle_inspect_interruption_is_preclaim_withheld(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2296,6 +2442,50 @@ def test_source_observation_rechecks_deadline_after_final_read(
             work,
             deadline_ns=1,
             monotonic_clock=lambda: now[0],
+        )
+
+
+@pytest.mark.parametrize("replacement", ["leaf", "parent"])
+def test_source_observation_revalidates_path_bindings_after_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    source_root = tmp_path / "source"
+    nested = source_root / "nested"
+    nested.mkdir(parents=True)
+    payload = b"expected source\n"
+    (nested / "README.md").write_bytes(payload)
+    work = replace(
+        _work(),
+        path="nested/README.md",
+        content_sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    original_fstat = semantic_worker.os.fstat
+    regular_fstats = 0
+
+    def replace_parent_after_read(descriptor: int) -> os.stat_result:
+        nonlocal regular_fstats
+        observed = original_fstat(descriptor)
+        if stat.S_ISREG(observed.st_mode):
+            regular_fstats += 1
+            if regular_fstats == 2:
+                if replacement == "parent":
+                    nested.rename(source_root / "detached")
+                    nested.mkdir()
+                else:
+                    (nested / "README.md").rename(nested / "detached.md")
+                (nested / "README.md").write_bytes(b"replacement source\n")
+        return observed
+
+    monkeypatch.setattr(semantic_worker.os, "fstat", replace_parent_after_read)
+
+    with pytest.raises(semantic_worker.SemanticSourceUnavailable):
+        semantic_worker._source_observation(
+            source_root,
+            work,
+            deadline_ns=time.monotonic_ns() + 5_000_000_000,
+            monotonic_clock=time.monotonic_ns,
         )
 
 

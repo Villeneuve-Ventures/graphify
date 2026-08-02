@@ -990,23 +990,32 @@ class LeaseStore:
                 else self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
             )
         with lock:
+            try:
+                if deadline_ns is None:
+                    state = self._load_state_locked(
+                        document,
+                        repo_uuid,
+                        recover=not existing_only,
+                    )
+                else:
+                    state = self._load_state_locked(
+                        document,
+                        repo_uuid,
+                        recover=not existing_only,
+                        deadline_ns=deadline_ns,
+                    )
+            except StateCorrupt as exc:
+                if operation != "SEMANTIC_CLAIM":
+                    raise
+                raise LeaseRecoveryRequired(
+                    f"workspace lease state requires recovery: {exc}"
+                ) from exc
             if deadline_ns is None:
-                state = self._load_state_locked(
-                    document,
-                    repo_uuid,
-                    recover=not existing_only,
-                )
                 staged_build = self._load_staged_build_locked(
                     repo_uuid,
                     recover=not existing_only,
                 )
             else:
-                state = self._load_state_locked(
-                    document,
-                    repo_uuid,
-                    recover=not existing_only,
-                    deadline_ns=deadline_ns,
-                )
                 staged_build = self._load_staged_build_locked(
                     repo_uuid,
                     recover=not existing_only,

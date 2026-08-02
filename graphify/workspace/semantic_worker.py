@@ -1982,21 +1982,54 @@ def _source_observation(
     try:
         root_descriptor = os.open(source_root, directory_flags)
         descriptors.append(root_descriptor)
+        directory_bindings: list[tuple[str, int, int]] = []
+
+        def revalidate_directory_bindings() -> None:
+            check_progress()
+            opened_root = os.fstat(root_descriptor)
+            bound_root = os.stat(source_root, follow_symlinks=False)
+            if not stat.S_ISDIR(bound_root.st_mode) or (opened_root.st_dev, opened_root.st_ino) != (
+                bound_root.st_dev,
+                bound_root.st_ino,
+            ):
+                raise SemanticSourceUnavailable(
+                    "active source root binding changed during observation"
+                )
+            for component, parent_descriptor, child_descriptor in directory_bindings:
+                check_progress()
+                opened = os.fstat(child_descriptor)
+                bound = os.stat(
+                    component,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if not stat.S_ISDIR(bound.st_mode) or (opened.st_dev, opened.st_ino) != (
+                    bound.st_dev,
+                    bound.st_ino,
+                ):
+                    raise SemanticSourceUnavailable(
+                        "source directory binding changed during observation"
+                    )
+
         check_progress()
         parent = root_descriptor
         for component in path.parts[:-1]:
-            parent = os.open(component, directory_flags, dir_fd=parent)
-            descriptors.append(parent)
+            child = os.open(component, directory_flags, dir_fd=parent)
+            descriptors.append(child)
+            directory_bindings.append((component, parent, child))
+            parent = child
             check_progress()
         name = path.parts[-1]
         if work.operation == "DELETE":
             try:
                 os.stat(name, dir_fd=parent, follow_symlinks=False)
             except FileNotFoundError:
+                revalidate_directory_bindings()
                 check_progress()
                 return
             except OSError as exc:
                 raise SemanticSourceUnavailable("source absence could not be proved") from exc
+            revalidate_directory_bindings()
             check_progress()
             raise SemanticSourceChanged("DELETE source is present")
         try:
@@ -2043,6 +2076,13 @@ def _source_observation(
         )
         if not stable or bytes_read != before.st_size:
             raise SemanticSourceUnavailable("UPSERT source changed during observation")
+        bound = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISREG(bound.st_mode) or (after.st_dev, after.st_ino) != (
+            bound.st_dev,
+            bound.st_ino,
+        ):
+            raise SemanticSourceUnavailable("UPSERT source path binding changed during observation")
+        revalidate_directory_bindings()
         if digest.hexdigest() != work.content_sha256:
             raise SemanticSourceChanged("UPSERT source digest differs from desired work")
     except _FrameDeadline:
@@ -2771,8 +2811,12 @@ class _WorkerSession:
         monotonic_ns = self.monotonic_clock()
         if monotonic_ns >= self.deadline_ns:
             raise _FrameDeadline("semantic-worker work deadline expired")
-        expected_liveness = monotonic_ns + _LEASE_TTL_NS
         before = grant.lease.to_dict()
+        liveness_deadline = cast(int, before["liveness_deadline_monotonic_ns"])
+        if monotonic_ns >= liveness_deadline:
+            raise LeaseExpired("semantic lease expired before heartbeat")
+        heartbeat_deadline = min(self.deadline_ns, liveness_deadline)
+        expected_liveness = monotonic_ns + _LEASE_TTL_NS
         for retry in range(2):
             try:
                 updated = self.runtime.leases.heartbeat(
@@ -2781,7 +2825,7 @@ class _WorkerSession:
                     monotonic_ns=monotonic_ns,
                     ttl_ns=_LEASE_TTL_NS,
                     expected_registry_revision=grant.registry_revision,
-                    deadline_ns=self.deadline_ns,
+                    deadline_ns=heartbeat_deadline,
                 )
                 expected = {
                     **before,
@@ -2799,6 +2843,10 @@ class _WorkerSession:
                 self.grant = updated
                 self.next_heartbeat_ns = monotonic_ns + _HEARTBEAT_INTERVAL_NS
                 return
+            except LockTimeout as exc:
+                if liveness_deadline < self.deadline_ns:
+                    raise LeaseExpired("semantic lease expired during heartbeat") from exc
+                raise _FrameDeadline("semantic-worker work deadline expired") from exc
             except (CommitUnknown, InjectedFault, KeyboardInterrupt) as fault:
                 interrupted = _caused_by_keyboard_interrupt(fault)
                 try:
@@ -3453,7 +3501,7 @@ class _WorkerSession:
             return self._withheld("semantic_worker_preclaim_interrupted")
         except LeaseBusy:
             return self._withheld("semantic_claim_contended")
-        except RevisionConflict:
+        except RevisionConflict, SemanticQueueConflict:
             return self._withheld("semantic_authority_stale")
         except SemanticQueueCapacityExceeded:
             return self._invalid("semantic_queue_invalid")
@@ -3503,7 +3551,9 @@ class _WorkerSession:
             return self._commit_unknown()
         except StatePathError:
             return self._invalid("unsafe_state_path")
-        except StateCorrupt, StateRecoveryRequired, LeaseRecoveryRequired:
+        except StateCorrupt, StateRecoveryRequired:
+            return self._invalid("registry_invalid")
+        except LeaseRecoveryRequired:
             return self._invalid("workspace_state_invalid")
         except LeaseError:
             return self._invalid("workspace_state_invalid")
