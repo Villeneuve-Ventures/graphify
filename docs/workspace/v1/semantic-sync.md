@@ -657,13 +657,12 @@ implementation and governance evidence is recorded in the
 ## P5B2 semantic-result handoff and sealed-input finalization
 
 This is a separate, unnumbered successor contract. It does not revise the
-accepted worker transport or its receipt. Repository authority for this
-contract remains `STAGED` through merge. The exact merge makes this child alone
-eligible for `READY`, but a separately authorized post-merge governance-only
-reconciliation from the canonical branch must refresh the live snapshot and
-record that transition before `READY` may be used to review a bounded
-implementation prompt. `READY` is implementation eligibility, not
-implementation, acceptance, or phase completion.
+accepted worker transport or its receipt. The post-merge governance
+reconciliation records only this child as `READY`. `READY` is implementation
+eligibility only: it permits a bounded implementation prompt to be reviewed but
+neither authorizes nor performs implementation, acceptance, or phase
+completion. This local transition remains proposed until publication and merge
+into `workspace/v1`.
 
 The child has no public command, request family, result family, status field,
 or receipt. It is an internal composition of the accepted worker evidence, the
