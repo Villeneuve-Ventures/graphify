@@ -9,7 +9,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import time
-from typing import Any, Iterator, Mapping, Sequence, cast
+from typing import Any, Callable, Iterator, Mapping, Sequence, cast
 import unicodedata
 
 from graphify.workspace.adapters.base import SourceObservation
@@ -33,8 +33,10 @@ from graphify.workspace.leases import (
     StaleLease,
 )
 from graphify.workspace.persistence import (
+    CommitUnknown,
     DurableStateRoot,
     FaultHook,
+    InjectedFault,
     RuntimeCapabilities,
     StateCorrupt,
     StatePathError,
@@ -2158,6 +2160,10 @@ class SemanticQueueStore:
         *,
         sealed_input_manifest_sha256: str,
         monotonic_ns: int,
+        expected_snapshot: SemanticQueueSnapshot | None = None,
+        validate_current: Callable[[LeaseOperation, SemanticQueueSnapshot], None]
+        | None = None,
+        deadline_ns: int | None = None,
     ) -> SemanticQueueSnapshot:
         """Durably bind one completed reconciliation to exact staged payload bytes."""
 
@@ -2165,12 +2171,63 @@ class SemanticQueueStore:
             sealed_input_manifest_sha256,
             "$.sealed_input_manifest_sha256",
         )
+        exact = expected_snapshot is not None or validate_current is not None
+        if exact and (expected_snapshot is None or validate_current is None):
+            raise SemanticQueueConflict(
+                "exact sealed-input binding requires one complete validation snapshot"
+            )
+        expected_post: SemanticQueueSnapshot | None = None
+        if expected_snapshot is not None:
+            try:
+                expected_snapshot = SemanticQueueSnapshot.from_mapping(
+                    expected_snapshot.to_dict()
+                )
+            except ContractError as exc:
+                raise SemanticQueueConflict(
+                    "exact sealed-input snapshot is invalid"
+                ) from exc
+            reconciliation = expected_snapshot.reconciliation
+            if (
+                expected_snapshot.queue_policy != self.policy
+                or reconciliation is None
+                or reconciliation.sealed_input_manifest_sha256 is not None
+                or expected_snapshot.completed_watermark
+                != expected_snapshot.desired_watermark
+                or any(item.status != "completed" for item in expected_snapshot.items)
+            ):
+                raise SemanticQueueConflict(
+                    "exact sealed-input snapshot is not an unsealed completion"
+                )
+            expected_post = SemanticQueueSnapshot.from_mapping(
+                replace(
+                    expected_snapshot,
+                    revision=expected_snapshot.revision + 1,
+                    reconciliation=replace(
+                        reconciliation,
+                        sealed_input_manifest_sha256=digest,
+                    ),
+                ).to_dict()
+            )
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
-            allowed_operations=_MUTATING_OPERATIONS,
+            allowed_operations=(frozenset({"BUILD"}) if exact else _MUTATING_OPERATIONS),
+            registry_required=exact,
+            deadline_ns=deadline_ns,
         ) as operation:
-            current = self._load_locked(operation.repo_uuid)
+            if exact:
+                return self._bind_sealed_inputs_exact_locked(
+                    operation,
+                    digest=digest,
+                    expected=cast(SemanticQueueSnapshot, expected_snapshot),
+                    expected_post=cast(SemanticQueueSnapshot, expected_post),
+                    validate_current=cast(
+                        Callable[[LeaseOperation, SemanticQueueSnapshot], None],
+                        validate_current,
+                    ),
+                    deadline_ns=deadline_ns,
+                )
+            current = self._load_locked(operation.repo_uuid, deadline_ns=deadline_ns)
             if current.active_source_revision != operation.grant.active_source_revision:
                 raise SemanticCertificationBlocked(
                     "active source changed; exact reconciliation is required"
@@ -2200,7 +2257,100 @@ class SemanticQueueStore:
                     sealed_input_manifest_sha256=digest,
                 ),
             )
-            return self._commit_locked(current, candidate)
+            return self._commit_for_deadline(
+                current,
+                candidate,
+                deadline_ns=deadline_ns,
+            )
+
+    def _bind_sealed_inputs_exact_locked(
+        self,
+        operation: LeaseOperation,
+        *,
+        digest: str,
+        expected: SemanticQueueSnapshot,
+        expected_post: SemanticQueueSnapshot,
+        validate_current: Callable[[LeaseOperation, SemanticQueueSnapshot], None],
+        deadline_ns: int | None,
+    ) -> SemanticQueueSnapshot:
+        """Resolve one null-to-digest commit without accepting unrelated state."""
+
+        if (
+            expected.repo_uuid != operation.repo_uuid
+            or expected.active_source_revision != operation.grant.active_source_revision
+        ):
+            raise SemanticQueueConflict("exact sealed-input authority names another source")
+
+        def uncertain() -> tuple[SemanticQueueSnapshot, bool]:
+            try:
+                return self.read_uncertain_snapshot_locked(
+                    operation.repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            except Exception as exc:
+                raise CommitUnknown(
+                    "exact sealed-input state cannot be classified"
+                ) from exc
+
+        def recover(observed: SemanticQueueSnapshot) -> SemanticQueueSnapshot:
+            if observed not in (expected, expected_post):
+                raise CommitUnknown("exact sealed-input pending state is unrelated")
+            try:
+                recovered = self._load_locked(
+                    operation.repo_uuid,
+                    recover=True,
+                    deadline_ns=deadline_ns,
+                )
+                confirmed, pending = uncertain()
+            except Exception as exc:
+                raise CommitUnknown("exact sealed-input recovery is ambiguous") from exc
+            if (
+                pending
+                or recovered != confirmed
+                or recovered not in (expected, expected_post)
+            ):
+                raise CommitUnknown("exact sealed-input recovery differs from expected state")
+            return recovered
+
+        current, pending = uncertain()
+        if pending:
+            current = recover(current)
+        if current == expected_post:
+            validate_current(operation, current)
+            return current
+        if current != expected:
+            raise SemanticQueueConflict("semantic queue differs from exact handoff authority")
+
+        candidate = replace(
+            current,
+            reconciliation=replace(
+                cast(_SemanticReconciliation, current.reconciliation),
+                sealed_input_manifest_sha256=digest,
+            ),
+        )
+        for retry in range(2):
+            validate_current(operation, current)
+            try:
+                committed = self._commit_for_deadline(
+                    current,
+                    candidate,
+                    deadline_ns=deadline_ns,
+                )
+            except (CommitUnknown, InjectedFault):
+                observed, pending = uncertain()
+                if pending:
+                    observed = recover(observed)
+                if observed == expected_post:
+                    validate_current(operation, observed)
+                    return observed
+                if observed == expected and retry == 0:
+                    current = observed
+                    continue
+                raise CommitUnknown("exact sealed-input commit outcome is uncertain")
+            if committed != expected_post:
+                raise CommitUnknown("exact sealed-input commit returned unexpected state")
+            return committed
+        raise CommitUnknown("exact sealed-input commit outcome is uncertain")
 
     def compact(
         self,

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 from typing import Any, Mapping, Sequence, cast
@@ -71,6 +72,18 @@ _MAX_GENERATION_COORDINATION_LOCK_BYTES = 64 * 1024
 _MAX_POINTER_RECORD_BYTES = 64 * 1024
 _MAX_STAGED_BUILD_STATE_BYTES = 64 * 1024
 _STAGED_BUILD_TERMINAL_STATES = frozenset({"PROMOTED", "ABANDONED"})
+_GENERATION_ID_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
+_HANDOFF_NAME_RE = re.compile(r"^[0-9a-f]{64}\.json$", re.ASCII)
+_MAX_CAPACITY_BYTES = 9_223_372_036_854_775_807
+
+
+def _bounded_capacity_sum(values: Sequence[int]) -> int:
+    total = 0
+    for value in values:
+        if value < 0 or value > _MAX_CAPACITY_BYTES - total:
+            raise CapacityExceeded("capacity usage overflows the supported range")
+        total += value
+    return total
 
 
 class GenerationError(RuntimeError):
@@ -206,22 +219,46 @@ class _PayloadInventory:
 
 @dataclass(frozen=True)
 class _Usage:
-    bytes_by_generation: Mapping[tuple[str, str], int]
+    primary_bytes_by_generation: Mapping[tuple[str, str], int]
+    handoff_bytes_by_generation: Mapping[tuple[str, str], int]
+    reserved_bytes_by_generation: Mapping[tuple[str, str], int]
     unconsumed_reserved_bytes: int
 
     @property
+    def bytes_by_generation(self) -> Mapping[tuple[str, str], int]:
+        keys = (
+            set(self.primary_bytes_by_generation)
+            | set(self.handoff_bytes_by_generation)
+            | set(self.reserved_bytes_by_generation)
+        )
+        return {
+            key: _bounded_capacity_sum(
+                (
+                    self.handoff_bytes_by_generation.get(key, 0),
+                    max(
+                        self.primary_bytes_by_generation.get(key, 0),
+                        self.reserved_bytes_by_generation.get(key, 0),
+                    ),
+                )
+            )
+            for key in keys
+        }
+
+    @property
     def global_bytes(self) -> int:
-        return sum(self.bytes_by_generation.values())
+        return _bounded_capacity_sum(tuple(self.bytes_by_generation.values()))
 
     @property
     def global_generations(self) -> int:
         return len(self.bytes_by_generation)
 
     def workspace_bytes(self, repo_uuid: str) -> int:
-        return sum(
-            size
-            for (candidate_uuid, _generation_id), size in self.bytes_by_generation.items()
-            if candidate_uuid == repo_uuid
+        return _bounded_capacity_sum(
+            tuple(
+                size
+                for (candidate_uuid, _generation_id), size in self.bytes_by_generation.items()
+                if candidate_uuid == repo_uuid
+            )
         )
 
     def workspace_generations(self, repo_uuid: str) -> int:
@@ -1525,8 +1562,79 @@ class GenerationStore:
             decoder=CapacityReservationState.from_json,
         )
 
-    def _scan_usage_once(self) -> dict[tuple[str, str], int]:
-        usage: dict[tuple[str, str], int] = {}
+    def _handoff_directory_bytes(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+    ) -> int:
+        relative = (
+            self._workspace(repo_uuid)
+            / "semantic-staging"
+            / "handoffs"
+            / generation_id
+        )
+        path = self.state.path(relative)
+        with self.state.existing_private_directory(relative) as descriptor:
+            before = os.fstat(descriptor)
+            names = self.state._tree_entry_names_descriptor(descriptor, path)
+            total = 0
+            for name in names:
+                if _HANDOFF_NAME_RE.fullmatch(name) is None:
+                    raise StatePathError("retained semantic handoff name is noncanonical")
+                candidate = path / name
+                details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                self.state._require_regular_details(
+                    details,
+                    candidate,
+                    allowed_modes=frozenset({0o600}),
+                )
+                try:
+                    file_descriptor = os.open(
+                        name,
+                        self.state._regular_open_flags(),
+                        dir_fd=descriptor,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        "retained semantic handoff cannot be opened safely"
+                    ) from exc
+                try:
+                    opened = self.state._require_regular_descriptor(
+                        file_descriptor,
+                        candidate,
+                        allowed_modes=frozenset({0o600}),
+                    )
+                    current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    identity = self.state._stat_identity(details)
+                    if (
+                        self.state._stat_identity(opened) != identity
+                        or self.state._stat_identity(current) != identity
+                    ):
+                        raise StatePathError(
+                            "retained semantic handoff changed while scanning"
+                        )
+                    total += opened.st_size
+                    if total > _MAX_CAPACITY_BYTES:
+                        raise StatePathError("retained semantic handoff usage overflows")
+                finally:
+                    os.close(file_descriptor)
+            after_names = self.state._tree_entry_names_descriptor(descriptor, path)
+            after = os.fstat(descriptor)
+            if (
+                names != after_names
+                or self.state._stat_identity(before) != self.state._stat_identity(after)
+            ):
+                raise StatePathError("retained semantic handoff usage changed while scanning")
+        return total
+
+    def _scan_usage_once(
+        self,
+    ) -> tuple[
+        dict[tuple[str, str], int],
+        dict[tuple[str, str], int],
+    ]:
+        primary_usage: dict[tuple[str, str], int] = {}
+        handoff_usage: dict[tuple[str, str], int] = {}
         try:
             workspaces = Path("workspaces")
             for repo_uuid in self.state.list_existing_private_directories(
@@ -1555,24 +1663,42 @@ class GenerationStore:
                     ):
                         generation_id = name.rsplit(".", 1)[0] if strips_epoch else name
                         key = (repo_uuid, generation_id)
-                        if key in usage:
+                        if key in primary_usage:
                             raise _CapacityScanChanged(
                                 "generation occupies multiple active/staging/quarantine locations: "
                                 f"{repo_uuid}/{generation_id}"
                             )
-                        usage[key] = self.state.tree_bytes(
+                        primary_usage[key] = self.state.tree_bytes(
                             container / name,
                             allowed_directory_modes=_ALLOWED_DIRECTORY_MODES,
                             allowed_file_modes=_ALLOWED_FILE_MODES,
                         )
+                handoff_root = workspace / "semantic-staging" / "handoffs"
+                for generation_id in self.state.list_existing_private_directories(
+                    handoff_root,
+                    allow_missing=True,
+                ):
+                    if _GENERATION_ID_RE.fullmatch(generation_id) is None:
+                        raise StatePathError(
+                            "retained semantic handoff target is noncanonical"
+                        )
+                    size = self._handoff_directory_bytes(repo_uuid, generation_id)
+                    if size:
+                        handoff_usage[(repo_uuid, generation_id)] = size
         except StatePathError as exc:
             raise CapacityExceeded(f"unsafe state path in capacity scan: {exc}") from exc
-        return usage
+        return primary_usage, handoff_usage
 
     def _usage(self, reservations: Sequence[CapacityReservation]) -> _Usage:
-        previous: dict[tuple[str, str], int] | None = None
+        previous: tuple[
+            dict[tuple[str, str], int],
+            dict[tuple[str, str], int],
+        ] | None = None
         repeated_change: str | None = None
-        usage: dict[tuple[str, str], int] | None = None
+        observed_usage: tuple[
+            dict[tuple[str, str], int],
+            dict[tuple[str, str], int],
+        ] | None = None
         for _attempt in range(5):
             try:
                 observed = self._scan_usage_once()
@@ -1589,24 +1715,32 @@ class GenerationStore:
                 continue
             repeated_change = None
             if previous is not None and observed == previous:
-                usage = observed
+                observed_usage = observed
                 break
             previous = observed
-        if usage is None:
+        if observed_usage is None:
             raise CapacityExceeded("capacity filesystem snapshot did not stabilize")
-        physical_usage = dict(usage)
-        unconsumed_reserved_bytes = sum(
-            max(
-                reservation.reserved_bytes
-                - physical_usage.get((reservation.repo_uuid, reservation.generation_id), 0),
-                0,
-            )
+        primary_usage, handoff_usage = observed_usage
+        reserved_usage = {
+            (reservation.repo_uuid, reservation.generation_id): reservation.reserved_bytes
             for reservation in reservations
+        }
+        unconsumed_reserved_bytes = _bounded_capacity_sum(
+            tuple(
+                max(
+                    reservation.reserved_bytes
+                    - primary_usage.get((reservation.repo_uuid, reservation.generation_id), 0),
+                    0,
+                )
+                for reservation in reservations
+            )
         )
-        for reservation in reservations:
-            key = (reservation.repo_uuid, reservation.generation_id)
-            usage[key] = max(usage.get(key, 0), reservation.reserved_bytes)
-        return _Usage(usage, unconsumed_reserved_bytes)
+        return _Usage(
+            primary_bytes_by_generation=primary_usage,
+            handoff_bytes_by_generation=handoff_usage,
+            reserved_bytes_by_generation=reserved_usage,
+            unconsumed_reserved_bytes=unconsumed_reserved_bytes,
+        )
 
     def _preflight(
         self,
@@ -1630,9 +1764,21 @@ class GenerationStore:
         usage = self._usage(reservations)
         key = (repo_uuid, generation_id)
         prior = usage.bytes_by_generation.get(key, 0)
-        projected_size = max(prior, expected_payload_bytes)
-        projected_global_bytes = usage.global_bytes - prior + projected_size
-        projected_workspace_bytes = usage.workspace_bytes(repo_uuid) - prior + projected_size
+        projected_size = _bounded_capacity_sum(
+            (
+                usage.handoff_bytes_by_generation.get(key, 0),
+                max(
+                    usage.primary_bytes_by_generation.get(key, 0),
+                    expected_payload_bytes,
+                ),
+            )
+        )
+        projected_global_bytes = _bounded_capacity_sum(
+            (usage.global_bytes - prior, projected_size)
+        )
+        projected_workspace_bytes = _bounded_capacity_sum(
+            (usage.workspace_bytes(repo_uuid) - prior, projected_size)
+        )
         additional_generation = 0 if key in usage.bytes_by_generation else 1
         if projected_workspace_bytes > policy.workspace_max_bytes:
             raise CapacityExceeded("workspace byte limit would be exceeded")
@@ -1646,6 +1792,93 @@ class GenerationStore:
         additional_bytes = 0 if existing is not None else expected_payload_bytes
         if (
             available - usage.unconsumed_reserved_bytes - additional_bytes
+            < policy.reserve_bytes
+        ):
+            raise CapacityExceeded("filesystem reserve threshold would be violated")
+
+    def preflight_retained_handoff_locked(
+        self,
+        *,
+        repo_uuid: str,
+        generation_id: str,
+        expected_payload_bytes: int,
+        handoff_bytes: int,
+        existing_handoff_bytes: int,
+        policy: CapacityPolicy,
+    ) -> None:
+        """Charge immutable handoff bytes plus one full target reservation.
+
+        The caller owns the canonical registry-before-workspace lock pair. This
+        method performs no durable mutation; it supplies the shared-capacity
+        precondition for the install that immediately follows under those locks.
+        """
+
+        policy = self._validated_capacity_policy(policy)
+        if _GENERATION_ID_RE.fullmatch(generation_id) is None:
+            raise CapacityExceeded("handoff target generation is invalid")
+        if expected_payload_bytes < 1 or handoff_bytes < 1:
+            raise CapacityExceeded("handoff capacity inputs must be positive")
+        if existing_handoff_bytes not in {0, handoff_bytes}:
+            raise CapacityExceeded("existing handoff bytes differ from exact replay")
+        capacity = self._load_capacity_locked()
+        reservations = () if capacity is None else capacity.reservations
+        existing_reservation = next(
+            (
+                item
+                for item in reservations
+                if (item.repo_uuid, item.generation_id) == (repo_uuid, generation_id)
+            ),
+            None,
+        )
+        if existing_reservation is not None and (
+            existing_reservation.reserved_bytes != expected_payload_bytes
+            or existing_reservation.policy_sha256 != policy.sha256
+            or existing_reservation.compatibility_sha256 != self.compatibility_sha256
+        ):
+            raise CapacityExceeded("target reservation differs from handoff authority")
+        usage = self._usage(reservations)
+        key = (repo_uuid, generation_id)
+        current_total = usage.bytes_by_generation.get(key, 0)
+        retained = usage.handoff_bytes_by_generation.get(key, 0)
+        additional_handoff = 0 if existing_handoff_bytes else handoff_bytes
+        projected_retained = _bounded_capacity_sum((retained, additional_handoff))
+        projected_total = _bounded_capacity_sum(
+            (
+                projected_retained,
+                max(
+                    usage.primary_bytes_by_generation.get(key, 0),
+                    usage.reserved_bytes_by_generation.get(key, 0),
+                    expected_payload_bytes,
+                ),
+            )
+        )
+        projected_global = _bounded_capacity_sum(
+            (usage.global_bytes - current_total, projected_total)
+        )
+        projected_workspace = _bounded_capacity_sum(
+            (usage.workspace_bytes(repo_uuid) - current_total, projected_total)
+        )
+        additional_generation = 0 if key in usage.bytes_by_generation else 1
+        if projected_workspace > policy.workspace_max_bytes:
+            raise CapacityExceeded("workspace byte limit would be exceeded")
+        if projected_global > policy.global_max_bytes:
+            raise CapacityExceeded("global byte limit would be exceeded")
+        if (
+            usage.workspace_generations(repo_uuid) + additional_generation
+            > policy.workspace_max_generations
+        ):
+            raise CapacityExceeded("workspace generation limit would be exceeded")
+        if usage.global_generations + additional_generation > policy.global_max_generations:
+            raise CapacityExceeded("global generation limit would be exceeded")
+        available = shutil.disk_usage(self.state.root.parent).free
+        additional_reservation = (
+            0 if existing_reservation is not None else expected_payload_bytes
+        )
+        if (
+            available
+            - usage.unconsumed_reserved_bytes
+            - additional_reservation
+            - additional_handoff
             < policy.reserve_bytes
         ):
             raise CapacityExceeded("filesystem reserve threshold would be violated")
