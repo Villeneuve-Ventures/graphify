@@ -79,12 +79,17 @@ def trust_source_observations(
     return adapter
 
 
-def git_output(repo: Path, *arguments: str) -> str:
+def git_output(
+    repo: Path,
+    *arguments: str,
+    env: dict[str, str] | None = None,
+) -> str:
     result = subprocess.run(
         ["git", *arguments],
         cwd=repo,
         check=True,
         capture_output=True,
+        env=env,
         text=True,
     )
     return result.stdout.strip()
@@ -123,7 +128,30 @@ def create_repo(root: Path, repo_uuid: str = REPO_UUID) -> Path:
     config.write_text(_workspace_toml(repo_uuid), encoding="utf-8")
     (root / "README.md").write_text("p3 fixture\n", encoding="utf-8")
     git_output(root, "add", ".")
-    git_output(root, "commit", "--quiet", "-m", "p3 fixture")
+    seed_commit_env = os.environ.copy()
+    seed_commit_env.update(
+        {
+            "GIT_AUTHOR_DATE": START.isoformat(),
+            "GIT_AUTHOR_EMAIL": "workspace-p3@example.com",
+            "GIT_AUTHOR_NAME": "Workspace P3",
+            "GIT_COMMITTER_DATE": START.isoformat(),
+            "GIT_COMMITTER_EMAIL": "workspace-p3@example.com",
+            "GIT_COMMITTER_NAME": "Workspace P3",
+        }
+    )
+    disabled_hooks = root / ".git" / "disabled-hooks"
+    disabled_hooks.mkdir()
+    git_output(
+        root,
+        "-c",
+        f"core.hooksPath={disabled_hooks}",
+        "commit",
+        "--quiet",
+        "--no-gpg-sign",
+        "-m",
+        "p3 fixture",
+        env=seed_commit_env,
+    )
     git_output(root, "remote", "add", "origin", REMOTE)
     return root
 
