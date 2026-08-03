@@ -106,6 +106,22 @@ boundary bound by the
 [P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md); full semantic
 sync and every successor remain outside it.
 
+The separately staged unnumbered P5B2 semantic-result handoff and sealed-input
+finalization child composes only existing internal authorities. It has no public
+command or schema. The trusted lifecycle composition admits a result only from
+one exact exit-0 worker session ending in one schema-valid `completed` terminal,
+or from identical format-version-1 evidence in the verified current source
+generation for the same carried desired work. It snapshots the complete
+semantic-required reconciliation, records the carried source separately from
+the new target generation, installs one immutable
+target-generation/request-bound handoff, and materializes that record's exact
+bytes as target-generation-owned
+`graphify-out/semantic-inputs.json` beside the
+unchanged structural output. `GenerationStore` completes the staged payload
+manifest and `SemanticQueueStore.bind_sealed_inputs()` binds that digest. The
+child stops there; content release, graph projection, certification, promotion,
+and pointer mutation remain separate.
+
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
 authority before consuming one bounded canonical request, requires its target
@@ -266,9 +282,48 @@ the existing no-follow durable-state primitives. It binds one begin request,
 one exact semantic claim and desired work item, the accepted source and epoch
 authority, and the sanitized fragment or delete-tombstone bytes and digest. It
 is not a queue record, generation payload, certification binding, or public
-receipt. A later
-full semantic-sync contract must own consumption and cleanup; this first child
-does neither.
+receipt. The accepted worker does not consume or clean it. The separately staged
+[handoff contract](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization)
+owns only the bounded successor behavior below.
+
+The proposed successor adds this private layout under the same external root:
+
+```text
+<external_state_root>/workspaces/<repo_uuid>/semantic-staging/
+  handoffs/<target_generation_id>/<structural_request_sha256>.json
+<external_state_root>/workspaces/<repo_uuid>/staging/<target_generation_id>/
+  graphify-out/semantic-inputs.json
+```
+
+The handoff is one install-once, canonical
+`graphify.workspace.semantic_result_handoff.internal` format-version-1 record.
+It embeds the exact accepted begin request, complete canonical worker transcript,
+observed process exit, reopened result-binding envelope, structural request,
+the new target generation, the distinct current certified source generation
+when any completion is carried, queue/reconciliation snapshot, and deterministic
+path-keyed materialization for every desired work item. Each result records
+whether it is fresh or carried as hop-local wrapper provenance; carried begin,
+session, and result-binding evidence remains byte-identical. The
+target-generation-owned file is an exact byte-for-byte copy. Both are private
+`0600` regular files reached through
+no-follow contained `0700` directories. The handoff remains recovery evidence
+outside generation staging so a successor fence may safely reset an interrupted
+staging tree.
+
+`GenerationStore` remains the shared-capacity owner. Its trusted usage scan must
+include every retained handoff for this preflight and all later allocations,
+coalescing handoff bytes with generation, staging, or quarantine bytes under the
+same repository/target-generation key and counting that target once. A
+handoff-only target consumes one generation slot. Unsafe or unstable handoff
+usage fails closed, and the bytes remain counted until separately authorized
+cleanup or GC removes them.
+
+`UPSERT` and `DELETE` apply from an empty path map in normalized-path byte order
+and ascending desired revision. `UPSERT` replaces the exact path slot with its
+validated payload; `DELETE` removes the slot but remains in the result evidence.
+The record rejects missing, duplicate, stale, foreign, conflicting, or extra
+results and recomputes the final materialized array. It does not merge entities,
+deduplicate IDs, invoke the graph engine, or make the content query-visible.
 
 ## Ordering
 
@@ -334,6 +389,49 @@ each have a frozen fail-closed route; only a completed source observation proves
 content drift. An unobserved completion or failure return is commit-unknown. So
 is a lost `completed` terminal, because completion clears the result association.
 Neither permits inferred success.
+
+The handoff successor first validates every worker session and result envelope,
+then takes registry before workspace lock and captures one exact current
+structural request, the existing sync request's new target generation, the
+distinct current certified source generation when carried evidence is used, and
+the completed semantic-required reconciliation. It installs and reopens the
+immutable target-generation-bound handoff before `request_staged_build()`. A
+fault before that install leaves no consumption authority; a lost terminal
+remains unconsumable under the accepted worker contract. Exact same-byte replay
+with the same source/target identities is idempotent. A different target,
+source/target swap, different carried source, or different, unreadable, unsafe,
+or ambiguous bytes are a conflict or commit-unknown and block staged request
+creation. Target nonexistence is required only for first handoff installation;
+after exact installation, an existing target is admissible only through the
+same request-bound `REQUESTED`, `PUBLISHING`, or `COMPLETE` staged state. A
+certified target or any unbound or mismatched target remains a conflict.
+
+After the request is durable, the ordinary request-bound `BUILD` acquisition,
+allocation, and staging preparation receive the same target generation
+unchanged. The structural adapter writes its output, the exact handoff bytes are
+installed and reopened as
+`graphify-out/semantic-inputs.json`, and two fresh equal source observations
+precede `complete_staged_build()`. Under the same current grant, the composition
+recomputes the returned sorted payload manifest, revalidates the exact handoff,
+queue, generation, request, source, and epochs, and calls
+`bind_sealed_inputs()` once. Exact same-digest replay is idempotent; a different
+existing digest fails closed. The reopened queue binding is the terminal boundary
+for this child.
+
+`REQUESTED` and `PUBLISHING` recovery reuse the existing staged barrier for the
+same repository, target, and structural request and may reset only unsealed
+target-generation staging under a successor fence; the external handoff survives
+and is deterministically recopied. `COMPLETE` recovery adopts only that exact
+durable inventory manifest. Bind uncertainty adopts only a
+locked reread proving the deterministic post-bind queue state, or retries from
+the entire exact unchanged pre-bind queue snapshot under the same live grant.
+The lifecycle composition owns only best-effort deletion of an original
+consumed worker envelope after that reopened binding. The worker, queue, and
+generation store do not clean other semantic staging; stale, conflicting,
+orphaned, legacy, or commit-unknown evidence remains retained for a separately
+authorized semantic-staging repair or GC lifecycle. No cleanup can delete the
+last transcript, envelope, handoff, generation copy, manifest, or queue-binding
+evidence.
 
 P5B2b reuses the P5B2b0 registry-before-workspace order and installs the exact
 `REQUESTED` record before acquiring its request-bound `BUILD` lease. A
