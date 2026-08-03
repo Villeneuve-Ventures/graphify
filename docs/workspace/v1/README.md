@@ -5,7 +5,7 @@ CLI, the unnumbered P5B2 active-source activation CLI, the unnumbered P5B2
 identity-maintenance CLI, P5B2c one-shot certified workspace query, the
 bounded P5B2 GC preview CLI, the public fenced offline-GC lifecycle, and the
 accepted bounded public fenced pointer-repair lifecycle, the accepted P5B2
-host-agent semantic-worker transport, and the separately frozen unnumbered P5B2
+host-agent semantic-worker transport, and the separately staged unnumbered P5B2
 semantic-result handoff and sealed-input finalization contract,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
