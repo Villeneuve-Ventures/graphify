@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-08-02T04:55:01Z`
+Ledger refresh: `2026-08-03T02:37:33Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -51,12 +51,13 @@ fresh governance-only reconciliation from the canonical branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical base | The pre-edit checkout and live `origin/workspace/v1` both resolved to `36b2e3426ebe3095a0b81c36656789b6790f103f`, tree `06d20480337bc94edba4de37c06d2dbf1ab595f2`, with divergence `0/0` and a clean working tree. |
-| Worktrees | Two worktrees existed at preflight. This checkout is now on `codex/p5b2-semantic-worker-governance`, created directly from the canonical base above. The separate detached Codex worktree was clean at the same commit; no competing delivery or governance branch was active there. |
-| GitHub | PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45) is merged at the canonical base above; the fork repository had no open pull requests before this branch was created. |
+| Canonical base | The pre-edit checkout and live `origin/workspace/v1` both resolved to `d19ff5467a48778b14a4cdb62eada4ba3fa48293`, tree `8b2fc5a29c06eb7df2a41cd79c896e052636a19e`, with divergence `0/0` and a clean working tree. |
+| Worktrees | One worktree existed at preflight, clean on `workspace/v1` at the canonical base above. No delivery worktree, competing governance worktree, or other closeout owner was present. |
+| GitHub | PR [#47](https://github.com/Villeneuve-Ventures/graphify/pull/47) is merged at the canonical base above. The fork repository had no open pull requests; its issue tracker is disabled. |
 | P5B2 host-agent semantic-worker contract provenance | PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) exact head `1f202c9134ee0993e4bba40482fa8113f598920a`; merge `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`; tree `27f7259fc3d716a78a3b28417204b1968c05d421`. Exact-head CI [30681324681](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30681324681) passed `skillgen-check`, `test (3.14)`, and `security-scan`. |
 | P5B2 host-agent semantic-worker implementation delivery | PR #45 exact base `99af03803a44d575123a18f1c0eafa48149df492`; head `5f57e565bd188789c984bc1370943caa758148c3`; merge/current commit `36b2e3426ebe3095a0b81c36656789b6790f103f`; delivery/merge/current tree `06d20480337bc94edba4de37c06d2dbf1ab595f2`. Exact-head CI [30730561721](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30730561721) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. |
-| Semantic-worker-governance preflight | The canonical repository, branch, HEAD, tree, cleanliness, divergence, worktree inventory, merged PR #45, exact delivery manifest, review/thread disposition, and empty open-PR inventory were revalidated with GitHub calls pinned to `Villeneuve-Ventures/graphify`. No GitHub review thread was replied to, resolved, or otherwise mutated. |
+| JOS test-harness determinism delivery | PR #47 exact base `c2bb53d733d43784b76ab3cf559c48c16688f298`; head `e17482c61a5cfad2d227a4b0d8d27c2bcd723c32`; merge/current commit `d19ff5467a48778b14a4cdb62eada4ba3fa48293`; delivery/merge/current tree `8b2fc5a29c06eb7df2a41cd79c896e052636a19e`. Exact-head CI [30771565129](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30771565129) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. |
+| Test-harness-governance preflight | The canonical repository, branch, HEAD, tree, cleanliness, divergence, worktree inventory, PR #45 source provenance, merged PR #47, exact three-file delivery manifest, review/thread disposition, and empty open-PR inventory were revalidated with GitHub calls pinned to `Villeneuve-Ventures/graphify`. No GitHub comment, review, or review thread was replied to, resolved, or otherwise mutated. |
 | Support baseline | Observed host CPython `3.14.6`; project CPython `3.14.3`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
@@ -133,16 +134,18 @@ statuses. `JOS` means `justified out-of-scope`:
 | `JOS-BOUNDED-INPUT-READERS` | PR [#39](https://github.com/Villeneuve-Ventures/graphify/pull/39); [exact-head evidence](#jos-bounded-input-readers-evidence) | `OPPORTUNISTIC` | Repeated bounded-input readers across established commands are justified maintainability debt, but consolidating them was a cross-command refactor outside the pointer-repair PR's surgical behavior fixes. | Activate only when an authorized batch adds another `--request-stdin` command or changes more than one established reader. Closure requires regression-locked parser behavior and must preserve each command's bounds, canonicality, error mapping, authority-loading order, and deadline semantics. |
 | `JOS-PR-AGENT-DRAIN` | PR [#40](https://github.com/Villeneuve-Ventures/graphify/pull/40); [exact-head evidence](#jos-pr-agent-drain-evidence) | `GUARDED` | The pinned PR-Agent revision relies on a private drain-aware runner, which creates a real pin-upgrade compatibility risk. The current exact pin imports and executes it successfully, so this is not a defect in the delivered workflow. | The [policy regression](../../../tests/test_pr_agent_policy.py) requires the exact import and call. Reactivate on any PR-Agent pin or runner-import change. Closure requires an exact-import smoke test and proof that review/description completion remains drain-aware with no silent legacy fallback. |
 | `JOS-SEMANTIC-WORKER-CONFORMANCE` | Contract PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43), delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45), and [`P5B2 semantic-worker receipt`](receipts/p5b2-semantic-worker.md); [exact-head evidence](#jos-semantic-worker-conformance-evidence) | `CLOSED` | PR #43 froze the prose contract and explicitly deferred machine-readable schemas, closed runtime validation, conformance tests, and implementation. PR #45 delivered those exact conformance surfaces, and the separate receipt independently accepts only the frozen transport. | Historical closure only: PR #45 plus the accepted receipt satisfy the stated schema/validator, conformance-suite, exact-decimal, checkpoint-capacity, uncertainty-recovery, and deadline-aware delivery evidence. Full semantic sync and every explicit backend remain excluded. `CLOSED` grants no broader phase, implementation, execution, or successor authority. |
-| `JOS-BACKEND-DETECTION-TEST-ISOLATION` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-backend-detection-test-isolation-evidence) | `SEPARATE_AUTHORIZATION_REQUIRED` | Three backend-detection tests clear only part of the provider-selector priority set, so an ambient higher-priority selector can change their expected result. This is test-fixture isolation debt, not a semantic-worker transport defect. | Owner: separately authorized repository test-harness maintenance. No code or test fix is authorized here. Closure requires provider-neutral fixtures that clear the full selector set and a focused regression proving the tests are independent of ambient provider credentials. |
-| `JOS-GIT-SEED-HISTORY-STABILITY` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-git-seed-history-stability-evidence) | `SEPARATE_AUTHORIZATION_REQUIRED` | The persistent-source-replacement test derives shared seed history from helper commits whose identity can diverge across a one-second timestamp boundary. The delivery stabilized its synthetic timestamps only for the final run; changing the shared helper was unrelated to P5B2. | Owner: separately authorized repository test-fixture maintenance. No helper or test fix is authorized here. Closure requires deterministic seed commit identity across wall-clock boundaries plus the exact persistent-source-replacement regression. |
+| `JOS-BACKEND-DETECTION-TEST-ISOLATION` | Original source PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45), closure delivery PR [#47](https://github.com/Villeneuve-Ventures/graphify/pull/47), and [`JOS test-harness determinism receipt`](receipts/jos-test-harness-determinism.md); [exact-head evidence](#jos-backend-detection-test-isolation-evidence) | `CLOSED` | PR #45 preserved the reproduced ambient-provider defect as separately authorized test-fixture isolation debt. PR #47 delivered provider-neutral fixtures that clear the complete dynamic API-key selector set plus the direct Azure, Bedrock/AWS, and Ollama selectors without changing production backend behavior. | Historical closure only: PR #47 plus the accepted receipt bind the hostile ambient-selector regression, full affected backend file, exact delivery evidence, hosted checks, and review disposition. `CLOSED` grants no product, provider, semantic-sync, phase, execution, or successor authority. |
+| `JOS-GIT-SEED-HISTORY-STABILITY` | Original source PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45), closure delivery PR [#47](https://github.com/Villeneuve-Ventures/graphify/pull/47), and [`JOS test-harness determinism receipt`](receipts/jos-test-harness-determinism.md); [exact-head evidence](#jos-git-seed-history-stability-evidence) | `CLOSED` | PR #45 preserved the reproduced one-second seed-commit identity drift as separately authorized test-fixture maintenance. PR #47 fixed only the synthetic seed commit's author, committer, timestamps, signing, and hook inputs, then proved stable commit identity across hostile inherited Git environments. | Historical closure only: PR #47 plus the accepted receipt bind deterministic seed identity and the exact persistent-source-replacement security-meaning regression. `CLOSED` grants no product, source-identity-policy, phase, execution, or successor authority. |
 | `JOS-SEMANTIC-RATIONALE-PROJECTION` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-semantic-rationale-projection-evidence) | `OPPORTUNISTIC` | Bounded rationale projection/classification is duplicated across semantic cleanup and worker validation. Consolidation is maintainability work, not a current conformance mismatch, and would broaden this acceptance. | Owner: semantic sanitizer/projection maintenance. The entry remains inactive until a separately authorized sanitizer, projection, or full semantic-sync batch already touches that behavior. Closure requires behavior-locked projection bounds, classification, and sanitizer output parity. This row grants no standalone implementation authority. |
 | `JOS-TOP-LEVEL-COMMAND-INVENTORY` | Delivery PR [#45](https://github.com/Villeneuve-Ventures/graphify/pull/45); [exact-head evidence](#jos-top-level-command-inventory-evidence) | `TRIGGER_GATED` | A derived consistency harness for the repository-wide top-level command inventory is justified maintainability work, but it spans unrelated commands and no current classifier mismatch was reproduced. | Owner: top-level CLI dispatcher/classifier maintenance. Activate only when the top-level dispatcher or semantic-worker classifier changes; adding or changing a nested workspace subcommand alone is not a trigger. Closure requires a derived canonical inventory plus targeted parity coverage for top-level dispatch and semantic-worker classification. |
 
 ### Exact-head source evidence
 
-These records were refreshed at `2026-08-02T04:55:01Z` for canonical repository
-`Villeneuve-Ventures/graphify`. Each exact-SHA compare link is the changed-file
-manifest for its recorded base and head.
+These original source records were refreshed at `2026-08-02T04:55:01Z` for
+canonical repository `Villeneuve-Ventures/graphify`. The two test-harness
+closure additions were independently refreshed at `2026-08-03T02:37:33Z`;
+unrelated source records retain their prior refresh. Each exact-SHA compare
+link is the changed-file manifest for its recorded base and head.
 `not-applicable` is explicit when a finding came from a PR description or a
 top-level comment instead of a review thread; thread identity, location, or
 workflow state is never inferred.
@@ -241,6 +244,19 @@ workflow state is never inferred.
   `gemini` from the ambient selector.
 - Thread identity, path/line, `isResolved`, and `isOutdated`:
   `not-applicable`.
+- Closure delivery: PR [#47](https://github.com/Villeneuve-Ventures/graphify/pull/47),
+  immutable node `PR_kwDOTZvP8s75vPSD`; base
+  `c2bb53d733d43784b76ab3cf559c48c16688f298`, head
+  `e17482c61a5cfad2d227a4b0d8d27c2bcd723c32`, merge
+  `d19ff5467a48778b14a4cdb62eada4ba3fa48293`, and delivery/merge tree
+  `8b2fc5a29c06eb7df2a41cd79c896e052636a19e`, with the exact
+  [three-file manifest](https://github.com/Villeneuve-Ventures/graphify/compare/c2bb53d733d43784b76ab3cf559c48c16688f298...e17482c61a5cfad2d227a4b0d8d27c2bcd723c32).
+- Closure acceptance: the
+  [`JOS test-harness determinism receipt`](receipts/jos-test-harness-determinism.md)
+  binds the complete selector-clearing fixture, hostile ambient-provider
+  regression, full affected backend file, exact-head hosted validation, and
+  review/thread disposition. Together with PR #47, it satisfies the original
+  closure contract and changes this row to `CLOSED` without broader authority.
 
 #### JOS-GIT-SEED-HISTORY-STABILITY evidence
 
@@ -256,6 +272,16 @@ workflow state is never inferred.
   `9730502641837cb4f8ac399b4d772156dc4b61d2`.
 - Thread identity, path/line, `isResolved`, and `isOutdated`:
   `not-applicable`.
+- Closure delivery: PR [#47](https://github.com/Villeneuve-Ventures/graphify/pull/47),
+  immutable node `PR_kwDOTZvP8s75vPSD`, at the same exact base, head, merge,
+  tree, and three-file manifest recorded immediately above.
+- Closure acceptance: the
+  [`JOS test-harness determinism receipt`](receipts/jos-test-harness-determinism.md)
+  binds the seed-only fixed identity/timestamp/signing/hook inputs, deterministic
+  commit-identity regression across hostile inherited Git environments, exact
+  persistent-source-replacement regression, exact-head hosted validation, and
+  review/thread disposition. Together with PR #47, it satisfies the original
+  closure contract and changes this row to `CLOSED` without broader authority.
 
 #### JOS-SEMANTIC-RATIONALE-PROJECTION evidence
 
