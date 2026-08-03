@@ -715,6 +715,173 @@ not authorize full semantic sync or any successor:
   retains a service/watch loop, consumes or cleans staged semantic output, or
   claims full semantic sync or governance acceptance.
 
+## P5B2 semantic-result handoff and sealed-input finalization contract gates
+
+These are implementation gates for the separately staged unnumbered successor,
+not evidence that it is implemented or accepted. They leave every accepted
+semantic-worker gate and receipt unchanged:
+
+- no public argv, CLI schema, status field/version, receipt, provider/backend
+  selector, or fallback is added. The only new contract is the internal
+  `graphify.workspace.semantic_result_handoff.internal` format version 1, and
+  its implementation remains separately authorized;
+- entry vectors accept a result only when one canonical begin request, complete
+  canonical worker-result transcript, observed process exit 0, final and only
+  schema-valid `completed` terminal, and reopened immutable result-binding
+  envelope agree on every overlapping begin, repository, claim, attempt, work,
+  payload, and result binding. Every entry matches the outer repository, current
+  active-source revision and migration epoch, and current desired source/policy
+  identity. Fresh begin active-source, migration, and desired-watermark
+  expectations match the captured snapshot; its original global registry
+  coordinate is retained while the same repository entry is revalidated at the
+  current revision. Carried evidence may retain older registry,
+  worker-operation, queue, and watermark coordinates but never rewrites them.
+  Original terminal queue revisions/watermarks are retained, bounded by the later
+  captured queue snapshot, and the exact current reconciliation independently
+  proves completion.
+  `idle`, `work`, `checkpointed`, partial output, nonzero exit,
+  `commit_unknown`, a cleared result checkpoint, orphan staging, manual
+  inspection, or a synthesized terminal is rejected;
+- carried-completion vectors accept only the byte-identical format-version-1
+  worker evidence for the same `SemanticDesiredWork` identity from the verified
+  semantic-input file in the exact current certified source generation selected
+  by the structural request's pointer/receipt CAS. Its generation ID, receipt
+  digest, semantic-input inventory entry and bytes, and payload manifest must
+  agree. Arbitrary historical generations and orphan handoff scans are
+  forbidden. Legacy completed queue items, prior receipts/manifests alone, or
+  raw result envelopes without that record remain readable but unconsumable and
+  are not silently migrated. The new result wrapper changes only hop-local
+  `origin` to `carried_current_generation`; the complete begin request, session,
+  result-binding envelope, byte counts, and digests remain byte-identical;
+- under registry-before-workspace lock ordering, the candidate handoff binds the
+  complete `StructuralBuildRequest`, its exact existing `SyncRequest` digest,
+  repository, new target generation, and optional distinct carried-source
+  generation identities,
+  registry/active-source/operation/migration/pointer CAS, capacity and
+  compatibility hashes, source commit/epoch/policy and two-equal-observation
+  evidence, queue policy, revision and canonical-state hash, compaction epoch,
+  desired/completed watermarks, and complete semantic-required reconciliation
+  with a null sealed-input digest;
+- exact-set vectors require completed watermark equal to desired watermark,
+  every retained item completed, and a bijection between reconciliation desired
+  work and handoff result entries. Compacted exact reconciliation remains valid;
+  missing, duplicate, stale, foreign, conflicting, or extra results leave the
+  state tree unchanged before staged request creation;
+- canonical-record vectors require exact `target_generation_id` and nullable
+  `carried_source_generation_id` top-level fields; exact per-result `origin`
+  values of `fresh_worker_session` or `carried_current_generation`; the complete
+  closed top-level, queue, result, session, and materialized field sets; NFC,
+  sorted keys, compact separators, one final newline, retained exact unquoted
+  fixed-point decimals, recomputed byte counts and SHA-256 values, and no binary
+  float. The carried-source field is non-null exactly when at least one result
+  is carried, all carried results name that one verified source, and source and
+  target are distinct. `origin` is excluded from the immutable accepted worker
+  evidence and records only this handoff hop. Unknown contracts,
+  versions, fields, encoders, worker grammars, and compatibility digests fail
+  closed with no migration. Reads are bounded before parse by the exact positive
+  structural reservation. Capacity vectors require the shared trusted usage scan
+  used by this preflight and every later allocation to enumerate all retained
+  handoff files without following links. They add every exact file size to the
+  matching repository/target-generation usage key, sum it with staging,
+  generation, or quarantine bytes, count that target once, and count a
+  handoff-only target as one generation slot. They cover multiple retained
+  handoffs, exact replay without double counting, unsafe or unstable scans,
+  overflow, deletion only after authorized cleanup/GC, the full new target
+  reservation, both workspace/global byte and generation ceilings, and the
+  filesystem reserve. Preflight failure leaves no new handoff;
+- the derived handoff path is exactly
+  `workspaces/<repo_uuid>/semantic-staging/handoffs/<target_generation_id>/<structural_request_sha256>.json`.
+  Path tests reject caller aliases, absolute paths, escapes, symlinks, hardlinks,
+  special files, wrong owners/modes, extra entries, and noncanonical generation
+  or digest names. Parent directories are `0700`; the record is one regular
+  single-link `0600` file;
+- install-once fault schedules cover short writes, zero progress, `EINTR`,
+  `ENOSPC`, `EDQUOT`, `EIO`, failed file/directory sync, failed replace, process
+  death, and post-commit errors. Exact expected bytes/mode/size/digest on
+  no-follow reopen adopt; exact absence retries only from the retained unchanged
+  authority snapshot; different, unreadable, unsafe, or ambiguous state is
+  conflict or commit-unknown and no downstream state is written. First install
+  rejects any existing target staging or certified generation. After the exact
+  handoff exists, replay admits only a staged record binding the same repository,
+  target, and structural request in `REQUESTED`, `PUBLISHING`, or `COMPLETE`; a
+  certified target or any other target state conflicts;
+- deterministic materialization vectors sort by normalized path byte order,
+  then ascending desired revision, operation, content digest, and result digest.
+  Starting from an empty path map, exact `UPSERT` replaces a path slot and exact
+  `DELETE` removes it while retaining tombstone evidence. They cover repeated
+  same-path revisions, delete of an absent slot, interleaved paths, carried
+  completion, operation/payload mismatch, nonascending revisions, duplicate
+  work, and recomputation of the path-sorted final materialized set. No engine
+  merge, entity deduplication, ID remapping, provider, or best-effort omission
+  occurs;
+- after the exact request-bound `BUILD` acquisition and ordinary allocation,
+  every generation operation must receive the same target ID from the existing
+  `SyncRequest`, and `prepare_staged_build()` must own its empty staging root. The
+  structural adapter writes its existing output, and the sole semantic file is
+  the byte-identical no-follow `0600` copy at
+  `graphify-out/semantic-inputs.json`. Tests reject a missing, altered,
+  alternate, linked, extra, or sibling semantic payload and prove recursive
+  source, Git, real `HOME`, real `XDG_STATE_HOME`, and real `CODEX_HOME`
+  snapshots remain unchanged;
+- two fresh equal trusted observations matching both request and handoff precede
+  `complete_staged_build()`. The returned sorted inventory is recomputed through
+  `payload_manifest_sha256("graphify-out", entries)` and must equal the durable
+  staged `COMPLETE` manifest. Capacity, payload drift, source drift, and every
+  completion failpoint preserve the existing exact staged-recovery barrier;
+- immediately before `bind_sealed_inputs()`, the same current `BUILD` grant
+  revalidates repository, active source, operation/migration epochs, request,
+  observations, the entire captured pre-bind queue revision/hash/policy/
+  compaction/watermark/reconciliation snapshot, handoff, generation-owned copy,
+  and staged manifest. Null-to-exact-digest is the only forward bind. Replay may
+  adopt only the deterministic one-commit post-bind revision/hash containing the
+  same digest; a different digest or unrelated queue advance fails closed. The
+  queue is reopened and must contain that digest before grant release;
+- bind fault schedules cover every queue current/previous/pending durable-write
+  boundary. Exact expected post-bind reread adopts; exact unchanged pre-bind
+  state may retry only under the same live grant; changed reconciliation,
+  different digest, unreadable state, or ambiguity is commit-unknown. A
+  watermark, handoff, or staged `COMPLETE` record alone is never success or
+  replay authority;
+- recovery matrices cover crashes before/after handoff install, staged request,
+  allocation, `PUBLISHING`, semantic-input copy, staged `COMPLETE`, queue bind,
+  and lease release. They reject source/target equality or exchange, target-ID
+  mismatch at any later generation call, a different carried source, inconsistent
+  null/origin combinations, and exact-path replay with different identities,
+  including every handoff-install commit-unknown boundary. They distinguish the
+  required empty target at first install from exact same-request recovery of
+  `REQUESTED`, `PUBLISHING`, and `COMPLETE`, and reject unbound staging or a
+  certified target. A successor fence resets only unsealed target-generation
+  staging and recopies the retained handoff. `COMPLETE` adopts only the exact
+  inventory; no path certifies, promotes, journals certification, or mutates a
+  pointer;
+- cleanup vectors prove an original consumed worker envelope is eligible only
+  after the external handoff, generation copy, staged manifest, and queue binding
+  have all been reopened and agree. The lifecycle composition alone owns that
+  best-effort deletion outside the commit. The worker, queue, and generation
+  store do not clean other semantic staging. The handoff is retained;
+  conflicting, stale, foreign, extra, orphaned, legacy-unindexed, and
+  commit-unknown staging is neither adopted nor automatically deleted and
+  remains for a separately authorized semantic-staging repair or GC lifecycle.
+  No fault
+  removes the last recovery evidence;
+- content and redaction vectors treat labels and rationales as private untrusted
+  text. Public status, results, logs, and errors contain no semantic prose,
+  source bytes, complete session objects, private paths, credentials,
+  provider/model data, owner/fence values, environment values, or raw
+  exceptions. Audit evidence is limited to identities, digests, counts,
+  revisions, lifecycle boundary, and stable internal classification; and
+- the terminal proof is exactly staged `COMPLETE` plus a reopened equal queue
+  sealed-input digest. No gate performs content release, semantic query/graph
+  projection, certification, promotion, pointer mutation, migrate, repair, GC,
+  service/watch, publication, production/runtime installation authority,
+  performance qualification, receipt creation, governance acceptance, phase
+  completion, or successor promotion.
+
+Run the focused existing semantic-worker, semantic-queue, generation, sync, and
+sync-CLI regression suites before repository gates. A documentation-only
+contract freeze audits all relative links and anchors and does not refresh the
+generated Graphify graph.
+
 ## P5B2 public fenced pointer-repair CLI gates
 
 - the only accepted repair argv forms are `workspace repair --dry-run

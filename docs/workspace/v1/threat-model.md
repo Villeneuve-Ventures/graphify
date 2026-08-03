@@ -41,6 +41,13 @@ host-agent semantic worker. Full semantic sync, every unlisted public workspace
 command, service, installation, route, publication, and live-cutover transitions
 remain absent.
 
+The separately staged unnumbered P5B2 semantic-result handoff and sealed-input
+finalization contract adds no public command or release route. If merged, it is
+eligible only to preserve already accepted worker evidence in one private
+immutable handoff, copy those exact bytes into request-bound generation staging,
+complete the existing payload manifest, and bind that digest to the exact queue
+reconciliation. It stops before certification or any content release.
+
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
 counter. Lease ownership is bound to OS-owned boot and process-start identity;
@@ -184,6 +191,71 @@ newline-terminated delivery.
 A partial trailing record is not a frame, and a `completed` terminal requires
 exit 0 to become public authority.
 
+The semantic-result handoff treats the captured session, original worker
+staging, carried completion, queue, structural request, source evidence, and
+generation staging as mutually untrusted until all exact bindings are
+recomputed. It accepts one result per desired work only when the original
+canonical begin request, complete stdout transcript, observed process exit 0,
+one final completed terminal, and reopened result envelope agree. A carried
+completion must retain the same format-version-1 evidence in the verified
+current certified source generation selected by the structural request's
+pointer/receipt CAS. That source is recorded separately from the new target
+generation derived from the existing sync request. Source/target equality,
+exchange, or mismatch, arbitrary history, and orphan scans are forbidden.
+The new wrapper records carried provenance without changing the accepted begin,
+session, or result-binding evidence copied from the source generation.
+Missing, duplicate, stale, foreign, conflicting, extra, legacy-unindexed, or
+manually inferred results fail before staged request creation.
+
+The immutable handoff path is derived from the repository, target generation,
+and structural-request digest and uses contained descriptor-relative no-follow
+traversal, `0700` directories, and a single-link `0600` file. Its canonical
+bytes include every admitted result payload, each result's fresh-or-carried
+origin, and the optional carried-source generation, and are bounded by the
+explicit request reservation and capacity policy. Same bytes with the same
+source/target identities are idempotent; different, unreadable, unsafe, or
+ambiguous bytes fail closed. Because the handoff is installed before the
+staged-build request and remains outside target-generation staging, a successor
+`BUILD` fence can discard interrupted unsealed staging and reconstruct it
+without consuming an orphan result.
+
+Retained handoffs may not escape capacity accounting. The shared trusted usage
+scan counts every handoff byte under its repository/target-generation key for
+this preflight and every later allocation, combines it with any staging,
+generation, or quarantine bytes for that target, and counts the target once.
+Handoff-only targets consume a generation slot. Unsafe or unstable scans fail
+closed, and retention remains charged until authorized cleanup or GC.
+
+Generation materialization stores the exact handoff as private
+`graphify-out/semantic-inputs.json`. Deterministic per-path, ascending-revision
+`UPSERT` replacement and `DELETE` removal prevent path-order or last-writer
+ambiguity; operation/payload mismatch and any nonreproducible final set are
+conflicts. This stage does not invoke entity deduplication, graph merge, query,
+or a provider. Existing inventory rules reject links, special files, extra
+roots, and payload drift before staged completion. The queue digest is bound
+only after the completed manifest, handoff, generation copy, source authority,
+and exact reconciliation are revalidated under the current `BUILD` grant.
+
+Crash safety follows explicit durable boundaries. An uncertain handoff install,
+staged completion, or queue bind is adopted only by an exact no-follow or locked
+reread of the expected bytes/state. Proven unchanged pre-commit state may retry
+only while its authority remains current; every other outcome is commit-unknown.
+Target nonexistence is a first-install condition. Later target state is accepted
+only as the exact request-bound `REQUESTED`, `PUBLISHING`, or `COMPLETE` recovery
+for the same repository, target, and request; a certified or mismatched target
+is not replay authority.
+Cleanup occurs only after the handoff, generation copy, staged manifest, and
+queue digest agree and never removes the last recovery copy. Conflicting, stale,
+orphaned, legacy, or uncertain staging remains retained for separately
+authorized inspection, repair, or GC.
+
+The handoff and generation copy remain private and may contain bounded labels or
+rationales derived from source content. Worker sanitization, canonicalization,
+hashing, staged completion, and sealed-input binding do not prove that prose is
+secret-free, non-verbatim, publication-safe, or query-safe. This child therefore
+creates no content-release, certification, promotion, pointer, or public-output
+authority.
+
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted
 `SEMANTIC_CLAIM` lease and an explicit live capability decision. At the claim
@@ -250,6 +322,15 @@ access, API-key handling, provider fallback, durable post-completion receipt
 recovery, staging cleanup, sealed-input finalization, generation certification
 or promotion, pointer mutation, retained service/watch behavior, full semantic
 sync, or content-level DLP classification of admitted semantic prose.
+
+The separately staged handoff successor makes no claim of recovering a lost
+worker `completed` terminal, adopting legacy completion without a version-1
+handoff, automatically cleaning ambiguous staging, merging semantic entities
+into `graph.json`, releasing semantic prose, certifying or promoting a
+generation, moving a pointer, exposing a public full-semantic-sync command, or
+granting provider/backend, network, service/watch, repair, GC, migrate,
+publication, production/runtime installation authority, performance,
+governance-acceptance, or successor authority.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

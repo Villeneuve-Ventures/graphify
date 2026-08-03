@@ -5,7 +5,8 @@ CLI, the unnumbered P5B2 active-source activation CLI, the unnumbered P5B2
 identity-maintenance CLI, P5B2c one-shot certified workspace query, the
 bounded P5B2 GC preview CLI, the public fenced offline-GC lifecycle, and the
 accepted bounded public fenced pointer-repair lifecycle, the accepted P5B2
-host-agent semantic-worker transport,
+host-agent semantic-worker transport, and the separately staged unnumbered P5B2
+semantic-result handoff and sealed-input finalization contract,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -161,6 +162,58 @@ This is the complete accepted transport boundary recorded by the
 call `graphify.llm`, infer a provider from credentials or environment, invoke a
 network or named backend, finalize `bind_sealed_inputs()`, certify or promote a
 generation, move a pointer, retain a service, or implement full semantic sync.
+
+## Semantic-result handoff and sealed-input finalization
+
+The separately delimited unnumbered P5B2 successor is an internal-only
+contract. It adds no public argv, CLI request/result family, status field,
+schema file, or receipt. Repository authority remains `STAGED` through merge.
+The exact merge makes this child alone eligible for `READY`, but a separately
+authorized post-merge governance-only reconciliation from the canonical branch
+must refresh the live snapshot and record that transition before `READY` may be
+used to review a bounded implementation prompt. Neither this documentation nor
+that future refresh implements or accepts the child.
+
+The contract starts only with a complete one-to-one result set for the current
+semantic-required reconciliation. Each result must retain an exact accepted
+worker begin request, canonical stdout transcript ending in one `completed`
+terminal, observed process exit 0, and reopened immutable result-binding
+envelope. A carried completion is eligible only when those same bytes are
+retained in the verified format-version-1 semantic-input file of the exact
+current certified source generation selected by the structural request's
+pointer/receipt CAS, for the identical desired-work identity. That carried
+source is recorded separately from the new target generation. Queue completion,
+a watermark, an orphan result file, a cleared checkpoint, or manual inspection
+does not fill a missing association.
+
+The trusted workspace composition installs one immutable, canonical,
+target-generation/request-bound handoff below private external semantic staging.
+Its exact bytes bind the structural request, repository, distinct target and
+optional carried-source generation identities, registry, active-source,
+operation and migration authority, source/policy observations, queue revision
+and canonical-state hash, watermarks, desired set, every worker session, every
+result envelope, and the deterministic final path-keyed semantic set. `UPSERT`
+replaces one path slot in ascending desired-revision order;
+`DELETE` removes it while retaining its tombstone evidence. Missing, duplicate,
+stale, foreign, conflicting, or extra results fail closed.
+
+Under the exact request-bound `BUILD` operation, those canonical bytes become
+the target-generation-owned private file `graphify-out/semantic-inputs.json`
+beside the unchanged structural output. The existing generation inventory
+computes the final `graphify-out` payload manifest, and the existing queue
+transition binds that exact digest through `bind_sealed_inputs()`. Exact replay
+may adopt only an identical handoff with the same source/target identities,
+staged manifest, or queue binding. Cleanup never removes the only recovery
+evidence.
+
+This child stops after the sealed-input digest is reopened in both staged-build
+and queue state. The bounded `label` and `rationale` text remains private and
+untrusted; worker sanitization is not content-level DLP. Content release, graph
+projection/query use, certification, promotion, pointer movement, full semantic
+sync, providers/backends, service/watch, repair, GC, migrate, publication, and
+every successor remain separate. The exact record, ordering, replay, cleanup,
+redaction, and verification contract is the
+[successor section of semantic-sync.md](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization).
 
 ## P5B2c one-shot certified query
 
@@ -546,7 +599,8 @@ set.
 | Area | Owner/status | Stable boundary |
 |---|---|---|
 | Host-agent semantic worker | P5B2 host-agent semantic-worker transport (`COMPLETE`) | [`semantic-sync.md`](semantic-sync.md) freezes the one long-lived `workspace semantic-worker --stdio` host-agent queue lifecycle with a verified staged-result binding before completion. Accepted receipt: [`P5B2 semantic worker`](receipts/p5b2-semantic-worker.md). |
-| Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is implemented. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and result-consumption contracts. |
+| Semantic-result handoff and sealed-input finalization | Unnumbered P5B2 successor (`STAGED`; `READY` only after merge refresh) | The [separate successor contract](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization) admits only exact accepted worker sessions or identical carried format-version-1 evidence from the verified current source generation, binds that optional source separately from the new target generation, installs one immutable target-generation/request-bound handoff, copies its exact bytes to target-generation-owned `graphify-out/semantic-inputs.json`, completes the staged payload manifest, and calls `bind_sealed_inputs()`. It has no public command and stops before content release, certification, promotion, or pointer mutation. |
+| Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` is implemented. The staged handoff contract grants no implementation or public semantic-sync route. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and execution contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
 | Active-source activation | Unnumbered P5B2 activation (`COMPLETE`) | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). `workspace activate` alone exposes the existing fenced active-source CAS with explicit UUID and four-part CAS, canonical `ACTIVATE` authorization, internally derived lease inputs, an immutable-enrollment continuity check, and one redacted CLI-v1 receipt. |
@@ -619,7 +673,11 @@ or fork engine logic inside the package.
   the bounded P4 read-only engine/query boundary. `.semantic_queue` implements
   the bounded P5A durable queue and certification boundary. `.semantic_worker`
   implements the accepted P5B2 host-agent request/result transport, private
-  staging, validation, and queue-transition composition. `.composition` owns the
+  staging, validation, and queue-transition composition. The staged successor
+  assigns read-only worker-evidence parsing to that existing boundary,
+  reconciliation and sealed-input mutation to `.semantic_queue`, generation
+  staging and payload completion to `.generations`, and internal ordering to
+  `.sync`; it adds no public CLI ownership. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
   P5B2a registration command plus the bounded rebind/rotation identity-
@@ -646,7 +704,7 @@ or fork engine logic inside the package.
 - [State contracts](state-contract.md)
 - [P3 runtime](p3-runtime.md)
 - [P4 adapter and freshness](p4-adapter-freshness.md)
-- [Host-agent semantic-worker contract](semantic-sync.md)
+- [Host-agent worker and semantic-result handoff contracts](semantic-sync.md)
 - [Compatibility and artifacts](compatibility.md)
 - [Installation and rollback](installation.md)
 - [Migration boundary](migration.md)

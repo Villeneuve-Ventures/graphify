@@ -653,3 +653,449 @@ accepted implementation writes only the reviewed external workspace state
 described above, under disposable configured roots in tests. Its bounded
 implementation and governance evidence is recorded in the
 [P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md).
+
+## P5B2 semantic-result handoff and sealed-input finalization
+
+This is a separate, unnumbered successor contract. It does not revise the
+accepted worker transport or its receipt. Repository authority for this
+contract remains `STAGED` through merge. The exact merge makes this child alone
+eligible for `READY`, but a separately authorized post-merge governance-only
+reconciliation from the canonical branch must refresh the live snapshot and
+record that transition before `READY` may be used to review a bounded
+implementation prompt. `READY` is implementation eligibility, not
+implementation, acceptance, or phase completion.
+
+The child has no public command, request family, result family, status field,
+or receipt. It is an internal composition of the accepted worker evidence, the
+existing semantic queue, the request-bound staged-build lifecycle, generation
+staging, and `bind_sealed_inputs()`. It begins only after all semantic work for
+one exact reconciliation is independently consumable and stops immediately
+after the resulting staged-payload manifest is durably bound to that
+reconciliation.
+
+### Entry authority and exact result set
+
+For every desired work identity in the current semantic-required
+reconciliation, the handoff must receive either:
+
+1. one freshly captured worker session whose process exited exactly 0, whose
+   final and only terminal frame is one schema-valid `completed` result, and
+   whose begin, work, payload, and result-binding digests match the captured
+   session and reopened immutable `result.json`; or
+2. the exact same worker-session evidence and result-binding envelope copied
+   from `graphify-out/semantic-inputs.json` in the exact current certified
+   source generation selected by the structural request's pointer/receipt CAS,
+   where that file is a verified format-version-1 handoff containing the
+   identical `SemanticDesiredWork` identity.
+
+The second form is only carried completion, not inference. Its original
+canonical begin request, complete stdout transcript, observed process exit,
+and result-binding envelope remain embedded and revalidated. A prior queue
+status, completed watermark, generation receipt, or payload manifest without
+that exact handoff entry is not a substitute.
+
+The target generation is separate authority. It is exactly the existing
+canonical `SyncRequest.generation_id` whose complete request digest equals the
+`StructuralBuildRequest.logical_request_sha256`; this child adds no public
+request field. The target must satisfy the existing generation grammar and must
+not name the current certified source generation. Before first handoff
+installation it must not name any existing staging or certified generation.
+After the exact handoff exists, target staging may exist only when the existing
+staged-build record binds the same repository, target, and structural request in
+the exact `REQUESTED`, `PUBLISHING`, or `COMPLETE` recovery lifecycle. A
+certified target, unbound staging, or any mismatched request remains a conflict.
+When carried completion is used, the current source generation is recorded
+independently and may never be substituted for, or swapped with, the target.
+
+The consumer first parses all inputs as untrusted bytes and reopens every
+referenced worker result without following links. It then takes the registry
+lock followed by the workspace lock and revalidates all of the following as one
+snapshot:
+
+- the repository UUID, exact target generation, complete `SyncRequest` digest,
+  registry revision, active-source revision, operation and migration epochs,
+  current pointer CAS, optional carried-source generation, selected
+  compatibility, and full `StructuralBuildRequest`;
+- the source commit, source epoch, policy hash, detector identity, observation
+  manifest, observation-entry digest, and two-equal-observation evidence;
+- the queue revision and canonical-state hash, queue policy, compaction epoch,
+  desired and completed watermarks, exact semantic-required reconciliation,
+  desired-set hash, and still-null sealed-input binding; and
+- a bijection between the reconciliation's desired work and the supplied
+  result entries.
+
+The completed watermark must equal the desired watermark. Every retained queue
+item must be completed; a compacted queue is allowed because the reconciliation
+retains the exact desired set. Each desired identity has exactly one result and
+each result names exactly one desired identity. Missing, duplicate, stale,
+foreign, conflicting, or extra results fail before a staged-build request,
+generation directory, queue binding, or cleanup is created. `idle`, `work`,
+`checkpointed`, a partial or non-final terminal, a nonzero process exit,
+`commit_unknown`, manual inspection, an orphan `result.json`, or a cleared
+`result:` checkpoint never satisfies this entry gate.
+
+### Durable handoff record
+
+The internal handoff owner is the trusted workspace lifecycle composition. The
+accepted worker remains only the producer of result envelopes and public
+session evidence; it does not install this successor record. The semantic queue
+owns reconciliation truth and the final sealed-input binding, while
+`GenerationStore` continues to own request-bound staging and payload-manifest
+completion.
+
+One immutable record is installed at this derived private external-state path:
+
+```text
+workspaces/<repo_uuid>/semantic-staging/handoffs/
+  <target_generation_id>/<structural_request_sha256>.json
+```
+
+The directory chain is descriptor-relative, contained, no-follow `0700`; the
+record is one regular, single-link `0600` file. The target generation ID must
+satisfy the existing generation grammar and the final name is the lowercase
+SHA-256 of the complete canonical `StructuralBuildRequest`. Caller-selected
+absolute paths, aliases, links, special files, and alternate names are
+forbidden.
+
+The record contract is
+`graphify.workspace.semantic_result_handoff.internal`, format version 1. It is
+canonical UTF-8 JSON with NFC-normalized strings, lexicographically sorted
+object keys, compact separators, exact unquoted worker fixed-point decimals,
+and one final newline. Binary floating point is forbidden. The top-level field
+set is exactly:
+
+```text
+{
+  "contract": "graphify.workspace.semantic_result_handoff.internal",
+  "format_version": 1,
+  "repo_uuid": REPO_UUID,
+  "target_generation_id": TARGET_GENERATION_ID,
+  "carried_source_generation_id": CARRIED_SOURCE_GENERATION_ID_OR_NULL,
+  "structural_request": STRUCTURAL_BUILD_REQUEST,
+  "structural_request_sha256": STRUCTURAL_REQUEST_SHA256,
+  "queue": QUEUE_BINDING,
+  "results": [RESULT_ENTRY, ...],
+  "materialized": [MATERIALIZED_ENTRY, ...]
+}
+```
+
+Format version 1 is a closed compatibility boundary. The structural request's
+`compatibility_sha256` must equal the currently selected existing
+`GenerationStore` compatibility digest, and every embedded worker object must
+remain valid under the accepted worker version-1 grammar. An unknown field,
+contract name, format version, encoder rule, worker grammar, or compatibility
+digest is unsupported rather than forward-compatible. This child performs no
+in-place rewrite or migration; any successor representation requires a
+separately frozen version and may not replace bytes at this derived path.
+
+`target_generation_id` is the exact new generation from the validated existing
+`SyncRequest`; the same value is passed unchanged to `request_staged_build()`,
+request-bound acquisition, allocation, staging, completion, and replay.
+`carried_source_generation_id` is exactly `null` when every result is fresh.
+Otherwise it is the canonical generation ID selected by the captured current
+pointer, its receipt digest equals
+`structural_request.expected_current_receipt_sha256`, and it is distinct from
+the target. Every carried entry comes from this one source generation. A null
+current receipt, missing source generation, source/target equality or swap,
+different target on replay, or disagreement among the pointer, receipt,
+payload manifest, semantic-input bytes, and recorded source identity is a
+conflict that blocks first installation or exact replay.
+
+`QUEUE_BINDING` has exactly `active_source_revision`, `revision`,
+`canonical_state_sha256`, `completed_watermark`, `desired_watermark`,
+`compaction_epoch`, `queue_policy`, and `reconciliation`. The queue policy is
+the complete existing version-1 `SemanticQueuePolicy`. The reconciliation is
+the complete current internal reconciliation, including source observations,
+the semantic-required bit, ordered desired work, desired-set digest, and a null
+`sealed_input_manifest_sha256`. The structural request is the complete existing
+request object; its digest is recomputed from its canonical bytes. Together
+these objects bind the repository, active source, registry, operation and
+migration epochs, pointer CAS, source/policy evidence, capacity and
+compatibility hashes, distinct target and optional carried-source generations,
+queue/watermark state, and exact desired set.
+
+Each `RESULT_ENTRY` has exactly `origin`, `begin_request`,
+`begin_request_sha256`, `session`, `result_binding`, `result_binding_bytes`, and
+`result_binding_sha256`:
+
+- `origin` is exactly `fresh_worker_session` or
+  `carried_current_generation`. The latter requires the non-null recorded
+  carried-source generation; the former may not claim that provenance. This is
+  hop-local wrapper metadata, not part of the immutable accepted worker evidence;
+- `begin_request` is the exact accepted canonical version-1 begin object and
+  its digest covers the complete canonical frame including the final newline;
+- `session` has exactly `frames`, `stdout_bytes`, `stdout_sha256`, and
+  `process_exit_code`. `frames` is the complete ordered list of canonical
+  worker-result objects; their canonical newline-terminated concatenation must
+  reproduce the byte count and SHA-256. It begins with one matching `work`
+  frame, may contain at most eight matching `checkpointed` frames, and ends
+  with the one and only terminal, which is `completed`. The process exit is the
+  integer 0;
+- `result_binding` is the complete reopened canonical
+  `graphify.workspace.semantic_result_binding.internal` version-1 envelope,
+  including its exact payload once; and
+- the result-binding byte count and digest cover that entire canonical envelope
+  including its final newline.
+
+The begin, work, claim, attempt, repository, active-source revision, worker
+operation and migration epochs, payload kind, payload bytes and digest, and
+result bytes and digest must agree wherever those fields overlap in the begin
+request, session frames, and envelope. Every entry's repository UUID equals the
+outer record. Its active-source revision and migration epoch equal the captured
+queue and structural-request authority, and its desired work retains the exact
+current source epoch and policy hash. Original registry, worker-operation,
+queue-revision, and watermark coordinates are preserved, not rewritten as the
+later staging coordinates. For a fresh entry, the begin request's active-source,
+migration, and desired-watermark expectations must equal the captured current
+values; its original global registry coordinate is retained while the same
+repository entry is independently revalidated at the current registry revision.
+A carried entry may retain older registry, operation, queue, and watermark
+coordinates only inside its exact original evidence; its repository, active
+source, migration epoch, and desired identity must still match the current
+handoff. At least one `carried_current_generation` entry requires the non-null
+carried-source field, and that field must be null when no entry has that origin.
+
+Each completed terminal's queue revision and completed watermark remain its
+original observed post-completion values; they must not exceed the captured
+current queue revision or completed watermark. The locked current reconciliation
+independently proves that every exact work identity is complete. A carried entry
+sets its new wrapper `origin` to `carried_current_generation` while reproducing
+the source entry's `begin_request`, `begin_request_sha256`, `session`,
+`result_binding`, `result_binding_bytes`, and `result_binding_sha256` exactly.
+Before copying, the current pointer, generation receipt, payload
+inventory/manifest, and semantic-input file are reopened and verified through
+existing read-only generation authority. The pointer's generation ID must equal
+`carried_source_generation_id`, its receipt digest must equal the structural
+request's expected current receipt digest, and the semantic-input bytes and
+inventory entry must agree with that receipt's payload manifest. Arbitrary
+historical generations, orphan handoff files, or directory scans are forbidden.
+The carried entry may not replace worker evidence with a prior receipt or a
+newly synthesized terminal.
+
+Each `MATERIALIZED_ENTRY` has exactly `work`, `work_sha256`, `payload`,
+`payload_bytes`, `payload_sha256`, and `result_binding_sha256`. It is derived,
+never caller-selected. Its payload is copied exactly from the selected result
+envelope and follows the accepted worker's operation-matched grammar. The
+record's `results` array is ordered by NFC-normalized path in lexicographic
+UTF-8 byte order, then ascending desired revision, operation, content digest,
+and result-binding digest. `materialized` is ordered only by path in the same
+byte order and contains at most one final `UPSERT` slot for each path.
+
+The exact canonical record size must not exceed the structural request's
+`expected_payload_bytes`. `GenerationStore` remains the owner of shared capacity
+truth. This successor's implementation must extend its trusted usage scan for
+this preflight and every later generation allocation to no-follow enumerate all
+retained canonical files below
+`workspaces/<repo_uuid>/semantic-staging/handoffs/<target_generation_id>/` and
+add their exact byte sizes to the same `(repo_uuid, target_generation_id)` usage
+key. If that target also exists in generation, staging, or quarantine storage,
+the byte totals are summed and the target consumes one generation slot, not two;
+a handoff-only target also consumes one slot. All retained handoffs remain in
+that shared usage until a separately authorized cleanup or GC removes them.
+
+Before first installation, the matching caller-supplied `CapacityPolicy` is
+revalidated and a conservative preflight counts existing shared usage, the full
+target-generation reservation, and the new handoff bytes against the
+workspace/global byte and generation ceilings plus filesystem reserve. Exact
+replay counts every already installed file once and adds no duplicate bytes or
+generation slot. Unsafe names or types, unreadable bytes, overflow, or a usage
+scan that cannot stabilize fails closed as capacity uncertainty. The later
+ordinary generation allocation repeats this extended shared scan after the
+handoff is visible. Capacity failure installs no new handoff; later allocation
+failure leaves only the capacity-counted immutable handoff as classified
+recovery evidence and creates no generation payload or queue bind. No
+environment or implicit size default may increase any bound.
+Every individual begin, public result, result envelope, payload, semantic text,
+semantic ID, collection, and queue count retains its already-frozen worker or
+queue limit.
+
+Installation occurs before `request_staged_build()`. The exact locked authority
+snapshot plus the complete accepted result set is install authority for this
+immutable evidence file; it grants no lease, queue transition, staged-build
+transition, certification, or cleanup authority. Install-once semantics apply:
+the exact same canonical bytes are idempotent and different bytes at the same
+derived path are a conflict. After a possible install fault, a no-follow reopen
+that proves the exact expected bytes, mode, size, and digest adopts the commit;
+proven absence may retry only while the retained authority snapshot is still
+exact; different, unreadable, unsafe, or ambiguous state is commit-unknown and
+blocks every downstream write.
+
+Legacy completed queue items, raw result envelopes, and generations created
+before format version 1 remain readable under their accepted contracts but are
+not silently adopted. If an exact desired work item has neither a fresh accepted
+session nor an exact entry in the verified current generation's version-1
+semantic-input file, this child fails closed. It does not search arbitrary
+history, reset completion, manufacture a terminal, migrate queue state, or infer
+an association from a watermark.
+
+### Deterministic `UPSERT` and `DELETE` materialization
+
+Materialization in this child means the exact generation-owned semantic input
+set, not a query-visible graph merge. It never invokes provider discovery,
+`graphify.llm`, fuzzy/entity deduplication, `build_merge()`, clustering, query,
+or publication. Starting from an empty path-keyed semantic map, it applies the
+validated result entries in the record order above:
+
+- `UPSERT` requires `operation="UPSERT"` and a `semantic_fragment` payload. It
+  replaces the slot for that exact path with the current work, payload, payload
+  digest, and result-binding digest.
+- `DELETE` requires `operation="DELETE"` and the exact kind-only
+  `delete_tombstone` payload. It removes the slot for that path. Deleting an
+  absent slot is deterministic and successful; the tombstone remains in
+  `results` even though it produces no `materialized` entry.
+
+Ascending desired revision therefore determines same-path replacement. The
+existing reconciliation rule already forbids two operations for the same path
+and desired revision. Any mismatch between operation and payload, nonascending
+same-path revision, duplicate desired identity, multiple final slots, or
+caller-supplied `materialized` value that differs from recomputation is a
+conflict. No last-writer rule outside this ordering, path aliasing, case folding,
+ID remapping, deduplication, or best-effort omission is permitted.
+
+After the request-bound `BUILD` lease is acquired, allocation is accepted, and
+`prepare_staged_build()` has produced the empty target-generation staging root,
+the structural adapter writes its existing output. The handoff record's exact
+canonical bytes are then installed without following links at:
+
+```text
+workspaces/<repo_uuid>/staging/<target_generation_id>/
+  graphify-out/semantic-inputs.json
+```
+
+The copy is a single-link regular `0600` file and must be reopened and match the
+external handoff byte-for-byte. The generation may contain no alternate
+semantic-input file, sibling semantic payload, unrecorded result, or extra
+staging root. Existing payload inventory rules reject links, special files,
+path escapes, duplicate paths, and files outside `graphify-out`. The structural
+payload bytes remain otherwise unchanged by this child.
+
+The semantic-input record is private generation staging and may contain the
+accepted bounded `label` and sanitizer-produced `rationale` text. Worker
+sanitization is structural and syntactic validation, not content-level DLP.
+Neither materialization, payload inventory, hashing, staged completion, nor
+sealed-input binding releases that prose or asserts that it is secret-free,
+non-verbatim, publication-safe, or query-safe.
+
+### Staged completion, sealed binding, and exact replay
+
+The forward order is exact:
+
+1. validate the exact existing `SyncRequest`, distinct target and optional
+   carried-source generation bindings, and complete result set, then
+   install/reopen the immutable handoff;
+2. durably install the exact structural staged-build request for that unchanged
+   target generation;
+3. acquire the request-bound `BUILD` operation, allocate that target generation,
+   and prepare its empty staging root;
+4. build the structural output and install/reopen the exact
+   `graphify-out/semantic-inputs.json` copy;
+5. obtain two fresh equal trusted source observations matching the structural
+   request and handoff, then call `complete_staged_build()`;
+6. recompute `payload_manifest_sha256("graphify-out", entries)` from the exact
+   returned sorted inventory and require it to equal the durable staged
+   `COMPLETE` manifest; and
+7. under the same current `BUILD` grant, revalidate the repository, active
+   source, operation and migration authority, the entire captured pre-bind
+   queue revision/hash/policy/compaction/watermark/reconciliation snapshot,
+   handoff, target-generation-owned copy, and staged manifest, then call
+   `bind_sealed_inputs()` with that manifest digest.
+
+`bind_sealed_inputs()` is the final mutation in this child. An existing null
+binding may advance exactly once; an existing identical digest is idempotent;
+an existing different digest is a conflict. The returned queue must be reopened
+and prove the same reconciliation and exact digest before the lease is
+released. No certification request, generation receipt, journal certification,
+promotion, pointer mutation, or public success receipt follows.
+
+Crash recovery reuses the existing staged-build barrier. Before staged request
+installation, only the immutable handoff may exist and exact replay begins from
+it using the same target and carried-source identities. A different target,
+source/target swap, or different carried source is a conflict, including after
+an uncertain install. Once staged state exists, replay additionally requires the
+same repository, target generation, and structural request in the exact
+request-bound `REQUESTED`, `PUBLISHING`, or `COMPLETE` lifecycle; a certified
+target or any other existing target state is not recovered by this child. The
+null sealed-input value is required when the handoff is first installed; replay
+of that already installed exact handoff may instead observe the one deterministic
+post-bind queue state whose reconciliation differs only by the
+expected manifest digest and queue commit revision/hash. `REQUESTED` or
+`PUBLISHING` recovery reacquires only the exact request-bound operation; a
+successor fence discards unsealed generation staging under the existing rules
+and deterministically rebuilds/copies from the retained handoff. `COMPLETE`
+recovery reopens the full payload inventory and adopts only the exact recorded
+manifest. If the queue binding is still null and the entire captured pre-bind
+snapshot remains current, the same digest may be bound; if the deterministic
+post-bind state already equals that digest, the bind is adopted. A changed
+reconciliation, newer desired set, unrelated queue revision, different sealed
+digest, payload drift, missing handoff, or ambiguous durable state fails closed.
+
+Uncertainty during the bind follows the same rule: exact reread of the expected
+post-bind reconciliation and digest adopts; exact unchanged pre-bind state may
+retry only under the same still-live grant; any other state is commit-unknown.
+Manual file inspection, a staged `COMPLETE` record alone, or a queue watermark
+alone never authorizes retry or success.
+
+### Cleanup, failure routing, and audit evidence
+
+Cleanup is subordinate to recovery evidence:
+
+- the trusted workspace lifecycle composition owns only the best-effort
+  deletion of an original consumed worker envelope described below. The
+  accepted worker, semantic queue, and `GenerationStore` do not delete semantic
+  staging on this child's behalf;
+- an original consumed worker `result.json` becomes eligible for best-effort
+  deletion only after the external handoff and its generation-owned copy have
+  both been reopened, staged `COMPLETE` binds their exact bytes through the
+  payload manifest, and the queue binding has been reopened with that digest;
+- deleting an eligible consumed envelope is not part of the commit and cannot
+  turn success into failure. The handoff itself remains retained through later
+  certification or terminal abandonment, neither of which this child performs;
+- conflicting, stale, foreign, extra, orphaned, legacy-unindexed, or
+  commit-unknown staging is never automatically deleted or adopted. It remains
+  quarantined evidence. A separately authorized semantic-staging repair or GC
+  lifecycle, not this child, owns any later classification and deletion; and
+- no cleanup may remove the only remaining copy of a worker transcript,
+  result-binding payload, exact handoff, generation-owned semantic input, staged
+  manifest, or queue binding needed to classify or recover an uncertain commit.
+
+The implementation may use internal stable exception or audit classifications,
+but this contract adds no public reason code, action code, result field, or
+status-schema version. Existing public routing remains authoritative:
+
+| Condition | Existing public truth/action |
+|---|---|
+| Pending, claimed, retrying, or watermark-gap work | `semantic_queue_pending` / `drain_semantic_queue` |
+| Dead-letter work | `semantic_queue_dead_letter` / `inspect_semantic_queue` |
+| Invalid queue or unsafe durable state | `semantic_queue_invalid` / `inspect_semantic_queue`, or the existing safe-state-root route |
+| Nonterminal staged build | `staged_build_recovery_required` / `resume_exact_workspace_sync` |
+| Source, reconciliation, pointer, operation, migration, compatibility, or request drift before a staged barrier | withhold the internal handoff and obtain fresh authoritative inputs; no new status field |
+| Handoff or sealed-bind commit uncertainty | no inferred success and no new public terminal; exact durable reread is required |
+
+Public status, command output, logs, and error text must not expose semantic
+payloads, labels, rationales, source bytes, complete begin/session objects,
+private paths, credentials, provider/model data, owner/fence identities,
+environment values, or raw exceptions. Bounded internal audit evidence records
+only the repository, target-generation, and optional carried-source-generation
+identities, structural-request and handoff digests, result/materialized counts,
+queue pre/post revisions and hashes, payload-manifest digest, lifecycle boundary,
+and redacted classification.
+
+Verification injects short writes, `EINTR`, `ENOSPC`, `EDQUOT`, `EIO`, failed
+file and directory sync, failed replace, process death, and post-commit faults at
+handoff installation/reopen, staged-request commit, staging preparation/reset,
+semantic-input copy/reopen, staged completion, queue bind, and lease release.
+It also covers every digest substitution; missing, duplicate, stale, foreign,
+extra, legacy, and carried result; UPSERT/DELETE order and same-path revision;
+capacity edges; symlink, hardlink, mode, special-file, and path escapes; payload
+drift; content-redaction snapshots; and exact replay before and after each
+durable boundary.
+
+### Exact stop boundary
+
+This child ends with a reopened staged `COMPLETE` payload manifest and an exact
+reopened queue `sealed_input_manifest_sha256` equal to that digest. It grants no
+public semantic-sync command, provider/backend execution, content-release or
+DLP decision, query projection, generation certification, receipt, journal
+certification, promotion, pointer movement, migrate, repair, GC, service/watch,
+publication, production/runtime installation authority, performance/resource
+qualification, phase completion, governance acceptance, or successor readiness.
