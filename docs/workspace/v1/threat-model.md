@@ -50,6 +50,17 @@ is bound by the
 [P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md),
 and it stops before certification or any content release.
 
+The next unnumbered P5B2 semantic-generation certification-finalization child
+is frozen only as an internal `WAITING` contract. It composes the accepted
+handoff's reopened request-bound staged `COMPLETE` state and equal queue
+sealed-input digest with existing semantic certification-view, immutable
+binding, generation certification, staged-recovery, and lease authorities. It
+adds no implementation, public command, schema, receipt, release route, or
+readiness claim. Its stop is the same target durably proved staged `CERTIFIED`
+and verified against its exact binding, receipt, journal, reservation, pointer,
+and released recovery grant; it still performs no content release, promotion,
+or pointer movement.
+
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
 counter. Lease ownership is bound to OS-owned boot and process-start identity;
@@ -258,6 +269,62 @@ secret-free, non-verbatim, publication-safe, or query-safe. This child therefore
 creates no content-release, certification, promotion, pointer, or public-output
 authority.
 
+The frozen certification-finalization contract treats the staged record,
+payload inventory, handoff, generation-owned semantic-input copy, queue,
+source observations, active-source state, structural request, pointer CAS,
+capacity reservation, certification binding, generation receipt, journal, and
+lease as mutually untrusted until their exact identities and digests are
+reopened and cross-checked. A same-generation substitution therefore cannot
+gain authority from a matching pathname, directory presence, watermark, sealed
+digest, receipt, or journal head alone. The target must bind one complete
+structural request, one exact payload inventory and manifest, one complete
+semantic-required reconciliation, and the same handoff and generation copy.
+
+Recovery fencing prevents an attacker or stale process from turning sealed
+staging into mutable build input. Only the same request-bound `BUILD` recovery
+grant may continue the exact `COMPLETE` target. The successor grant's current
+operation epoch and fence replace mutation authority but do not rewrite the
+historical `COMPLETE` record. `allocate()`, `prepare_staged_build()`, and
+`complete_staged_build()` may reconstruct existing wrappers only; they cannot
+reset staging, rerun the adapter, recopy or modify semantic input, append
+payloads, select another target, or silently adopt different sealed bytes.
+Registry-before-workspace and workspace-before-generation-lock ordering prevents
+the recovery composition from weakening existing deadlock and authority
+boundaries.
+
+The semantic certification view closes the remaining queue/build
+time-of-check/time-of-use window. Two fresh equal typed source observations,
+`semantic_completeness="complete"`, the exact queue revision and canonical-state
+hash, and the staged manifest's equal sealed digest must all agree. The store
+then installs and reopens the immutable target/request/view/manifest binding
+under the workspace lock before a generation lock or receipt can become
+authority. A preseeded receipt, different binding bytes, foreign request,
+changed queue before binding, incomplete reconciliation, or different manifest
+cannot convert staged bytes into a certified generation.
+
+Crash recovery is phase-sensitive and non-destructive. Before the immutable
+binding exists, any queue, source, policy, pointer, epoch, operation,
+compatibility, request, target, handoff, inventory, manifest, sealed-input, or
+observation drift blocks certification. After the exact binding exists, a later
+queue or policy state is never substituted into it; existing generation
+recovery may only finish the already-bound request and view. Receipt install,
+staging-to-final movement, journal append, reservation clear, staged
+`COMPLETE`-to-`CERTIFIED` transition, and lease release are adopted only through
+exact durable reread. Both/neither generation locations, mismatched or
+unreadable binding/receipt/journal state, an unrelated reservation, a
+replacement lease, or any ambiguous suffix is commit-unknown rather than
+inferred success.
+
+Exact same-byte/state replay is idempotent. A caller starting from the full
+exact terminal proof may only verify it read-only; a different certified target
+or any promoted target is not mutable replay authority. No recovery path
+deletes or resets staging, the handoff, semantic-input copy, immutable binding,
+receipt, journal evidence, or installed generation, and none compacts or
+rewrites the queue. The final proof still leaves retained labels and rationales
+private and untrusted: certification establishes integrity and internal
+completeness, not DLP clearance, query safety, publication fitness, or semantic
+correctness.
+
 P5A treats semantic work and its outputs as untrusted until exact reconciliation
 and generation sealing. A worker cannot claim work without an accepted
 `SEMANTIC_CLAIM` lease and an explicit live capability decision. At the claim
@@ -333,6 +400,15 @@ generation, moving a pointer, exposing a public full-semantic-sync command, or
 granting provider/backend, network, service/watch, repair, GC, migrate,
 publication, production/runtime installation authority, performance,
 parent-phase completion, or successor authority.
+
+The frozen certification-finalization contract makes no implementation,
+receipt-acceptance, governance-acceptance, readiness, completion, or merge
+claim. Even after its exact internal stop boundary, it grants no content-release
+or DLP decision, graph/query projection, promotion, pointer movement, public
+semantic-sync command, provider/backend/model or credential authority,
+networking, migrate, repair, GC, semantic-staging cleanup, service/watch,
+publication, production/runtime installation, performance qualification, P5C,
+H3, P6+, parent-phase completion, or successor authority.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

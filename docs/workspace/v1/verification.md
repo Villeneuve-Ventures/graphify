@@ -882,6 +882,141 @@ Run the focused semantic-result handoff suite before repository gates. The
 documentation-only acceptance closeout audits all relative links and anchors
 and does not refresh the generated Graphify graph.
 
+## P5B2 semantic-generation certification finalization contract gates
+
+These gates freeze the next unnumbered child as a documentation-only,
+`WAITING` contract. They demonstrate that existing durable state and APIs can
+express the required lifecycle; they do not claim that a lifecycle composition
+has been implemented, accepted, activated, or made public. Every accepted
+receipt and prior acceptance gate remains unchanged:
+
+- the documentation diff is limited to the seven canonical workspace contract
+  documents. No receipt, JOS row, code, test, schema, fixture, dependency,
+  configuration, workflow, or generated Graphify output changes, and P5/P5B2
+  remain `IN_PROGRESS`, H3 remains `DEFERRED`, and the remaining P5B2/P5C work
+  remains `WAITING`;
+- entry vectors start from the accepted target generation and exact structural
+  `SyncRequest`, the complete canonical `StructuralBuildRequest`, and the same
+  request-bound staged record reopened in `COMPLETE`. They recompute the sorted
+  payload inventory and manifest and require the retained immutable handoff and
+  sole target-generation-owned `graphify-out/semantic-inputs.json` copy to
+  match those bytes. They reopen the complete semantic-required reconciliation
+  and require its sealed-input digest to equal that manifest;
+- entry authority also revalidates repository and target identity, registry,
+  active source, current operation and migration epochs, pointer CAS, capacity,
+  policy, compatibility, source commit/epoch, and two equal typed source
+  observations. A watermark, queue digest, handoff, staged directory,
+  `COMPLETE` record, receipt, journal head, reservation, or final directory
+  alone is never sufficient;
+- rejection vectors cover missing, foreign, duplicated, mismatched, or
+  ambiguous repository, target, request, handoff, generation copy, queue,
+  source observation, inventory, manifest, sealed digest, reservation,
+  binding, receipt, journal, and location evidence. Forward entry rejects
+  `REQUESTED`, `PUBLISHING`, `ABANDONED`, unrelated `CERTIFIED`, `PROMOTED`, and
+  inconsistent lifecycle state. A full exact terminal `CERTIFIED` proof is
+  eligible only for read-only replay verification;
+- lease vectors allow only `GenerationStore.acquire_staged_recovery()` for the
+  same repository, target, and structural request. The grant is the
+  request-bound `BUILD` recovery lane with the caller's new attempt digest and
+  current operation epoch/fence. Tests reject a second staged request, a fresh
+  unbound build operation, a different target, and `MIGRATE`, `PROMOTE`,
+  `POINTER_RECOVERY`, repair, or abandonment authority;
+- lock-order vectors retain registry-before-workspace and
+  workspace-before-pre-created-generation-lock order. No generation lock wraps
+  registry or workspace acquisition. Drift after grant acquisition and before
+  the first certification mutation blocks the lifecycle and does not create
+  cleanup or abandonment authority;
+- reconstruction vectors allow existing `allocate()`,
+  `prepare_staged_build()`, and `complete_staged_build()` only to recover the
+  exact reservation, allocation, completion wrapper, inventory, and manifest
+  already represented by staged `COMPLETE`. They prove no reset, staging
+  deletion, adapter execution, payload rewrite, handoff recopy, appended entry,
+  manifest change, or silent adoption of different sealed staging. A missing
+  reservation is accepted only through the existing exact
+  interrupted-certification recovery rule;
+- certification-view vectors call existing
+  `SemanticQueueStore.certification_view()` with two fresh equal source
+  observations and the staged manifest. They require the exact entry repository,
+  queue revision and canonical-state SHA-256, desired/completed watermark,
+  compaction epoch, source epoch/commit, policy digest,
+  observation-manifest/evidence digests, sealed-input manifest, and
+  `semantic_completeness="complete"`. They reject `not_required`, incomplete,
+  unsealed, unequal, stale, scalar-watermark-only, or differently revised
+  views;
+- certification-request vectors derive source commit/epoch, policy,
+  observation-manifest digest, queue watermark, and complete semantic status
+  from that view; use the current request-selected compatibility digest; use
+  exactly the reconstructed completion entries; and require exactly the
+  existing validation set `coordination_lock_precreated`, `payload_manifest`,
+  and `stable_semantic_queue`. Caller-invented or predecessor-fence fields
+  cannot substitute for current authority;
+- `GenerationStore.certify()` ordering vectors prove that allocation, request,
+  staged state, declared inventory, manifest, certification request, and any
+  existing binding are prevalidated; a fresh view is recaptured and revalidated
+  under the workspace lock; and the immutable target-derived binding of target,
+  request digest, complete queue view, and sealed manifest is durably installed
+  and reopened before any generation lock or receipt becomes authority;
+- later certification vectors prove that the existing target generation lock
+  protects journal recovery through `BUILT` and `VALIDATING`, exact inventory
+  and sync, generation receipt install/reopen, staging-to-final movement,
+  installed-generation plus binding verification, and the matching `CERTIFIED`
+  journal event with pointer revision zero. Only afterward is the exact target
+  reservation cleared, the generation/receipt reopened, and the same staged
+  record advanced by one revision from `COMPLETE` to `CERTIFIED` with the exact
+  receipt digest and certification epoch/fence;
+- binding failpoint matrices cover absence, same-byte replay, different bytes,
+  unreadable/unsafe state, failed write/sync/rename, and process death. Before
+  binding, any queue, source, policy, pointer, epoch, request, target, handoff,
+  inventory, manifest, sealed-input, compatibility, or observation drift blocks
+  new certification. Proven absence retries only while all pre-binding authority
+  remains exact; any other uncertainty is commit-unknown;
+- receipt and lifecycle failpoint matrices cover every receipt install,
+  staging-to-final move, installed-generation verification, journal append,
+  reservation-clear, staged-state, and lease-release boundary. After an exact
+  binding is durable, tests recover only its already-bound request and queue
+  view and never adopt later drift. They reject a preseeded receipt without the
+  binding, different receipt bytes, both or neither generation locations,
+  mismatched journal history, a different reservation, replacement lease,
+  revision jump, or ambiguous suffix;
+- staged-state replay recovers only the same `COMPLETE` identity, request,
+  manifest, immutable binding, and durable receipt through existing
+  `GenerationStore` exact certification recovery, or adopts exact `CERTIFIED`
+  with the expected receipt. Reservation-clear and lease-release uncertainty
+  resolve only by a locked durable reread proving the exact state; neither
+  absence alone nor a different live record is success;
+- exact same-byte/state replay produces the same binding, receipt, installed
+  generation, journal event, absent reservation, and staged revision. No
+  failure path resets or deletes staging, abandons the target, removes the
+  handoff, semantic-input copy, binding, receipt, journal evidence, or installed
+  generation, rewrites or compacts the queue, or performs inferred cleanup; and
+- terminal vectors require staged `CERTIFIED` for the same request, target,
+  manifest and exact receipt digest; successful
+  `GenerationStore.verify_generation()` for one final target with the exact
+  inventory, complete semantic receipt, coordination lock, and immutable
+  binding; the matching `CERTIFIED` journal event with pointer revision zero;
+  durable absence of the exact target reservation; an unchanged visible
+  pointer at the entry boundary; and, after release, durable absence of the
+  exact recovery owner/fence. They stop there and grant no content release,
+  graph/query projection, promotion, pointer mutation, public semantic-sync
+  command, provider, credential, networking, migrate, repair, GC, cleanup,
+  service/watch, publication, production/runtime installation, P5C, H3, P6+,
+  parent completion, successor readiness, governance acceptance, or merge
+  authority.
+
+Run the existing focused state-model suite before repository gates:
+
+```bash
+uv run --frozen --all-extras pytest -q \
+  tests/test_workspace_semantic_queue.py \
+  tests/test_workspace_semantic_result_handoff.py \
+  tests/test_workspace_staged_build_certification_recovery.py
+```
+
+Contract review must independently verify the exact committed head for both
+specification consistency and architecture/lock-order correctness. The
+documentation-only closeout audits all relative links and anchors and does not
+refresh the generated Graphify graph.
+
 ## P5B2 public fenced pointer-repair CLI gates
 
 - the only accepted repair argv forms are `workspace repair --dry-run
