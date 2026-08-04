@@ -51,15 +51,17 @@ is bound by the
 and it stops before certification or any content release.
 
 The next unnumbered P5B2 semantic-generation certification-finalization child
-is frozen only as an internal `WAITING` contract. It composes the accepted
-handoff's reopened request-bound staged `COMPLETE` state and equal queue
-sealed-input digest with existing semantic certification-view, immutable
-binding, generation certification, staged-recovery, and lease authorities. It
-adds no implementation, public command, schema, receipt, release route, or
-readiness claim. Its stop is the same target durably proved staged `CERTIFIED`
-and verified against its exact binding, receipt, journal, reservation, pointer,
-and released recovery grant; it still performs no content release, promotion,
-or pointer movement.
+is frozen only as an internal contract and is the sole `READY` child recorded
+by the post-merge governance reconciliation. `READY` is implementation
+eligibility only. It composes the accepted handoff's reopened request-bound
+staged `COMPLETE` state and equal queue sealed-input digest with existing
+semantic certification-view, immutable binding, generation certification,
+staged-recovery, and lease authorities. The contract itself adds no
+implementation, public command, schema, receipt, release route, or readiness
+claim. Its stop is the same target durably proved staged `CERTIFIED` and
+verified against its exact binding, receipt, journal, reservation, pointer, and
+released recovery grant; it still performs no content release, promotion, or
+pointer movement.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -403,7 +405,9 @@ parent-phase completion, or successor authority.
 
 The frozen certification-finalization contract makes no implementation,
 receipt-acceptance, governance-acceptance, readiness, completion, or merge
-claim. Even after its exact internal stop boundary, it grants no content-release
+claim. The separate governance reconciliation records `READY` as implementation
+eligibility only and creates none of those authorities. Even after the exact
+internal stop boundary, the contract grants no content-release
 or DLP decision, graph/query projection, promotion, pointer movement, public
 semantic-sync command, provider/backend/model or credential authority,
 networking, migrate, repair, GC, semantic-staging cleanup, service/watch,

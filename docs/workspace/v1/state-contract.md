@@ -598,9 +598,11 @@ that exact stop boundary.
 
 ## Semantic-generation certification finalization
 
-The next unnumbered P5B2 child is frozen as a contract-only, `WAITING`
-composition of existing durable formats and authorities. It introduces no
-schema, format version, record kind, receipt kind, public command, or migration.
+The next unnumbered P5B2 child is frozen as a contract-only composition of
+existing durable formats and authorities and is the sole `READY` child recorded
+by the post-merge governance reconciliation. `READY` is implementation
+eligibility only; the child remains unimplemented and introduces no schema,
+format version, record kind, receipt kind, public command, or migration.
 Its entry is the accepted semantic-result handoff's exact target in reopened
 staged `COMPLETE` state plus a reopened semantic queue whose complete
 reconciliation binds the same non-null sealed-input digest as that staged
