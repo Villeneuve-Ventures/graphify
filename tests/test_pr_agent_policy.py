@@ -26,7 +26,7 @@ def _embedded_policy_namespace() -> dict:
     tree = ast.parse(_embedded_python())
     helper_names = {
         "_excluded_only_evidence",
-        "_event_head_sha",
+        "_event_pull_request_evidence",
         "_marked_publication",
         "_publication_visible",
         "_record_excluded_only",
@@ -220,7 +220,7 @@ def test_incremental_without_a_verified_baseline_falls_back_to_full() -> None:
     assert provider.incremental.is_incremental is False
 
 
-def _reviewability_provider(head_sha: str, *filenames: str) -> SimpleNamespace:
+def _reviewability_provider(head_sha: str, *filenames: object) -> SimpleNamespace:
     return SimpleNamespace(
         last_commit_id=SimpleNamespace(sha=head_sha),
         pr=SimpleNamespace(head=SimpleNamespace(sha=head_sha)),
@@ -239,30 +239,63 @@ def test_excluded_only_diff_is_bound_to_the_exact_nonempty_head() -> None:
         provider,
         lambda filename: filename != "uv.lock",
         head_sha,
+        1,
     )
 
     assert evidence == (head_sha, ("uv.lock",))
 
 
-def test_pull_request_event_head_is_read_from_the_trusted_payload(
+def test_pull_request_event_evidence_is_read_from_the_trusted_payload(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    event_head_sha = _embedded_policy_namespace()["_event_head_sha"]
+    event_evidence = _embedded_policy_namespace()["_event_pull_request_evidence"]
     head_sha = "1" * 40
     event_path = tmp_path / "event.json"
     event_path.write_text(
-        json.dumps({"pull_request": {"head": {"sha": head_sha}}}),
+        json.dumps(
+            {
+                "pull_request": {
+                    "changed_files": 1,
+                    "head": {"sha": head_sha},
+                }
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
 
-    assert event_head_sha() == head_sha
+    assert event_evidence() == (head_sha, 1)
+
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "issue_comment")
+    assert event_evidence() == (None, None)
+
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
 
     event_path.write_text("{}", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="no readable pull-request head"):
-        event_head_sha()
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent event has no readable pull-request evidence$",
+    ):
+        event_evidence()
+
+    event_path.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "changed_files": "1",
+                    "head": {"sha": head_sha},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent event has no verified changed-file count$",
+    ):
+        event_evidence()
 
 
 def test_mixed_diff_still_requires_the_normal_pr_agent_path() -> None:
@@ -280,6 +313,7 @@ def test_mixed_diff_still_requires_the_normal_pr_agent_path() -> None:
         provider,
         lambda filename: filename.endswith(".py"),
         head_sha,
+        2,
     )
 
     assert evidence is None
@@ -291,18 +325,86 @@ def test_excluded_only_diff_fails_closed_on_missing_or_mismatched_evidence() -> 
     ]
     head_sha = "1" * 40
 
-    with pytest.raises(RuntimeError, match="no changed files"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent preflight found no changed files$",
+    ):
         excluded_only_evidence(
             _reviewability_provider(head_sha),
             lambda _filename: False,
             head_sha,
+            0,
         )
 
-    with pytest.raises(RuntimeError, match="head SHA mismatch"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent event head SHA mismatch$",
+    ):
         excluded_only_evidence(
             _reviewability_provider(head_sha, "uv.lock"),
             lambda _filename: False,
             "2" * 40,
+            1,
+        )
+
+    provider = _reviewability_provider(head_sha, "uv.lock")
+    provider.pr.head.sha = "2" * 40
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent provider head SHA mismatch$",
+    ):
+        excluded_only_evidence(provider, lambda _filename: False, head_sha, 1)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent preflight has no verified head SHA$",
+    ):
+        excluded_only_evidence(
+            _reviewability_provider("z" * 40, "uv.lock"),
+            lambda _filename: False,
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent preflight found duplicate changed-file names$",
+    ):
+        excluded_only_evidence(
+            _reviewability_provider(head_sha, "uv.lock", "uv.lock"),
+            lambda _filename: False,
+            head_sha,
+            2,
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent preflight changed-file count mismatch$",
+    ):
+        excluded_only_evidence(
+            _reviewability_provider(head_sha, "uv.lock"),
+            lambda _filename: False,
+            head_sha,
+            2,
+        )
+
+
+@pytest.mark.parametrize("filename", [None, ""])
+def test_excluded_only_diff_rejects_invalid_changed_file_names(
+    filename: object,
+) -> None:
+    excluded_only_evidence = _embedded_policy_namespace()[
+        "_excluded_only_evidence"
+    ]
+    head_sha = "1" * 40
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent preflight found an invalid changed-file name$",
+    ):
+        excluded_only_evidence(
+            _reviewability_provider(head_sha, filename),
+            lambda _filename: False,
+            head_sha,
+            1,
         )
 
 
@@ -331,6 +433,32 @@ def test_excluded_only_completion_requires_identical_tool_evidence() -> None:
             ("2" * 40, ("uv.lock",)),
             "review",
         )
+
+
+def test_excluded_only_completion_rejects_an_unknown_component() -> None:
+    record_excluded_only = _embedded_policy_namespace()["_record_excluded_only"]
+    verification = {
+        "description_completed": False,
+        "review_completed": False,
+        "review_mode": None,
+        "excluded_only_evidence": None,
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^PR-Agent excluded-only component is invalid$",
+    ):
+        record_excluded_only(
+            verification,
+            ("1" * 40, ("uv.lock",)),
+            "improve",
+        )
+    assert verification == {
+        "description_completed": False,
+        "review_completed": False,
+        "review_mode": None,
+        "excluded_only_evidence": None,
+    }
 
 
 def test_publication_requires_a_workflow_owned_marker() -> None:

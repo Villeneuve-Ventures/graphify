@@ -131,25 +131,37 @@ jobs:
               match = REVIEW_MARKER_RE.search(body or "")
               return match.group(1) if match else None
 
-          def _event_head_sha():
+          def _event_pull_request_evidence():
               if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
-                  return None
+                  return None, None
               event_path = os.environ.get("GITHUB_EVENT_PATH")
               if not event_path:
-                  raise RuntimeError("PR-Agent event has no payload path")
+                  raise RuntimeError(
+                      "PR-Agent event has no readable pull-request evidence"
+                  )
               try:
                   with open(event_path, encoding="utf-8") as event_file:
                       payload = json.load(event_file)
                   head_sha = payload["pull_request"]["head"]["sha"]
+                  changed_file_count = payload["pull_request"]["changed_files"]
               except (KeyError, OSError, TypeError, ValueError) as exc:
                   raise RuntimeError(
-                      "PR-Agent event has no readable pull-request head"
+                      "PR-Agent event has no readable pull-request evidence"
                   ) from exc
               if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
                   raise RuntimeError("PR-Agent event has no verified head SHA")
-              return head_sha
+              if type(changed_file_count) is not int or changed_file_count < 0:
+                  raise RuntimeError(
+                      "PR-Agent event has no verified changed-file count"
+                  )
+              return head_sha, changed_file_count
 
-          def _excluded_only_evidence(provider, classifier, expected_head_sha=None):
+          def _excluded_only_evidence(
+              provider,
+              classifier,
+              expected_head_sha=None,
+              expected_file_count=None,
+          ):
               head_sha = getattr(
                   getattr(provider, "last_commit_id", None), "sha", ""
               )
@@ -180,6 +192,15 @@ jobs:
                   raise RuntimeError(
                       "PR-Agent preflight found duplicate changed-file names"
                   )
+              if expected_file_count is not None:
+                  if type(expected_file_count) is not int or expected_file_count < 0:
+                      raise RuntimeError(
+                          "PR-Agent event has no verified changed-file count"
+                      )
+                  if expected_file_count != len(filenames):
+                      raise RuntimeError(
+                          "PR-Agent preflight changed-file count mismatch"
+                      )
 
               filenames = tuple(sorted(filenames))
               if any(classifier(filename) for filename in filenames):
@@ -187,6 +208,8 @@ jobs:
               return head_sha, filenames
 
           def _record_excluded_only(verification, evidence, component):
+              if component not in {"description", "review"}:
+                  raise RuntimeError("PR-Agent excluded-only component is invalid")
               previous = verification["excluded_only_evidence"]
               if previous is not None and previous != evidence:
                   raise RuntimeError("PR-Agent excluded-only evidence changed")
@@ -197,8 +220,6 @@ jobs:
               elif component == "review":
                   verification["review_completed"] = True
                   verification["review_mode"] = "excluded_only"
-              else:
-                  raise RuntimeError("PR-Agent excluded-only component is invalid")
               return first_record
 
           def _report_excluded_only(evidence):
@@ -316,10 +337,14 @@ jobs:
           original_description = PRDescription.run
 
           async def run_verified_description(self):
+              event_head_sha, event_file_count = (
+                  _event_pull_request_evidence()
+              )
               excluded_only = _excluded_only_evidence(
                   self.git_provider,
                   is_valid_file,
-                  _event_head_sha(),
+                  event_head_sha,
+                  event_file_count,
               )
               if excluded_only is not None:
                   if _record_excluded_only(
@@ -365,10 +390,14 @@ jobs:
           original_review = PRReviewer.run
 
           async def run_verified_review(self):
+              event_head_sha, event_file_count = (
+                  _event_pull_request_evidence()
+              )
               excluded_only = _excluded_only_evidence(
                   self.git_provider,
                   is_valid_file,
-                  _event_head_sha(),
+                  event_head_sha,
+                  event_file_count,
               )
               if excluded_only is not None:
                   if (
