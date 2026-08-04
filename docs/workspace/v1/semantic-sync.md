@@ -656,16 +656,15 @@ implementation and governance evidence is recorded in the
 
 ## P5B2 semantic-result handoff and sealed-input finalization
 
-This is a separate, unnumbered successor contract. It does not revise the
-accepted worker transport or its receipt. The post-merge governance
-reconciliation records only this child as `READY`. `READY` is implementation
-eligibility only: it permits a bounded implementation prompt to be reviewed but
-neither authorizes nor performs implementation, acceptance, or phase
-completion. This local transition remains proposed until publication and merge
-into `workspace/v1`.
+This is a separate, implemented, and accepted unnumbered child. It does not
+revise the accepted worker transport or its receipt. Its exact delivery and
+governance evidence is bound by the
+[P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md).
+That governance transition remains staged until its documentation-only commit
+is published and merged into `workspace/v1`, and it promotes no successor.
 
 The child has no public command, request family, result family, status field,
-or receipt. It is an internal composition of the accepted worker evidence, the
+or runtime receipt. It is an internal composition of the accepted worker evidence, the
 existing semantic queue, the request-bound staged-build lifecycle, generation
 staging, and `bind_sealed_inputs()`. It begins only after all semantic work for
 one exact reconciliation is independently consumable and stops immediately
@@ -1094,7 +1093,9 @@ durable boundary.
 This child ends with a reopened staged `COMPLETE` payload manifest and an exact
 reopened queue `sealed_input_manifest_sha256` equal to that digest. It grants no
 public semantic-sync command, provider/backend execution, content-release or
-DLP decision, query projection, generation certification, receipt, journal
-certification, promotion, pointer movement, migrate, repair, GC, service/watch,
-publication, production/runtime installation authority, performance/resource
-qualification, phase completion, governance acceptance, or successor readiness.
+DLP decision, query projection, generation certification, runtime receipt,
+journal certification, promotion, pointer movement, migrate, repair, GC,
+service/watch, publication, production/runtime installation authority,
+performance/resource qualification, parent-phase completion, or successor
+readiness. The separate governance receipt accepts only this bounded internal
+child.

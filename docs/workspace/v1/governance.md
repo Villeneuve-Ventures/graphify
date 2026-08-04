@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-08-03T06:55:37Z`
+Ledger refresh: `2026-08-04T06:56:55Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -52,16 +52,17 @@ branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical base | At pre-edit, the checkout, local `workspace/v1`, local tracking ref, and read-only live `origin/workspace/v1` query all resolved to `92b81db6d39e42c4b4a52aa69f1113398f9115ad`, tree `7e77046c8dce66ad6a21e423cd3ca153385a8d74`, with local divergence `0/0` and a clean working tree. |
+| Canonical base | At pre-edit, the checkout, local `workspace/v1`, local tracking ref, and refreshed live `origin/workspace/v1` all resolved to `2d9efe7e79b16953e62523684fbf8c6bf8b7a20a`, tree `dee2624fb3729b3e9b30a855f2c3635e672dd797`, with local divergence `0/0` and a clean working tree. |
 | Worktrees | One worktree existed at preflight, clean on `workspace/v1` at the canonical base above. No delivery worktree, competing contract/governance worktree, or other closeout owner was present. The authorized governance branch did not yet exist locally or remotely. |
-| GitHub | PR [#49](https://github.com/Villeneuve-Ventures/graphify/pull/49) is merged at the canonical base above. Repository-qualified live inspection found no open pull requests; the issue tracker is disabled. GitHub's default branch remains `v8`, while `workspace/v1` remains this ledger's canonical base. |
+| GitHub | PR [#51](https://github.com/Villeneuve-Ventures/graphify/pull/51) is merged at the canonical base above. Repository-qualified live inspection found no open pull requests. GitHub's default branch remains `v8`, while `workspace/v1` remains this ledger's canonical base. |
 | P5B2 host-agent semantic-worker contract provenance | PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) exact head `1f202c9134ee0993e4bba40482fa8113f598920a`; merge `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`; tree `27f7259fc3d716a78a3b28417204b1968c05d421`. Exact-head CI [30681324681](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30681324681) passed `skillgen-check`, `test (3.14)`, and `security-scan`. |
 | P5B2 host-agent semantic-worker implementation delivery | PR #45 exact base `99af03803a44d575123a18f1c0eafa48149df492`; head `5f57e565bd188789c984bc1370943caa758148c3`; merge/current commit `36b2e3426ebe3095a0b81c36656789b6790f103f`; delivery/merge/current tree `06d20480337bc94edba4de37c06d2dbf1ab595f2`. Exact-head CI [30730561721](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30730561721) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. |
 | P5B2 host-agent semantic-worker governance acceptance | PR [#46](https://github.com/Villeneuve-Ventures/graphify/pull/46) exact head `a0c3763acd20cb9886a4e26cc3c2e776597fe162`; merge `c2bb53d733d43784b76ab3cf559c48c16688f298`; tree `98b0ed85599794a152c1fd8ddde6ae3ebacb98aa`. Exact-head CI [30734181344](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30734181344) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. The acceptance is limited to the worker transport and promotes no successor. |
 | JOS test-harness determinism delivery | PR #47 exact base `c2bb53d733d43784b76ab3cf559c48c16688f298`; head `e17482c61a5cfad2d227a4b0d8d27c2bcd723c32`; merge/current commit `d19ff5467a48778b14a4cdb62eada4ba3fa48293`; delivery/merge/current tree `8b2fc5a29c06eb7df2a41cd79c896e052636a19e`. Exact-head CI [30771565129](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30771565129) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. |
 | JOS test-harness governance acceptance | PR [#48](https://github.com/Villeneuve-Ventures/graphify/pull/48) exact head `a099ce64ac533ae61b14275f67c07eabd126c9a3`; merge/current commit `e9967f18de55aba2a51803cb51d225a221d42fdc`; head/merge/current tree `13117628e5b22cce5d95d26dfd5456a2d9136d58`. Exact-head CI [30780293723](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30780293723) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. Both test-harness JOS rows are `CLOSED` historical evidence only. |
 | Semantic-result handoff contract delivery | PR [#49](https://github.com/Villeneuve-Ventures/graphify/pull/49) exact base `e9967f18de55aba2a51803cb51d225a221d42fdc`; head `f46de7408df3b70e57a8bb17047449caff658326`; merge/current commit `92b81db6d39e42c4b4a52aa69f1113398f9115ad`; head/merge/current tree `7e77046c8dce66ad6a21e423cd3ca153385a8d74`. The merge commit's ordered parents are the exact base and head. Exact-head CI [30789398224](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30789398224) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. The hosted [Codex review](https://github.com/Villeneuve-Ventures/graphify/pull/49#issuecomment-5163081658) reported no major issue against reviewed commit `f46de7408d`, the exact head's unique prefix. |
-| Semantic-result handoff governance preflight | At `2026-08-03T06:55:37Z`, the canonical repository, branch, HEAD/tree, clean `0/0` divergence, one-worktree inventory, empty open-PR inventory, disabled issues, recent merged PRs, and absence of competing contract/governance work were revalidated with repository-qualified GitHub calls. The graph report remained stale orientation from `e0f576f6` and was not rebuilt. This local reconciliation proposes only the `READY` transition recorded below; no push or GitHub pull-request, comment, review, or review-thread mutation occurred. |
+| Semantic-result handoff implementation delivery | PR [#51](https://github.com/Villeneuve-Ventures/graphify/pull/51) exact base `1d092a86fce5ba2eec5723908ec442d8ecdd639e`; head `272e56248c56ea6bc699e035b69f732c20e94d1e`; merge/current commit `2d9efe7e79b16953e62523684fbf8c6bf8b7a20a`; delivery/merge/current tree `dee2624fb3729b3e9b30a855f2c3635e672dd797`. Exact-head CI [30882417900](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30882417900) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. The delivery changed exactly seven implementation/test files. |
+| Semantic-result handoff governance closeout preflight | At `2026-08-04T06:56:55Z`, the canonical repository, branch, HEAD/tree, clean `0/0` divergence, one-worktree inventory, empty open-PR inventory, and absence of a competing closeout owner were revalidated. PR #51 ancestry, its exact seven-file manifest, delivery/merge/current tree parity, hosted checks, 22 normalized timeline comments, four submitted reviews, and all eight review threads were audited without GitHub thread mutation. Five threads were resolved and three remained unresolved in the UI; no exact-head P0-P2 defect reproduced. The current graph report already matched `2d9efe7e79b16953e62523684fbf8c6bf8b7a20a` and was not rebuilt. |
 | Support baseline | Observed host CPython `3.14.6`; project CPython `3.14.3`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
@@ -79,10 +80,10 @@ orientation only and cannot justify execution.
 | H1 | P4F | COMPLETE | Inherited labeling-order test stabilization closed. |
 | H2 | H1 | COMPLETE | Candidate packaging, dependency, and blocking security hygiene closed. |
 | H3 | H2 | DEFERRED | Full-repository Pyright and medium-severity Bandit debt remains non-blocking. |
-| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, are complete. The semantic-result handoff is the sole `READY` child recorded by this local reconciliation; `READY` is implementation eligibility only. Its implementation, remaining P5B2, and the broad P5C gate are not complete. |
+| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport and semantic-result handoff, are complete. Remaining P5B2 and the broad P5C gate are not complete, and no successor is `READY`. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, are complete. The semantic-result handoff contract is the sole `READY` child recorded by this local reconciliation. Its implementation, full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and all other undelivered commands remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport and semantic-result handoff, are complete. Full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and all other undelivered commands remain waiting. No successor is `READY`. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
@@ -95,8 +96,8 @@ orientation only and cannot justify execution.
 | P5B2b | P5B2b0 | COMPLETE | Accepted receipt: [`P5B2b`](receipts/p5b2b.md). |
 | P5B2c | P5C1 | COMPLETE | Accepted receipt: [`P5B2c`](receipts/p5b2c.md). One-shot certified `workspace query --request-stdin` transport only. |
 | P5B2 host-agent semantic-worker transport | P5A, P5C1 | COMPLETE | Accepted exact `workspace semantic-worker --stdio` host-agent lifecycle in [`semantic-sync.md`](semantic-sync.md). P5A directly supplies queue semantics; P5C1 supplies installed runtime authority and transitively includes P5B1. Completion evidence: [`P5B2 host-agent semantic worker`](receipts/p5b2-semantic-worker.md). |
-| P5B2 semantic-result handoff and sealed-input finalization | P5A, P5B2b0, P5B2 host-agent semantic-worker transport | READY | Contract-only internal handoff in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization). It preserves exact accepted worker evidence, distinguishes the optional carried-source generation from the new target generation, materializes one target-generation-owned semantic-input record, completes the staged payload manifest, and binds it through `bind_sealed_inputs()`. PR #49's exact merge/current and exact-head check/review evidence satisfy the recorded dependency and preflight gate. `READY` is implementation eligibility only; this local transition remains proposed until publication and merge and does not perform or authorize implementation, completion, governance acceptance, phase promotion, or later successor activation. |
-| Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The `READY` internal handoff grants no public command or implementation authority. |
+| P5B2 semantic-result handoff and sealed-input finalization | P5A, P5B2b0, P5B2 host-agent semantic-worker transport | COMPLETE | Accepted internal handoff in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization). It preserves exact accepted worker evidence, distinguishes the optional carried-source generation from the new target generation, materializes one target-generation-owned semantic-input record, completes the staged payload manifest, and binds it through `bind_sealed_inputs()`. Completion evidence: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md). This staged governance transition becomes canonical only when its documentation-only commit is published and merged; it grants no public command, parent-phase completion, or successor activation. |
+| Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The accepted internal handoff grants no broader or public command authority. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
 | Remaining P5C concerns | P5C | WAITING | Watch/service, performance, shared-lock/root-traversal optimization, publication, retained query/service authority, and all other P5C work remain unchanged. |
@@ -107,12 +108,10 @@ remain waiting at this handoff.
 
 Statements in accepted boundary freezes below that a receipt promoted no later
 child describe that receipt's authority at its acceptance point. They do not
-override the current ledger. PR #49's exact merge and the refreshed live
-preflight support only the semantic-result handoff row's proposed `READY`
-transition. `READY` is implementation eligibility only, not execution,
-implementation, completion, governance acceptance, phase promotion, or
-later successor activation. Until this commit is published and merged, the
-published canonical branch remains authoritative.
+override the current ledger. PR #51's exact delivery and the refreshed live
+preflight support only the semantic-result handoff row's `COMPLETE` transition.
+Until this governance-only commit is published and merged, the published
+canonical branch remains authoritative. No successor is promoted to `READY`.
 
 ## Justified out-of-scope follow-up register
 
@@ -408,13 +407,12 @@ surfaces remain `WAITING` or deferred as recorded above.
 ## P5B2 semantic-result handoff and sealed-input finalization boundary freeze
 
 This is a separate unnumbered P5B2 contract child. It preserves the accepted
-worker boundary and receipt unchanged. This post-merge governance reconciliation
-records only this child as `READY` from PR #49's exact merge/current and
-exact-head evidence. `READY` is implementation eligibility only. The transition
-remains a local proposal until publication and merge; neither the merge, this
-status proposal, nor its later publication marks the child `COMPLETE`, creates
-a receipt, accepts implementation, completes a phase, or promotes or activates
-a later successor.
+worker boundary and receipt unchanged. PR #51 implements the exact frozen
+boundary, and this separate governance-only reconciliation records only this
+child as `COMPLETE`. The completion evidence is the
+[P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md).
+The transition remains staged until publication and merge; it does not complete
+P5 or P5B2 or promote or activate a later successor.
 
 The frozen implementation boundary is limited to all of the following as one
 coherent internal operation:
@@ -450,7 +448,7 @@ gates are frozen in
 with corresponding ownership in [`architecture.md`](architecture.md), durable
 state invariants in [`state-contract.md`](state-contract.md), threats in
 [`threat-model.md`](threat-model.md), and gates in
-[`verification.md`](verification.md#p5b2-semantic-result-handoff-and-sealed-input-finalization-contract-gates).
+[`verification.md`](verification.md#p5b2-semantic-result-handoff-and-sealed-input-finalization-acceptance-gates).
 
 The handoff may retain bounded worker-accepted labels and rationales in private
 state. Sanitization is not content-level DLP, and neither staged completion nor
@@ -460,13 +458,13 @@ queue binding all agree, and never the only recovery evidence. Conflicting,
 stale, orphaned, legacy-unindexed, or commit-unknown staging is retained for
 separately authorized inspection, repair, or GC.
 
-This freeze adds no code, test, helper, JSON Schema, receipt, public argv,
-status/result field, provider/backend, credential/network/model/fallback path,
-content-release policy, graph/query projection, certification, promotion,
-pointer mutation, migrate, repair, GC execution, service/watch, publication,
-production/runtime installation authority, performance/resource proof,
-governance acceptance, phase completion, or successor authority. P5 and P5B2
-remain `IN_PROGRESS`; H3
+This acceptance adds no product code, test, helper, JSON Schema, public argv,
+status/result field, runtime receipt, provider/backend,
+credential/network/model/fallback path, content-release policy, graph/query
+projection, certification, promotion, pointer mutation, migrate, repair, GC
+execution, service/watch, publication, production/runtime installation
+authority, performance/resource proof, parent-phase completion, or successor
+authority. P5 and P5B2 remain `IN_PROGRESS`; H3
 remains `DEFERRED`; P5C, remaining P5B2 commands, and remaining P5C concerns
 remain `WAITING`. `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC`,
 `JOS-TOP-LEVEL-COMMAND-INVENTORY` remains `TRIGGER_GATED`, and both test-harness

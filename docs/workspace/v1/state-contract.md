@@ -422,9 +422,11 @@ successor authority is added.
 
 ## Semantic-result handoff and sealed-input finalization
 
-The separately staged unnumbered P5B2 successor adds one internal immutable
-record, not a public schema, worker receipt, queue-format revision, or
-staged-build-format revision. Its exact contract is
+The accepted unnumbered P5B2 child adds one internal immutable record, not a
+public schema, runtime receipt, queue-format revision, or staged-build-format
+revision. Its implementation and completion evidence are bound by the
+[P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md).
+Its exact contract is
 `graphify.workspace.semantic_result_handoff.internal`, format version 1, at:
 
 ```text
@@ -591,7 +593,8 @@ The target-generation-owned semantic-input copy may retain bounded semantic
 sanitizer-produced `rationale` text. Staged completion and sealed-input binding
 are integrity boundaries, not content-level DLP or release decisions. This child
 stops before certification, promotion, pointer movement, query projection, or
-any public semantic-sync lifecycle.
+any public semantic-sync lifecycle. Its accepted status adds no authority beyond
+that exact stop boundary.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

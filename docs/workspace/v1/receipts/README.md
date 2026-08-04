@@ -21,6 +21,7 @@ from the verified canonical branch.
 - [P5B2 public fenced offline-GC lifecycle](p5b2-offline-gc-lifecycle.md)
 - [P5B2 public fenced pointer-repair lifecycle](p5b2-pointer-repair.md)
 - [P5B2 host-agent semantic worker](p5b2-semantic-worker.md)
+- [P5B2 semantic-result handoff and sealed-input finalization](p5b2-semantic-result-handoff.md)
 - [JOS test-harness determinism](jos-test-harness-determinism.md)
 - [P5B2b provider-neutral structural sync](p5b2b.md)
 - [P5B2c one-shot certified workspace query](p5b2c.md)
