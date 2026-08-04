@@ -884,11 +884,13 @@ and does not refresh the generated Graphify graph.
 
 ## P5B2 semantic-generation certification finalization contract gates
 
-These gates freeze the next unnumbered child as a documentation-only,
-`WAITING` contract. They demonstrate that existing durable state and APIs can
-express the required lifecycle; they do not claim that a lifecycle composition
-has been implemented, accepted, activated, or made public. Every accepted
-receipt and prior acceptance gate remains unchanged:
+These gates freeze the next unnumbered child as a documentation-only contract,
+and the post-merge governance reconciliation records it as the sole `READY`
+child. `READY` is implementation eligibility only. The gates demonstrate that
+existing durable state and APIs can express the required lifecycle; they do not
+claim that a lifecycle composition has been implemented, accepted, activated,
+or made public. Every accepted receipt and prior acceptance gate remains
+unchanged:
 
 - the documentation diff is limited to the seven canonical workspace contract
   documents. No receipt, JOS row, code, test, schema, fixture, dependency,
