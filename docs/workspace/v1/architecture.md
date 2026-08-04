@@ -124,6 +124,17 @@ manifest and `SemanticQueueStore.bind_sealed_inputs()` binds that digest. The
 child stops there; content release, graph projection, certification, promotion,
 and pointer mutation remain separate.
 
+The next unnumbered P5B2 semantic-generation certification finalization child
+is contract-frozen but unimplemented. It begins only from that accepted
+handoff's reopened request-bound staged `COMPLETE` record, byte-exact payload
+inventory and handoff copy, and equal semantic-required queue sealed-input
+digest. It reacquires only the same request's `BUILD` recovery lane, reconstructs
+the existing allocation and completion wrappers without resetting staging, and
+uses the existing semantic certification view plus `GenerationStore.certify()`
+to bind and seal the same target. Its terminal boundary is a verified staged
+`CERTIFIED` record and released recovery lease; it has no public transport,
+receipt, promotion, pointer, projection, or content-release authority.
+
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
 authority before consuming one bounded canonical request, requires its target
@@ -362,6 +373,54 @@ Once the binding is durable, the exact request and payload can recover even if
 newer desired work later advances the queue; a staged receipt alone is never
 queue authority. The receipt remains the idempotent boundary for the subsequent
 generation install and journal transition.
+
+The frozen certification-finalization composition narrows that existing P5A/P3
+order to one exact staged successor. Before acquisition it reopens the canonical
+`SyncRequest`, target generation, `StructuralBuildRequest`, staged `COMPLETE`
+record, payload inventory and manifest, handoff and target-owned semantic-input
+bytes, equal queue sealed-input digest, pointer CAS, compatibility, and current
+registry/source/operation/policy evidence. A staged state other than exact `COMPLETE` is
+not admitted to the mutating lane. An exact already-`CERTIFIED` replay may only
+return the same proof through read-only verification; `PROMOTED`, foreign,
+mismatched, or ambiguous state is outside this child.
+
+`acquire_staged_recovery()` is the only lease entry and must return the
+request-bound `BUILD` operation. Its accepted grant supplies the new current
+operation epoch and fence; the prior `COMPLETE` epoch and fence remain frozen
+staged-completion evidence and are not copied forward. `allocate()`,
+`prepare_staged_build()`, and `complete_staged_build()` may only reconstruct the
+same reservation/allocation/completion authority. The `COMPLETE` branch performs
+inventory adoption; it never resets the staging tree, invokes the adapter, or
+rewrites `graphify-out/semantic-inputs.json`.
+
+Two fresh equal typed source observations must match the structural request and
+sealed reconciliation. `SemanticQueueStore.certification_view()` must bind the
+same manifest and report `semantic_completeness="complete"`; its values form the
+exact `CertificationRequest` with the selected compatibility and the existing
+three validation markers. `GenerationStore.certify()` then reobserves source,
+revalidates that view under the workspace lock, installs or reopens the immutable
+generation/request/view/manifest binding, and only afterward takes the existing
+generation lock. Under that lock it recovers or installs the existing receipt,
+final generation, and `CERTIFIED` journal transition. It next clears the exact
+reservation, reopens the installed generation, and commits the staged
+`COMPLETE` to `CERTIFIED` transition with the same request, manifest, and receipt
+digest.
+
+Before an immutable binding exists, any queue, source, policy, pointer, epoch,
+request, manifest, inventory, target, or compatibility drift blocks new
+certification. A durable exact binding freezes its older queue view; a durable
+exact receipt freezes the subsequent generation/journal authority. Later state
+may not be adopted into either, but the existing recovery paths may finish those
+same bytes. Binding, receipt, staged-state, reservation-clear, and lease-release
+uncertainty resolves only through exact durable reread. No recovery path infers
+success, abandons the target, resets staging, or deletes handoff evidence.
+
+The final proof reopens the staged `CERTIFIED` record, installed receipt and
+payload, immutable semantic binding, matching `CERTIFIED` journal event,
+reservation absence, unchanged pointer boundary, and exact lease-owner/fence
+absence. The child stops after that proof. Promotion, pointer movement, content
+release, graph/query projection, public semantic sync, service, publication,
+and every successor remain separately owned.
 
 The accepted semantic worker retains the registry-before-workspace order
 for each queue mutation but keeps one process alive between mutations so the

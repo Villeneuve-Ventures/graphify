@@ -660,8 +660,8 @@ This is a separate, implemented, and accepted unnumbered child. It does not
 revise the accepted worker transport or its receipt. Its exact delivery and
 governance evidence is bound by the
 [P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md).
-That governance transition remains staged until its documentation-only commit
-is published and merged into `workspace/v1`, and it promotes no successor.
+Merged PR #53 made that governance acceptance canonical on `workspace/v1`; it
+promotes no successor.
 
 The child has no public command, request family, result family, status field,
 or runtime receipt. It is an internal composition of the accepted worker evidence, the
@@ -1099,3 +1099,319 @@ service/watch, publication, production/runtime installation authority,
 performance/resource qualification, parent-phase completion, or successor
 readiness. The separate governance receipt accepts only this bounded internal
 child.
+
+## P5B2 semantic-generation certification finalization
+
+This is the next unnumbered P5B2 child, frozen as an internal contract only. It
+is not implemented, `READY`, `COMPLETE`, or accepted; it has no governance
+receipt. It does not revise the accepted worker or handoff contracts and grants
+no public semantic-sync authority.
+
+The child composes only existing durable authorities:
+
+- the canonical `SyncRequest` and its exact new target generation;
+- the complete existing `StructuralBuildRequest` and request-bound staged-build
+  record;
+- the retained handoff plus target-generation-owned
+  `graphify-out/semantic-inputs.json` from the accepted predecessor;
+- `SemanticQueueStore.certification_view()` and the existing immutable
+  `graphify.workspace.semantic_certification_binding.internal` format-version-1
+  record;
+- `GenerationStore.certify()`, the existing
+  `graphify.workspace.generation_receipt` v1 record, generation coordination
+  lock, lifecycle journal, capacity reservation, and staged-state transition;
+  and
+- the existing fenced lease acquisition, acceptance, release, and exact
+  recovery rules.
+
+No public request/result family, CLI argv, status field, JSON Schema, durable
+format, completion index, or new receipt family is introduced.
+
+### Exact start boundary
+
+The only forward entry is the accepted semantic-result handoff's durable stop
+boundary after its exact `BUILD` grant has been released. Before any new lease
+or mutation, the trusted lifecycle composition must reopen and cross-check all
+of the following:
+
+1. the canonical accepted `SyncRequest`, its digest, repository UUID, and exact
+   target generation;
+2. one canonical staged-build format-version-1 record in lifecycle
+   `COMPLETE`, with no receipt, pointer revision, or abandonment intent, bound to
+   that repository, target, and complete `StructuralBuildRequest`;
+3. the exact sorted target payload inventory, whose
+   `payload_manifest_sha256("graphify-out", entries)` equals the staged
+   `payload_manifest_sha256`, stays within the immutable request reservation,
+   and contains the sole allowed target semantic input at
+   `graphify-out/semantic-inputs.json`;
+4. the retained external handoff at the target/request-derived path and the
+   generation-owned semantic-input file, with byte-for-byte equality, exact
+   handoff digest, `0600` regular single-link files, contained no-follow paths,
+   and an inventory entry that binds the copy's exact size and SHA-256;
+5. the current queue snapshot and complete semantic-required reconciliation,
+   including queue policy, revision and canonical-state SHA-256, compaction
+   epoch, equal positive desired/completed watermarks, exact desired set and
+   observation evidence, no incomplete retained item, and
+   `sealed_input_manifest_sha256` equal to the staged manifest; and
+6. current installed compatibility plus registry, selected active source,
+   workspace operation and migration state, pointer, policy, source
+   commit/epoch, and two fresh equal typed source observations that match the
+   structural request, handoff queue evidence, and target inventory.
+
+The structural request's logical digest must still equal the complete canonical
+`SyncRequest` digest. The current global registry revision and selected
+repository entry must equal the request's expected registry and active-source
+revisions and source identity; the workspace migration epoch must equal the
+request expectation; and the pointer revision/current-receipt pair must still
+equal its request CAS. The selected compatibility digest must equal both the
+request and current `GenerationStore`, and the installed queue policy must equal
+the captured handoff policy. The prior staged `COMPLETE` operation epoch and
+fence remain historical staged-completion evidence only. They are not current
+certification authority and are never copied into the new receipt.
+
+Before reacquisition, the durable workspace operation epoch and fence high-water
+mark must still equal the staged `COMPLETE` operation epoch and fence, and the
+predecessor `BUILD` lease must be absent. Any intervening operation is drift.
+The first successful recovery acquisition advances both values exactly once;
+commit-unknown replay with the same attempt digest must reopen that same grant
+rather than advance them again.
+
+A missing or noncanonical request, handoff, queue, inventory, reservation,
+source observation, or staged record fails closed. A target in `REQUESTED` or
+`PUBLISHING` is still owned by the predecessor recovery lifecycle and is not
+advanced here. A target already recorded as staged `CERTIFIED` is not admitted
+to the mutating entry; only the exact terminal replay proof below may be
+returned read-only. A `PROMOTED` or `ABANDONED` staged record, arbitrary final
+generation, foreign workspace, source/target substitution, different request,
+different manifest, duplicate generation location, unsafe path, or ambiguous
+current/previous/pending state is a conflict or recovery barrier.
+
+Prior handoff lease-release uncertainty must be resolved first through the
+existing lease store: an observed release return or locked reread proving the
+exact owner/fence absent permits entry; the exact unchanged live record may be
+retried only under its existing liveness rule. Replacement, unreadable, or
+ambiguous lease state never becomes absence or successor authority.
+
+### Exact recovery lease and staged reconstruction
+
+Because the request and staged `COMPLETE` record already exist, this child may
+call only `GenerationStore.acquire_staged_recovery()` for the same repository,
+target, and complete structural request. It may not call
+`request_staged_build()` again, acquire a fresh unbound operation, choose a new
+generation, or use `MIGRATE`, `PROMOTE`, or `POINTER_RECOVERY`. The returned
+operation must be exactly the request-bound `BUILD` recovery lane with the
+caller's new attempt digest. Its accepted grant supplies the current operation
+epoch and fence and must retain the current registry, active-source, and
+migration authority.
+
+Lease transitions preserve the existing registry-before-workspace order.
+Generation operations preserve workspace-before-existing-generation-lock order;
+the composition never takes a generation lock around registry or workspace
+acquisition. Current pointer, policy, compatibility, request, and source
+evidence is rechecked after acquisition and before the first certification
+mutation. Drift at this boundary releases or classifies the exact recovery
+grant and blocks certification; it does not authorize abandonment or cleanup.
+
+Under that grant, the existing `allocate()` call may only recover the exact
+capacity reservation and target allocation named by the staged request. The
+existing `prepare_staged_build()` and `complete_staged_build()` calls may only
+reconstruct the `StagedBuildPreparation` and `StagedBuildCompletion` wrappers
+from the `COMPLETE` record and exact inventory. Their `COMPLETE` path is
+adoption, not publication: it must not reset or remove staging, invoke the
+adapter, rewrite payload bytes, reinstall the semantic-input copy, append a new
+payload entry, or change the staged revision or manifest. A missing reservation
+is recoverable only when existing `GenerationStore` rules independently prove
+an exact interrupted certification location; otherwise it is a conflict.
+
+The reconstructed completion's repository, target, allocation, structural
+request, canonical staged state, entries, and manifest must equal the reopened
+entry proof. The target must occupy exactly one allowed certification location.
+Before receipt installation that is the exact staging directory; after an
+uncertain certification boundary it may instead be the exact final generation
+or exact staging directory containing an existing receipt, but only the
+existing certification recovery path may classify and adopt it.
+
+### Exact certification request and durable order
+
+With the same live `BUILD` grant, the composition obtains two fresh equal typed
+source observations and calls `SemanticQueueStore.certification_view()` with
+the structural source epoch, those observations, and the exact staged manifest.
+The view must match the entry queue evidence and all of these exact values:
+
+- repository UUID, current queue revision and canonical-state SHA-256;
+- equal desired and completed watermark;
+- compaction epoch;
+- source epoch and commit;
+- policy, observation-manifest, and observation-evidence digests;
+- the staged `sealed_input_manifest_sha256`; and
+- `semantic_completeness="complete"`.
+
+`not_required`, queue absence, a null or different sealed digest, scalar
+watermark evidence, an incomplete item, an unequal or untrusted observation
+pair, or a view from another queue revision is not admissible.
+
+The exact `CertificationRequest` is derived, not caller-invented:
+
+```text
+source_commit                  = certification_view.source_commit
+source_epoch                   = certification_view.source_epoch
+policy_sha256                  = certification_view.policy_sha256
+observation_manifest_sha256    = certification_view.observation_manifest_sha256
+queue_watermark                = certification_view.queue_watermark
+semantic_completeness          = "complete"
+compatibility_sha256           = current request-selected compatibility
+validations                    = {
+  "coordination_lock_precreated",
+  "payload_manifest",
+  "stable_semantic_queue"
+}
+```
+
+The validations are exactly that set; their canonical receipt representation
+uses existing sorted-array behavior. The declared entries are exactly the
+reconstructed completion entries. The target generation and structural request
+remain supplied through the allocation and `staged_completion`; no new request
+field or digest substitutes for them.
+
+`GenerationStore.certify()` is the sole forward mutation authority and retains
+this exact order:
+
+1. under registry then workspace authority, require the exact allocation and
+   staged `COMPLETE` proof, prevalidate the certification request and declared
+   manifest, and look up any immutable certification binding at
+   `queue/certifications/<target_generation_id>.json` by target,
+   certification-request SHA-256, and sealed manifest;
+2. when no binding exists, independently reobserve the selected source twice,
+   obtain the existing semantic certification view, require it to equal the
+   request, and then under the workspace lock revalidate the view's exact queue
+   revision and state SHA-256;
+3. before any generation lock or staged receipt becomes authority, install and
+   reopen the canonical immutable binding of repository, target generation,
+   certification-request digest, and complete queue view. Same bytes are
+   idempotent; any different target, request digest, view, or manifest conflicts;
+4. only after that binding is durable, take the pre-created target generation
+   lock and let existing certification recovery advance the journal through
+   `BUILT` and `VALIDATING` as required, inventory and sync the exact payload,
+   install or reopen the existing generation receipt, atomically move the exact
+   staging directory to the final generation location when still needed,
+   reopen and verify the installed generation plus its semantic binding, and
+   append or reopen the matching `CERTIFIED` journal event with pointer revision
+   zero;
+5. under registry/workspace authority, clear only the exact target capacity
+   reservation, reopen the installed generation and receipt, and require the
+   same canonical receipt returned by certification; and
+6. under the existing generation lock, durably advance the same staged record
+   by one revision from `COMPLETE` to `CERTIFIED`, preserving its repository,
+   target, structural request, and payload manifest while recording exactly the
+   verified receipt SHA-256 and the receipt's new operation epoch and fence.
+
+The existing receipt is the only runtime receipt. It must name the same target,
+source commit/epoch, active-source revision, policy, observation manifest,
+queue watermark, `semantic_completeness="complete"`, compatibility, payload
+entries and manifest, coordination lock, current recovery operation epoch and
+fence, and exact validation set. No field is supplied from the predecessor's
+old `COMPLETE` fence, from a caller-preseeded receipt, or from newer unbound
+queue state.
+
+### Replay, drift, and uncertainty
+
+Before the immutable certification binding exists, any queue revision/hash,
+source, policy, active-source, registry, pointer, migration, operation,
+compatibility, request, target, manifest, inventory, handoff, generation-copy,
+or source-observation drift blocks new certification. The child does not update
+the request, rerun reconciliation, rebind staged inputs, rebuild payloads,
+select another target, or weaken `semantic_completeness` to continue.
+
+A durable exact binding is the commit boundary for the captured queue view. If
+its install return was uncertain, only reopening the same canonical target,
+request digest, view, and manifest adopts it. Proven absence may retry while all
+pre-binding authority remains exact. Different, unreadable, unsafe, or
+ambiguous binding state is commit-unknown. Once that exact binding is durable,
+a newer current queue is not adopted into the certification; the existing
+`GenerationStore` recovery path may finish only the already-bound request and
+view. That is recovery of prior authority, not a new certification from drifted
+state.
+
+A durable exact staged or installed generation receipt, verified against that
+binding and a matching `VALIDATING`/`CERTIFIED` history, is the next recovery
+boundary. Receipt installation, staging-to-final rename, installed-generation
+verification, or journal uncertainty may be adopted only by the existing
+`GenerationStore` exact reread and recovery checks. A preseeded receipt without
+the binding, different receipt bytes, receipt without matching payload or
+journal authority, both or neither generation locations, or any ambiguous
+suffix remains a conflict. After the exact receipt is durable, later source,
+policy, compatibility, or queue change is never copied into it; only that same
+receipt may finish journal or staged-state recovery.
+
+Staged-state uncertainty is resolved by recovering the canonical durable
+record. Exact `CERTIFIED` with the expected previous `COMPLETE` identity,
+request, manifest, and receipt is adopted. Exact `COMPLETE` plus an exact
+binding and durable receipt may use only
+`GenerationStore.recover_staged_certification()` or the equivalent exact
+`certify()` recovery to finish the marker. Any other lifecycle, revision jump,
+receipt, request, manifest, abandonment intent, pending state, or ambiguity is
+not success.
+
+Reservation-clear uncertainty requires an exact recovered capacity-state reread.
+The target reservation's proven absence is success for that boundary; the exact
+unchanged reservation may be cleared idempotently under the same recovery
+authority. A different reservation, uncertain recovery state, or unrelated
+capacity mutation is not absence and may not be cleaned up by this child.
+
+Lease release remains cleanup rather than certification acceptance. The release
+return or a locked durable reread proving the exact recovery owner/fence absent
+is required before terminal success. The exact unchanged live record may retry
+under existing liveness rules. Replacement, unreadable, or ambiguous lease
+state is commit-unknown. A release failure never rewrites the receipt or staged
+state and never permits inferred success.
+
+Exact same-byte/state replay at any preterminal boundary is idempotent and must
+produce the same binding, receipt, installed generation, journal event,
+reservation state, and staged revision. An invocation that begins after the
+full exact staged `CERTIFIED` proof already exists performs read-only terminal
+verification and returns that same internal proof without acquiring a `BUILD`
+lease or mutating state. A merely existing final directory, a different
+certified generation, or a `PROMOTED` target is not terminal replay authority.
+
+No failure or recovery path resets or deletes staging, abandons the target,
+removes the handoff, semantic-input copy, receipt, binding, journal evidence, or
+installed generation, compacts or rewrites the queue, or performs semantic
+staging cleanup. There is no inferred success from a directory, receipt,
+watermark, manifest, journal head, absent reservation, or absent lease alone.
+
+### Exact stop boundary
+
+To reach terminal success, the composition must durably assemble and
+cross-check one terminal proof. While the recovery grant is still live and
+before releasing it, the composition proves the first five items below. It then
+releases that exact grant and proves the final item by locked durable reread:
+
+- the staged record is exactly `CERTIFIED`, still binds the same repository,
+  target, structural request and manifest, records the exact verified receipt
+  digest, has no pointer revision or abandonment evidence, and uses the
+  receipt's certification epoch and fence;
+- `GenerationStore.verify_generation()` reopens one final target generation,
+  reproduces the exact payload inventory and manifest, validates the retained
+  coordination lock, receipt, `semantic_completeness="complete"`, queue
+  watermark, compatibility, source/policy/observation facts, and immutable
+  semantic certification binding;
+- the certification binding reopens at the target-derived path and equals the
+  exact certification-request digest, queue view, and sealed manifest;
+- the lifecycle journal contains the matching `CERTIFIED` event for that target
+  and receipt with pointer revision zero, without a promotion transition owned
+  by this child;
+- the exact target capacity reservation is durably absent and the visible
+  pointer remains at the entry request's revision/current-receipt boundary; and
+- after release, the exact recovery owner/fence is durably absent.
+
+Only that complete proof ends the child. It is internal and adds no public
+success receipt or status field. The target remains a certified but unpromoted
+generation behind the existing staged recovery barrier.
+
+This stop grants no content-release or DLP decision for retained labels or
+rationales, graph construction/merge/query projection, promotion, pointer
+movement, public semantic-sync command, provider/backend/model selection,
+credentials, networking, migrate, repair, GC, cleanup, service/watch,
+publication, production/runtime installation authority, performance/resource
+qualification, P5C, H3, P6+, parent-phase completion, successor readiness,
+governance acceptance, or merge authority.

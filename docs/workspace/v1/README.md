@@ -28,6 +28,15 @@ the [P5B2 semantic-result handoff acceptance receipt](receipts/p5b2-semantic-res
 It adds no public command or release route, and its acceptance promotes no
 successor.
 
+The next unnumbered P5B2 semantic-generation certification finalization child
+is contract-frozen only and remains `WAITING`. It starts from that accepted
+handoff's exact reopened staged `COMPLETE` manifest plus the equal queue
+sealed-input digest, reuses only the existing semantic-certification-view and
+`GenerationStore` certification authorities, and stops after the same target
+generation is durably verified as staged `CERTIFIED` and its exact recovery
+lease is released. It is not implemented or accepted, has no receipt, and
+promotes no successor.
+
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
 operator-authorized UUID/source binding, explicit active-source selection, and
@@ -175,8 +184,8 @@ The accepted unnumbered P5B2 child is internal-only. It adds no public argv,
 CLI request/result family, status field, schema file, or runtime receipt. Its
 implementation and governance evidence are limited to the exact boundary bound
 by the [P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md).
-The governance transition remains staged until its documentation-only commit is
-published and merged into `workspace/v1`; it promotes no later successor.
+PR #53 merged its separate governance closeout into `workspace/v1`; that
+acceptance promotes no later successor.
 
 The contract starts only with a complete one-to-one result set for the current
 semantic-required reconciliation. Each result must retain an exact accepted
@@ -218,6 +227,61 @@ sync, providers/backends, service/watch, repair, GC, migrate, publication, and
 every successor remain separate. The exact record, ordering, replay, cleanup,
 redaction, and verification contract is the
 [accepted handoff section of semantic-sync.md](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization).
+
+## Semantic-generation certification finalization
+
+The unnumbered P5B2 semantic-generation certification finalization child is a
+frozen internal contract, not an implementation or accepted completion. Its
+only entry is the exact accepted handoff terminal state: the canonical
+`SyncRequest` and target generation still bind one request-bound staged
+`COMPLETE` record; the reopened payload inventory hashes to that record's
+manifest; the external handoff and target-owned
+`graphify-out/semantic-inputs.json` are byte-identical and inventory-bound; and
+the current semantic-required reconciliation has an equal
+`sealed_input_manifest_sha256`. Current registry, active-source, pointer,
+operation, migration, policy, compatibility, and two-equal-source-observation evidence
+must still match that request. A staged `REQUESTED`, `PUBLISHING`, `CERTIFIED`,
+`PROMOTED`, foreign, mismatched, or ambiguous target is not mutation authority.
+
+The forward lifecycle may reacquire only the same request-bound `BUILD`
+recovery lane. It reconstructs the existing allocation and staged-completion
+wrapper without resetting, rewriting, rebuilding, or adopting different
+staging. The existing `SemanticQueueStore.certification_view()` must bind the
+exact target manifest and report `semantic_completeness="complete"`. The exact
+certification request uses that view's source, policy, observation, and
+watermark values; the selected compatibility digest; and exactly the existing
+`payload_manifest`, `coordination_lock_precreated`, and
+`stable_semantic_queue` validations.
+
+`GenerationStore.certify()` remains the sole certification authority. Under
+the existing registry-before-workspace and generation-lock ordering, it
+revalidates the queue view, installs or reopens the immutable target/request/
+view/manifest semantic certification binding, installs or reopens the existing
+generation receipt, verifies the installed generation and `CERTIFIED` journal
+event, clears the exact capacity reservation, and advances the same staged
+record from `COMPLETE` to `CERTIFIED`. No new durable format, public schema, or
+receipt family is introduced.
+
+Before an immutable certification binding exists, any queue, source, policy,
+pointer, epoch, request, manifest, inventory, target, or compatibility drift
+blocks new certification. Once an exact binding or generation receipt is
+durable, later state is never adopted into it: recovery may only reopen and
+finish those same immutable bytes through the existing recovery APIs. Exact
+same-byte/state replay is idempotent; different, missing, unsafe, unreadable,
+or ambiguous evidence is conflict or commit-unknown. Binding, receipt,
+staged-state, reservation-clear, and lease-release uncertainty is resolved only
+by exact durable reread, never inferred success or destructive cleanup.
+
+The terminal proof requires the same staged record at `CERTIFIED`, its exact
+receipt digest, unchanged payload manifest and request, the verified installed
+generation, matching immutable semantic certification binding and journal
+event, no remaining reservation for that target, and proven release of the
+exact recovery owner/fence. The child stops there. It grants no content release
+or DLP decision, graph/query projection, promotion, pointer movement, public
+semantic-sync command, provider/backend, credentials, networking, migrate,
+repair, GC, service/watch, publication, P5C, H3, P6+, parent completion,
+readiness, or acceptance authority. The normative detail is
+[the certification-finalization section of semantic-sync.md](semantic-sync.md#p5b2-semantic-generation-certification-finalization).
 
 ## P5B2c one-shot certified query
 
@@ -604,6 +668,7 @@ set.
 |---|---|---|
 | Host-agent semantic worker | P5B2 host-agent semantic-worker transport (`COMPLETE`) | [`semantic-sync.md`](semantic-sync.md) freezes the one long-lived `workspace semantic-worker --stdio` host-agent queue lifecycle with a verified staged-result binding before completion. Accepted receipt: [`P5B2 semantic worker`](receipts/p5b2-semantic-worker.md). |
 | Semantic-result handoff and sealed-input finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal boundary](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization) admits only exact accepted worker sessions or identical carried format-version-1 evidence from the verified current source generation, binds that optional source separately from the new target generation, installs one immutable target-generation/request-bound handoff, copies its exact bytes to target-generation-owned `graphify-out/semantic-inputs.json`, completes the staged payload manifest, and calls `bind_sealed_inputs()`. Accepted receipt: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md). It has no public command and stops before content release, certification, promotion, or pointer mutation. |
+| Semantic-generation certification finalization | Unnumbered P5B2 child (`WAITING`) | The [frozen internal contract](semantic-sync.md#p5b2-semantic-generation-certification-finalization) starts only from the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest, reacquires only the same request-bound `BUILD` recovery authority, and reuses the existing semantic certification view, immutable binding, generation receipt, journal, reservation, and staged-state transitions until the same target is durably verified as `CERTIFIED` and the lease is released. It is unimplemented, has no receipt, and grants no content-release, projection, promotion, pointer, public-command, or successor authority. |
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` and the accepted internal handoff are implemented. The handoff acceptance grants no public semantic-sync route. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and execution contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
@@ -681,7 +746,11 @@ or fork engine logic inside the package.
   assigns read-only worker-evidence parsing to that existing boundary,
   reconciliation and sealed-input mutation to `.semantic_queue`, generation
   staging and payload completion to `.generations`, and internal ordering to
-  `.sync`; it adds no public CLI ownership. `.composition` owns the
+  `.sync`; it adds no public CLI ownership. The frozen but
+  unimplemented certification-finalization successor would keep ordering in
+  `.sync` and reuse `.semantic_queue` certification-view/binding ownership plus
+  `.generations` receipt, journal, reservation, and staged-state ownership; it
+  adds no persistence or public CLI owner. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
   stores without duplicating their persistence behavior. `.cli` exposes the
   P5B2a registration command plus the bounded rebind/rotation identity-
@@ -708,7 +777,7 @@ or fork engine logic inside the package.
 - [State contracts](state-contract.md)
 - [P3 runtime](p3-runtime.md)
 - [P4 adapter and freshness](p4-adapter-freshness.md)
-- [Host-agent worker and semantic-result handoff contracts](semantic-sync.md)
+- [Host-agent worker, semantic-result handoff, and certification-finalization contracts](semantic-sync.md)
 - [Compatibility and artifacts](compatibility.md)
 - [Installation and rollback](installation.md)
 - [Migration boundary](migration.md)
