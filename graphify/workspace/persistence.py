@@ -15,7 +15,7 @@ import re
 import stat
 import subprocess
 import time
-from typing import Callable, Generic, Iterator, Protocol, Sequence, TypeVar
+from typing import Any, Callable, Generic, Iterator, Protocol, Sequence, TypeVar
 import uuid
 
 
@@ -197,6 +197,8 @@ class Syscalls(Protocol):
 class PosixSyscalls:
     """Injectable POSIX syscall surface used by durability tests."""
 
+    _rename_exclusive_binding_cache: tuple[Any, int] | None = None
+
     def write(self, descriptor: int, data: memoryview) -> int:
         return os.write(descriptor, data)
 
@@ -229,24 +231,39 @@ class PosixSyscalls:
         source_dir_fd: int,
         destination_dir_fd: int,
     ) -> None:
-        libc = ctypes.CDLL(None, use_errno=True)
-        system = platform.system()
-        if system == "Darwin":
-            rename = libc.renameatx_np
-            flags = 0x00000004  # RENAME_EXCL
-        elif system == "Linux":
-            rename = libc.renameat2
-            flags = 0x00000001  # RENAME_NOREPLACE
-        else:  # pragma: no cover - workspace mutation rejects other hosts
-            raise OSError(errno.ENOSYS, "exclusive descriptor-relative rename unavailable")
-        rename.argtypes = (
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        )
-        rename.restype = ctypes.c_int
+        binding = self._rename_exclusive_binding_cache
+        if binding is None:
+            system = platform.system()
+            if system == "Darwin":
+                symbol = "renameatx_np"
+                flags = 0x00000004  # RENAME_EXCL
+            elif system == "Linux":
+                symbol = "renameat2"
+                flags = 0x00000001  # RENAME_NOREPLACE
+            else:  # pragma: no cover - workspace mutation rejects other hosts
+                raise OSError(
+                    errno.ENOSYS,
+                    "exclusive descriptor-relative rename unavailable",
+                )
+            libc = ctypes.CDLL(None, use_errno=True)
+            try:
+                rename = getattr(libc, symbol)
+            except AttributeError as exc:
+                raise OSError(
+                    errno.ENOSYS,
+                    "exclusive descriptor-relative rename unavailable",
+                ) from exc
+            rename.argtypes = (
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            )
+            rename.restype = ctypes.c_int
+            binding = (rename, flags)
+            self._rename_exclusive_binding_cache = binding
+        rename, flags = binding
         if (
             rename(
                 source_dir_fd,
@@ -1740,6 +1757,78 @@ class DurableStateRoot:
             deadline_ns=deadline_ns,
         )
 
+    def _require_zeroized_cleanup_marker(
+        self,
+        directory_descriptor: int,
+        directory_path: Path,
+        marker_name: str,
+        *,
+        expected_inode: tuple[int, int] | None = None,
+    ) -> os.stat_result:
+        marker_path = directory_path / marker_name
+        try:
+            details = os.stat(
+                marker_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            self._require_regular_details(
+                details,
+                marker_path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            descriptor = os.open(
+                marker_name,
+                self._regular_open_flags(),
+                dir_fd=directory_descriptor,
+            )
+        except OSError as exc:
+            raise StatePathError(
+                f"state cleanup archive collision is unsafe: {marker_path}"
+            ) from exc
+        try:
+            opened = self._require_regular_descriptor(
+                descriptor,
+                marker_path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            identity = self._stat_identity(details)
+            if self._stat_identity(opened) != identity or (
+                expected_inode is not None
+                and (opened.st_dev, opened.st_ino) != expected_inode
+            ):
+                raise StatePathError(
+                    f"state cleanup archive collision changed: {marker_path}"
+                )
+            if opened.st_size != 0:
+                raise StatePathError(
+                    f"state cleanup archive collision bytes differ: {marker_path}"
+                )
+            while True:
+                try:
+                    observed = os.read(descriptor, 1)
+                    break
+                except InterruptedError:
+                    continue
+            current = os.stat(
+                marker_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if observed or self._stat_identity(current) != identity:
+                raise StatePathError(
+                    f"state cleanup archive collision changed: {marker_path}"
+                )
+            return current
+        except StatePathError:
+            raise
+        except OSError as exc:
+            raise StatePathError(
+                f"state cleanup archive collision is unsafe: {marker_path}"
+            ) from exc
+        finally:
+            os.close(descriptor)
+
     def _archive_consumed_marker(
         self,
         parent_descriptor: int,
@@ -1794,9 +1883,55 @@ class DurableStateRoot:
                 self.fault_hook(f"{label}:parent_durable")
             except FileExistsError:
                 if not visible:
-                    self.syscalls.fsync(parent_descriptor)
-                    self.fault_hook(f"{label}:parent_durable")
-                    return
+                    removed = False
+                    try:
+                        source = self._require_zeroized_cleanup_marker(
+                            parent_descriptor,
+                            parent_path,
+                            marker_name,
+                            expected_inode=(opened.st_dev, opened.st_ino),
+                        )
+                        archived = self._require_zeroized_cleanup_marker(
+                            archive_descriptor,
+                            archive_path,
+                            marker_name,
+                        )
+                        rebound_source = os.stat(
+                            marker_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                        rebound_archive = os.stat(
+                            marker_name,
+                            dir_fd=archive_descriptor,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            self._stat_identity(rebound_source)
+                            != self._stat_identity(source)
+                            or self._stat_identity(rebound_archive)
+                            != self._stat_identity(archived)
+                        ):
+                            raise StatePathError(
+                                "state cleanup archive collision changed before removal"
+                            )
+                        self.syscalls.unlink_at(marker_name, dir_fd=parent_descriptor)
+                        removed = True
+                        self.syscalls.fsync(archive_descriptor)
+                        self.syscalls.fsync(parent_descriptor)
+                        self.fault_hook(f"{label}:parent_durable")
+                        return
+                    except BaseException as exc:
+                        if removed:
+                            raise CommitUnknown(
+                                f"{label} cleanup archive collision was removed before "
+                                "durability acknowledgement"
+                            ) from exc
+                        if isinstance(exc, OSError):
+                            raise StatePathError(
+                                "state cleanup archive collision changed before removal"
+                            ) from exc
+                        raise
                 raise
             except BaseException as exc:
                 if visible:

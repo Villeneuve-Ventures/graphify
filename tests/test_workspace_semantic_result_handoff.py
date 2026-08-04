@@ -7,7 +7,9 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+import errno
 import hashlib
+import os
 from pathlib import Path
 import secrets
 import time
@@ -16,12 +18,18 @@ from typing import Any, Callable, Mapping, cast
 import pytest
 
 import graphify.workspace.semantic_handoff as semantic_handoff
+import graphify.workspace.persistence as workspace_persistence
 import graphify.workspace.semantic_worker as semantic_worker
 import graphify.workspace.sync as workspace_sync
 from graphify.workspace.composition import WorkspaceRuntime
 from graphify.workspace.contracts import PointerSet, payload_manifest_sha256
 from graphify.workspace.generations import CertificationRequest
-from graphify.workspace.persistence import InjectedFault, PosixSyscalls
+from graphify.workspace.persistence import (
+    CommitUnknown,
+    InjectedFault,
+    PosixSyscalls,
+    StatePathError,
+)
 from graphify.workspace.semantic_handoff import (
     CarriedSemanticResultEvidence,
     FreshWorkerSessionEvidence,
@@ -299,6 +307,67 @@ def _archived_result_markers(result_path: Path) -> tuple[Path, ...]:
     if not archive.exists():
         return ()
     return tuple(sorted(archive.iterdir()))
+
+
+def test_exclusive_rename_reports_a_missing_native_symbol_as_enosys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingLibc:
+        pass
+
+    monkeypatch.setattr(workspace_persistence.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        workspace_persistence.ctypes,
+        "CDLL",
+        lambda _name, *, use_errno: MissingLibc(),
+    )
+
+    with pytest.raises(OSError) as raised:
+        PosixSyscalls().rename_exclusive_at(
+            "source",
+            "destination",
+            source_dir_fd=-1,
+            destination_dir_fd=-1,
+        )
+
+    assert raised.value.errno == errno.ENOSYS
+
+
+def test_exclusive_rename_caches_the_verified_native_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Rename:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *_args: object) -> int:
+            return 0
+
+    rename = Rename()
+    loads = 0
+
+    class Libc:
+        renameat2 = rename
+
+    def load_libc(_name: object, *, use_errno: bool) -> Libc:
+        nonlocal loads
+        assert use_errno is True
+        loads += 1
+        return Libc()
+
+    monkeypatch.setattr(workspace_persistence.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(workspace_persistence.ctypes, "CDLL", load_libc)
+    syscalls = PosixSyscalls()
+
+    for _ in range(2):
+        syscalls.rename_exclusive_at(
+            "source",
+            "destination",
+            source_dir_fd=-1,
+            destination_dir_fd=-1,
+        )
+
+    assert loads == 1
 
 
 def _certify_and_promote_terminal(
@@ -652,6 +721,124 @@ def test_post_visibility_faults_are_adopted_only_as_the_exact_terminal(
     assert queue.reconciliation.sealed_input_manifest_sha256 == proof.payload_manifest_sha256
 
 
+def test_exact_sealed_input_uncertainty_preserves_the_injected_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, _request_value, _evidence = _fresh_ready_runtime(
+        tmp_path,
+        monkeypatch,
+    )
+    queue = runtime.semantic_queue
+    expected = queue.inspect(REPO_UUID)
+    build = _acquire_build(runtime)
+    cause = InjectedFault("sealed-input-commit")
+
+    def fail_commit(*_args: object, **_kwargs: object) -> object:
+        raise cause
+
+    monkeypatch.setattr(queue, "_commit_for_deadline", fail_commit)
+    try:
+        with pytest.raises(CommitUnknown) as raised:
+            queue.bind_sealed_inputs(
+                build,
+                sealed_input_manifest_sha256="9" * 64,
+                monotonic_ns=time.monotonic_ns(),
+                expected_snapshot=expected,
+                validate_current=lambda _operation, _snapshot: None,
+            )
+    finally:
+        runtime.leases.release(build)
+
+    assert raised.value.__cause__ is cause
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_generation_copy_install_never_overwrites_a_racing_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    matching: bool,
+) -> None:
+    harness, runtime, request, evidence = _fresh_ready_runtime(tmp_path, monkeypatch)
+    owner = runtime.semantic_handoffs
+    assert owner is not None
+
+    class RacingGenerationCopy(PosixSyscalls):
+        raced = False
+
+        def rename_exclusive_at(
+            self,
+            source: str,
+            destination: str,
+            *,
+            source_dir_fd: int,
+            destination_dir_fd: int,
+        ) -> None:
+            if (
+                not self.raced
+                and destination == "semantic-inputs.json"
+                and source.startswith(".semantic-inputs.json.tmp-")
+            ):
+                self.raced = True
+                source_descriptor = os.open(source, os.O_RDONLY, dir_fd=source_dir_fd)
+                try:
+                    chunks: list[bytes] = []
+                    while chunk := os.read(source_descriptor, 64 * 1024):
+                        chunks.append(chunk)
+                    installed = b"".join(chunks)
+                finally:
+                    os.close(source_descriptor)
+                if not matching:
+                    installed = b'{"racing":"conflict"}\n'
+                destination_descriptor = os.open(
+                    destination,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=destination_dir_fd,
+                )
+                try:
+                    os.fchmod(destination_descriptor, 0o600)
+                    view = memoryview(installed)
+                    while view:
+                        written = os.write(destination_descriptor, view)
+                        view = view[written:]
+                    os.fsync(destination_descriptor)
+                finally:
+                    os.close(destination_descriptor)
+            super().rename_exclusive_at(
+                source,
+                destination,
+                source_dir_fd=source_dir_fd,
+                destination_dir_fd=destination_dir_fd,
+            )
+
+    syscalls = RacingGenerationCopy()
+    owner.state.syscalls = syscalls
+    semantic_input = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "staging"
+        / request.generation_id
+        / SEMANTIC_INPUT_PATH
+    )
+
+    if matching:
+        workspace_sync._finalize_semantic_result_handoff(runtime, request, (evidence,))
+        handoff = parse_semantic_result_handoff(
+            _handoff_path(harness, runtime, request).read_bytes(),
+            max_bytes=request.expected_payload_bytes,
+        )
+        assert semantic_input.read_bytes() == handoff.canonical
+    else:
+        with pytest.raises(SemanticHandoffConflict, match="semantic input bytes conflict"):
+            workspace_sync._finalize_semantic_result_handoff(runtime, request, (evidence,))
+        assert semantic_input.read_bytes() == b'{"racing":"conflict"}\n'
+
+    assert syscalls.raced
+    assert not tuple(semantic_input.parent.glob(".semantic-inputs.json.tmp-*"))
+
+
 @pytest.mark.parametrize("evidence_mode", ["missing", "duplicate"])
 def test_first_handoff_rejects_a_non_bijective_result_set_before_staging(
     tmp_path: Path,
@@ -748,6 +935,45 @@ def test_shared_capacity_charges_handoff_plus_target_reservation_once(
 
     assert not _handoff_path(harness, runtime, limited).exists()
     assert runtime.generations.recover_staged_build(REPO_UUID) is None
+
+
+def test_capacity_scan_retries_a_transient_handoff_directory_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime, request, evidence = _fresh_ready_runtime(tmp_path, monkeypatch)
+    workspace_sync._finalize_semantic_result_handoff(runtime, request, (evidence,))
+    handoff_path = _handoff_path(harness, runtime, request)
+    handoff_relative = handoff_path.parent.relative_to(harness.state_root)
+    state = runtime.generations.state
+    existing_private_directory = state._existing_private_directory
+    missed = False
+
+    @contextmanager
+    def transient_missing(
+        relative: str | Path,
+        *,
+        allow_missing: bool = False,
+    ):
+        nonlocal missed
+        if not missed and Path(relative) == handoff_relative:
+            missed = True
+            yield None
+            return
+        with existing_private_directory(
+            relative,
+            allow_missing=allow_missing,
+        ) as descriptor:
+            yield descriptor
+
+    monkeypatch.setattr(state, "_existing_private_directory", transient_missing)
+
+    usage = runtime.generations._usage(())
+
+    assert missed
+    assert usage.handoff_bytes_by_generation[(REPO_UUID, request.generation_id)] == len(
+        handoff_path.read_bytes()
+    )
 
 
 def test_handoff_final_path_is_no_follow_and_failure_is_redacted(
@@ -1027,6 +1253,102 @@ def test_cleanup_replay_zeroizes_a_retained_marker_beside_a_foreign_result(
     ).read_bytes() == b""
 
 
+def _retained_cleanup_marker_with_archive_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    archived: bytes,
+) -> tuple[
+    RuntimeHarness,
+    WorkspaceRuntime,
+    Path,
+    Path,
+    bytes,
+    str,
+]:
+    fault = _ArmedFault("")
+    harness, runtime, request, evidence = _fresh_ready_runtime(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    begin_sha256 = hashlib.sha256(evidence.begin_request_bytes).hexdigest()
+    fault.target = f"semantic_result_cleanup:{begin_sha256}:unlinked"
+    fault.armed = True
+    workspace_sync._finalize_semantic_result_handoff(runtime, request, (evidence,))
+    result_path = _result_path(harness, evidence)
+    markers = tuple(result_path.parent.glob(".result.json.consumed-*"))
+    assert len(markers) == 1
+    marker = markers[0]
+    handoff = parse_semantic_result_handoff(
+        _handoff_path(harness, runtime, request).read_bytes(),
+        max_bytes=request.expected_payload_bytes,
+    )
+    binding = cast(Mapping[str, object], handoff.results[0]["result_binding"])
+    expected = semantic_worker.canonical_protocol_bytes(binding)
+    owner = runtime.semantic_handoffs
+    assert owner is not None
+    archive = owner.state.ensure_directory(
+        (result_path.parent / ".semantic-result-consumed").relative_to(harness.state_root)
+    )
+    collision = archive / marker.name
+    collision.write_bytes(archived)
+    collision.chmod(0o600)
+    return harness, runtime, result_path, marker, expected, begin_sha256
+
+
+def test_cleanup_collision_removes_only_an_exact_zeroized_source_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime, result_path, marker, expected, begin_sha256 = (
+        _retained_cleanup_marker_with_archive_collision(
+            tmp_path,
+            monkeypatch,
+            archived=b"",
+        )
+    )
+    owner = runtime.semantic_handoffs
+    assert owner is not None
+
+    consumed = owner.state.consume_matching_bytes_and_sync(
+        result_path.relative_to(harness.state_root),
+        expected,
+        label=f"semantic_result_cleanup:{begin_sha256}",
+    )
+
+    assert consumed is True
+    assert not marker.exists()
+    archived_marker = result_path.parent / ".semantic-result-consumed" / marker.name
+    assert archived_marker.read_bytes() == b""
+
+
+def test_cleanup_collision_rejects_a_conflicting_archive_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime, result_path, marker, expected, begin_sha256 = (
+        _retained_cleanup_marker_with_archive_collision(
+            tmp_path,
+            monkeypatch,
+            archived=b"FOREIGN-ARCHIVE",
+        )
+    )
+    owner = runtime.semantic_handoffs
+    assert owner is not None
+
+    with pytest.raises(StatePathError, match="archive collision"):
+        owner.state.consume_matching_bytes_and_sync(
+            result_path.relative_to(harness.state_root),
+            expected,
+            label=f"semantic_result_cleanup:{begin_sha256}",
+        )
+
+    assert marker.read_bytes() == b""
+    archived_marker = result_path.parent / ".semantic-result-consumed" / marker.name
+    assert archived_marker.read_bytes() == b"FOREIGN-ARCHIVE"
+
+
 def test_cleanup_preserves_a_marker_with_a_false_encoded_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1243,6 +1565,116 @@ def test_carried_result_is_byte_identical_evidence_from_current_generation(
     assert source_reopens >= 1
     assert staged.lifecycle_state == "COMPLETE"
     assert staged.payload_manifest_sha256 == proof.payload_manifest_sha256
+
+
+def test_carried_subset_can_use_a_smaller_target_bound_than_its_certified_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime = _runtime(tmp_path)
+    adapter = _adapter(harness)
+    _install_adapter(runtime, adapter)
+    readme = SemanticDesiredWork(
+        source_epoch=1,
+        policy_sha256=adapter.observation.policy_sha256,
+        operation="UPSERT",
+        path="README.md",
+        content_sha256=hashlib.sha256((harness.repo / "README.md").read_bytes()).hexdigest(),
+        desired_revision=1,
+    )
+    large = SemanticDesiredWork(
+        source_epoch=1,
+        policy_sha256=adapter.observation.policy_sha256,
+        operation="UPSERT",
+        path=".graphify/workspace.toml",
+        content_sha256=hashlib.sha256(
+            (harness.repo / ".graphify/workspace.toml").read_bytes()
+        ).hexdigest(),
+        desired_revision=1,
+    )
+    build = _acquire_build(runtime)
+    runtime.semantic_queue.reconcile(
+        build,
+        (readme, large),
+        source_epoch=1,
+        policy_sha256=adapter.observation.policy_sha256,
+        source_observations=(adapter.observation, adapter.observation),
+        desired_watermark=1,
+        semantic_required=True,
+        monotonic_ns=time.monotonic_ns(),
+    )
+    runtime.leases.release(build)
+    monkeypatch.chdir(harness.repo)
+
+    def source_payload(frame: Mapping[str, object]) -> Mapping[str, object]:
+        work = cast(Mapping[str, object], frame["work"])
+        fragment = _fragment(cast(str, work["path"]))
+        if work["path"] == large.path:
+            fragment["nodes"][0]["label"] = "X" * (12 * 1024)  # type: ignore[index]
+        return {"kind": "semantic_fragment", "fragment": fragment}
+
+    source_evidence = (
+        _drain_one_worker(runtime, payload=source_payload),
+        _drain_one_worker(runtime, payload=source_payload),
+    )
+    source_request = _request(
+        runtime,
+        generation_id="gen-semantic-large-source",
+        semantic_desired_watermark=1,
+        expected_payload_bytes=256 * 1024,
+    )
+    workspace_sync._finalize_semantic_result_handoff(
+        runtime,
+        source_request,
+        source_evidence,
+    )
+    _certify_and_promote_terminal(runtime, source_request)
+    source_semantic_input = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "generations"
+        / source_request.generation_id
+        / SEMANTIC_INPUT_PATH
+    )
+    target_limit = 12 * 1024
+    assert source_semantic_input.stat().st_size > target_limit
+
+    build = _acquire_build(runtime)
+    runtime.semantic_queue.reconcile(
+        build,
+        (readme,),
+        source_epoch=1,
+        policy_sha256=adapter.observation.policy_sha256,
+        source_observations=(adapter.observation, adapter.observation),
+        desired_watermark=2,
+        semantic_required=True,
+        monotonic_ns=time.monotonic_ns(),
+    )
+    runtime.leases.release(build)
+    target_request = _request(
+        runtime,
+        generation_id="gen-semantic-small-target",
+        semantic_desired_watermark=2,
+        expected_payload_bytes=target_limit,
+    )
+
+    proof = workspace_sync._finalize_semantic_result_handoff(
+        runtime,
+        target_request,
+        (CarriedSemanticResultEvidence(readme),),
+    )
+
+    target_semantic_input = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "staging"
+        / target_request.generation_id
+        / SEMANTIC_INPUT_PATH
+    )
+    assert target_semantic_input.stat().st_size <= target_limit
+    assert proof.carried_source_generation_id == source_request.generation_id
 
 
 def test_carried_source_receipt_is_revalidated_before_handoff_install(

@@ -2336,7 +2336,7 @@ class SemanticQueueStore:
                     candidate,
                     deadline_ns=deadline_ns,
                 )
-            except (CommitUnknown, InjectedFault):
+            except (CommitUnknown, InjectedFault) as exc:
                 observed, pending = uncertain()
                 if pending:
                     observed = recover(observed)
@@ -2346,7 +2346,9 @@ class SemanticQueueStore:
                 if observed == expected and retry == 0:
                     current = observed
                     continue
-                raise CommitUnknown("exact sealed-input commit outcome is uncertain")
+                raise CommitUnknown(
+                    "exact sealed-input commit outcome is uncertain"
+                ) from exc
             if committed != expected_post:
                 raise CommitUnknown("exact sealed-input commit returned unexpected state")
             return committed

@@ -1060,6 +1060,10 @@ class SemanticResultHandoffStore:
         entry = matches[0]
         if entry.get("file_type") != "regular_file" or entry.get("mode") != "0600":
             raise SemanticHandoffConflict("current semantic input metadata is invalid")
+        source_size = entry.get("size")
+        if type(source_size) is not int or cast(int, source_size) < 1:
+            raise SemanticHandoffConflict("current semantic input size is invalid")
+        source_size = cast(int, source_size)
         relative = (
             LeaseStore._directory(repo_uuid)
             / "generations"
@@ -1084,7 +1088,7 @@ class SemanticResultHandoffStore:
                     raw = self._read_semantic_input_descriptor(
                         payload_descriptor,
                         self.state.path(relative),
-                        maximum=structural_request.expected_payload_bytes,
+                        maximum=source_size,
                     )
                 finally:
                     os.close(payload_descriptor)
@@ -1101,7 +1105,7 @@ class SemanticResultHandoffStore:
             raise SemanticHandoffConflict("current payload manifest binding differs")
         source_handoff = parse_semantic_result_handoff(
             raw,
-            max_bytes=structural_request.expected_payload_bytes,
+            max_bytes=source_size,
         )
         if (
             source_handoff.repo_uuid != repo_uuid
@@ -1479,7 +1483,7 @@ class SemanticResultHandoffStore:
                         reopened = self._read_semantic_input_descriptor(
                             payload,
                             semantic_path,
-                            maximum=structural_request.expected_payload_bytes,
+                            maximum=len(source_handoff.canonical),
                         )
                     finally:
                         os.close(payload)
@@ -1916,7 +1920,7 @@ class SemanticResultHandoffStore:
                 self.state.syscalls.fsync(file_descriptor)
             finally:
                 os.close(file_descriptor)
-            self.state.syscalls.replace_at(
+            self.state.syscalls.rename_exclusive_at(
                 temporary,
                 path.name,
                 source_dir_fd=descriptor,
@@ -1986,6 +1990,17 @@ class SemanticResultHandoffStore:
                     for retry in range(2):
                         try:
                             self._install_generation_copy_descriptor(payload, handoff)
+                        except FileExistsError:
+                            observed = self._read_generation_copy_descriptor(payload, handoff)
+                            if observed == handoff.canonical:
+                                return cast(bytes, observed)
+                            if observed is not None:
+                                raise SemanticHandoffConflict(
+                                    "generation semantic input bytes conflict"
+                                )
+                            raise SemanticHandoffCommitUnknown(
+                                "generation semantic input installation is uncertain"
+                            )
                         except CommitUnknown, InjectedFault:
                             observed = self._read_generation_copy_descriptor(payload, handoff)
                             if observed == handoff.canonical:

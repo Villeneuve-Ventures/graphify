@@ -1574,7 +1574,12 @@ class GenerationStore:
             / generation_id
         )
         path = self.state.path(relative)
-        with self.state.existing_private_directory(relative) as descriptor:
+        with self.state._existing_private_directory(
+            relative,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                raise FileNotFoundError(path)
             before = os.fstat(descriptor)
             names = self.state._tree_entry_names_descriptor(descriptor, path)
             total = 0
