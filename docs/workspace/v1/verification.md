@@ -715,16 +715,16 @@ not authorize full semantic sync or any successor:
   retains a service/watch loop, consumes or cleans staged semantic output, or
   claims full semantic sync or governance acceptance.
 
-## P5B2 semantic-result handoff and sealed-input finalization contract gates
+## P5B2 semantic-result handoff and sealed-input finalization acceptance gates
 
-These are implementation gates for the separately staged unnumbered successor,
-not evidence that it is implemented or accepted. They leave every accepted
-semantic-worker gate and receipt unchanged:
+These gates freeze the implemented and accepted unnumbered child. The exact
+delivery and governance evidence is bound by the
+[P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md).
+They leave every accepted semantic-worker gate and receipt unchanged:
 
-- no public argv, CLI schema, status field/version, receipt, provider/backend
+- no public argv, CLI schema, status field/version, runtime receipt, provider/backend
   selector, or fallback is added. The only new contract is the internal
-  `graphify.workspace.semantic_result_handoff.internal` format version 1, and
-  its implementation remains separately authorized;
+  `graphify.workspace.semantic_result_handoff.internal` format version 1;
 - entry vectors accept a result only when one canonical begin request, complete
   canonical worker-result transcript, observed process exit 0, final and only
   schema-valid `completed` terminal, and reopened immutable result-binding
@@ -874,13 +874,13 @@ semantic-worker gate and receipt unchanged:
   sealed-input digest. No gate performs content release, semantic query/graph
   projection, certification, promotion, pointer mutation, migrate, repair, GC,
   service/watch, publication, production/runtime installation authority,
-  performance qualification, receipt creation, governance acceptance, phase
-  completion, or successor promotion.
+  performance qualification, runtime receipt creation, parent-phase
+  completion, or successor promotion. The separate governance receipt accepts
+  only this bounded internal child.
 
-Run the focused existing semantic-worker, semantic-queue, generation, sync, and
-sync-CLI regression suites before repository gates. A documentation-only
-contract freeze audits all relative links and anchors and does not refresh the
-generated Graphify graph.
+Run the focused semantic-result handoff suite before repository gates. The
+documentation-only acceptance closeout audits all relative links and anchors
+and does not refresh the generated Graphify graph.
 
 ## P5B2 public fenced pointer-repair CLI gates
 

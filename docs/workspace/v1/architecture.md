@@ -106,9 +106,11 @@ boundary bound by the
 [P5B2 semantic-worker receipt](receipts/p5b2-semantic-worker.md); full semantic
 sync and every successor remain outside it.
 
-The separately staged unnumbered P5B2 semantic-result handoff and sealed-input
-finalization child composes only existing internal authorities. It has no public
-command or schema. The trusted lifecycle composition admits a result only from
+The accepted unnumbered P5B2 semantic-result handoff and sealed-input
+finalization child composes only existing internal authorities. Its evidence is
+bound by the [P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md),
+and it has no public command or schema. The trusted lifecycle composition
+admits a result only from
 one exact exit-0 worker session ending in one schema-valid `completed` terminal,
 or from identical format-version-1 evidence in the verified current source
 generation for the same carried desired work. It snapshots the complete
@@ -282,11 +284,11 @@ the existing no-follow durable-state primitives. It binds one begin request,
 one exact semantic claim and desired work item, the accepted source and epoch
 authority, and the sanitized fragment or delete-tombstone bytes and digest. It
 is not a queue record, generation payload, certification binding, or public
-receipt. The accepted worker does not consume or clean it. The separately staged
-[handoff contract](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization)
+receipt. The accepted worker does not consume or clean it. The accepted
+[handoff boundary](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization)
 owns only the bounded successor behavior below.
 
-The proposed successor adds this private layout under the same external root:
+The accepted handoff adds this private layout under the same external root:
 
 ```text
 <external_state_root>/workspaces/<repo_uuid>/semantic-staging/
@@ -390,7 +392,7 @@ content drift. An unobserved completion or failure return is commit-unknown. So
 is a lost `completed` terminal, because completion clears the result association.
 Neither permits inferred success.
 
-The handoff successor first validates every worker session and result envelope,
+The accepted handoff first validates every worker session and result envelope,
 then takes registry before workspace lock and captures one exact current
 structural request, the existing sync request's new target generation, the
 distinct current certified source generation when carried evidence is used, and

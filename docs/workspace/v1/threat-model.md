@@ -41,12 +41,14 @@ host-agent semantic worker. Full semantic sync, every unlisted public workspace
 command, service, installation, route, publication, and live-cutover transitions
 remain absent.
 
-The separately staged unnumbered P5B2 semantic-result handoff and sealed-input
-finalization contract adds no public command or release route. If merged, it is
-eligible only to preserve already accepted worker evidence in one private
-immutable handoff, copy those exact bytes into request-bound generation staging,
-complete the existing payload manifest, and bind that digest to the exact queue
-reconciliation. It stops before certification or any content release.
+The accepted unnumbered P5B2 semantic-result handoff and sealed-input
+finalization child adds no public command or release route. It preserves already
+accepted worker evidence in one private immutable handoff, copies those exact
+bytes into request-bound generation staging, completes the existing payload
+manifest, and binds that digest to the exact queue reconciliation. Its evidence
+is bound by the
+[P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md),
+and it stops before certification or any content release.
 
 Enrollment creates the durable per-workspace fence floor. Losing all initialized
 workspace records is treated as corruption, never as permission to restart the
@@ -323,14 +325,14 @@ recovery, staging cleanup, sealed-input finalization, generation certification
 or promotion, pointer mutation, retained service/watch behavior, full semantic
 sync, or content-level DLP classification of admitted semantic prose.
 
-The separately staged handoff successor makes no claim of recovering a lost
+The accepted handoff child makes no claim of recovering a lost
 worker `completed` terminal, adopting legacy completion without a version-1
 handoff, automatically cleaning ambiguous staging, merging semantic entities
 into `graph.json`, releasing semantic prose, certifying or promoting a
 generation, moving a pointer, exposing a public full-semantic-sync command, or
 granting provider/backend, network, service/watch, repair, GC, migrate,
 publication, production/runtime installation authority, performance,
-governance-acceptance, or successor authority.
+parent-phase completion, or successor authority.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication
