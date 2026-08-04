@@ -103,10 +103,12 @@ jobs:
           python - <<'PY'
           import asyncio
           import hashlib
+          import json
           import os
           import re
 
           from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
+          from pr_agent.algo.language_handler import is_valid_file
 
           # PR-Agent at the pinned revision does not yet list these stable model
           # IDs in its reasoning-effort allowlist. LiteLLM 1.93 supports their
@@ -128,6 +130,96 @@ jobs:
           def _review_marker_sha(body):
               match = REVIEW_MARKER_RE.search(body or "")
               return match.group(1) if match else None
+
+          def _event_head_sha():
+              if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
+                  return None
+              event_path = os.environ.get("GITHUB_EVENT_PATH")
+              if not event_path:
+                  raise RuntimeError("PR-Agent event has no payload path")
+              try:
+                  with open(event_path, encoding="utf-8") as event_file:
+                      payload = json.load(event_file)
+                  head_sha = payload["pull_request"]["head"]["sha"]
+              except (KeyError, OSError, TypeError, ValueError) as exc:
+                  raise RuntimeError(
+                      "PR-Agent event has no readable pull-request head"
+                  ) from exc
+              if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+                  raise RuntimeError("PR-Agent event has no verified head SHA")
+              return head_sha
+
+          def _excluded_only_evidence(provider, classifier, expected_head_sha=None):
+              head_sha = getattr(
+                  getattr(provider, "last_commit_id", None), "sha", ""
+              )
+              provider_head_sha = getattr(
+                  getattr(getattr(provider, "pr", None), "head", None),
+                  "sha",
+                  "",
+              )
+              if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+                  raise RuntimeError("PR-Agent preflight has no verified head SHA")
+              if provider_head_sha != head_sha:
+                  raise RuntimeError("PR-Agent provider head SHA mismatch")
+              if expected_head_sha is not None and expected_head_sha != head_sha:
+                  raise RuntimeError("PR-Agent event head SHA mismatch")
+
+              files = list(provider.get_files())
+              if not files:
+                  raise RuntimeError("PR-Agent preflight found no changed files")
+              filenames = []
+              for file in files:
+                  filename = getattr(file, "filename", None)
+                  if not isinstance(filename, str) or not filename:
+                      raise RuntimeError(
+                          "PR-Agent preflight found an invalid changed-file name"
+                      )
+                  filenames.append(filename)
+              if len(set(filenames)) != len(filenames):
+                  raise RuntimeError(
+                      "PR-Agent preflight found duplicate changed-file names"
+                  )
+
+              filenames = tuple(sorted(filenames))
+              if any(classifier(filename) for filename in filenames):
+                  return None
+              return head_sha, filenames
+
+          def _record_excluded_only(verification, evidence, component):
+              previous = verification["excluded_only_evidence"]
+              if previous is not None and previous != evidence:
+                  raise RuntimeError("PR-Agent excluded-only evidence changed")
+              first_record = previous is None
+              verification["excluded_only_evidence"] = evidence
+              if component == "description":
+                  verification["description_completed"] = True
+              elif component == "review":
+                  verification["review_completed"] = True
+                  verification["review_mode"] = "excluded_only"
+              else:
+                  raise RuntimeError("PR-Agent excluded-only component is invalid")
+              return first_record
+
+          def _report_excluded_only(evidence):
+              head_sha, filenames = evidence
+              digest = hashlib.sha256(
+                  json.dumps(
+                      filenames,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                  ).encode("utf-8")
+              ).hexdigest()[:16]
+              message = (
+                  "PR-Agent verified no-op: all "
+                  f"{len(filenames)} changed file(s) are excluded by the pinned "
+                  f"classifier at head {head_sha} (file-set {digest})."
+              )
+              print(message)
+              summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+              if summary_path:
+                  with open(summary_path, "a", encoding="utf-8") as summary:
+                      summary.write(f"### PR-Agent\n\n{message}\n")
 
           def _set_sha_bound_incremental_commits(provider):
               commits = list(provider.pr_commits or provider.pr.get_commits())
@@ -218,11 +310,26 @@ jobs:
               "description_completed": False,
               "review_completed": False,
               "review_mode": None,
+              "excluded_only_evidence": None,
           }
 
           original_description = PRDescription.run
 
           async def run_verified_description(self):
+              excluded_only = _excluded_only_evidence(
+                  self.git_provider,
+                  is_valid_file,
+                  _event_head_sha(),
+              )
+              if excluded_only is not None:
+                  if _record_excluded_only(
+                      verification,
+                      excluded_only,
+                      "description",
+                  ):
+                      _report_excluded_only(excluded_only)
+                  return
+
               description_published = False
               original_publish = self.git_provider.publish_persistent_comment
 
@@ -258,6 +365,32 @@ jobs:
           original_review = PRReviewer.run
 
           async def run_verified_review(self):
+              excluded_only = _excluded_only_evidence(
+                  self.git_provider,
+                  is_valid_file,
+                  _event_head_sha(),
+              )
+              if excluded_only is not None:
+                  if (
+                      os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+                      and verification["description_completed"]
+                      and verification["excluded_only_evidence"] is None
+                  ):
+                      raise RuntimeError(
+                          "PR-Agent excluded-only evidence changed between tools"
+                      )
+                  if _record_excluded_only(
+                      verification,
+                      excluded_only,
+                      "review",
+                  ):
+                      _report_excluded_only(excluded_only)
+                  return
+              if verification["excluded_only_evidence"] is not None:
+                  raise RuntimeError(
+                      "PR-Agent excluded-only evidence changed between tools"
+                  )
+
               requested_incremental = bool(self.args and self.args[0] == "-i")
               effective_incremental = bool(self.incremental.is_incremental)
               persistent_review_published = False
@@ -363,6 +496,7 @@ jobs:
           if os.environ.get("GITHUB_EVENT_NAME") == "issue_comment":
               if verification["review_mode"] not in {
                   "baseline_full",
+                  "excluded_only",
                   "incremental",
               }:
                   raise RuntimeError("/prreview did not complete a verified review")

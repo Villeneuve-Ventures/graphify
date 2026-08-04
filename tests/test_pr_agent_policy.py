@@ -1,7 +1,10 @@
 import ast
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import tomllib
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,8 +25,11 @@ def _embedded_python() -> str:
 def _embedded_policy_namespace() -> dict:
     tree = ast.parse(_embedded_python())
     helper_names = {
+        "_excluded_only_evidence",
+        "_event_head_sha",
         "_marked_publication",
         "_publication_visible",
+        "_record_excluded_only",
         "_review_marker_sha",
         "_set_sha_bound_incremental_commits",
         "_workflow_comment",
@@ -33,7 +39,10 @@ def _embedded_policy_namespace() -> dict:
         for node in tree.body
         if (
             isinstance(node, ast.Import)
-            and any(alias.name in {"hashlib", "re"} for alias in node.names)
+            and any(
+                alias.name in {"hashlib", "json", "os", "re"}
+                for alias in node.names
+            )
         )
         or (
             isinstance(node, ast.Assign)
@@ -89,6 +98,7 @@ def test_runtime_and_review_policy_follow_target_python_support() -> None:
     assert (
         "git+https://github.com/the-pr-agent/pr-agent.git@570f67ed5fc8db5be74c18df070bc20079b64b0d"
     ) in workflow
+    assert "from pr_agent.algo.language_handler import is_valid_file" in workflow
     assert "qodo-ai/pr-agent" not in workflow
     assert "from pr_agent.servers.github_action_runner import _run_action_and_drain" in workflow
     assert "asyncio.run(_run_action_and_drain())" in workflow
@@ -208,6 +218,119 @@ def test_incremental_without_a_verified_baseline_falls_back_to_full() -> None:
     set_incremental(provider)
 
     assert provider.incremental.is_incremental is False
+
+
+def _reviewability_provider(head_sha: str, *filenames: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        last_commit_id=SimpleNamespace(sha=head_sha),
+        pr=SimpleNamespace(head=SimpleNamespace(sha=head_sha)),
+        get_files=lambda: [SimpleNamespace(filename=name) for name in filenames],
+    )
+
+
+def test_excluded_only_diff_is_bound_to_the_exact_nonempty_head() -> None:
+    excluded_only_evidence = _embedded_policy_namespace()[
+        "_excluded_only_evidence"
+    ]
+    head_sha = "1" * 40
+    provider = _reviewability_provider(head_sha, "uv.lock")
+
+    evidence = excluded_only_evidence(
+        provider,
+        lambda filename: filename != "uv.lock",
+        head_sha,
+    )
+
+    assert evidence == (head_sha, ("uv.lock",))
+
+
+def test_pull_request_event_head_is_read_from_the_trusted_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    event_head_sha = _embedded_policy_namespace()["_event_head_sha"]
+    head_sha = "1" * 40
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps({"pull_request": {"head": {"sha": head_sha}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+
+    assert event_head_sha() == head_sha
+
+    event_path.write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="no readable pull-request head"):
+        event_head_sha()
+
+
+def test_mixed_diff_still_requires_the_normal_pr_agent_path() -> None:
+    excluded_only_evidence = _embedded_policy_namespace()[
+        "_excluded_only_evidence"
+    ]
+    head_sha = "1" * 40
+    provider = _reviewability_provider(
+        head_sha,
+        "uv.lock",
+        "graphify/workspace/sync.py",
+    )
+
+    evidence = excluded_only_evidence(
+        provider,
+        lambda filename: filename.endswith(".py"),
+        head_sha,
+    )
+
+    assert evidence is None
+
+
+def test_excluded_only_diff_fails_closed_on_missing_or_mismatched_evidence() -> None:
+    excluded_only_evidence = _embedded_policy_namespace()[
+        "_excluded_only_evidence"
+    ]
+    head_sha = "1" * 40
+
+    with pytest.raises(RuntimeError, match="no changed files"):
+        excluded_only_evidence(
+            _reviewability_provider(head_sha),
+            lambda _filename: False,
+            head_sha,
+        )
+
+    with pytest.raises(RuntimeError, match="head SHA mismatch"):
+        excluded_only_evidence(
+            _reviewability_provider(head_sha, "uv.lock"),
+            lambda _filename: False,
+            "2" * 40,
+        )
+
+
+def test_excluded_only_completion_requires_identical_tool_evidence() -> None:
+    record_excluded_only = _embedded_policy_namespace()["_record_excluded_only"]
+    evidence = ("1" * 40, ("uv.lock",))
+    verification = {
+        "description_completed": False,
+        "review_completed": False,
+        "review_mode": None,
+        "excluded_only_evidence": None,
+    }
+
+    assert record_excluded_only(verification, evidence, "description") is True
+    assert record_excluded_only(verification, evidence, "review") is False
+    assert verification == {
+        "description_completed": True,
+        "review_completed": True,
+        "review_mode": "excluded_only",
+        "excluded_only_evidence": evidence,
+    }
+
+    with pytest.raises(RuntimeError, match="evidence changed"):
+        record_excluded_only(
+            verification,
+            ("2" * 40, ("uv.lock",)),
+            "review",
+        )
 
 
 def test_publication_requires_a_workflow_owned_marker() -> None:
