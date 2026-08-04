@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-from typing import Mapping, cast
+from typing import TYPE_CHECKING, Mapping, cast
 
 from graphify.workspace.adapters import AdapterIntent, CompatibilityTuple, select_adapter
 from graphify.workspace.contracts import (
@@ -32,6 +32,9 @@ from graphify.workspace.persistence import (
 from graphify.workspace.pointers import PointerStore
 from graphify.workspace.registry import RegistryStore
 from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueueStore
+
+if TYPE_CHECKING:
+    from graphify.workspace.semantic_handoff import SemanticResultHandoffStore
 
 
 RUNTIME_AUTHORITY_CONTRACT = "graphify.workspace.runtime_authority.internal"
@@ -217,10 +220,13 @@ class WorkspaceRuntime:
     pointers: PointerStore
     freshness: FreshnessAuthority
     gc: GcStore
+    semantic_handoffs: SemanticResultHandoffStore | None = None
 
 
 def compose_workspace_runtime(inputs: WorkspaceRuntimeInputs) -> WorkspaceRuntime:
     """Validate authorities, then wire the existing stores without state access."""
+
+    from graphify.workspace.semantic_handoff import SemanticResultHandoffStore
 
     compatibility = CompatibilityTuple.from_manifest(inputs.compatibility_manifest)
     select_adapter(compatibility, intent=AdapterIntent.EXECUTE).require_adapter()
@@ -246,6 +252,13 @@ def compose_workspace_runtime(inputs: WorkspaceRuntimeInputs) -> WorkspaceRuntim
         journal,
         compatibility_manifest=inputs.compatibility_manifest,
         semantic_queue=semantic_queue,
+        **shared,
+    )
+    semantic_handoffs = SemanticResultHandoffStore(
+        inputs.state_root,
+        leases,
+        generations,
+        semantic_queue,
         **shared,
     )
     pointers = PointerStore(
@@ -277,6 +290,7 @@ def compose_workspace_runtime(inputs: WorkspaceRuntimeInputs) -> WorkspaceRuntim
         pointers=pointers,
         freshness=freshness,
         gc=gc,
+        semantic_handoffs=semantic_handoffs,
     )
 
 

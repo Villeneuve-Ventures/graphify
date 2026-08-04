@@ -12,7 +12,7 @@ import secrets
 from threading import Event, Thread
 import time
 from types import TracebackType
-from typing import Any, Mapping, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.composition import WorkspaceRuntime
@@ -35,9 +35,16 @@ from graphify.workspace.generations import (
     StructuralBuildRequest,
 )
 from graphify.workspace.identity import SourceIdentity
-from graphify.workspace.leases import LeaseGrant
+from graphify.workspace.leases import LeaseGrant, LeaseOperation
 from graphify.workspace.persistence import CommitUnknown, StateRecoveryRequired
 from graphify.workspace.pointers import PointerCAS, PointerRecoveryRequired
+
+if TYPE_CHECKING:
+    from graphify.workspace.semantic_handoff import (
+        SemanticResultEvidence,
+        SemanticResultFinalization,
+    )
+    from graphify.workspace.semantic_queue import SemanticQueueSnapshot
 
 
 SYNC_REQUEST_CONTRACT = "graphify.workspace.sync_request"
@@ -625,6 +632,218 @@ def _build_structural_with_heartbeat(
         monotonic_ns=time.monotonic_ns(),
         ttl_ns=_SYNC_LEASE_TTL_NS,
     )
+
+
+def _finalize_semantic_result_handoff(
+    runtime: WorkspaceRuntime,
+    request: SyncRequest,
+    evidence: Sequence[SemanticResultEvidence],
+) -> SemanticResultFinalization:
+    """Stop at one reopened COMPLETE manifest and equal sealed queue binding."""
+
+    from graphify.workspace.semantic_handoff import (
+        SEMANTIC_INPUT_PATH,
+        SemanticHandoffConflict,
+        SemanticResultFinalization,
+    )
+
+    request = SyncRequest.from_mapping(request.to_dict())
+    owner = runtime.semantic_handoffs
+    if owner is None:
+        raise SemanticHandoffConflict("semantic handoff owner is not composed")
+
+    source, captured_observations = _observe_structural_source(runtime, request.repo_uuid)
+    structural_request = _structural_request(runtime, request, captured_observations)
+    try:
+        pointer_document = runtime.pointers.load(request.repo_uuid, allow_missing=True)
+        current_pointer = (
+            None if pointer_document is None else pointer_document.to_dict()
+        )
+    except Exception as exc:
+        raise SemanticHandoffConflict(
+            "current pointer authority cannot be reopened"
+        ) from exc
+    capture = owner.capture_and_install(
+        request,
+        structural_request,
+        tuple(evidence),
+        current_pointer=current_pointer,
+        source_observations=captured_observations,
+    )
+    staged = runtime.generations.request_staged_build(
+        request.repo_uuid,
+        request.generation_id,
+        structural_request,
+        source_observations=captured_observations,
+    )
+    if staged.lifecycle_state not in {"REQUESTED", "PUBLISHING", "COMPLETE"}:
+        raise SemanticHandoffConflict("semantic handoff staged lifecycle is not recoverable")
+
+    exact_recovery = capture.staged_state is not None and (
+        capture.staged_state.repo_uuid == request.repo_uuid
+        and capture.staged_state.generation_id == request.generation_id
+        and capture.staged_state.request.sha256 == structural_request.sha256
+    )
+    acquired_at = datetime.now(timezone.utc)
+    acquired_ns = time.monotonic_ns()
+    attempt_sha256 = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+    if exact_recovery:
+        attempt = runtime.generations.acquire_staged_recovery(
+            request.repo_uuid,
+            request.generation_id,
+            structural_request,
+            attempt_sha256=attempt_sha256,
+            acquired_at=acquired_at,
+            monotonic_ns=acquired_ns,
+            ttl_ns=_SYNC_LEASE_TTL_NS,
+        )
+    else:
+        attempt = runtime.generations.acquire_staged_operation(
+            request.repo_uuid,
+            request.generation_id,
+            structural_request,
+            attempt_sha256=attempt_sha256,
+            operation="BUILD",
+            acquired_at=acquired_at,
+            monotonic_ns=acquired_ns,
+            ttl_ns=_SYNC_LEASE_TTL_NS,
+        )
+
+    primary: tuple[BaseException, TracebackType | None] | None = None
+    result: SemanticResultFinalization | None = None
+    try:
+        allocation = runtime.generations.allocate(
+            attempt.grant,
+            expected_payload_bytes=request.expected_payload_bytes,
+            capacity_policy=request.capacity_policy,
+            generation_id=request.generation_id,
+            occurred_at=acquired_at,
+            monotonic_ns=time.monotonic_ns(),
+        )
+        preparation = runtime.generations.prepare_staged_build(
+            attempt,
+            allocation,
+            monotonic_ns=time.monotonic_ns(),
+        )
+        structural_entries: tuple[dict[str, str | int], ...] | None = None
+        if preparation.state.lifecycle_state != "COMPLETE":
+            _build_structural_with_heartbeat(
+                runtime,
+                attempt.grant,
+                source.root,
+                preparation.staging_path,
+            )
+            structural_entries = runtime.generations.inspect_staged_payload(allocation)
+            if any(entry["path"] == SEMANTIC_INPUT_PATH for entry in structural_entries):
+                raise SemanticHandoffConflict(
+                    "structural output already contains semantic input authority"
+                )
+        owner.install_generation_copy(
+            capture.handoff,
+            preparation,
+            monotonic_ns=time.monotonic_ns(),
+        )
+        copied_entries = runtime.generations.inspect_staged_payload(allocation)
+        semantic_entries = [
+            entry for entry in copied_entries if entry["path"] == SEMANTIC_INPUT_PATH
+        ]
+        if len(semantic_entries) != 1:
+            raise SemanticHandoffConflict("staging lacks one exact semantic input")
+        semantic_entry = semantic_entries[0]
+        if (
+            semantic_entry["file_type"] != "regular_file"
+            or semantic_entry["mode"] != "0600"
+            or semantic_entry["size"] != len(capture.handoff.canonical)
+            or semantic_entry["sha256"] != capture.handoff.sha256
+        ):
+            raise SemanticHandoffConflict("staged semantic input inventory differs")
+        if structural_entries is not None:
+            expected_entries = tuple(
+                sorted(
+                    (*structural_entries, semantic_entry),
+                    key=lambda entry: str(entry["path"]),
+                )
+            )
+            if canonical_json_bytes(list(copied_entries)) != canonical_json_bytes(
+                list(expected_entries)
+            ):
+                raise SemanticHandoffConflict(
+                    "semantic copy changed structural staged output"
+                )
+
+        confirmed_source, completion_observations = _observe_structural_source(
+            runtime,
+            request.repo_uuid,
+        )
+        if confirmed_source != source or completion_observations != captured_observations:
+            raise SemanticHandoffConflict("trusted source changed before staged completion")
+        completion = runtime.generations.complete_staged_build(
+            preparation,
+            source_observations=completion_observations,
+            monotonic_ns=time.monotonic_ns(),
+        )
+        inventory = runtime.generations.inspect_staged_payload(completion.allocation)
+        if canonical_json_bytes(list(inventory)) != canonical_json_bytes(
+            list(completion.entries)
+        ):
+            raise SemanticHandoffConflict("completed staged inventory changed after commit")
+        manifest_sha256 = payload_manifest_sha256("graphify-out", inventory)
+        if manifest_sha256 != completion.manifest_sha256:
+            raise SemanticHandoffConflict("completed staged manifest differs from inventory")
+
+        bind_deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
+
+        def validate_bind(
+            operation: LeaseOperation,
+            queue: SemanticQueueSnapshot,
+        ) -> None:
+            owner.validate_terminal_locked(
+                operation,
+                queue,
+                request=request,
+                capture=capture,
+                completion=completion,
+                source_observations=completion_observations,
+                manifest_sha256=manifest_sha256,
+                deadline_ns=bind_deadline_ns,
+            )
+
+        runtime.semantic_queue.bind_sealed_inputs(
+            attempt.grant,
+            sealed_input_manifest_sha256=manifest_sha256,
+            monotonic_ns=time.monotonic_ns(),
+            expected_snapshot=capture.pre_bind_queue,
+            validate_current=validate_bind,
+            deadline_ns=bind_deadline_ns,
+        )
+        terminal_deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
+        reopened_staged, reopened_queue = owner.reopen_terminal(
+            attempt.grant,
+            request=request,
+            capture=capture,
+            completion=completion,
+            source_observations=completion_observations,
+            manifest_sha256=manifest_sha256,
+            monotonic_ns=time.monotonic_ns(),
+            deadline_ns=terminal_deadline_ns,
+        )
+        result = SemanticResultFinalization(
+            repo_uuid=request.repo_uuid,
+            target_generation_id=request.generation_id,
+            carried_source_generation_id=capture.handoff.carried_source_generation_id,
+            handoff_sha256=capture.handoff.sha256,
+            payload_manifest_sha256=manifest_sha256,
+            staged_revision=reopened_staged.revision,
+            queue_revision=reopened_queue.revision,
+            queue_sha256=reopened_queue.sha256,
+        )
+    except BaseException as exc:
+        primary = (exc, exc.__traceback__)
+    _release_grant(runtime, attempt.grant, primary)
+    if result is None:  # pragma: no cover - guarded by primary exception replay
+        raise SemanticHandoffConflict("semantic result finalization returned no proof")
+    owner.cleanup_consumed_fresh_results(capture.handoff)
+    return result
 
 
 def _build_and_certify(

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager, ExitStack
 from contextvars import ContextVar
+import ctypes
 from dataclasses import dataclass
 import errno
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import platform
@@ -13,7 +15,7 @@ import re
 import stat
 import subprocess
 import time
-from typing import Callable, Generic, Iterator, Protocol, Sequence, TypeVar
+from typing import Any, Callable, Generic, Iterator, Protocol, Sequence, TypeVar
 import uuid
 
 
@@ -32,6 +34,9 @@ _ATOMIC_TEMP_RE = re.compile(
 _PRIVATE_DIRECTORY_MODES = frozenset({0o700})
 _PRIVATE_FILE_MODES = frozenset({0o600})
 _PRIVATE_TREE_DEADLINE_DETAIL = "private tree operation exceeded its deadline"
+_CLEANUP_MARKER_MAX_ENTRIES = 64
+_CLEANUP_MARKER_IDENTITY_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]+$", re.ASCII)
+_CLEANUP_MARKER_ARCHIVE = ".semantic-result-consumed"
 
 
 class WorkspaceRuntimeError(RuntimeError):
@@ -165,6 +170,17 @@ class Syscalls(Protocol):
         destination_dir_fd: int,
     ) -> None: ...
 
+    def rename_exclusive_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None: ...
+
+    def truncate(self, descriptor: int, length: int) -> None: ...
+
     def unlink(self, path: Path) -> None: ...
 
     def unlink_at(self, path: str, *, dir_fd: int) -> None: ...
@@ -180,6 +196,8 @@ class Syscalls(Protocol):
 
 class PosixSyscalls:
     """Injectable POSIX syscall surface used by durability tests."""
+
+    _rename_exclusive_binding_cache: tuple[Any, int] | None = None
 
     def write(self, descriptor: int, data: memoryview) -> int:
         return os.write(descriptor, data)
@@ -204,6 +222,63 @@ class PosixSyscalls:
             src_dir_fd=source_dir_fd,
             dst_dir_fd=destination_dir_fd,
         )
+
+    def rename_exclusive_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        binding = self._rename_exclusive_binding_cache
+        if binding is None:
+            system = platform.system()
+            if system == "Darwin":
+                symbol = "renameatx_np"
+                flags = 0x00000004  # RENAME_EXCL
+            elif system == "Linux":
+                symbol = "renameat2"
+                flags = 0x00000001  # RENAME_NOREPLACE
+            else:  # pragma: no cover - workspace mutation rejects other hosts
+                raise OSError(
+                    errno.ENOSYS,
+                    "exclusive descriptor-relative rename unavailable",
+                )
+            libc = ctypes.CDLL(None, use_errno=True)
+            try:
+                rename = getattr(libc, symbol)
+            except AttributeError as exc:
+                raise OSError(
+                    errno.ENOSYS,
+                    "exclusive descriptor-relative rename unavailable",
+                ) from exc
+            rename.argtypes = (
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            )
+            rename.restype = ctypes.c_int
+            binding = (rename, flags)
+            self._rename_exclusive_binding_cache = binding
+        rename, flags = binding
+        if (
+            rename(
+                source_dir_fd,
+                os.fsencode(source),
+                destination_dir_fd,
+                os.fsencode(destination),
+                flags,
+            )
+            != 0
+        ):
+            error_number = ctypes.get_errno()
+            raise OSError(error_number, os.strerror(error_number), destination)
+
+    def truncate(self, descriptor: int, length: int) -> None:
+        os.ftruncate(descriptor, length)
 
     def unlink(self, path: Path) -> None:
         os.unlink(path)
@@ -471,6 +546,15 @@ class DurableStateRoot:
     def _regular_open_flags() -> int:
         return (
             os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+
+    @staticmethod
+    def _regular_update_flags() -> int:
+        return (
+            os.O_RDWR
             | getattr(os, "O_CLOEXEC", 0)
             | getattr(os, "O_NOFOLLOW", 0)
             | getattr(os, "O_NONBLOCK", 0)
@@ -916,7 +1000,10 @@ class DurableStateRoot:
         path: Path,
         *,
         deadline_ns: int | None = None,
+        maximum_entries: int | None = None,
     ) -> list[str]:
+        if maximum_entries is not None and maximum_entries < 0:
+            raise ValueError("maximum_entries must be nonnegative")
         require_before_deadline(
             deadline_ns,
             _PRIVATE_TREE_DEADLINE_DETAIL,
@@ -929,6 +1016,10 @@ class DurableStateRoot:
                         deadline_ns,
                         _PRIVATE_TREE_DEADLINE_DETAIL,
                     )
+                    if maximum_entries is not None and len(names) >= maximum_entries:
+                        raise StatePathError(
+                            f"state tree exceeds maximum entries: {path}"
+                        )
                     names.append(entry.name)
         except OSError as exc:
             raise StatePathError(
@@ -1665,6 +1756,450 @@ class DurableStateRoot:
             label=label,
             deadline_ns=deadline_ns,
         )
+
+    def _require_zeroized_cleanup_marker(
+        self,
+        directory_descriptor: int,
+        directory_path: Path,
+        marker_name: str,
+        *,
+        expected_inode: tuple[int, int] | None = None,
+    ) -> os.stat_result:
+        marker_path = directory_path / marker_name
+        try:
+            details = os.stat(
+                marker_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            self._require_regular_details(
+                details,
+                marker_path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            descriptor = os.open(
+                marker_name,
+                self._regular_open_flags(),
+                dir_fd=directory_descriptor,
+            )
+        except OSError as exc:
+            raise StatePathError(
+                f"state cleanup archive collision is unsafe: {marker_path}"
+            ) from exc
+        try:
+            opened = self._require_regular_descriptor(
+                descriptor,
+                marker_path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            identity = self._stat_identity(details)
+            if self._stat_identity(opened) != identity or (
+                expected_inode is not None
+                and (opened.st_dev, opened.st_ino) != expected_inode
+            ):
+                raise StatePathError(
+                    f"state cleanup archive collision changed: {marker_path}"
+                )
+            if opened.st_size != 0:
+                raise StatePathError(
+                    f"state cleanup archive collision bytes differ: {marker_path}"
+                )
+            while True:
+                try:
+                    observed = os.read(descriptor, 1)
+                    break
+                except InterruptedError:
+                    continue
+            current = os.stat(
+                marker_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if observed or self._stat_identity(current) != identity:
+                raise StatePathError(
+                    f"state cleanup archive collision changed: {marker_path}"
+                )
+            return current
+        except StatePathError:
+            raise
+        except OSError as exc:
+            raise StatePathError(
+                f"state cleanup archive collision is unsafe: {marker_path}"
+            ) from exc
+        finally:
+            os.close(descriptor)
+
+    def _archive_consumed_marker(
+        self,
+        parent_descriptor: int,
+        parent_path: Path,
+        marker_name: str,
+        opened: os.stat_result,
+        *,
+        label: str,
+    ) -> None:
+        archive_relative = (
+            parent_path.relative_to(self.root) / _CLEANUP_MARKER_ARCHIVE
+        )
+        archive_path = self.ensure_directory(archive_relative)
+        with self.existing_private_directory(archive_relative) as archive_descriptor:
+            visible = False
+            try:
+                self.syscalls.rename_exclusive_at(
+                    marker_name,
+                    marker_name,
+                    source_dir_fd=parent_descriptor,
+                    destination_dir_fd=archive_descriptor,
+                )
+                visible = True
+                try:
+                    archived = os.stat(
+                        marker_name,
+                        dir_fd=archive_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state cleanup archive cannot be rebound safely: "
+                        f"{archive_path / marker_name}"
+                    ) from exc
+                self._require_regular_details(
+                    archived,
+                    archive_path / marker_name,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                if (archived.st_dev, archived.st_ino) != (
+                    opened.st_dev,
+                    opened.st_ino,
+                ):
+                    self.syscalls.fsync(archive_descriptor)
+                    self.syscalls.fsync(parent_descriptor)
+                    raise StatePathError(
+                        f"state cleanup marker changed while archiving: "
+                        f"{parent_path / marker_name}"
+                    )
+                self.syscalls.fsync(archive_descriptor)
+                self.syscalls.fsync(parent_descriptor)
+                self.fault_hook(f"{label}:parent_durable")
+            except FileExistsError:
+                if not visible:
+                    removed = False
+                    try:
+                        source = self._require_zeroized_cleanup_marker(
+                            parent_descriptor,
+                            parent_path,
+                            marker_name,
+                            expected_inode=(opened.st_dev, opened.st_ino),
+                        )
+                        archived = self._require_zeroized_cleanup_marker(
+                            archive_descriptor,
+                            archive_path,
+                            marker_name,
+                        )
+                        rebound_source = os.stat(
+                            marker_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                        rebound_archive = os.stat(
+                            marker_name,
+                            dir_fd=archive_descriptor,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            self._stat_identity(rebound_source)
+                            != self._stat_identity(source)
+                            or self._stat_identity(rebound_archive)
+                            != self._stat_identity(archived)
+                        ):
+                            raise StatePathError(
+                                "state cleanup archive collision changed before removal"
+                            )
+                        self.syscalls.unlink_at(marker_name, dir_fd=parent_descriptor)
+                        removed = True
+                        self.syscalls.fsync(archive_descriptor)
+                        self.syscalls.fsync(parent_descriptor)
+                        self.fault_hook(f"{label}:parent_durable")
+                        return
+                    except BaseException as exc:
+                        if removed:
+                            raise CommitUnknown(
+                                f"{label} cleanup archive collision was removed before "
+                                "durability acknowledgement"
+                            ) from exc
+                        if isinstance(exc, OSError):
+                            raise StatePathError(
+                                "state cleanup archive collision changed before removal"
+                            ) from exc
+                        raise
+                raise
+            except BaseException as exc:
+                if visible:
+                    raise CommitUnknown(
+                        f"{label} cleanup archive became visible before durability "
+                        "acknowledgement"
+                    ) from exc
+                raise
+
+    def _zeroize_and_archive_marker(
+        self,
+        descriptor: int,
+        parent_descriptor: int,
+        parent_path: Path,
+        marker_name: str,
+        opened: os.stat_result,
+        *,
+        label: str,
+    ) -> None:
+        self.syscalls.truncate(descriptor, 0)
+        self.syscalls.fsync(descriptor)
+        self.fault_hook(f"{label}:zeroized")
+        self._archive_consumed_marker(
+            parent_descriptor,
+            parent_path,
+            marker_name,
+            opened,
+            label=label,
+        )
+
+    def _consume_retained_markers(
+        self,
+        parent_descriptor: int,
+        parent_path: Path,
+        marker_prefix: str,
+        expected: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None,
+    ) -> bool:
+        consumed = False
+        names = self._tree_entry_names_descriptor(
+            parent_descriptor,
+            parent_path,
+            deadline_ns=deadline_ns,
+            maximum_entries=_CLEANUP_MARKER_MAX_ENTRIES,
+        )
+        for name in names:
+            if not name.startswith(marker_prefix) or not _CLEANUP_MARKER_IDENTITY_RE.fullmatch(
+                name.removeprefix(marker_prefix)
+            ):
+                continue
+            require_before_deadline(
+                deadline_ns,
+                "state cleanup exceeded its deadline",
+            )
+            marker_path = parent_path / name
+            try:
+                descriptor = os.open(
+                    name,
+                    self._regular_update_flags(),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise StatePathError(
+                    f"state cleanup marker cannot be opened safely: {marker_path}"
+                ) from exc
+            try:
+                details = self._require_regular_descriptor(
+                    descriptor,
+                    marker_path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                if name != f"{marker_prefix}{details.st_dev:x}-{details.st_ino:x}":
+                    continue
+                if details.st_size:
+                    observed = self._read_regular_descriptor(
+                        os.dup(descriptor),
+                        marker_path,
+                        max_bytes=len(expected),
+                        deadline_ns=deadline_ns,
+                    )
+                    if observed != expected:
+                        continue
+                self._zeroize_and_archive_marker(
+                    descriptor,
+                    parent_descriptor,
+                    parent_path,
+                    name,
+                    details,
+                    label=label,
+                )
+                consumed = True
+            finally:
+                os.close(descriptor)
+        return consumed
+
+    def consume_matching_bytes_and_sync(
+        self,
+        relative: str | Path,
+        expected: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> bool:
+        """Consume exact private bytes without unlinking a pathname-selected inode."""
+
+        path = self.path(relative)
+        expected_sha256 = hashlib.sha256(expected).hexdigest()
+        marker_prefix = f".{path.name}.consumed-{expected_sha256}-"
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return False
+            try:
+                descriptor = os.open(
+                    path.name,
+                    self._regular_update_flags(),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                return self._consume_retained_markers(
+                    parent_descriptor,
+                    path.parent,
+                    marker_prefix,
+                    expected,
+                    label=label,
+                    deadline_ns=deadline_ns,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state cleanup target cannot be opened safely: {path}"
+                ) from exc
+            try:
+                opened = self._require_regular_descriptor(
+                    descriptor,
+                    path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                observed = self._read_regular_descriptor(
+                    os.dup(descriptor),
+                    path,
+                    max_bytes=len(expected),
+                    deadline_ns=deadline_ns,
+                )
+                if observed != expected:
+                    return self._consume_retained_markers(
+                        parent_descriptor,
+                        path.parent,
+                        marker_prefix,
+                        expected,
+                        label=label,
+                        deadline_ns=deadline_ns,
+                    )
+                self.fault_hook(f"{label}:before_unlink")
+                after_read = self._require_regular_descriptor(
+                    descriptor,
+                    path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                try:
+                    bound = os.stat(
+                        path.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    return False
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state cleanup target cannot be rebound safely: {path}"
+                    ) from exc
+                self._require_regular_details(
+                    bound,
+                    path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                identity = self._stat_identity(opened)
+                if (
+                    self._stat_identity(after_read) != identity
+                    or self._stat_identity(bound) != identity
+                ):
+                    raise StatePathError(f"state cleanup target changed while inspecting: {path}")
+                consumed_name = f"{marker_prefix}{opened.st_dev:x}-{opened.st_ino:x}"
+                consumed_path = path.with_name(consumed_name)
+                require_before_deadline(
+                    deadline_ns,
+                    "state cleanup exceeded its deadline",
+                )
+                visible = False
+                try:
+                    self.syscalls.rename_exclusive_at(
+                        path.name,
+                        consumed_name,
+                        source_dir_fd=parent_descriptor,
+                        destination_dir_fd=parent_descriptor,
+                    )
+                    visible = True
+                    self.fault_hook(f"{label}:unlinked")
+                    try:
+                        quarantined = os.stat(
+                            consumed_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise StatePathError(
+                            f"state cleanup marker cannot be rebound safely: {consumed_path}"
+                        ) from exc
+                    self._require_regular_details(
+                        quarantined,
+                        consumed_path,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                    if (quarantined.st_dev, quarantined.st_ino) != (
+                        opened.st_dev,
+                        opened.st_ino,
+                    ):
+                        try:
+                            self.syscalls.rename_exclusive_at(
+                                consumed_name,
+                                path.name,
+                                source_dir_fd=parent_descriptor,
+                                destination_dir_fd=parent_descriptor,
+                            )
+                        except FileExistsError:
+                            pass
+                        self.syscalls.fsync(parent_descriptor)
+                        raise StatePathError(
+                            f"state cleanup target changed while quarantining: {path}"
+                        )
+                    self._zeroize_and_archive_marker(
+                        descriptor,
+                        parent_descriptor,
+                        path.parent,
+                        consumed_name,
+                        opened,
+                        label=label,
+                    )
+                except FileExistsError, FileNotFoundError:
+                    if not visible:
+                        return False
+                    raise
+                except BaseException as exc:
+                    if visible:
+                        raise CommitUnknown(
+                            f"{label} cleanup became visible before durability acknowledgement"
+                        ) from exc
+                    raise
+            finally:
+                os.close(descriptor)
+            try:
+                self._consume_retained_markers(
+                    parent_descriptor,
+                    path.parent,
+                    marker_prefix,
+                    expected,
+                    label=label,
+                    deadline_ns=deadline_ns,
+                )
+            except Exception:
+                pass
+        return True
 
     def fsync_directory(self, relative: str | Path) -> None:
         with self.existing_private_directory(relative) as descriptor:
