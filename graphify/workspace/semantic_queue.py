@@ -2508,17 +2508,15 @@ class SemanticQueueStore:
         )
 
     @classmethod
-    def _certification_binding_from_state(
+    def _certification_binding_for_target_from_state(
         cls,
         state: DurableStateRoot,
         repo_uuid: str,
         *,
         generation_id: str,
-        request_sha256: str,
         sealed_input_manifest_sha256: str,
         deadline_ns: int | None = None,
-    ) -> SemanticCertificationView | None:
-        request_digest = _digest(request_sha256, "$.request_sha256")
+    ) -> tuple[str, SemanticCertificationView] | None:
         sealed_digest = _digest(
             sealed_input_manifest_sha256,
             "$.sealed_input_manifest_sha256",
@@ -2548,13 +2546,40 @@ class SemanticQueueStore:
         if (
             binding.repo_uuid != repo_uuid
             or binding.generation_id != generation_id
-            or binding.request_sha256 != request_digest
             or binding.view.sealed_input_manifest_sha256 != sealed_digest
         ):
             raise SemanticCertificationBlocked(
+                "durable semantic certification binding differs from the target"
+            )
+        return binding.request_sha256, binding.view
+
+    @classmethod
+    def _certification_binding_from_state(
+        cls,
+        state: DurableStateRoot,
+        repo_uuid: str,
+        *,
+        generation_id: str,
+        request_sha256: str,
+        sealed_input_manifest_sha256: str,
+        deadline_ns: int | None = None,
+    ) -> SemanticCertificationView | None:
+        request_digest = _digest(request_sha256, "$.request_sha256")
+        reopened = cls._certification_binding_for_target_from_state(
+            state,
+            repo_uuid,
+            generation_id=generation_id,
+            sealed_input_manifest_sha256=sealed_input_manifest_sha256,
+            deadline_ns=deadline_ns,
+        )
+        if reopened is None:
+            return None
+        bound_request_sha256, view = reopened
+        if bound_request_sha256 != request_digest:
+            raise SemanticCertificationBlocked(
                 "durable semantic certification binding differs from the request"
             )
-        return binding.view
+        return view
 
     def certification_binding_locked(
         self,

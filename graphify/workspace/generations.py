@@ -395,6 +395,31 @@ class GenerationStore:
                 ) from exc
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
 
+    def _project_staged_build_recovery_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> tuple[StagedBuildState | None, bool]:
+        """Project one staged-state recovery without mutating durable state."""
+
+        current, previous, pending = self._staged_build_paths(repo_uuid)
+        try:
+            projection = self.state.project_record_recovery(
+                label=f"staged-build:{repo_uuid}",
+                current=current,
+                previous=previous,
+                pending=pending,
+                decoder=StagedBuildState.from_json,
+                revision=lambda value: value.revision,
+                allow_missing=True,
+                max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
+                deadline_ns=deadline_ns,
+            )
+        except StateCorrupt as exc:
+            raise GenerationError(f"staged build state is corrupt: {exc}") from exc
+        return projection.record, projection.requires_recovery
+
     def recover_staged_build(self, repo_uuid: str) -> StagedBuildState | None:
         """Recover one pending staged record under canonical lock ordering."""
 
@@ -1534,6 +1559,42 @@ class GenerationStore:
         except StateCorrupt as exc:
             raise CapacityExceeded(f"capacity reservation state is corrupt: {exc}") from exc
 
+    def _project_capacity_reservation_locked(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> tuple[CapacityReservation | None, bool]:
+        """Project the exact target reservation without repairing capacity state."""
+
+        try:
+            projection = self.state.project_record_recovery(
+                label="capacity",
+                current=_CAPACITY_CURRENT,
+                previous=_CAPACITY_PREVIOUS,
+                pending=_CAPACITY_PENDING,
+                decoder=CapacityReservationState.from_json,
+                revision=lambda value: value.revision,
+                allow_missing=True,
+                deadline_ns=deadline_ns,
+            )
+        except StateCorrupt as exc:
+            raise CapacityExceeded(f"capacity reservation state is corrupt: {exc}") from exc
+        state = projection.record
+        matches = (
+            ()
+            if state is None
+            else tuple(
+                item
+                for item in state.reservations
+                if (item.repo_uuid, item.generation_id) == (repo_uuid, generation_id)
+            )
+        )
+        if len(matches) > 1:  # pragma: no cover - canonical state rejects duplicates
+            raise CapacityExceeded("capacity reservation state contains duplicate targets")
+        return (None if not matches else matches[0]), projection.requires_recovery
+
     @staticmethod
     def _validated_capacity_policy(policy: CapacityPolicy) -> CapacityPolicy:
         try:
@@ -2222,6 +2283,8 @@ class GenerationStore:
         self,
         state: StagedBuildState,
         allocation: GenerationAllocation,
+        *,
+        deadline_ns: int | None = None,
     ) -> StagedBuildCompletion:
         if state.lifecycle_state != "COMPLETE":
             raise GenerationConflict("staged build is not complete")
@@ -2239,7 +2302,10 @@ class GenerationStore:
             else self.state.path(final_relative)
         )
         staged_receipt = (
-            self.state.read_optional_existing_bytes(staging_relative / "receipt.json")
+            self.state.read_optional_existing_bytes(
+                staging_relative / "receipt.json",
+                deadline_ns=deadline_ns,
+            )
             if staging_exists
             else None
         )
@@ -2270,6 +2336,7 @@ class GenerationStore:
                 if staged_receipt is not None or final_exists
                 else frozenset({"graphify-out"})
             ),
+            deadline_ns=deadline_ns,
         )
         if inventory.total_bytes > allocation.expected_payload_bytes:
             raise CapacityExceeded("staged payload exceeds its durable reservation")
