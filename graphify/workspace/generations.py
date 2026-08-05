@@ -2283,6 +2283,8 @@ class GenerationStore:
         self,
         state: StagedBuildState,
         allocation: GenerationAllocation,
+        *,
+        deadline_ns: int | None = None,
     ) -> StagedBuildCompletion:
         if state.lifecycle_state != "COMPLETE":
             raise GenerationConflict("staged build is not complete")
@@ -2300,7 +2302,10 @@ class GenerationStore:
             else self.state.path(final_relative)
         )
         staged_receipt = (
-            self.state.read_optional_existing_bytes(staging_relative / "receipt.json")
+            self.state.read_optional_existing_bytes(
+                staging_relative / "receipt.json",
+                deadline_ns=deadline_ns,
+            )
             if staging_exists
             else None
         )
@@ -2331,6 +2336,7 @@ class GenerationStore:
                 if staged_receipt is not None or final_exists
                 else frozenset({"graphify-out"})
             ),
+            deadline_ns=deadline_ns,
         )
         if inventory.total_bytes > allocation.expected_payload_bytes:
             raise CapacityExceeded("staged payload exceeds its durable reservation")

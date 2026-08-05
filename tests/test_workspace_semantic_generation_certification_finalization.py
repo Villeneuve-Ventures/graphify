@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -377,6 +378,49 @@ def test_certification_reopen_propagates_deadline_to_semantic_input_read(
     assert semantic_input_deadlines == [deadline_ns]
 
 
+def test_certification_entry_propagates_deadline_to_completion_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+
+    inventory_deadlines: list[int] = []
+    real_inventory = runtime.generations._inventory
+
+    def inventory(*args: Any, deadline_ns: int | None = None, **kwargs: Any):
+        assert deadline_ns is not None
+        inventory_deadlines.append(deadline_ns)
+        return real_inventory(*args, deadline_ns=deadline_ns, **kwargs)
+
+    monkeypatch.setattr(runtime.generations, "_inventory", inventory)
+
+    reuse_calls: list[tuple[int, int]] = []
+    real_reuse = runtime.generations._reuse_staged_completion_locked
+
+    def reuse(*args: Any, deadline_ns: int | None = None, **kwargs: Any):
+        assert deadline_ns is not None
+        reuse_calls.append((time.monotonic_ns(), deadline_ns))
+        return real_reuse(*args, deadline_ns=deadline_ns, **kwargs)
+
+    monkeypatch.setattr(runtime.generations, "_reuse_staged_completion_locked", reuse)
+
+    entry = workspace_sync._capture_semantic_certification_entry(
+        runtime,
+        request,
+        complete,
+        source_observations=None,
+    )
+
+    assert entry.staged.canonical == complete.canonical
+    assert len(reuse_calls) == 1
+    called_ns, deadline_ns = reuse_calls[0]
+    assert 0 < deadline_ns - called_ns <= workspace_sync._SYNC_READ_TIMEOUT_NS
+    assert inventory_deadlines == [deadline_ns]
+
+
 def test_mismatched_and_ambiguous_staged_entry_fail_before_recovery_acquisition(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -397,11 +441,13 @@ def test_mismatched_and_ambiguous_staged_entry_fail_before_recovery_acquisition(
     assert tree_snapshot(harness.state_root) == before
 
     previous = _workspace_root(harness) / "staged-build.previous.json"
+    assert complete.operation_epoch is not None
+    assert complete.fence_token is not None
     divergent = StagedBuildState.from_mapping(
         replace(
             complete,
-            operation_epoch=complete.operation_epoch + 1,  # type: ignore[operator]
-            fence_token=complete.fence_token + 1,  # type: ignore[operator]
+            operation_epoch=complete.operation_epoch + 1,
+            fence_token=complete.fence_token + 1,
         ).to_dict()
     )
     previous.write_bytes(divergent.canonical)
@@ -546,7 +592,7 @@ def test_durable_binding_recovers_exact_view_after_source_and_queue_drift(
         GENERATION_ID,
         complete.request,
         attempt_sha256=hashlib.sha256(b"post-binding-drift").hexdigest(),
-        acquired_at=workspace_sync.datetime.now(workspace_sync.timezone.utc),
+        acquired_at=datetime.now(timezone.utc),
         monotonic_ns=time.monotonic_ns(),
         ttl_ns=60_000_000_000,
     )

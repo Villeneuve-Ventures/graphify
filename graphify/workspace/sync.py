@@ -34,6 +34,7 @@ from graphify.workspace.generations import (
     StagedBuildReadRecoveryRequired,
     StagedBuildStillCurrent,
     StructuralBuildRequest,
+    _MAX_STAGED_BUILD_STATE_BYTES,
 )
 from graphify.workspace.identity import SourceIdentity
 from graphify.workspace.leases import LeaseGrant, LeaseOperation
@@ -1225,7 +1226,11 @@ def _complete_entry_locked(
         operation_epoch=staged.operation_epoch,
         fence_token=staged.fence_token,
     )
-    completion = runtime.generations._reuse_staged_completion_locked(staged, allocation)
+    completion = runtime.generations._reuse_staged_completion_locked(
+        staged,
+        allocation,
+        deadline_ns=deadline_ns,
+    )
     if completion.state.canonical != staged.canonical:
         raise SemanticHandoffConflict("certification completion wrapper is stale")
     if payload_manifest_sha256("graphify-out", completion.entries) != staged.payload_manifest_sha256:
@@ -1479,7 +1484,7 @@ def _terminal_previous_complete_locked(
         previous = StagedBuildState.from_json(
             runtime.generations.state.read_existing_bytes(
                 previous_path,
-                max_bytes=64 * 1024,
+                max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
                 deadline_ns=deadline_ns,
             )
         )
