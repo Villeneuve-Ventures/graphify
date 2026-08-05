@@ -1362,18 +1362,34 @@ capacity mutation is not absence and may not be cleaned up by this child.
 
 Lease release remains cleanup rather than certification acceptance. The release
 return or a locked durable reread proving the exact recovery owner/fence absent
-is required before terminal success. The exact unchanged live record may retry
-under existing liveness rules. Replacement, unreadable, or ambiguous lease
-state is commit-unknown. A release failure never rewrites the receipt or staged
-state and never permits inferred success.
+is required before terminal success. If a later invocation reopens the full
+exact staged `CERTIFIED` proof but the certification attempt's paired `BUILD`
+lease and staged-attempt digest remain durable, it may enter one cleanup-only
+recovery lane. That lane adopts the persisted attempt digest, reopens the exact
+unchanged live grant for the current OS owner, or replaces only an expired or
+rebooted grant under the existing fence and liveness rules. It may verify the
+terminal proof, release that cleanup grant, and reread absence; it may not call
+`certify()`, rewrite the staged record or receipt, clear another reservation, or
+perform any other lifecycle mutation. The certification epoch and fence remain
+the values already frozen in the staged record and receipt; a replacement
+cleanup epoch or fence is never copied into them. The complete immutable proof
+is checked before acquisition and rechecked under the cleanup grant. If the
+second check fails, the exact cleanup grant is still released before returning
+the primary failure unless release itself becomes uncertain. A live foreign owner,
+different operation, missing or different attempt digest, replacement
+authority, unreadable state, or any ambiguity is busy, conflict, or
+commit-unknown rather than cleanup authority. A release failure never rewrites
+the receipt or staged state and never permits inferred success.
 
 Exact same-byte/state replay at any preterminal boundary is idempotent and must
 produce the same binding, receipt, installed generation, journal event,
 reservation state, and staged revision. An invocation that begins after the
-full exact staged `CERTIFIED` proof already exists performs read-only terminal
-verification and returns that same internal proof without acquiring a `BUILD`
-lease or mutating state. A merely existing final directory, a different
-certified generation, or a `PROMOTED` target is not terminal replay authority.
+full exact staged `CERTIFIED` proof and cleanup-grant absence already exist
+performs read-only terminal verification and returns that same internal proof
+without acquiring a `BUILD` lease or mutating state. The retained-grant case
+above is the sole exception and grants cleanup only. A merely existing final
+directory, a different certified generation, or a `PROMOTED` target is not
+terminal replay authority.
 
 No failure or recovery path resets or deletes staging, abandons the target,
 removes the handoff, semantic-input copy, receipt, binding, journal evidence, or

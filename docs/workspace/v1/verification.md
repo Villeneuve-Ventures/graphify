@@ -986,6 +986,16 @@ unchanged:
   with the expected receipt. Reservation-clear and lease-release uncertainty
   resolve only by a locked durable reread proving the exact state; neither
   absence alone nor a different live record is success;
+- terminal-cleanup vectors interrupt after durable staged `CERTIFIED` but before
+  release, then prove a new invocation adopts the paired persisted attempt and
+  releases the same current-owner `BUILD` grant. Reboot/expiry vectors prove a
+  replacement cleanup fence is allowed without changing the certified staged
+  state or receipt. Invalid terminal receipt, binding, journal, reservation, or
+  pointer evidence blocks before cleanup acquisition; a failure during
+  under-grant revalidation still releases the exact cleanup grant before
+  returning the primary error. Live foreign owners, different operations or
+  attempts, replacement authority, missing pairing, and ambiguous state remain
+  busy, conflict, or commit-unknown;
 - exact same-byte/state replay produces the same binding, receipt, installed
   generation, journal event, absent reservation, and staged revision. No
   failure path resets or deletes staging, abandons the target, removes the

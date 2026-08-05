@@ -380,9 +380,10 @@ order to one exact staged successor. Before acquisition it reopens the canonical
 record, payload inventory and manifest, handoff and target-owned semantic-input
 bytes, equal queue sealed-input digest, pointer CAS, compatibility, and current
 registry/source/operation/policy evidence. A staged state other than exact `COMPLETE` is
-not admitted to the mutating lane. An exact already-`CERTIFIED` replay may only
-return the same proof through read-only verification; `PROMOTED`, foreign,
-mismatched, or ambiguous state is outside this child.
+not admitted to the forward-mutating lane. An exact already-`CERTIFIED` replay
+with no retained cleanup grant may only return the same proof through read-only
+verification; `PROMOTED`, foreign, mismatched, or ambiguous state is outside
+this child.
 
 `acquire_staged_recovery()` is the only lease entry and must return the
 request-bound `BUILD` operation. Its accepted grant supplies the new current
@@ -414,6 +415,17 @@ may not be adopted into either, but the existing recovery paths may finish those
 same bytes. Binding, receipt, staged-state, reservation-clear, and lease-release
 uncertainty resolves only through exact durable reread. No recovery path infers
 success, abandons the target, resets staging, or deletes handoff evidence.
+
+The only post-`CERTIFIED` mutation is terminal grant cleanup. If the exact
+terminal proof exists except that its paired request-bound `BUILD` lease and
+staged-attempt digest remain, a dedicated cleanup acquisition adopts that
+persisted digest. It reopens the same live grant for the current OS owner or,
+only after expiry or reboot, advances the non-resetting fence to a replacement
+cleanup grant. The composition verifies under that grant, releases it, and
+rereads absence. It does not re-enter `GenerationStore.certify()`, and a
+replacement cleanup epoch or fence never changes the receipt or staged
+certification evidence. Foreign live ownership, a different operation or
+attempt, or ambiguous authority fails closed.
 
 The final proof reopens the staged `CERTIFIED` record, installed receipt and
 payload, immutable semantic binding, matching `CERTIFIED` journal event,
