@@ -8,13 +8,15 @@ import hashlib
 import json
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
 import graphify.workspace.sync as workspace_sync
+from graphify.workspace.composition import WorkspaceRuntime
 from graphify.workspace.contracts import StagedBuildState, WorkspaceLeaseState
 from graphify.workspace.generations import GenerationConflict, GenerationError
+from graphify.workspace.leases import LeaseBusy
 from graphify.workspace.persistence import CommitUnknown, InjectedFault
 from graphify.workspace.semantic_handoff import SemanticHandoffConflict
 from graphify.workspace.semantic_queue import (
@@ -22,6 +24,7 @@ from graphify.workspace.semantic_queue import (
     SemanticDesiredWork,
     SemanticQueueStore,
 )
+from graphify.workspace.sync import SyncRequest
 from tests.test_workspace_semantic_result_handoff import (
     _ArmedFault,
     _fresh_ready_runtime,
@@ -75,6 +78,30 @@ def _forbidden(name: str):
         raise AssertionError(f"forbidden certification-finalization call: {name}")
 
     return fail
+
+
+def _commit_unknown(message: str) -> Callable[..., None]:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise CommitUnknown(message)
+
+    return fail
+
+
+def _retain_certified_grant(
+    runtime: WorkspaceRuntime,
+    request: SyncRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    message: str,
+) -> None:
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            workspace_sync,
+            "_release_semantic_certification_grant",
+            _commit_unknown(message),
+        )
+        with pytest.raises(CommitUnknown, match=message):
+            workspace_sync._finalize_semantic_generation_certification(runtime, request)
 
 
 def test_exact_complete_advances_to_certified_and_terminal_replay_is_read_only(
@@ -768,6 +795,263 @@ def test_certification_commit_uncertainty_recovers_without_destructive_cleanup(
     assert handoff.read_bytes() == handoff_bytes
     assert runtime.pointers.load(REPO_UUID, allow_missing=True) is None
     assert runtime.leases.inspect(REPO_UUID).leases.get("workspace") is None
+
+
+def test_certified_retry_releases_retained_current_owner_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    _retain_certified_grant(
+        runtime,
+        request,
+        monkeypatch,
+        message="simulated interruption after durable CERTIFIED",
+    )
+
+    certified_before = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_before is not None
+    assert certified_before.lifecycle_state == "CERTIFIED"
+    receipt_before = runtime.generations.verify_generation(REPO_UUID, GENERATION_ID)
+    retained = runtime.leases.inspect(REPO_UUID)
+    retained_lease = retained.leases.get("workspace")
+    assert retained_lease is not None
+    assert retained_lease.to_dict()["operation"] == "BUILD"
+    assert retained.staged_attempt_sha256 is not None
+
+    monkeypatch.setattr(
+        runtime.generations,
+        "certify",
+        _forbidden("certify during terminal cleanup"),
+    )
+
+    proof = workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    certified_after = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_after is not None
+    assert certified_after.canonical == certified_before.canonical
+    assert proof.receipt_sha256 == receipt_before.sha256
+    assert runtime.generations.verify_generation(
+        REPO_UUID,
+        GENERATION_ID,
+    ).sha256 == receipt_before.sha256
+    released = runtime.leases.inspect(REPO_UUID)
+    assert released.leases.get("workspace") is None
+    assert released.staged_attempt_sha256 is None
+
+
+def test_certified_retry_adopts_terminal_proof_when_competing_cleanup_wins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    _retain_certified_grant(
+        runtime,
+        request,
+        monkeypatch,
+        message="simulated retained certification grant",
+    )
+
+    certified_before = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_before is not None
+    receipt_before = runtime.generations.verify_generation(REPO_UUID, GENERATION_ID)
+    real_acquire = runtime.leases.acquire_certified_build_cleanup
+    competing_cleanup_calls = 0
+
+    def acquire_after_competing_cleanup(*args: Any, **kwargs: Any):
+        nonlocal competing_cleanup_calls
+        competing_cleanup_calls += 1
+        competing_grant, attempt_sha256 = real_acquire(*args, **kwargs)
+        workspace_sync._release_semantic_certification_grant(
+            runtime,
+            competing_grant,
+            attempt_sha256=attempt_sha256,
+        )
+        return real_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(
+        runtime.leases,
+        "acquire_certified_build_cleanup",
+        acquire_after_competing_cleanup,
+    )
+    monkeypatch.setattr(
+        runtime.generations,
+        "certify",
+        _forbidden("certify after competing terminal cleanup"),
+    )
+
+    proof = workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    assert competing_cleanup_calls == 1
+    certified_after = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_after is not None
+    assert certified_after.canonical == certified_before.canonical
+    assert proof.receipt_sha256 == receipt_before.sha256
+    released = runtime.leases.inspect(REPO_UUID)
+    assert released.leases.get("workspace") is None
+    assert released.staged_attempt_sha256 is None
+
+
+def test_certified_retry_replaces_rebooted_cleanup_grant_without_recertifying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    _retain_certified_grant(
+        runtime,
+        request,
+        monkeypatch,
+        message="simulated process death after durable CERTIFIED",
+    )
+
+    certified_before = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_before is not None
+    receipt_before = runtime.generations.verify_generation(REPO_UUID, GENERATION_ID)
+    retained = runtime.leases.inspect(REPO_UUID)
+    assert retained.leases.get("workspace") is not None
+
+    prior_owner = runtime.leases.current_owner()
+    rebooted_owner = replace(prior_owner, boot_id="rebooted-cleanup-owner")
+    monkeypatch.setattr(runtime.leases, "current_owner", lambda: rebooted_owner)
+    monkeypatch.setattr(
+        runtime.generations,
+        "certify",
+        _forbidden("certify during rebooted terminal cleanup"),
+    )
+
+    proof = workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    certified_after = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_after is not None
+    assert certified_after.canonical == certified_before.canonical
+    assert proof.receipt_sha256 == receipt_before.sha256
+    released = runtime.leases.inspect(REPO_UUID)
+    assert released.operation_epoch == retained.operation_epoch + 1
+    assert released.fence_high_watermark == retained.fence_high_watermark + 1
+    assert released.leases.get("workspace") is None
+    assert released.staged_attempt_sha256 is None
+
+
+def test_certified_cleanup_rejects_a_live_foreign_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    _retain_certified_grant(
+        runtime,
+        request,
+        monkeypatch,
+        message="simulated retained certification grant",
+    )
+
+    certified_before = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_before is not None
+    receipt_before = runtime.generations.verify_generation(REPO_UUID, GENERATION_ID)
+    retained = runtime.leases.inspect(REPO_UUID)
+    prior_owner = runtime.leases.current_owner()
+    foreign_owner = replace(
+        prior_owner,
+        pid=prior_owner.pid + 1,
+        process_start_id=f"{prior_owner.process_start_id}-foreign",
+    )
+    monkeypatch.setattr(runtime.leases, "current_owner", lambda: foreign_owner)
+
+    with pytest.raises(LeaseBusy, match="workspace lease is held"):
+        workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    certified_after = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_after is not None
+    assert certified_after.canonical == certified_before.canonical
+    assert runtime.generations.verify_generation(
+        REPO_UUID,
+        GENERATION_ID,
+    ).sha256 == receipt_before.sha256
+    assert runtime.leases.inspect(REPO_UUID).canonical == retained.canonical
+
+
+def test_certified_cleanup_validates_terminal_receipt_before_reboot_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    _retain_certified_grant(
+        runtime,
+        request,
+        monkeypatch,
+        message="interrupt after durable CERTIFIED",
+    )
+
+    retained = runtime.leases.inspect(REPO_UUID)
+    prior_owner = runtime.leases.current_owner()
+    rebooted_owner = replace(prior_owner, boot_id="reboot-before-invalid-proof")
+    monkeypatch.setattr(runtime.leases, "current_owner", lambda: rebooted_owner)
+
+    def invalid_receipt(*_args: object, **_kwargs: object) -> object:
+        raise GenerationConflict("injected invalid terminal receipt")
+
+    monkeypatch.setattr(runtime.generations, "verify_generation", invalid_receipt)
+
+    with pytest.raises(GenerationConflict, match="injected invalid terminal receipt"):
+        workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    assert runtime.leases.inspect(REPO_UUID).canonical == retained.canonical
+
+
+def test_certified_cleanup_releases_replacement_when_grant_revalidation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    _retain_certified_grant(
+        runtime,
+        request,
+        monkeypatch,
+        message="interrupt before certification release",
+    )
+
+    retained = runtime.leases.inspect(REPO_UUID)
+    prior_owner = runtime.leases.current_owner()
+    rebooted_owner = replace(prior_owner, boot_id="reboot-before-revalidation")
+    monkeypatch.setattr(runtime.leases, "current_owner", lambda: rebooted_owner)
+
+    def invalid_under_grant(*_args: object, **_kwargs: object) -> object:
+        raise GenerationConflict("injected cleanup grant revalidation failure")
+
+    monkeypatch.setattr(
+        workspace_sync,
+        "_semantic_certification_terminal_under_grant",
+        invalid_under_grant,
+    )
+
+    with pytest.raises(
+        GenerationConflict,
+        match="injected cleanup grant revalidation failure",
+    ):
+        workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    released = runtime.leases.inspect(REPO_UUID)
+    assert released.operation_epoch == retained.operation_epoch + 1
+    assert released.fence_high_watermark == retained.fence_high_watermark + 1
+    assert released.leases.get("workspace") is None
+    assert released.staged_attempt_sha256 is None
 
 
 def test_release_commit_unknown_is_adopted_only_after_exact_absence_reread(

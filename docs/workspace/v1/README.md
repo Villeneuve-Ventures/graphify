@@ -276,6 +276,13 @@ or ambiguous evidence is conflict or commit-unknown. Binding, receipt,
 staged-state, reservation-clear, and lease-release uncertainty is resolved only
 by exact durable reread, never inferred success or destructive cleanup.
 
+If interruption leaves that exact staged `CERTIFIED` proof paired with its
+durable request-bound `BUILD` lease and staged-attempt digest, a later invocation
+may recover only terminal cleanup: reopen the same current-owner grant or
+replace it after expiry/reboot, verify the unchanged proof, release the grant,
+and prove absence. It cannot recertify or rewrite the receipt/staged evidence,
+and foreign, changed, or ambiguous lease authority fails closed.
+
 The terminal proof requires the same staged record at `CERTIFIED`, its exact
 receipt digest, unchanged payload manifest and request, the verified installed
 generation, matching immutable semantic certification binding and journal

@@ -616,6 +616,7 @@ class LeaseStore:
         *,
         recover: bool = True,
         allow_staged_abandonment: bool = False,
+        allow_certified_build_cleanup: bool = False,
         deadline_ns: int | None = None,
     ) -> None:
         workspace = self._directory(repo_uuid)
@@ -655,6 +656,8 @@ class LeaseStore:
         ):
             if staged_build.lifecycle_state == "CERTIFIED":
                 allowed = {"PROMOTE", "POINTER_RECOVERY"}
+                if allow_certified_build_cleanup:
+                    allowed.add("BUILD")
             else:
                 allowed = {"BUILD"}
             if operation not in allowed:
@@ -927,6 +930,58 @@ class LeaseStore:
                 allow_stale_staged_authority=True,
             )
 
+    def acquire_certified_build_cleanup(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        request: StructuralBuildRequest,
+        *,
+        acquired_at: datetime,
+        monotonic_ns: int,
+        ttl_ns: int,
+    ) -> tuple[LeaseGrant, str]:
+        """Recover only the paired BUILD grant retained after certification."""
+
+        try:
+            request = StructuralBuildRequest.from_mapping(request.to_dict())
+        except Exception as exc:
+            raise LeaseRecoveryRequired(
+                f"staged build request is invalid: {exc}"
+            ) from exc
+
+        with self.registry.recovered_snapshot() as document:
+            with self.workspace_lock(repo_uuid):
+                state = self._load_state_locked(document, repo_uuid)
+                staged_build = self._load_staged_build_locked(repo_uuid)
+                attempt_sha256 = self._require_certified_build_cleanup_attempt_locked(
+                    state,
+                    staged_build,
+                    repo_uuid=repo_uuid,
+                    generation_id=generation_id,
+                    request=request,
+                )
+
+        with self.registry.recovered_snapshot() as document:
+            grant = self._acquire_under_registry_lock(
+                document,
+                repo_uuid,
+                "BUILD",
+                self.current_owner(),
+                expected_registry_revision=request.expected_registry_revision,
+                expected_active_source_revision=request.expected_active_source_revision,
+                expected_operation_epoch=request.expected_operation_epoch,
+                expected_migration_epoch=request.expected_migration_epoch,
+                acquired_at=acquired_at,
+                monotonic_ns=monotonic_ns,
+                ttl_ns=ttl_ns,
+                verify_active=True,
+                staged_request=(generation_id, request),
+                staged_attempt_sha256=attempt_sha256,
+                allow_stale_staged_authority=True,
+                certified_build_cleanup=True,
+            )
+        return grant, attempt_sha256
+
     def _acquire_under_registry_lock(
         self,
         document: Registry,
@@ -945,6 +1000,7 @@ class LeaseStore:
         staged_request: tuple[str, StructuralBuildRequest] | None = None,
         staged_attempt_sha256: str | None = None,
         allow_stale_staged_authority: bool = False,
+        certified_build_cleanup: bool = False,
         existing_only: bool = False,
         deadline_ns: int | None = None,
     ) -> LeaseGrant:
@@ -953,6 +1009,14 @@ class LeaseStore:
             "lease acquisition exceeded its deadline",
         )
         owner = self._require_current_owner(owner)
+        if certified_build_cleanup and (
+            staged_request is None
+            or operation != "BUILD"
+            or not allow_stale_staged_authority
+        ):
+            raise LeaseError(
+                "certification cleanup requires exact stale staged BUILD authority"
+            )
         if staged_request is None:
             if staged_attempt_sha256 is not None:
                 raise LeaseError("staged attempt requires a staged request")
@@ -1050,12 +1114,23 @@ class LeaseStore:
                     operation=operation,
                     request=request,
                     allow_stale_authority=allow_stale_staged_authority,
+                    allow_certified_build_cleanup=certified_build_cleanup,
                 )
+                if certified_build_cleanup:
+                    self._require_certified_build_cleanup_attempt_locked(
+                        state,
+                        staged_build,
+                        repo_uuid=repo_uuid,
+                        generation_id=generation_id,
+                        request=request,
+                        expected_attempt_sha256=staged_attempt_sha256,
+                    )
             self._assert_recovery_barriers_locked(
                 repo_uuid,
                 operation,
                 recover=not existing_only,
                 allow_staged_abandonment=allow_stale_staged_authority,
+                allow_certified_build_cleanup=certified_build_cleanup,
                 deadline_ns=deadline_ns,
             )
             domain = _lease_domain(operation)
@@ -1134,6 +1209,57 @@ class LeaseStore:
             )
 
     @staticmethod
+    def _require_certified_build_cleanup_attempt_locked(
+        state: WorkspaceLeaseState,
+        staged_build: StagedBuildState | None,
+        *,
+        repo_uuid: str,
+        generation_id: str,
+        request: StructuralBuildRequest,
+        expected_attempt_sha256: str | None = None,
+    ) -> str:
+        if (
+            staged_build is None
+            or staged_build.lifecycle_state != "CERTIFIED"
+            or staged_build.repo_uuid != repo_uuid
+            or staged_build.generation_id != generation_id
+            or staged_build.request.sha256 != request.sha256
+            or staged_build.abandonment_intent is not None
+            or staged_build.operation_epoch is None
+            or staged_build.fence_token is None
+        ):
+            raise LeaseRecoveryRequired(
+                "certification cleanup is not bound to one exact CERTIFIED request"
+            )
+        attempt_sha256 = state.staged_attempt_sha256
+        existing = state.leases.get("workspace")
+        lease_epoch = state.lease_epochs.get("workspace")
+        if attempt_sha256 is None or existing is None or lease_epoch is None:
+            raise LeaseRecoveryRequired(
+                "certification cleanup requires a paired staged BUILD attempt"
+            )
+        if (
+            expected_attempt_sha256 is not None
+            and attempt_sha256 != expected_attempt_sha256
+        ):
+            raise LeaseRecoveryRequired(
+                "certification cleanup staged attempt changed before acquisition"
+            )
+        existing_value = existing.to_dict()
+        if (
+            existing_value["repo_uuid"] != repo_uuid
+            or existing_value["operation"] != "BUILD"
+            or lease_epoch < staged_build.operation_epoch
+            or int(existing_value["fence_token"]) < staged_build.fence_token
+            or (lease_epoch == staged_build.operation_epoch)
+            != (int(existing_value["fence_token"]) == staged_build.fence_token)
+        ):
+            raise LeaseRecoveryRequired(
+                "certification cleanup lease differs from certified fencing evidence"
+            )
+        return attempt_sha256
+
+    @staticmethod
     def _check_staged_request_locked(
         document: Registry,
         entry: dict[str, Any],
@@ -1145,6 +1271,7 @@ class LeaseStore:
         operation: str,
         request: StructuralBuildRequest,
         allow_stale_authority: bool = False,
+        allow_certified_build_cleanup: bool = False,
     ) -> None:
         if staged_build is None:
             raise LeaseRecoveryRequired("staged build request is not durable")
@@ -1166,6 +1293,8 @@ class LeaseStore:
             "PROMOTE": {"CERTIFIED"},
             "POINTER_RECOVERY": {"CERTIFIED"},
         }
+        if allow_certified_build_cleanup and operation == "BUILD":
+            allowed["BUILD"].add("CERTIFIED")
         if staged_build.lifecycle_state not in allowed[operation]:
             raise LeaseRecoveryRequired(
                 f"staged build in {staged_build.lifecycle_state} cannot acquire {operation}"

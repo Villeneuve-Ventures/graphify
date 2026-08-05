@@ -638,9 +638,23 @@ inventories, source observations, or compatibility digests conflict. A
 `REQUESTED`, `PUBLISHING`, `ABANDONED`, unrelated `CERTIFIED`, `PROMOTED`,
 missing, duplicate-location, or otherwise ambiguous target is not forward
 certification entry authority. An invocation that begins with the full exact
-terminal `CERTIFIED` proof may perform read-only replay verification only.
+terminal `CERTIFIED` proof and no retained cleanup grant may perform read-only
+replay verification only.
 
-The composition may reacquire mutation authority only through
+One exact post-certification exception exists for terminal cleanup. When the
+same `CERTIFIED` record, receipt, binding, journal, reservation absence, pointer
+boundary, request, target, and manifest are durable but their paired
+request-bound `BUILD` lease and staged-attempt digest remain, the store may
+adopt that persisted digest solely to recover the cleanup grant. The same live
+grant is reusable only by its current OS owner; an expired or rebooted grant may
+be replaced under the normal non-resetting fence rules. The cleanup grant may
+only prove the terminal state, release itself, and prove absence. Its newer
+epoch or fence, if any, is cleanup authority and must not replace the
+certification epoch or fence already recorded in the staged state or receipt.
+A live foreign owner, non-`BUILD` lease, unpaired or changed attempt digest, or
+ambiguous/replaced state grants no cleanup authority.
+
+Forward certification may reacquire mutation authority only through
 `GenerationStore.acquire_staged_recovery()` for the same repository, target,
 and structural request. The resulting grant is the request-bound `BUILD`
 recovery lane with a new caller attempt digest and current operation epoch and

@@ -317,9 +317,21 @@ unreadable binding/receipt/journal state, an unrelated reservation, a
 replacement lease, or any ambiguous suffix is commit-unknown rather than
 inferred success.
 
+A process may die after durable `CERTIFIED` and before releasing its paired
+`BUILD` grant. The next invocation may not treat that retained lease as forward
+certification authority, but it also must not self-deadlock forever. A dedicated
+cleanup-only recovery requires the exact terminal proof, exact request-bound
+`BUILD` operation, and paired persisted staged-attempt digest. It reopens the
+same live grant only for the current OS owner or replaces it only after normal
+expiry/reboot proof, then verifies, releases, and rereads absence. Live foreign
+ownership, changed attempt or operation, replacement ambiguity, and unreadable
+state fail closed. A cleanup replacement's epoch and fence are never written
+into the certified receipt or staged record.
+
 Exact same-byte/state replay is idempotent. A caller starting from the full
-exact terminal proof may only verify it read-only; a different certified target
-or any promoted target is not mutable replay authority. No recovery path
+exact terminal proof with cleanup-grant absence may only verify it read-only; a
+different certified target or any promoted target is not mutable replay
+authority. No recovery path
 deletes or resets staging, the handoff, semantic-input copy, immutable binding,
 receipt, journal evidence, or installed generation, and none compacts or
 rewrites the queue. The final proof still leaves retained labels and rationales

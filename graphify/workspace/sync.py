@@ -37,7 +37,7 @@ from graphify.workspace.generations import (
     _MAX_STAGED_BUILD_STATE_BYTES,
 )
 from graphify.workspace.identity import SourceIdentity
-from graphify.workspace.leases import LeaseGrant, LeaseOperation
+from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseRecoveryRequired
 from graphify.workspace.persistence import CommitUnknown, StateRecoveryRequired
 from graphify.workspace.pointers import PointerCAS, PointerRecoveryRequired
 
@@ -406,6 +406,10 @@ class _SemanticCertificationFinalization:
     queue_sha256: str
 
 
+class _SemanticCertificationCleanupRequired(CommitUnknown):
+    """Exact terminal certification still retains its paired cleanup grant."""
+
+
 def _observe_structural_source(
     runtime: WorkspaceRuntime,
     repo_uuid: str,
@@ -460,6 +464,8 @@ def _structural_request(
 def _read_staged_build(
     runtime: WorkspaceRuntime,
     request: SyncRequest,
+    *,
+    allow_certified_build_cleanup: bool = False,
 ) -> StagedBuildState | None:
     repo_uuid = request.repo_uuid
     deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
@@ -487,6 +493,24 @@ def _read_staged_build(
                 repo_uuid,
                 deadline_ns=deadline_ns,
             )
+            exact = staged is not None and (
+                staged.generation_id == request.generation_id
+                and staged.request.logical_request_sha256 == request.sha256
+            )
+            certified_build_cleanup = False
+            if allow_certified_build_cleanup and exact and staged is not None:
+                try:
+                    runtime.leases._require_certified_build_cleanup_attempt_locked(
+                        lease_state,
+                        staged,
+                        repo_uuid=repo_uuid,
+                        generation_id=request.generation_id,
+                        request=staged.request,
+                    )
+                except LeaseRecoveryRequired:
+                    pass
+                else:
+                    certified_build_cleanup = True
             live_workspace_lease = lease_state.leases.get("workspace")
             if live_workspace_lease is not None:
                 live_value = live_workspace_lease.to_dict()
@@ -496,13 +520,10 @@ def _read_staged_build(
                     live_owner["boot_id"] == current_boot_id
                     and time.monotonic_ns()
                     < int(live_value["liveness_deadline_monotonic_ns"])
+                    and not certified_build_cleanup
                 ):
                     raise SyncLeaseBusy("a live workspace lease excludes this sync")
 
-            exact = staged is not None and (
-                staged.generation_id == request.generation_id
-                and staged.request.logical_request_sha256 == request.sha256
-            )
             if (
                 staged is not None
                 and not exact
@@ -1538,6 +1559,7 @@ def _semantic_certification_terminal_locked(
     *,
     expected_complete: StagedBuildState | None,
     grant: LeaseGrant | None,
+    attempt_sha256: str | None,
     deadline_ns: int,
 ) -> _SemanticCertificationFinalization:
     from graphify.workspace.semantic_handoff import SemanticHandoffConflict
@@ -1583,18 +1605,6 @@ def _semantic_certification_terminal_locked(
         or lease_state.migration_epoch != request.expected_migration_epoch
     ):
         raise GenerationConflict("terminal repository authority differs from the request")
-
-    workspace_lease = lease_state.leases.get("workspace")
-    if grant is None:
-        if workspace_lease is not None or lease_state.staged_attempt_sha256 is not None:
-            raise CommitUnknown(
-                "terminal recovery owner or staged attempt remains durably visible"
-            )
-    else:
-        if workspace_lease is None or workspace_lease.canonical != grant.lease.canonical:
-            raise CommitUnknown("terminal proof is not held by the exact recovery grant")
-        if lease_state.lease_epochs.get("workspace") != grant.operation_epoch:
-            raise CommitUnknown("terminal recovery lease epoch differs from its grant")
 
     _certification_pointer_locked(runtime, request, deadline_ns=deadline_ns)
     handoff = owner._reopen_for_certification(
@@ -1712,6 +1722,23 @@ def _semantic_certification_terminal_locked(
     if reservation is not None or capacity_requires_recovery:
         raise GenerationConflict("terminal capacity reservation is not durably absent")
 
+    workspace_lease = lease_state.leases.get("workspace")
+    if grant is None:
+        if workspace_lease is not None or lease_state.staged_attempt_sha256 is not None:
+            raise _SemanticCertificationCleanupRequired(
+                "terminal recovery owner or staged attempt remains durably visible"
+            )
+    else:
+        if (
+            attempt_sha256 is None
+            or lease_state.staged_attempt_sha256 != attempt_sha256
+        ):
+            raise CommitUnknown("terminal recovery staged attempt differs")
+        if workspace_lease is None or workspace_lease.canonical != grant.lease.canonical:
+            raise CommitUnknown("terminal proof is not held by the exact recovery grant")
+        if lease_state.lease_epochs.get("workspace") != grant.operation_epoch:
+            raise CommitUnknown("terminal recovery lease epoch differs from its grant")
+
     return _SemanticCertificationFinalization(
         repo_uuid=request.repo_uuid,
         target_generation_id=request.generation_id,
@@ -1729,8 +1756,10 @@ def _semantic_certification_terminal_locked(
 def _semantic_certification_terminal_under_grant(
     runtime: WorkspaceRuntime,
     request: SyncRequest,
-    expected_complete: StagedBuildState,
+    expected_complete: StagedBuildState | None,
     grant: LeaseGrant,
+    *,
+    attempt_sha256: str,
 ) -> _SemanticCertificationFinalization:
     deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
     runtime.leases._require_grant_owner(grant)
@@ -1771,6 +1800,7 @@ def _semantic_certification_terminal_under_grant(
                 staged,
                 expected_complete=expected_complete,
                 grant=grant,
+                attempt_sha256=attempt_sha256,
                 deadline_ns=deadline_ns,
             )
 
@@ -1806,6 +1836,7 @@ def _semantic_certification_terminal_after_release(
                 staged,
                 expected_complete=expected_complete,
                 grant=None,
+                attempt_sha256=None,
                 deadline_ns=deadline_ns,
             )
 
@@ -1862,7 +1893,11 @@ def _semantic_certification_staged_state(
     request: SyncRequest,
 ) -> StagedBuildState:
     try:
-        staged = _read_staged_build(runtime, request)
+        staged = _read_staged_build(
+            runtime,
+            request,
+            allow_certified_build_cleanup=True,
+        )
     except StagedBuildReadRecoveryRequired:
         staged = _project_and_recover_certification_staged_state(runtime, request)
     if staged is None:
@@ -1947,6 +1982,95 @@ def _release_semantic_certification_grant(
     raise CommitUnknown("recovery lease release could not be proven")  # pragma: no cover
 
 
+def _release_semantic_certification_grant_after_primary(
+    runtime: WorkspaceRuntime,
+    grant: LeaseGrant,
+    *,
+    attempt_sha256: str,
+    primary: tuple[BaseException, TracebackType | None] | None,
+) -> None:
+    try:
+        _release_semantic_certification_grant(
+            runtime,
+            grant,
+            attempt_sha256=attempt_sha256,
+        )
+    except BaseException as release_error:
+        if primary is not None:
+            raise release_error from primary[0]
+        raise
+    if primary is not None:
+        error, traceback = primary
+        raise error.with_traceback(traceback)
+
+
+def _recover_certified_build_cleanup(
+    runtime: WorkspaceRuntime,
+    request: SyncRequest,
+) -> _SemanticCertificationFinalization:
+    acquired_at = datetime.now(timezone.utc)
+    cleanup_authority: tuple[LeaseGrant, str] | None = None
+    for retry in range(2):
+        try:
+            cleanup_authority = runtime.leases.acquire_certified_build_cleanup(
+                request.repo_uuid,
+                request.generation_id,
+                _semantic_certification_staged_state(runtime, request).request,
+                acquired_at=acquired_at,
+                monotonic_ns=time.monotonic_ns(),
+                ttl_ns=_SYNC_LEASE_TTL_NS,
+            )
+        except CommitUnknown:
+            if retry == 0:
+                continue
+            raise
+        except LeaseRecoveryRequired:
+            try:
+                return _semantic_certification_terminal_after_release(
+                    runtime,
+                    request,
+                    expected_complete=None,
+                )
+            except _SemanticCertificationCleanupRequired:
+                pass
+            raise
+        else:
+            break
+    if cleanup_authority is None:  # pragma: no cover - retry loop returns or raises
+        raise CommitUnknown("certification cleanup acquisition is uncertain")
+    grant, attempt_sha256 = cleanup_authority
+    primary: tuple[BaseException, TracebackType | None] | None = None
+    pre_release: _SemanticCertificationFinalization | None = None
+    try:
+        pre_release = _semantic_certification_terminal_under_grant(
+            runtime,
+            request,
+            None,
+            grant,
+            attempt_sha256=attempt_sha256,
+        )
+    except BaseException as exc:
+        primary = (exc, exc.__traceback__)
+    _release_semantic_certification_grant_after_primary(
+        runtime,
+        grant,
+        attempt_sha256=attempt_sha256,
+        primary=primary,
+    )
+    if pre_release is None:  # pragma: no cover - successful branch assigns proof
+        raise GenerationConflict("certification cleanup returned no terminal proof")
+    terminal = _semantic_certification_terminal_after_release(
+        runtime,
+        request,
+        expected_complete=None,
+    )
+    if terminal != pre_release:
+        raise CommitUnknown(
+            "semantic certification terminal proof changed during cleanup release"
+        )
+    return terminal
+
+
 def _finalize_semantic_generation_certification(
     runtime: WorkspaceRuntime,
     request: SyncRequest,
@@ -1958,11 +2082,14 @@ def _finalize_semantic_generation_certification(
     request = SyncRequest.from_mapping(request.to_dict())
     staged = _semantic_certification_staged_state(runtime, request)
     if staged.lifecycle_state == "CERTIFIED":
-        return _semantic_certification_terminal_after_release(
-            runtime,
-            request,
-            expected_complete=None,
-        )
+        try:
+            return _semantic_certification_terminal_after_release(
+                runtime,
+                request,
+                expected_complete=None,
+            )
+        except _SemanticCertificationCleanupRequired:
+            return _recover_certified_build_cleanup(runtime, request)
     if staged.lifecycle_state != "COMPLETE":
         raise SemanticHandoffConflict(
             f"semantic certification cannot start from {staged.lifecycle_state}"
@@ -2170,23 +2297,17 @@ def _finalize_semantic_generation_certification(
             request,
             entry.staged,
             attempt.grant,
+            attempt_sha256=attempt_sha256,
         )
     except BaseException as exc:
         primary = (exc, exc.__traceback__)
 
-    try:
-        _release_semantic_certification_grant(
-            runtime,
-            attempt.grant,
-            attempt_sha256=attempt_sha256,
-        )
-    except BaseException as release_error:
-        if primary is not None:
-            raise release_error from primary[0]
-        raise
-    if primary is not None:
-        error, traceback = primary
-        raise error.with_traceback(traceback)
+    _release_semantic_certification_grant_after_primary(
+        runtime,
+        attempt.grant,
+        attempt_sha256=attempt_sha256,
+        primary=primary,
+    )
     if pre_release is None:  # pragma: no cover - successful branch assigns proof
         raise GenerationConflict("semantic certification returned no terminal proof")
     terminal = _semantic_certification_terminal_after_release(

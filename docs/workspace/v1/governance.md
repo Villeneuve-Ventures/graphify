@@ -519,12 +519,21 @@ reservation-clear, or lease-release uncertainty requires exact durable reread;
 it never authorizes inferred success, target abandonment, staging reset, or
 cleanup.
 
+The sole cleanup exception is an exact staged `CERTIFIED` proof that still has
+its paired request-bound `BUILD` lease and persisted staged-attempt digest. A
+later invocation may adopt that digest only to reopen the same current-owner
+grant, or replace it after normal expiry/reboot proof, verify the unchanged
+terminal evidence, release the cleanup grant, and prove absence. It may not
+recertify or rewrite certified evidence; foreign, changed, or ambiguous lease
+authority fails closed.
+
 The exact stop boundary is the same staged record durably reopened as
 `CERTIFIED`, bound to its unchanged request and manifest plus the exact verified
 generation receipt, immutable semantic certification binding, matching journal
 event, cleared target reservation, unchanged pointer boundary, and proven
 release of the recovery owner/fence. An exact terminal replay may only return
-that same proof read-only; it may not reacquire `BUILD`. A `PROMOTED` target is
+that same proof read-only after grant absence is proven. Reacquiring `BUILD` is
+limited to the paired terminal-cleanup exception above. A `PROMOTED` target is
 outside this child.
 
 This freeze adds no product code, tests, schema, fixture, dependency,
