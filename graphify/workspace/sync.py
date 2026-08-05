@@ -2113,9 +2113,11 @@ def _finalize_semantic_generation_certification(
         owner = runtime.semantic_handoffs
         if owner is None:  # pragma: no cover - captured entry already requires it
             raise SemanticHandoffConflict("semantic handoff owner is not composed")
+        reopen_deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
         reopened_handoff = owner._reopen_for_certification(
             request,
             entry.staged.request,
+            deadline_ns=reopen_deadline_ns,
         )
         if reopened_handoff.canonical != entry.handoff.canonical:
             raise SemanticHandoffConflict("semantic handoff changed before certification")
@@ -2130,9 +2132,11 @@ def _finalize_semantic_generation_certification(
             occurred_at=acquired_at,
             monotonic_ns=time.monotonic_ns(),
         )
+        verification_deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
         if receipt.sha256 != runtime.generations.verify_generation(
             request.repo_uuid,
             request.generation_id,
+            deadline_ns=verification_deadline_ns,
             _expected_compatibility_sha256=entry.staged.request.compatibility_sha256,
         ).sha256:
             raise GenerationConflict("certification receipt changed after installation")

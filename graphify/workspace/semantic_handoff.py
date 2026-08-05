@@ -1849,6 +1849,7 @@ class SemanticResultHandoffStore:
         path: Path,
         *,
         maximum: int,
+        deadline_ns: int | None = None,
     ) -> bytes | None:
         try:
             details = os.stat(
@@ -1890,6 +1891,7 @@ class SemanticResultHandoffStore:
                     file_descriptor,
                     path,
                     max_bytes=maximum,
+                    deadline_ns=deadline_ns,
                 )
             finally:
                 if not transferred:
@@ -2075,6 +2077,7 @@ class SemanticResultHandoffStore:
                     payload,
                     semantic_path,
                     maximum=handoff.structural_request.expected_payload_bytes,
+                    deadline_ns=deadline_ns,
                 )
             finally:
                 os.close(payload)

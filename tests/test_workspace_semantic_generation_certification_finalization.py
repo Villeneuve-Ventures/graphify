@@ -284,6 +284,99 @@ def test_exact_complete_advances_to_certified_and_terminal_replay_is_read_only(
     assert tree_snapshot(harness.state_root) == state_before_replay
 
 
+def test_certification_finalization_bounds_reopen_and_post_install_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    owner = runtime.semantic_handoffs
+    assert owner is not None
+
+    reopen_calls: list[tuple[int, int | None]] = []
+    real_reopen = owner._reopen_for_certification
+
+    def reopen(*args: Any, deadline_ns: int | None = None, **kwargs: Any):
+        reopen_calls.append((time.monotonic_ns(), deadline_ns))
+        return real_reopen(*args, deadline_ns=deadline_ns, **kwargs)
+
+    monkeypatch.setattr(owner, "_reopen_for_certification", reopen)
+
+    certify_returned = False
+    real_certify = runtime.generations.certify
+
+    def certify(*args: Any, **kwargs: Any):
+        nonlocal certify_returned
+        result = real_certify(*args, **kwargs)
+        certify_returned = True
+        return result
+
+    monkeypatch.setattr(runtime.generations, "certify", certify)
+
+    verification_calls: list[tuple[int, int | None]] = []
+    real_verify = runtime.generations.verify_generation
+
+    def verify(*args: Any, deadline_ns: int | None = None, **kwargs: Any):
+        if certify_returned:
+            verification_calls.append((time.monotonic_ns(), deadline_ns))
+        return real_verify(*args, deadline_ns=deadline_ns, **kwargs)
+
+    monkeypatch.setattr(runtime.generations, "verify_generation", verify)
+
+    workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    for calls in (reopen_calls, verification_calls):
+        assert calls
+        for called_ns, deadline_ns in calls:
+            assert deadline_ns is not None
+            assert 0 < deadline_ns - called_ns <= workspace_sync._SYNC_READ_TIMEOUT_NS
+
+
+def test_certification_reopen_propagates_deadline_to_semantic_input_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, handoff_proof, complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    owner = runtime.semantic_handoffs
+    assert owner is not None
+
+    semantic_input_deadlines: list[int | None] = []
+    real_read = owner.state._read_regular_descriptor
+
+    def read_regular_descriptor(
+        descriptor: int,
+        path: Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        if path.name == "semantic-inputs.json":
+            semantic_input_deadlines.append(deadline_ns)
+        return real_read(
+            descriptor,
+            path,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(owner.state, "_read_regular_descriptor", read_regular_descriptor)
+    deadline_ns = time.monotonic_ns() + workspace_sync._SYNC_READ_TIMEOUT_NS
+
+    reopened = owner._reopen_for_certification(
+        request,
+        complete.request,
+        deadline_ns=deadline_ns,
+    )
+
+    assert reopened.sha256 == handoff_proof.handoff_sha256
+    assert semantic_input_deadlines == [deadline_ns]
+
+
 def test_mismatched_and_ambiguous_staged_entry_fail_before_recovery_acquisition(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -620,11 +713,14 @@ def test_release_commit_unknown_rejects_absence_after_replacement_authority(
         with runtime.registry.recovered_snapshot():
             with runtime.leases.workspace_lock(REPO_UUID):
                 runtime.leases._commit_state_locked(advanced)
-        raise CommitUnknown("certification release was followed by replacement authority")
+        raise CommitUnknown("injected release acknowledgement loss")
 
     monkeypatch.setattr(runtime.leases, "release", release_then_replace)
 
-    with pytest.raises(CommitUnknown, match="replacement authority"):
+    with pytest.raises(
+        CommitUnknown,
+        match="recovery lease absence follows replacement authority",
+    ):
         workspace_sync._finalize_semantic_generation_certification(runtime, request)
 
     lease_state = runtime.leases.inspect(REPO_UUID)
