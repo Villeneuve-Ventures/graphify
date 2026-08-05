@@ -887,8 +887,8 @@ and does not refresh the generated Graphify graph.
 These gates accept the corrected internal lifecycle implementation only at the
 already frozen boundary. The
 [accepted completion receipt](receipts/p5b2-semantic-generation-certification-finalization.md)
-binds PR #56's implementation together with PR #57's corrective delivery; PR
-#56 alone is insufficient. The gates do not activate or make the lifecycle
+binds PR #56's implementation together with PR #57's corrective
+delivery; PR #56 alone is insufficient. The gates do not activate or make the lifecycle
 public. Every prior accepted receipt and acceptance gate remains unchanged:
 
 - the governance-closeout diff is limited to the nine allowlisted Markdown

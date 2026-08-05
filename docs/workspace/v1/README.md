@@ -757,9 +757,9 @@ or fork engine logic inside the package.
   assigns read-only worker-evidence parsing to that existing boundary,
   reconciliation and sealed-input mutation to `.semantic_queue`, generation
   staging and payload completion to `.generations`, and internal ordering to
-  `.sync`; it adds no public CLI ownership. The frozen but
-  unimplemented certification-finalization successor would keep ordering in
-  `.sync` and reuse `.semantic_queue` certification-view/binding ownership plus
+  `.sync`; it adds no public CLI ownership. The accepted
+  certification-finalization child keeps ordering in `.sync` and reuses
+  `.semantic_queue` certification-view/binding ownership plus
   `.generations` receipt, journal, reservation, and staged-state ownership; it
   adds no persistence or public CLI owner. `.composition` owns the
   bounded, no-follow read of installed runtime authority and wires the existing
