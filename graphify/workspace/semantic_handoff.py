@@ -2048,10 +2048,22 @@ class SemanticResultHandoffStore:
             handoff.repo_uuid,
             handoff.target_generation_id,
         )
-        payload_path = self.state.path(staging_relative / "graphify-out")
-        with self.state.existing_private_directory(staging_relative) as staging:
+        final_relative = self.generations._generation(
+            handoff.repo_uuid,
+            handoff.target_generation_id,
+        )
+        staging_exists = self.state.private_directory_exists(staging_relative)
+        final_exists = self.state.private_directory_exists(final_relative)
+        if staging_exists == final_exists:
+            raise SemanticHandoffConflict(
+                "semantic handoff target must occupy exactly one generation location"
+            )
+        container_relative = staging_relative if staging_exists else final_relative
+        payload_path = self.state.path(container_relative / "graphify-out")
+        semantic_path = self.state.path(container_relative / SEMANTIC_INPUT_PATH)
+        with self.state.existing_private_directory(container_relative) as container:
             payload = self.state._open_directory_at(
-                staging,
+                container,
                 "graphify-out",
                 payload_path,
                 allowed_modes=frozenset({0o700, 0o755}),
@@ -2059,11 +2071,54 @@ class SemanticResultHandoffStore:
             if payload is None:  # pragma: no cover - allow_missing is false
                 raise SemanticHandoffConflict("terminal structural payload root is missing")
             try:
-                copied = self._read_generation_copy_descriptor(payload, handoff)
+                copied = self._read_semantic_input_descriptor(
+                    payload,
+                    semantic_path,
+                    maximum=handoff.structural_request.expected_payload_bytes,
+                )
             finally:
                 os.close(payload)
         if external != handoff.canonical or copied != handoff.canonical:
             raise SemanticHandoffConflict("semantic handoff copies differ")
+
+    def _reopen_for_certification(
+        self,
+        request: SyncRequest,
+        structural_request: StructuralBuildRequest,
+        *,
+        deadline_ns: int | None = None,
+    ) -> SemanticResultHandoff:
+        """Reopen the retained external handoff and its exact target-owned copy."""
+
+        relative = self._relative_path(
+            request.repo_uuid,
+            request.generation_id,
+            structural_request.sha256,
+        )
+        raw = self._read_exact_handoff_directory(
+            relative,
+            maximum=structural_request.expected_payload_bytes,
+            deadline_ns=deadline_ns,
+        )
+        if raw is None:
+            raise SemanticHandoffConflict("retained semantic handoff is missing")
+        try:
+            handoff = parse_semantic_result_handoff(
+                raw,
+                max_bytes=structural_request.expected_payload_bytes,
+            )
+        except SemanticHandoffError:
+            raise
+        except Exception as exc:  # pragma: no cover - parser owns stable failures
+            raise SemanticHandoffConflict("retained semantic handoff is invalid") from exc
+        if (
+            handoff.repo_uuid != request.repo_uuid
+            or handoff.target_generation_id != request.generation_id
+            or handoff.structural_request.canonical != structural_request.canonical
+        ):
+            raise SemanticHandoffConflict("retained semantic handoff identities differ")
+        self._reopen_exact_files(handoff, deadline_ns=deadline_ns)
+        return handoff
 
     def validate_terminal_locked(
         self,
