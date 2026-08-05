@@ -50,14 +50,14 @@ is bound by the
 [P5B2 semantic-result handoff receipt](receipts/p5b2-semantic-result-handoff.md),
 and it stops before certification or any content release.
 
-The next unnumbered P5B2 semantic-generation certification-finalization child
-is frozen only as an internal contract and is the sole `READY` child recorded
-by the post-merge governance reconciliation. `READY` is implementation
-eligibility only. It composes the accepted handoff's reopened request-bound
+The unnumbered P5B2 semantic-generation certification-finalization child is
+implemented and accepted only at its frozen internal boundary, with evidence
+in the [accepted completion receipt](receipts/p5b2-semantic-generation-certification-finalization.md).
+It composes the accepted handoff's reopened request-bound
 staged `COMPLETE` state and equal queue sealed-input digest with existing
 semantic certification-view, immutable binding, generation certification,
-staged-recovery, and lease authorities. The contract itself adds no
-implementation, public command, schema, receipt, release route, or readiness
+staged-recovery, and lease authorities. The accepted implementation adds no
+public command, schema, runtime receipt, release route, or successor-readiness
 claim. Its stop is the same target durably proved staged `CERTIFIED` and
 verified against its exact binding, receipt, journal, reservation, pointer, and
 released recovery grant; it still performs no content release, promotion, or
@@ -415,11 +415,12 @@ granting provider/backend, network, service/watch, repair, GC, migrate,
 publication, production/runtime installation authority, performance,
 parent-phase completion, or successor authority.
 
-The frozen certification-finalization contract makes no implementation,
-receipt-acceptance, governance-acceptance, readiness, completion, or merge
-claim. The separate governance reconciliation records `READY` as implementation
-eligibility only and creates none of those authorities. Even after the exact
-internal stop boundary, the contract grants no content-release
+The accepted certification-finalization implementation and
+[receipt](receipts/p5b2-semantic-generation-certification-finalization.md) are
+authority only for the exact internal stop boundary. The local receipt remains
+staged until separately published and merged, and neither the implementation
+nor its receipt grants publication, merge, execution, or successor authority.
+Even after the exact internal stop boundary, they grant no content-release
 or DLP decision, graph/query projection, promotion, pointer movement, public
 semantic-sync command, provider/backend/model or credential authority,
 networking, migrate, repair, GC, semantic-staging cleanup, service/watch,

@@ -124,8 +124,10 @@ manifest and `SemanticQueueStore.bind_sealed_inputs()` binds that digest. The
 child stops there; content release, graph projection, certification, promotion,
 and pointer mutation remain separate.
 
-The next unnumbered P5B2 semantic-generation certification finalization child
-is contract-frozen but unimplemented. It begins only from that accepted
+The unnumbered P5B2 semantic-generation certification finalization child is
+implemented and accepted only at its frozen internal boundary, with evidence
+in the [P5B2 certification-finalization receipt](receipts/p5b2-semantic-generation-certification-finalization.md).
+It begins only from that accepted
 handoff's reopened request-bound staged `COMPLETE` record, byte-exact payload
 inventory and handoff copy, and equal semantic-required queue sealed-input
 digest. It reacquires only the same request's `BUILD` recovery lane, reconstructs
@@ -133,7 +135,8 @@ the existing allocation and completion wrappers without resetting staging, and
 uses the existing semantic certification view plus `GenerationStore.certify()`
 to bind and seal the same target. Its terminal boundary is a verified staged
 `CERTIFIED` record and released recovery lease; it has no public transport,
-receipt, promotion, pointer, projection, or content-release authority.
+public success receipt, promotion, pointer, projection, or content-release
+authority.
 
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
@@ -374,7 +377,7 @@ newer desired work later advances the queue; a staged receipt alone is never
 queue authority. The receipt remains the idempotent boundary for the subsequent
 generation install and journal transition.
 
-The frozen certification-finalization composition narrows that existing P5A/P3
+The accepted certification-finalization composition narrows that existing P5A/P3
 order to one exact staged successor. Before acquisition it reopens the canonical
 `SyncRequest`, target generation, `StructuralBuildRequest`, staged `COMPLETE`
 record, payload inventory and manifest, handoff and target-owned semantic-input

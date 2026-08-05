@@ -882,19 +882,19 @@ Run the focused semantic-result handoff suite before repository gates. The
 documentation-only acceptance closeout audits all relative links and anchors
 and does not refresh the generated Graphify graph.
 
-## P5B2 semantic-generation certification finalization contract gates
+## P5B2 semantic-generation certification finalization acceptance gates
 
-These gates freeze the next unnumbered child as a documentation-only contract,
-and the post-merge governance reconciliation records it as the sole `READY`
-child. `READY` is implementation eligibility only. The gates demonstrate that
-existing durable state and APIs can express the required lifecycle; they do not
-claim that a lifecycle composition has been implemented, accepted, activated,
-or made public. Every accepted receipt and prior acceptance gate remains
-unchanged:
+These gates accept the corrected internal lifecycle implementation only at the
+already frozen boundary. The
+[accepted completion receipt](receipts/p5b2-semantic-generation-certification-finalization.md)
+binds PR #56's implementation together with PR #57's corrective
+delivery; PR #56 alone is insufficient. The gates do not activate or make the lifecycle
+public. Every prior accepted receipt and acceptance gate remains unchanged:
 
-- the documentation diff is limited to the seven canonical workspace contract
-  documents. No receipt, JOS row, code, test, schema, fixture, dependency,
-  configuration, workflow, or generated Graphify output changes, and P5/P5B2
+- the governance-closeout diff is limited to the nine allowlisted Markdown
+  documents, including the new receipt and receipt index. No JOS row, code,
+  test, schema, fixture, dependency, configuration, workflow, or generated
+  Graphify output changes, and P5/P5B2
   remain `IN_PROGRESS`, H3 remains `DEFERRED`, and the remaining P5B2/P5C work
   remains `WAITING`;
 - entry vectors start from the accepted target generation and exact structural
@@ -1015,20 +1015,23 @@ unchanged:
   parent completion, successor readiness, governance acceptance, or merge
   authority.
 
-Run the existing focused state-model suite before repository gates:
+Run the accepted focused state-model suite before repository gates:
 
 ```bash
 uv run --frozen --all-extras pytest -q \
+  tests/test_workspace_semantic_generation_certification_finalization.py \
   tests/test_workspace_semantic_queue.py \
   tests/test_workspace_semantic_result_handoff.py \
-  tests/test_workspace_semantic_generation_certification_finalization.py \
-  tests/test_workspace_staged_build_certification_recovery.py
+  tests/test_workspace_staged_build_certification_recovery.py \
+  tests/test_workspace_generations.py \
+  tests/test_workspace_sync.py
 ```
 
-Contract review must independently verify the exact committed head for both
-specification consistency and architecture/lock-order correctness. The
-documentation-only closeout audits all relative links and anchors and does not
-refresh the generated Graphify graph.
+Acceptance review must independently verify PR #56's exact implementation head
+plus PR #57's exact corrective head against specification consistency,
+architecture/lock-order correctness, tests, and every review item. The
+documentation-only closeout audits all relative links and heading anchors and
+does not refresh the generated Graphify graph.
 
 ## P5B2 public fenced pointer-repair CLI gates
 

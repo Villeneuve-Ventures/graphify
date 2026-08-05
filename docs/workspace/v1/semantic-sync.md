@@ -1102,12 +1102,12 @@ child.
 
 ## P5B2 semantic-generation certification finalization
 
-This is the next unnumbered P5B2 child, frozen as an internal contract only,
-and the post-merge governance reconciliation records it as the sole `READY`
-child. `READY` is implementation eligibility only. It is not implemented,
-`COMPLETE`, or accepted; it has no governance receipt. It does not revise the
-accepted worker or handoff contracts and grants no public semantic-sync
-authority.
+This unnumbered P5B2 child is implemented and accepted only at the frozen
+internal boundary in this section. The
+[accepted completion receipt](receipts/p5b2-semantic-generation-certification-finalization.md)
+binds the exact PR #56 implementation together with PR #57's corrective
+delivery. It does not revise the accepted worker or handoff contracts and
+grants no public semantic-sync authority or successor readiness.
 
 The child composes only existing durable authorities:
 
