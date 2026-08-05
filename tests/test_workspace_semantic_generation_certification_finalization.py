@@ -529,6 +529,46 @@ def test_prebinding_queue_drift_fails_closed_and_releases_exact_recovery_lease(
     assert lease_state.staged_attempt_sha256 is None
 
 
+def test_released_prebinding_attempt_does_not_become_new_entry_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, runtime, request, _handoff_proof, complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    attempt = runtime.generations.acquire_staged_recovery(
+        REPO_UUID,
+        GENERATION_ID,
+        complete.request,
+        attempt_sha256=hashlib.sha256(b"released-prebinding-attempt").hexdigest(),
+        acquired_at=datetime.now(timezone.utc),
+        monotonic_ns=time.monotonic_ns(),
+        ttl_ns=60_000_000_000,
+    )
+    runtime.leases.release(attempt.grant)
+    advanced = runtime.leases.inspect(REPO_UUID)
+    assert complete.operation_epoch is not None
+    assert complete.fence_token is not None
+    assert advanced.operation_epoch == complete.operation_epoch + 1
+    assert advanced.fence_high_watermark == complete.fence_token + 1
+    before = tree_snapshot(harness.state_root)
+    monkeypatch.setattr(
+        runtime.generations,
+        "acquire_staged_recovery",
+        _forbidden("released pre-binding attempt replay"),
+    )
+
+    with pytest.raises(
+        SemanticHandoffConflict,
+        match="pre-binding operation authority advanced beyond COMPLETE",
+    ):
+        workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    assert not _binding_path(harness).exists()
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_recovery_acquisition_commit_unknown_reuses_one_attempt_and_fence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -629,6 +669,64 @@ def test_durable_binding_recovers_exact_view_after_source_and_queue_drift(
         queue.desired_watermark + 1
     )
     assert runtime.leases.inspect(REPO_UUID).leases.get("workspace") is None
+
+
+def test_bound_complete_retry_replaces_rebooted_recovery_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault(f"semantic_certification:{GENERATION_ID}:installed")
+    harness, runtime, request, _handoff_proof, complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    fault.armed = True
+    real_release = workspace_sync._release_semantic_certification_grant
+    block_release = True
+
+    def release(*args: Any, **kwargs: Any) -> None:
+        nonlocal block_release
+        if block_release:
+            block_release = False
+            raise CommitUnknown("injected crash before certification lease release")
+        real_release(*args, **kwargs)
+
+    monkeypatch.setattr(
+        workspace_sync,
+        "_release_semantic_certification_grant",
+        release,
+    )
+
+    with pytest.raises(
+        CommitUnknown,
+        match="injected crash before certification lease release",
+    ):
+        workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    assert fault.fired
+    assert _binding_path(harness).is_file()
+    staged = runtime.generations.recover_staged_build(REPO_UUID)
+    assert staged is not None
+    assert staged.canonical == complete.canonical
+    retained = runtime.leases.inspect(REPO_UUID)
+    assert retained.leases.get("workspace") is not None
+    assert retained.staged_attempt_sha256 is not None
+
+    prior_owner = runtime.leases.current_owner()
+    rebooted_owner = replace(prior_owner, boot_id="rebooted-certification-owner")
+    monkeypatch.setattr(runtime.leases, "current_owner", lambda: rebooted_owner)
+
+    proof = workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    receipt = runtime.generations.verify_generation(REPO_UUID, GENERATION_ID)
+    receipt_value = receipt.to_dict()
+    assert receipt.sha256 == proof.receipt_sha256
+    assert receipt_value["operation_epoch"] == retained.operation_epoch + 1
+    assert receipt_value["fence_token"] == retained.fence_high_watermark + 1
+    released = runtime.leases.inspect(REPO_UUID)
+    assert released.leases.get("workspace") is None
+    assert released.staged_attempt_sha256 is None
 
 
 @pytest.mark.parametrize(

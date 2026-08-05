@@ -1371,13 +1371,7 @@ def _capture_semantic_certification_entry(
                 request.repo_uuid,
                 deadline_ns=deadline_ns,
             )
-            if (
-                lease_state.leases.get("workspace") is not None
-                or lease_state.staged_attempt_sha256 is not None
-            ):
-                raise SemanticHandoffConflict(
-                    "prior staged BUILD lease release is not durably proven"
-                )
+            workspace_lease = lease_state.leases.get("workspace")
             current = runtime.generations.read_only_staged_build_locked(
                 request.repo_uuid,
                 deadline_ns=deadline_ns,
@@ -1394,6 +1388,13 @@ def _capture_semantic_certification_entry(
                 deadline_ns=deadline_ns,
             )
             if entry.binding_view is None:
+                if (
+                    workspace_lease is not None
+                    or lease_state.staged_attempt_sha256 is not None
+                ):
+                    raise SemanticHandoffConflict(
+                        "prior staged BUILD lease release is not durably proven"
+                    )
                 if (
                     lease_state.operation_epoch != staged.operation_epoch
                     or lease_state.fence_high_watermark != staged.fence_token
@@ -1413,6 +1414,25 @@ def _capture_semantic_certification_entry(
                     or lease_state.fence_high_watermark < staged_fence_token
                 ):
                     raise SemanticHandoffConflict("bound recovery authority regressed")
+                if (workspace_lease is None) != (
+                    lease_state.staged_attempt_sha256 is None
+                ):
+                    raise SemanticHandoffConflict(
+                        "bound recovery lease evidence is ambiguous"
+                    )
+                if workspace_lease is not None:
+                    lease_value = workspace_lease.to_dict()
+                    lease_epoch = lease_state.lease_epochs.get("workspace")
+                    if (
+                        lease_value["repo_uuid"] != request.repo_uuid
+                        or lease_value["operation"] != "BUILD"
+                        or lease_epoch is None
+                        or lease_epoch <= staged_operation_epoch
+                        or cast(int, lease_value["fence_token"]) <= staged_fence_token
+                    ):
+                        raise SemanticHandoffConflict(
+                            "bound recovery lease differs from certification authority"
+                        )
             return entry
 
 
