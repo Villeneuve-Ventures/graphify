@@ -2024,6 +2024,16 @@ def _recover_certified_build_cleanup(
             if retry == 0:
                 continue
             raise
+        except LeaseRecoveryRequired:
+            try:
+                return _semantic_certification_terminal_after_release(
+                    runtime,
+                    request,
+                    expected_complete=None,
+                )
+            except _SemanticCertificationCleanupRequired:
+                pass
+            raise
         else:
             break
     if cleanup_authority is None:  # pragma: no cover - retry loop returns or raises

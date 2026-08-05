@@ -1021,6 +1021,7 @@ Run the existing focused state-model suite before repository gates:
 uv run --frozen --all-extras pytest -q \
   tests/test_workspace_semantic_queue.py \
   tests/test_workspace_semantic_result_handoff.py \
+  tests/test_workspace_semantic_generation_certification_finalization.py \
   tests/test_workspace_staged_build_certification_recovery.py
 ```
 

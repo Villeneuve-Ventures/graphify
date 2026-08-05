@@ -843,6 +843,61 @@ def test_certified_retry_releases_retained_current_owner_grant(
     assert released.staged_attempt_sha256 is None
 
 
+def test_certified_retry_adopts_terminal_proof_when_competing_cleanup_wins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _harness, runtime, request, _handoff_proof, _complete = _complete_handoff(
+        tmp_path,
+        monkeypatch,
+    )
+    _retain_certified_grant(
+        runtime,
+        request,
+        monkeypatch,
+        message="simulated retained certification grant",
+    )
+
+    certified_before = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_before is not None
+    receipt_before = runtime.generations.verify_generation(REPO_UUID, GENERATION_ID)
+    real_acquire = runtime.leases.acquire_certified_build_cleanup
+    competing_cleanup_calls = 0
+
+    def acquire_after_competing_cleanup(*args: Any, **kwargs: Any):
+        nonlocal competing_cleanup_calls
+        competing_cleanup_calls += 1
+        competing_grant, attempt_sha256 = real_acquire(*args, **kwargs)
+        workspace_sync._release_semantic_certification_grant(
+            runtime,
+            competing_grant,
+            attempt_sha256=attempt_sha256,
+        )
+        return real_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(
+        runtime.leases,
+        "acquire_certified_build_cleanup",
+        acquire_after_competing_cleanup,
+    )
+    monkeypatch.setattr(
+        runtime.generations,
+        "certify",
+        _forbidden("certify after competing terminal cleanup"),
+    )
+
+    proof = workspace_sync._finalize_semantic_generation_certification(runtime, request)
+
+    assert competing_cleanup_calls == 1
+    certified_after = runtime.generations.recover_staged_build(REPO_UUID)
+    assert certified_after is not None
+    assert certified_after.canonical == certified_before.canonical
+    assert proof.receipt_sha256 == receipt_before.sha256
+    released = runtime.leases.inspect(REPO_UUID)
+    assert released.leases.get("workspace") is None
+    assert released.staged_attempt_sha256 is None
+
+
 def test_certified_retry_replaces_rebooted_cleanup_grant_without_recertifying(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
