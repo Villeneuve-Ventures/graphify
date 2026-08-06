@@ -1105,9 +1105,10 @@ child.
 This unnumbered P5B2 child is implemented and accepted only at the frozen
 internal boundary in this section. The
 [accepted completion receipt](receipts/p5b2-semantic-generation-certification-finalization.md)
-binds the exact PR #56 implementation together with PR #57's corrective
-delivery. It does not revise the accepted worker or handoff contracts and
-grants no public semantic-sync authority or successor readiness.
+was made canonical by merged PR #58 and binds the exact PR #56 implementation
+together with PR #57's corrective delivery. It does not revise the accepted
+worker or handoff contracts and grants no public semantic-sync authority or
+successor readiness.
 
 The child composes only existing durable authorities:
 
@@ -1433,3 +1434,315 @@ credentials, networking, migrate, repair, GC, cleanup, service/watch,
 publication, production/runtime installation authority, performance/resource
 qualification, P5C, H3, P6+, parent-phase completion, successor readiness,
 governance acceptance, or merge authority.
+
+## P5B2 semantic-generation promotion and pointer-finalization
+
+This next unnumbered P5B2 child is contract-frozen only and remains `WAITING`.
+Nothing in this section implements, accepts, completes, activates, or promotes
+the child to `READY`. It introduces no public command, request/result family,
+schema, durable format, runtime receipt, provider/backend path, or completion
+evidence. Merged PR #58 remains acceptance only for the corrected predecessor
+certification-finalization child.
+
+The child composes only existing authorities:
+
+- the canonical `SyncRequest`, complete `StructuralBuildRequest`, and exact
+  staged-build record already accepted as `CERTIFIED`;
+- the installed target generation, canonical generation receipt, coordination
+  lock, lifecycle journal, immutable semantic certification binding, and
+  retained semantic-result handoff;
+- `GenerationStore.acquire_staged_recovery()` and
+  `GenerationStore.complete_staged_promotion()`;
+- the existing `PointerCAS`, `PointerStore.promote()`, pointer-recovery
+  projection, and `PointerStore.recover()` authorities; and
+- the existing registry, selected-source, workspace lease, migration,
+  compatibility, queue-policy, state-schema, and lock-order contracts.
+
+### Exact start boundary
+
+The only admissible entry is the predecessor's complete accepted terminal
+proof after certification cleanup is finished. Before lease acquisition or any
+pointer mutation, the composition must reopen and cross-check all of the
+following as one proof:
+
+1. one canonical accepted `SyncRequest`, its digest, repository UUID, exact
+   target generation, and complete canonical `StructuralBuildRequest` whose
+   logical request digest equals that `SyncRequest`;
+2. one canonical staged-build format-version-1 record in lifecycle
+   `CERTIFIED`, bound to that repository, target, request, and exact payload
+   manifest, with the exact generation-receipt SHA-256 and certification
+   operation epoch/fence, no pointer revision, and no abandonment intent or
+   evidence;
+3. exactly one installed target generation whose reopened payload inventory,
+   manifest, receipt, compatibility, source/policy/observation facts,
+   `semantic_completeness="complete"`, validation set, and retained
+   coordination lock reproduce the staged record and accepted certification
+   proof;
+4. the target-derived immutable semantic certification binding, reopened with
+   the same certification-request digest, complete queue view, sealed-input
+   manifest, and exact installed receipt;
+5. a recovered lifecycle journal with no pending journal action and exactly one
+   matching target `CERTIFIED` event whose receipt is exact and whose pointer
+   revision is zero, with no target `PROMOTED`, `REPAIRED`, `SUPERSEDED`, or
+   failed terminal event;
+6. durable absence of the exact target capacity reservation and of every
+   certification `BUILD` recovery grant and staged-attempt digest;
+7. no durable pointer intent, plus a visible pointer that is either absent for
+   request CAS `(revision=0, current_receipt=null)` or exactly equals the
+   request's expected pointer revision and current-receipt SHA-256; and
+8. current installed compatibility and queue policy plus the durable registry,
+   selected-active-source, migration-epoch, state-schema, and certified source
+   commit/epoch evidence that still agree with the request and receipt; before
+   a new direct pointer move, two fresh equal typed source observations must
+   also reproduce the frozen structural observation evidence.
+
+Items 1--8 define fresh forward entry. A later invocation recovering after
+acquisition or a pointer write began may vary only the clauses whose fresh
+state was absence: item 5 may contain only the exact target-bound `PROMOTED` or
+`REPAIRED` journal residue of that move; item 6 may retain only the exact
+persisted promotion attempt and its live grant, or proof that the grant is
+expired or rebooted and eligible for request/target-bound replacement; and item
+7 may contain only the exact pending or already-visible pointer residue. The
+target reservation and certification `BUILD` grant must remain absent, and
+every other part of items 1--8 must remain exact. Recovery preserves the same
+staged `CERTIFIED` record, installed generation, receipt, binding, request and
+target and proves the residue's registry/active-source and pointer authority.
+That is recovery of the prior move, not a second forward entry. Once the exact
+pointer intent or exact target visibility is durable, recovery does not require
+the selected checkout to remain observable and must not recapture or adopt
+newer source observations.
+
+The staged certification epoch/fence remains immutable certification evidence.
+It is not copied forward as a pointer-mutation grant. The current workspace
+operation epoch and fence high-water mark may be later only when the accepted
+certification cleanup advanced them without changing the certified receipt;
+their exact terminal values are captured and the next grant advances from
+current state. A merely certified directory, receipt, binding, journal event,
+absent reservation, absent lease, or matching pointer is not entry authority
+by itself. Missing, duplicated, foreign, substituted, incompatible, unsafe,
+unreadable, or ambiguous evidence fails closed. A staged `COMPLETE`,
+`PROMOTED`, or `ABANDONED` record, a different certified generation, a newer
+request, or an already-drifted pointer is outside forward entry.
+
+### Request-bound acquisition and forward decision
+
+The composition may acquire mutation authority only through
+`GenerationStore.acquire_staged_recovery()` for the same repository, target,
+and structural request. A fresh acquisition creates one new caller attempt
+SHA-256 and retains it across an acquisition commit-unknown retry. Recovery
+with a persisted promotion attempt must adopt that exact digest rather than
+invent another one. It may not call `request_staged_build()`, acquire a generic
+workspace operation, reopen `BUILD`, select another target, or use `MIGRATE`,
+`REPAIR`, `ROLLBACK`, `GC`, or abandonment as a promotion substitute.
+
+The existing staged-recovery classifier owns the operation:
+
+- with no `pointers.pending.json`, the grant must be `PROMOTE`; and
+- with a durable pointer intent, the grant must be `POINTER_RECOVERY`.
+
+Any other operation is a conflict. The current OS owner may reopen the same
+live grant only with the retained attempt digest. After exact expiry or reboot
+proof, request/target-bound acquisition may replace that grant with the same
+persisted attempt and the operation classified from the durable pointer state;
+the replacement epoch/fence is current mutation authority, not proof that an
+earlier boundary completed. Proven grant and attempt absence may retry from the
+unchanged fresh entry with one new digest. A different digest while an attempt
+remains, a live foreign owner, an operation not selected by the classifier, a
+different request or target, or ambiguous replacement authority is busy,
+conflict, or commit-unknown, never successor authority.
+
+Registry-before-workspace ordering remains mandatory for acquisition and grant
+validation. Pointer movement retains workspace authority before taking the
+sorted exclusive generation-lock set for the exact candidate and any visible
+current/last-good references. A generation lock never wraps registry or
+workspace acquisition. After acquisition and immediately before a new direct
+pointer write, the composition revalidates the full fresh-entry proof, accepted
+grant, liveness, and two equal current source observations. An exact pending or
+already-visible recovery path instead revalidates the durable recovery proof,
+grant, registry/active-source authority, candidate receipt and pointer plan
+without consuming source payload or requiring source observation. Drift
+releases or classifies that exact grant and blocks this child; it does not
+update the request, adopt newer authority, substitute a target, or infer
+success.
+
+### Direct exact promotion
+
+Under a `PROMOTE` grant, an already-visible candidate is admissible only when
+the current reference equals the exact target generation and certified receipt
+and its pointer/journal proof is complete. That path performs no new pointer
+move and proceeds only to staged finalization. Any other already-advanced
+pointer is a conflict.
+
+For a new move, the only allowed `PointerCAS` is derived from the frozen request
+and accepted grant:
+
+```text
+expected_pointer_revision         = request.expected_pointer_revision
+expected_current_receipt_sha256   = request.expected_current_receipt_sha256
+expected_active_source_revision   = accepted grant active-source revision
+expected_source_epoch             = certified receipt source epoch
+expected_operation_epoch          = accepted grant operation epoch
+expected_migration_epoch          = accepted grant migration epoch
+expected_state_schema_version     = current frozen state schema version
+expected_fence_token              = accepted grant fence token
+candidate_generation_id           = exact certified target generation
+candidate_receipt_sha256          = exact certified target receipt SHA-256
+```
+
+Every field is mandatory. The candidate must reopen through
+`GenerationStore.verify_generation()` and remain eligible under the exact
+`CERTIFIED` journal event. `PointerStore.promote()` is the sole direct pointer
+writer. Its existing durable order is retained: preserve the verified prior
+pointer when any; install the exact pending pointer intent; make that exact
+pointer visible; append the authoritative `PROMOTED` journal event; then unlink
+and sync the pending intent. The direct pointer revision is exactly the prior
+visible revision plus one. A stale CAS may append only the existing
+`SUPERSEDED` result for the losing exact candidate and is never promotion
+success. The entry proof requires all referenced generations to be valid, so
+this child has no corrupt-generation quarantine or generic repair authority.
+
+### Exact pointer recovery
+
+When durable pointer intent selects `POINTER_RECOVERY`, it may reconcile only
+pending or already-visible residue from the same request's exact target/receipt
+move. Before mutation, the locked recovery projection and any supplied
+`expected_plan` must prove all of the following:
+
+- the verified candidate is the same target generation and receipt;
+- the selected source is the exact target-bound pending or visible move, not a
+  prior, last-good, unrelated current, arbitrary certified, or newly discovered
+  generation;
+- the pending/visible relationship, retained prior revision, registry and
+  active-source revision, operation and migration authority, source epoch,
+  compatibility, generation receipt, certification journal, and pointer
+  revision chain are valid;
+- no corrupt-generation quarantine, rollback, GC, public `REPAIR`, or other
+  lifecycle action is part of the plan; and
+- re-deriving the plan under the mutation locks produces the same decision.
+
+A compatible exact residue may be resumed or finalized at its existing
+revision. When the existing pointer store must re-emit that same target and
+receipt at a later monotonic revision to close visible commit uncertainty, the
+new revision and authoritative `REPAIRED` event are recovery evidence only;
+they do not authorize target substitution or adoption of unrelated newer
+state. A plan whose candidate, selected source, last-good, quarantine set, or
+pointer facts differ is rejected before pointer mutation. Corrupt, stale,
+incompatible, foreign, or ambiguous pending state remains a recovery barrier.
+
+`PointerStore.recover()` remains the sole recovery writer. Its returned pointer
+is not accepted merely because it is readable. It must bind current to the
+exact target/receipt, have the exact recovered revision, operation epoch and
+fence, have a matching authoritative `PROMOTED` or `REPAIRED` journal event,
+and leave no pending pointer intent. A generic no-op or replacement that merely
+finds some valid current generation is outside this child.
+
+### Staged pointer finalization
+
+After either path returns the exact visible pointer, and only after pending
+intent absence is durably proved, the composition calls
+`GenerationStore.complete_staged_promotion()` with the same staged-recovery
+attempt and exact pointer. That method may only:
+
+1. reopen the exact request-bound staged record in `CERTIFIED` or exact replay
+   `PROMOTED`;
+2. require the visible pointer bytes to equal the supplied pointer and current
+   to bind the same repository, target generation, receipt, active-source
+   revision, and source epoch;
+3. require the pointer revision to exceed the original request CAS and reject
+   pointer authority from a fence newer than the accepted grant;
+4. under the existing target generation lock, reopen the unchanged installed
+   generation and exact receipt and require the authoritative target
+   `PROMOTED` or `REPAIRED` journal event at the same pointer revision,
+   operation epoch, and fence; and
+5. advance the same staged record by exactly one durable revision from
+   `CERTIFIED` to `PROMOTED`, preserving its repository, target, structural
+   request, payload manifest, and receipt while recording that exact pointer
+   revision and pointer-authority epoch/fence.
+
+The method never moves or repairs a pointer. An uncertain staged-state commit
+is adopted only when durable recovery reopens the exact expected `PROMOTED`
+record with the exact previous `CERTIFIED` identity and pointer proof. A
+revision jump, different receipt, changed manifest/request, pending staged
+record, abandonment evidence, or mismatched pointer is not terminal success.
+
+Before and after staged finalization, the composition reopens the installed
+payload inventory, generation receipt, semantic-input bytes, immutable semantic
+certification binding, and retained handoff. Their canonical bytes and digests
+must equal the start proof. Promotion changes pointer and staged lifecycle
+evidence only; it does not rebuild, recertify, rewrite, release, project, or
+clean semantic content.
+
+### Commit uncertainty, replay, and release
+
+Each durable boundary is independently recovered:
+
+- acquisition uncertainty reuses only the retained attempt digest and exact
+  live grant, or after expiry/reboot proof replaces it through the same
+  request/target-bound classifier without changing that digest;
+- pending-intent uncertainty adopts only the exact target-bound intent or
+  enters exact `POINTER_RECOVERY`;
+- visible-pointer uncertainty never succeeds before matching journal authority
+  and pending-intent resolution;
+- journal uncertainty reopens only the exact target, receipt, revision,
+  operation epoch, fence, and `PROMOTED` or admissible `REPAIRED` transition;
+- staged-transition uncertainty reopens only the exact `PROMOTED` successor of
+  the accepted `CERTIFIED` record; and
+- release uncertainty retries only the exact unchanged live grant or adopts a
+  locked durable reread proving that exact owner/fence and staged-attempt digest
+  absent without replacement authority.
+
+Same canonical state is idempotent. An invocation beginning with the complete
+terminal proof and exact grant absence performs read-only replay verification.
+If the pointer and staged transition are complete but the same live promotion
+grant and staged-attempt digest remain, a cleanup-only path may verify the full
+terminal proof, adopt that exact persisted attempt, release only that grant,
+and reprove absence. The same live grant is reusable only by its current OS
+owner; an expired or rebooted grant may be replaced only through a
+request/target-bound terminal-cleanup acquisition that first verifies the exact
+`PROMOTED` proof. A generic unbound lease acquisition is forbidden. Any cleanup
+replacement epoch or fence is cleanup authority only and is never copied into
+the pointer, journal, receipt, or staged `PROMOTED` record. Cleanup may not
+move/recover the pointer, rewrite staged state, or recertify. A live foreign
+owner, different attempt or operation, invalid terminal proof, later unrelated
+fence, or ambiguous/unreadable state is not cleanup or absence. No success is
+inferred from an installed generation, visible target, journal head, absent
+pending file, `PROMOTED` marker, or released lease alone.
+
+No replay or failure path selects a different generation, adopts a newer
+request or pointer, deletes or resets staging, removes the handoff,
+semantic-input copy, binding, receipt, journal, or installed generation,
+rewrites the queue, or performs semantic-staging cleanup.
+
+### Exact stop boundary and carried evidence
+
+Terminal success requires one locked, cross-record proof:
+
+- the staged record is exactly `PROMOTED` for the same request, target,
+  manifest, and receipt, and records the exact pointer revision plus
+  pointer-authority operation epoch and fence;
+- the visible pointer current is bound to that exact target and receipt, its
+  revision equals the staged revision evidence and exceeds the request CAS, and
+  the lifecycle journal contains the matching authoritative `PROMOTED` or
+  admissible `REPAIRED` event;
+- no unresolved `pointers.pending.json` or journal recovery action exists;
+- the installed payload inventory, semantic-input bytes, generation receipt,
+  coordination lock, retained handoff, and immutable semantic certification
+  binding are unchanged from the accepted entry proof; and
+- after cleanup, a locked durable reread proves the exact acquired promotion
+  owner/fence and staged-attempt digest absent without replacement ambiguity.
+
+Only the exact generation proved both staged `PROMOTED` and visible current by
+that terminal proof may later be offered as carried semantic-result evidence
+to a separately authorized handoff. This boundary neither invokes that handoff
+nor makes its retained labels or rationales releasable, query-safe, DLP-cleared,
+semantically correct, or publication-ready.
+
+Content release or DLP decisions, graph construction/merge/query projection,
+changes to `query_structural()`, public semantic-sync commands, schemas,
+runtime formats, receipts, providers/backends/models, credentials, networking,
+migrate, repair, GC, service/watch, publication, production/runtime
+installation, performance/resource qualification, P5C, H3, P6+, parent
+completion, governance acceptance, implementation, and successor readiness are
+explicitly excluded. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`;
+this child, remaining P5B2, P5C, and remaining P5C concerns remain `WAITING`;
+no successor is `READY`.

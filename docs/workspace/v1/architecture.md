@@ -126,7 +126,8 @@ and pointer mutation remain separate.
 
 The unnumbered P5B2 semantic-generation certification finalization child is
 implemented and accepted only at its frozen internal boundary, with evidence
-in the [P5B2 certification-finalization receipt](receipts/p5b2-semantic-generation-certification-finalization.md).
+in the [P5B2 certification-finalization receipt](receipts/p5b2-semantic-generation-certification-finalization.md),
+made canonical by merged PR #58.
 It begins only from that accepted
 handoff's reopened request-bound staged `COMPLETE` record, byte-exact payload
 inventory and handoff copy, and equal semantic-required queue sealed-input
@@ -137,6 +138,40 @@ to bind and seal the same target. Its terminal boundary is a verified staged
 `CERTIFIED` record and released recovery lease; it has no public transport,
 public success receipt, promotion, pointer, projection, or content-release
 authority.
+
+The next unnumbered P5B2 semantic-generation promotion and pointer-finalization
+child is contract-frozen and remains `WAITING`. It composes no new store or
+format. Its fresh entry is the accepted certification terminal: the same staged
+`CERTIFIED` request/target/manifest/receipt, verified installed payload and
+immutable semantic certification binding, matching `CERTIFIED` journal event
+at pointer revision zero, absent target reservation, unchanged request pointer
+CAS, and absent certification `BUILD` recovery grant. Only
+`GenerationStore.acquire_staged_recovery()` may open the next lane. With no
+pending pointer intent it must return `PROMOTE`, including for an exact
+already-visible replay; only durable pending intent from the same exact
+attempted move may select `POINTER_RECOVERY`.
+
+Commit-unknown recovery may vary only the fresh-absence clauses. It may reopen
+the exact persisted promotion attempt and live grant, or replace that same
+attempt after expiry/reboot proof, and it may admit only matching target-bound
+pending/visible pointer and `PROMOTED`/`REPAIRED` journal residue. The certified
+target, receipt, binding, request, absent reservation, and absent certification
+`BUILD` authority do not change.
+
+Direct forward movement delegates the unchanged complete pointer CAS to
+`PointerStore.promote()`. Recovery delegates to `PointerStore.recover()` only
+after the recovery projection is bound to that same target and receipt and to
+the exact pending or already-visible move; selection from an unrelated current,
+prior, last-good, or arbitrary certified generation is inadmissible. The
+existing registry-before-workspace and workspace-before-sorted-generation-lock
+order remains unchanged. `GenerationStore.complete_staged_promotion()` may
+then record `PROMOTED` only after the visible pointer, exact revision and
+authoritative `PROMOTED` or `REPAIRED` journal event are durable and no pending
+intent remains. Terminal release must prove the exact promotion owner/fence
+absent. A retained terminal grant may be replaced after expiry or reboot only
+by request/target-bound cleanup authority and may not rewrite terminal evidence.
+The child adds no implementation, public transport, schema, runtime receipt,
+content release, graph/query projection, acceptance, or readiness.
 
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
