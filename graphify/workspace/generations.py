@@ -30,11 +30,13 @@ from graphify.workspace.contracts import (
     GenerationCoordinationLock,
     GenerationReceipt,
     PointerSet,
+    Registry,
     StagedBuildAbandonmentEvidence,
     StagedBuildAbandonmentIntent,
     StagedBuildAuthorityCurrent,
     StagedBuildState,
     StructuralBuildRequest,
+    WorkspaceLeaseState,
     canonical_json_bytes,
     payload_manifest_sha256,
 )
@@ -201,9 +203,7 @@ class StagedBuildCompletion:
     def manifest_sha256(self) -> str:
         manifest_sha256 = self.state.payload_manifest_sha256
         if manifest_sha256 is None:
-            raise GenerationConflict(
-                "completed staged build is missing a durable payload manifest"
-            )
+            raise GenerationConflict("completed staged build is missing a durable payload manifest")
         return manifest_sha256
 
 
@@ -478,8 +478,7 @@ class GenerationStore:
         if len(source_observations) != 2:
             raise GenerationConflict("exactly two source observations are required")
         documents = tuple(
-            cls._source_observation_document(observation)
-            for observation in source_observations
+            cls._source_observation_document(observation) for observation in source_observations
         )
         if documents[0] != documents[1]:
             raise GenerationConflict("repeated source observations differ")
@@ -498,17 +497,13 @@ class GenerationStore:
             )
             confirmed_source = self.leases.registry.resolve_active_source(repo_uuid)
         except (AdapterError, IdentityError, OSError, StateCorrupt, StatePathError) as exc:
-            raise GenerationError(
-                f"trusted source observations are unavailable: {exc}"
-            ) from exc
+            raise GenerationError(f"trusted source observations are unavailable: {exc}") from exc
         if confirmed_source != source:
             raise GenerationConflict("trusted source identity changed during observation")
         if trusted[0] != trusted[1]:
             raise GenerationConflict("trusted source observations are not stable")
         if tuple(expected) != trusted:
-            raise GenerationConflict(
-                "caller evidence differs from trusted source observations"
-            )
+            raise GenerationConflict("caller evidence differs from trusted source observations")
         return trusted
 
     def _require_structural_evidence(
@@ -536,9 +531,7 @@ class GenerationStore:
             evidence_sha256,
         )
         if expected != actual:
-            raise GenerationConflict(
-                "staged build request differs from trusted source evidence"
-            )
+            raise GenerationConflict("staged build request differs from trusted source evidence")
         return trusted
 
     @staticmethod
@@ -600,9 +593,7 @@ class GenerationStore:
         ):
             raise GenerationConflict("staged build request binding does not match")
         if state.abandonment_intent is not None and not allow_abandonment_intent:
-            raise GenerationConflict(
-                "durable staged abandonment requires exact recovery"
-            )
+            raise GenerationConflict("durable staged abandonment requires exact recovery")
 
     def _visible_pointer_locked(self, repo_uuid: str) -> PointerSet | None:
         current_relative = self._workspace(repo_uuid) / "pointers.json"
@@ -640,9 +631,7 @@ class GenerationStore:
             request.expected_current_receipt_sha256,
         )
         if expected != actual:
-            raise GenerationConflict(
-                "pointer CAS differs from staged build request authority"
-            )
+            raise GenerationConflict("pointer CAS differs from staged build request authority")
 
     def request_staged_build(
         self,
@@ -688,13 +677,8 @@ class GenerationStore:
                         allow_abandonment_intent=True,
                     )
                     return prior
-                if (
-                    prior is not None
-                    and prior.lifecycle_state not in _STAGED_BUILD_TERMINAL_STATES
-                ):
-                    raise GenerationConflict(
-                        "another staged build request requires exact recovery"
-                    )
+                if prior is not None and prior.lifecycle_state not in _STAGED_BUILD_TERMINAL_STATES:
+                    raise GenerationConflict("another staged build request requires exact recovery")
                 LeaseStore._check_expected(
                     document,
                     entry,
@@ -715,9 +699,7 @@ class GenerationStore:
                     (self._generation(repo_uuid, generation_id), "certified"),
                 ):
                     if self.state.private_directory_exists(relative):
-                        raise GenerationConflict(
-                            f"generation already has a {label} directory"
-                        )
+                        raise GenerationConflict(f"generation already has a {label} directory")
                 if self.state.private_file_exists(self._lock(repo_uuid, generation_id)):
                     raise GenerationConflict("generation coordination lock already exists")
                 requested = self._staged_state(
@@ -784,6 +766,487 @@ class GenerationStore:
                 )
         return StagedBuildOperation(state=state, grant=grant)
 
+    def _previous_certified_for_promoted_locked(
+        self,
+        state: StagedBuildState,
+    ) -> StagedBuildState:
+        current, previous, pending = self._staged_build_paths(state.repo_uuid)
+        if self.state.private_file_exists(pending):
+            raise GenerationConflict("promoted staged state has an unresolved pending commit")
+        if not self.state.private_file_exists(current):
+            raise GenerationConflict("promoted staged current record is missing")
+        try:
+            predecessor = StagedBuildState.from_json(
+                self.state.read_existing_bytes(
+                    previous,
+                    max_bytes=_MAX_STAGED_BUILD_STATE_BYTES,
+                )
+            )
+        except Exception as exc:
+            raise GenerationConflict(f"promoted staged predecessor is invalid: {exc}") from exc
+        if (
+            predecessor.lifecycle_state != "CERTIFIED"
+            or predecessor.revision + 1 != state.revision
+            or predecessor.repo_uuid != state.repo_uuid
+            or predecessor.generation_id != state.generation_id
+            or predecessor.request.canonical != state.request.canonical
+            or predecessor.payload_manifest_sha256 != state.payload_manifest_sha256
+            or predecessor.receipt_sha256 != state.receipt_sha256
+            or predecessor.operation_epoch is None
+            or predecessor.fence_token is None
+            or predecessor.pointer_revision is not None
+            or predecessor.abandonment_intent is not None
+            or predecessor.abandoned_from is not None
+            or predecessor.abandon_reason is not None
+            or predecessor.abandon_evidence is not None
+            or predecessor.abandon_evidence_sha256 is not None
+        ):
+            raise GenerationConflict(
+                "PROMOTED state does not advance the exact prior CERTIFIED record"
+            )
+        return predecessor
+
+    def _promoted_handoff_evidence_locked(
+        self,
+        state: StagedBuildState,
+    ) -> tuple[bytes, str, Mapping[str, object]]:
+        from graphify.workspace.semantic_handoff import parse_semantic_result_handoff
+
+        request = state.request
+        handoff_name = f"{request.sha256}.json"
+        handoff_parent = (
+            self._workspace(state.repo_uuid) / "semantic-staging" / "handoffs" / state.generation_id
+        )
+        handoff_relative = handoff_parent / handoff_name
+        try:
+            with self.state.existing_private_directory(handoff_parent) as descriptor:
+                with os.scandir(descriptor) as entries:
+                    names = sorted(entry.name for entry in entries)
+                if names != [handoff_name]:
+                    raise GenerationConflict("retained promotion handoff directory is ambiguous")
+                details = os.stat(
+                    handoff_name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+                if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                    raise GenerationConflict("retained promotion handoff is not one regular file")
+            retained = self.state.read_existing_bytes(
+                handoff_relative,
+                max_bytes=request.expected_payload_bytes,
+            )
+            handoff = parse_semantic_result_handoff(
+                retained,
+                max_bytes=request.expected_payload_bytes,
+            )
+        except GenerationConflict:
+            raise
+        except Exception as exc:
+            raise GenerationConflict(
+                f"promoted semantic handoff evidence is invalid: {exc}"
+            ) from exc
+        if (
+            handoff.repo_uuid != state.repo_uuid
+            or handoff.target_generation_id != state.generation_id
+            or handoff.structural_request.canonical != request.canonical
+        ):
+            raise GenerationConflict("retained promotion handoff evidence differs")
+        return handoff.canonical, handoff.sha256, handoff.queue
+
+    def _require_promoted_certification_binding_locked(
+        self,
+        state: StagedBuildState,
+        receipt: GenerationReceipt,
+        handoff_queue: Mapping[str, object],
+    ) -> None:
+        if self.semantic_queue is None or state.payload_manifest_sha256 is None:
+            raise GenerationConflict("promoted semantic certification authority is unavailable")
+        receipt_value = receipt.to_dict()
+        validations = tuple(str(item) for item in cast(list[object], receipt_value["validations"]))
+        certification_request = CertificationRequest(
+            source_commit=str(receipt_value["source_commit"]),
+            source_epoch=int(receipt_value["source_epoch"]),
+            policy_sha256=str(receipt_value["policy_sha256"]),
+            observation_manifest_sha256=str(receipt_value["observation_manifest_sha256"]),
+            queue_watermark=int(receipt_value["queue_watermark"]),
+            semantic_completeness=str(receipt_value["semantic_completeness"]),
+            compatibility_sha256=str(receipt_value["compatibility_sha256"]),
+            validations=validations,
+        )
+        try:
+            view = SemanticQueueStore.verify_certification_binding_at(
+                self.state,
+                state.repo_uuid,
+                generation_id=state.generation_id,
+                request_sha256=self._semantic_request_sha256(certification_request),
+                sealed_input_manifest_sha256=state.payload_manifest_sha256,
+            )
+            reconciliation = cast(Mapping[str, object], handoff_queue["reconciliation"])
+            observation_evidence = cast(
+                Mapping[str, object],
+                reconciliation["source_observations"],
+            )
+            observations = cast(
+                list[Mapping[str, object]],
+                observation_evidence["observations"],
+            )
+        except (KeyError, SemanticCertificationBlocked) as exc:
+            raise GenerationConflict(
+                f"promoted semantic certification binding is invalid: {exc}"
+            ) from exc
+        if len(observations) != 2 or observations[0] != observations[1]:
+            raise GenerationConflict("retained semantic observations are not exact")
+        observation = observations[0]
+        if cast(Mapping[str, object], handoff_queue["queue_policy"]) != (
+            self.semantic_queue.policy.to_dict()
+        ):
+            raise GenerationConflict("retained semantic queue policy is not current")
+        expected_view = (
+            state.repo_uuid,
+            cast(int, handoff_queue["revision"]) + 1,
+            cast(int, handoff_queue["desired_watermark"]),
+            cast(int, handoff_queue["completed_watermark"]),
+            cast(int, handoff_queue["compaction_epoch"]),
+            cast(int, reconciliation["source_epoch"]),
+            str(observation["source_commit"]),
+            str(reconciliation["policy_sha256"]),
+            str(observation["inventory_sha256"]),
+            str(observation_evidence["evidence_sha256"]),
+            state.payload_manifest_sha256,
+            "complete",
+        )
+        actual_view = (
+            view.repo_uuid,
+            view.queue_revision,
+            view.queue_watermark,
+            view.completed_watermark,
+            view.compaction_epoch,
+            view.source_epoch,
+            view.source_commit,
+            view.policy_sha256,
+            view.observation_manifest_sha256,
+            view.observation_evidence_sha256,
+            view.sealed_input_manifest_sha256,
+            view.semantic_completeness,
+        )
+        structural_view = (
+            view.repo_uuid,
+            view.source_commit,
+            view.source_epoch,
+            view.policy_sha256,
+            view.observation_manifest_sha256,
+            view.observation_evidence_sha256,
+            view.sealed_input_manifest_sha256,
+        )
+        expected_structural_view = (
+            state.repo_uuid,
+            state.request.source_commit,
+            state.request.source_epoch,
+            state.request.policy_sha256,
+            state.request.observation_manifest_sha256,
+            state.request.observation_evidence_sha256,
+            state.payload_manifest_sha256,
+        )
+        if actual_view != expected_view or structural_view != expected_structural_view:
+            raise GenerationConflict(
+                "promoted semantic certification binding differs from retained authority"
+            )
+
+    def _require_promoted_terminal_cleanup_locked(
+        self,
+        document: Registry,
+        lease_state: WorkspaceLeaseState,
+        state: StagedBuildState,
+        *,
+        repo_uuid: str,
+        generation_id: str,
+        request: StructuralBuildRequest,
+        attempt_sha256: str,
+    ) -> str:
+        self._require_staged_binding(
+            state,
+            repo_uuid=repo_uuid,
+            generation_id=generation_id,
+            request=request,
+        )
+        operation = self.leases._require_promoted_staged_cleanup_attempt_locked(
+            lease_state,
+            state,
+            repo_uuid=repo_uuid,
+            generation_id=generation_id,
+            request=request,
+            expected_attempt_sha256=attempt_sha256,
+        )
+        predecessor = self._previous_certified_for_promoted_locked(state)
+        if request.compatibility_sha256 != self.compatibility_sha256:
+            raise GenerationConflict("promoted compatibility authority changed")
+
+        registry_value = document.to_dict()
+        entries = [
+            item
+            for item in cast(list[Mapping[str, object]], registry_value["workspaces"])
+            if item["repo_uuid"] == repo_uuid
+        ]
+        if (
+            len(entries) != 1
+            or int(cast(int, registry_value["revision"])) != request.expected_registry_revision
+            or int(cast(int, entries[0]["active_source_revision"]))
+            != request.expected_active_source_revision
+            or lease_state.migration_epoch != request.expected_migration_epoch
+            or state.operation_epoch is None
+            or state.fence_token is None
+            or lease_state.operation_epoch < state.operation_epoch
+            or lease_state.fence_high_watermark < state.fence_token
+        ):
+            raise GenerationConflict(
+                "promoted repository authority differs from the staged request"
+            )
+
+        workspace = self._workspace(repo_uuid)
+        if self.state.private_file_exists(workspace / "pointers.pending.json"):
+            raise GenerationConflict("promoted cleanup requires durable pointer-intent absence")
+        pointer = self._visible_pointer_locked(repo_uuid)
+        if pointer is None:
+            raise GenerationConflict("promoted visible pointer is missing")
+        pointer_value = pointer.to_dict()
+        current = cast(Mapping[str, object], pointer_value["current"])
+        if (
+            pointer_value["repo_uuid"] != repo_uuid
+            or current["generation_id"] != generation_id
+            or current["receipt_sha256"] != state.receipt_sha256
+            or int(cast(int, pointer_value["pointer_revision"])) != state.pointer_revision
+            or int(cast(int, pointer_value["pointer_revision"]))
+            <= request.expected_pointer_revision
+            or int(cast(int, pointer_value["active_source_revision"]))
+            != request.expected_active_source_revision
+            or int(cast(int, pointer_value["source_epoch"])) != request.source_epoch
+            or int(cast(int, pointer_value["operation_epoch"])) != state.operation_epoch
+            or int(cast(int, pointer_value["fence_token"])) != state.fence_token
+        ):
+            raise GenerationConflict("visible pointer differs from promoted staged authority")
+
+        try:
+            journal = self.journal.project_recovery(repo_uuid)
+        except Exception as exc:
+            raise GenerationConflict(f"promoted lifecycle journal is invalid: {exc}") from exc
+        if journal.actions:
+            raise GenerationConflict("promoted lifecycle journal requires durable recovery")
+        target_events = journal.snapshot.for_generation(generation_id)
+        matching_events = tuple(
+            event
+            for event in target_events
+            if event.to_dict()["transition"] in {"PROMOTED", "REPAIRED"}
+            and event.to_dict()["receipt_sha256"] == state.receipt_sha256
+            and event.to_dict()["pointer_revision"] == state.pointer_revision
+            and event.to_dict()["operation_epoch"] == state.operation_epoch
+            and event.to_dict()["fence_token"] == state.fence_token
+        )
+        if (
+            len(matching_events) != 1
+            or not target_events
+            or target_events[-1].canonical != matching_events[0].canonical
+        ):
+            raise GenerationConflict(
+                "promoted staged state has no exact authoritative journal event"
+            )
+
+        reservation, capacity_requires_recovery = self._project_capacity_reservation_locked(
+            repo_uuid, generation_id
+        )
+        if reservation is not None or capacity_requires_recovery:
+            raise GenerationConflict("promoted target reservation is not durably absent")
+
+        lock = self._lock(repo_uuid, generation_id)
+        with self.state.existing_generation_lock(
+            lock,
+            generation_id=generation_id,
+            exclusive=True,
+        ):
+            receipt = self.verify_generation(
+                repo_uuid,
+                generation_id,
+                _expected_compatibility_sha256=request.compatibility_sha256,
+            )
+            handoff_bytes, handoff_sha256, handoff_queue = self._promoted_handoff_evidence_locked(
+                state
+            )
+            self._require_promoted_certification_binding_locked(
+                state,
+                receipt,
+                handoff_queue,
+            )
+        receipt_value = receipt.to_dict()
+        payload = cast(Mapping[str, object], receipt_value["sealed_query_payload"])
+        payload_entries = cast(list[Mapping[str, object]], payload["entries"])
+        semantic_entries = tuple(
+            entry
+            for entry in payload_entries
+            if entry["path"] == "graphify-out/semantic-inputs.json"
+        )
+        if (
+            receipt.sha256 != state.receipt_sha256
+            or payload["manifest_sha256"] != state.payload_manifest_sha256
+            or receipt_value["repo_uuid"] != repo_uuid
+            or receipt_value["generation_id"] != generation_id
+            or receipt_value["source_commit"] != request.source_commit
+            or receipt_value["source_epoch"] != request.source_epoch
+            or receipt_value["active_source_revision"] != request.expected_active_source_revision
+            or receipt_value["policy_sha256"] != request.policy_sha256
+            or receipt_value["observation_manifest_sha256"] != request.observation_manifest_sha256
+            or receipt_value["compatibility_sha256"] != request.compatibility_sha256
+            or receipt_value["operation_epoch"] != predecessor.operation_epoch
+            or receipt_value["fence_token"] != predecessor.fence_token
+            or receipt_value["semantic_completeness"] != "complete"
+            or receipt_value["validations"]
+            != [
+                "coordination_lock_precreated",
+                "payload_manifest",
+                "stable_semantic_queue",
+            ]
+            or len(semantic_entries) != 1
+            or semantic_entries[0]["file_type"] != "regular_file"
+            or semantic_entries[0]["mode"] != "0600"
+            or semantic_entries[0]["size"] != len(handoff_bytes)
+            or semantic_entries[0]["sha256"] != handoff_sha256
+        ):
+            raise GenerationConflict("installed promoted receipt or semantic evidence changed")
+        return operation
+
+    def _promoted_terminal_cleanup_preflight(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        request: StructuralBuildRequest,
+        *,
+        attempt_sha256: str,
+    ) -> StagedBuildState | None:
+        try:
+            with self.leases.registry.read_only_snapshot() as document:
+                with self.leases.read_only_workspace_lock(repo_uuid):
+                    try:
+                        lease_state = self.leases.read_only_snapshot_locked(
+                            document,
+                            repo_uuid,
+                        )
+                    except StateRecoveryRequired:
+                        self.leases.read_uncertain_snapshot_locked(
+                            document,
+                            repo_uuid,
+                        )
+                        projected, _ = self._project_staged_build_recovery_locked(repo_uuid)
+                        if projected is not None and projected.lifecycle_state in {
+                            "PROMOTED",
+                            "ABANDONED",
+                        }:
+                            raise GenerationConflict(
+                                "terminal cleanup lease state is not durably stable"
+                            )
+                        return None
+                    try:
+                        state = self.read_only_staged_build_locked(
+                            repo_uuid,
+                            deadline_ns=None,
+                        )
+                    except StagedBuildReadRecoveryRequired:
+                        projected, _ = self._project_staged_build_recovery_locked(repo_uuid)
+                        if projected is not None and projected.lifecycle_state in {
+                            "PROMOTED",
+                            "ABANDONED",
+                        }:
+                            raise GenerationConflict("terminal staged state is not durably stable")
+                        return None
+                    if state is None or state.lifecycle_state not in {
+                        "PROMOTED",
+                        "ABANDONED",
+                    }:
+                        return None
+                    self._require_staged_binding(
+                        state,
+                        repo_uuid=repo_uuid,
+                        generation_id=generation_id,
+                        request=request,
+                        allow_abandonment_intent=True,
+                    )
+                    if state.lifecycle_state == "ABANDONED":
+                        raise GenerationConflict("staged build is already ABANDONED")
+                    self._require_promoted_terminal_cleanup_locked(
+                        document,
+                        lease_state,
+                        state,
+                        repo_uuid=repo_uuid,
+                        generation_id=generation_id,
+                        request=request,
+                        attempt_sha256=attempt_sha256,
+                    )
+                    return state
+        except StateRecoveryRequired:
+            return None
+        except StateCorrupt as exc:
+            raise GenerationError(f"promoted cleanup lease state is corrupt: {exc}") from exc
+
+    def _acquire_promoted_terminal_cleanup(
+        self,
+        state: StagedBuildState,
+        request: StructuralBuildRequest,
+        *,
+        attempt_sha256: str,
+        acquired_at: datetime,
+        monotonic_ns: int,
+        ttl_ns: int,
+    ) -> StagedBuildOperation:
+        grant: LeaseGrant | None = None
+        try:
+            grant = self.leases.acquire_promoted_staged_cleanup(
+                state.repo_uuid,
+                state.generation_id,
+                request,
+                attempt_sha256=attempt_sha256,
+                acquired_at=acquired_at,
+                monotonic_ns=monotonic_ns,
+                ttl_ns=ttl_ns,
+            )
+            with self.leases.current_promoted_staged_cleanup(
+                grant,
+                state.generation_id,
+                request,
+                attempt_sha256=attempt_sha256,
+                monotonic_ns=monotonic_ns,
+            ) as operation:
+                current = self.read_only_staged_build_locked(
+                    state.repo_uuid,
+                    deadline_ns=None,
+                )
+                if current is None:
+                    raise GenerationConflict(
+                        "promoted staged state disappeared after cleanup acquisition"
+                    )
+                retained_operation = self._require_promoted_terminal_cleanup_locked(
+                    operation.registry,
+                    operation.state,
+                    current,
+                    repo_uuid=state.repo_uuid,
+                    generation_id=state.generation_id,
+                    request=request,
+                    attempt_sha256=attempt_sha256,
+                )
+                if retained_operation != grant.lease.to_dict()["operation"]:
+                    raise GenerationConflict("promoted cleanup operation changed after acquisition")
+                return StagedBuildOperation(state=current, grant=grant)
+        except BaseException as exc:
+            if grant is not None:
+                try:
+                    released = self.leases.release(grant)
+                    if (
+                        released.leases.get("workspace") is not None
+                        or released.staged_attempt_sha256 is not None
+                    ):
+                        raise GenerationConflict(
+                            "promoted cleanup grant release returned ambiguous authority"
+                        )
+                except BaseException as release_error:
+                    raise release_error from exc
+            raise
+
     def acquire_staged_recovery(
         self,
         repo_uuid: str,
@@ -798,6 +1261,21 @@ class GenerationStore:
         """Acquire the exact fenced lane that may recover or close stale authority."""
 
         request = self._validated_structural_request(request)
+        promoted = self._promoted_terminal_cleanup_preflight(
+            repo_uuid,
+            generation_id,
+            request,
+            attempt_sha256=attempt_sha256,
+        )
+        if promoted is not None:
+            return self._acquire_promoted_terminal_cleanup(
+                promoted,
+                request,
+                attempt_sha256=attempt_sha256,
+                acquired_at=acquired_at,
+                monotonic_ns=monotonic_ns,
+                ttl_ns=ttl_ns,
+            )
         try:
             with self.leases.registry.recovered_snapshot():
                 with self.leases.workspace_lock(repo_uuid):
@@ -812,9 +1290,7 @@ class GenerationStore:
                         allow_abandonment_intent=True,
                     )
                     if state.lifecycle_state in _STAGED_BUILD_TERMINAL_STATES:
-                        raise GenerationConflict(
-                            f"staged build is already {state.lifecycle_state}"
-                        )
+                        raise GenerationConflict(f"staged build is already {state.lifecycle_state}")
                     if state.lifecycle_state == "CERTIFIED":
                         pending = self._workspace(repo_uuid) / "pointers.pending.json"
                         operation = (
@@ -864,9 +1340,7 @@ class GenerationStore:
         trusted = tuple(source_observations)
         return {
             "observation": cls._source_observation_document(trusted[0]),
-            "observation_evidence_sha256": cls.structural_observation_evidence_sha256(
-                trusted
-            ),
+            "observation_evidence_sha256": cls.structural_observation_evidence_sha256(trusted),
         }
 
     @staticmethod
@@ -916,9 +1390,7 @@ class GenerationStore:
             )
             and self.compatibility_sha256 == state.request.compatibility_sha256
         ):
-            queue_snapshot = self.semantic_queue.read_only_snapshot_locked(
-                operation.repo_uuid
-            )
+            queue_snapshot = self.semantic_queue.read_only_snapshot_locked(operation.repo_uuid)
             reconciliation = queue_snapshot.reconciliation
             if reconciliation is not None:
                 if queue_snapshot.active_source_revision != active_source_revision:
@@ -953,9 +1425,7 @@ class GenerationStore:
         except StagedBuildAuthorityCurrent:
             return None
         except ContractError as exc:
-            raise GenerationConflict(
-                f"staged abandonment evidence is invalid: {exc}"
-            ) from exc
+            raise GenerationConflict(f"staged abandonment evidence is invalid: {exc}") from exc
         return reason, evidence, pointer
 
     @staticmethod
@@ -1008,9 +1478,7 @@ class GenerationStore:
                 allowed_file_modes=_ALLOWED_FILE_MODES,
             )
         except (OSError, StatePathError) as exc:
-            raise GenerationConflict(
-                f"stale staging cannot be removed safely: {exc}"
-            ) from exc
+            raise GenerationConflict(f"stale staging cannot be removed safely: {exc}") from exc
         self.fault_hook(f"generation:{state.generation_id}:abandon_staging_removed")
 
     @staticmethod
@@ -1047,8 +1515,7 @@ class GenerationStore:
         value = receipt.to_dict()
         payload = cast(dict[str, Any], value["sealed_query_payload"])
         entries = tuple(
-            cast(dict[str, str | int], item)
-            for item in cast(list[object], payload["entries"])
+            cast(dict[str, str | int], item) for item in cast(list[object], payload["entries"])
         )
         validations = tuple(str(item) for item in cast(list[object], value["validations"]))
         certification_request = CertificationRequest(
@@ -1088,9 +1555,7 @@ class GenerationStore:
                 "durable receipt differs from completed staged build authority"
             )
         if "stable_semantic_queue" not in certification_request.validations:
-            raise GenerationConflict(
-                "durable receipt lacks stable semantic queue validation"
-            )
+            raise GenerationConflict("durable receipt lacks stable semantic queue validation")
         if payload_manifest_sha256("graphify-out", entries) != state.payload_manifest_sha256:
             raise GenerationConflict(
                 "durable receipt payload differs from completed staged manifest"
@@ -1104,9 +1569,7 @@ class GenerationStore:
             sealed_input_manifest_sha256=sealed_input_manifest_sha256,
         )
         if queue_view is None:
-            raise GenerationConflict(
-                "durable receipt has no semantic certification binding"
-            )
+            raise GenerationConflict("durable receipt has no semantic certification binding")
         queue_expected = (
             state.repo_uuid,
             certification_request.source_commit,
@@ -1174,9 +1637,7 @@ class GenerationStore:
                         ),
                     )
                 except Exception as exc:
-                    raise GenerationConflict(
-                        f"durable staged receipt is invalid: {exc}"
-                    ) from exc
+                    raise GenerationConflict(f"durable staged receipt is invalid: {exc}") from exc
             certification_request, entries = self._stale_certification_inputs_locked(
                 recovery_operation,
                 state,
@@ -1213,9 +1674,7 @@ class GenerationStore:
                 _expected_compatibility_sha256=state.request.compatibility_sha256,
             )
             if verified.canonical != recovered_receipt.canonical:
-                raise GenerationConflict(
-                    "recovered certification changed before staged completion"
-                )
+                raise GenerationConflict("recovered certification changed before staged completion")
             return self._mark_staged_certified_locked(state, recovered_receipt)
 
     def recover_staged_certification(
@@ -1243,9 +1702,7 @@ class GenerationStore:
                 request=request,
             )
             if state.lifecycle_state != "COMPLETE":
-                raise GenerationConflict(
-                    "staged certification recovery requires COMPLETE state"
-                )
+                raise GenerationConflict("staged certification recovery requires COMPLETE state")
             lease_value = attempt.grant.lease.to_dict()
             occurred_at = datetime.fromisoformat(
                 str(lease_value["acquired_at"]).replace("Z", "+00:00")
@@ -1308,9 +1765,7 @@ class GenerationStore:
     ) -> None:
         workspace = self._workspace(operation.repo_uuid)
         if self.state.private_file_exists(workspace / "pointers.pending.json"):
-            raise GenerationConflict(
-                "pointer intent must be recovered before staged abandonment"
-            )
+            raise GenerationConflict("pointer intent must be recovered before staged abandonment")
         pointer = self._visible_pointer_locked(operation.repo_uuid)
         if state.lifecycle_state == "CERTIFIED":
             if pointer is not None and self._pointer_references_staged_generation(
@@ -1337,17 +1792,18 @@ class GenerationStore:
                     )
             return
         final = self._generation(operation.repo_uuid, state.generation_id)
-        staged_receipt = self._staging(
-            operation.repo_uuid,
-            state.generation_id,
-        ) / "receipt.json"
+        staged_receipt = (
+            self._staging(
+                operation.repo_uuid,
+                state.generation_id,
+            )
+            / "receipt.json"
+        )
         if state.lifecycle_state == "COMPLETE" and (
             self.state.private_directory_exists(final)
             or self.state.private_file_exists(staged_receipt)
         ):
-            raise GenerationConflict(
-                "certification recovery is required before staged abandonment"
-            )
+            raise GenerationConflict("certification recovery is required before staged abandonment")
 
     def _finish_staged_abandonment_locked(
         self,
@@ -1358,16 +1814,12 @@ class GenerationStore:
         occurred_at: datetime,
     ) -> StagedBuildState:
         if state.abandonment_intent != intent:
-            raise GenerationConflict(
-                "durable staged abandonment intent changed before recovery"
-            )
+            raise GenerationConflict("durable staged abandonment intent changed before recovery")
         if (
             intent.operation_epoch > operation.grant.operation_epoch
             or intent.fence_token > operation.fence_token
         ):
-            raise GenerationConflict(
-                "durable staged abandonment intent belongs to a newer fence"
-            )
+            raise GenerationConflict("durable staged abandonment intent belongs to a newer fence")
         self._require_staged_abandonment_safe_locked(operation, state)
         if state.lifecycle_state != "CERTIFIED":
             lock = self._lock(operation.repo_uuid, state.generation_id)
@@ -1628,12 +2080,7 @@ class GenerationStore:
         repo_uuid: str,
         generation_id: str,
     ) -> int:
-        relative = (
-            self._workspace(repo_uuid)
-            / "semantic-staging"
-            / "handoffs"
-            / generation_id
-        )
+        relative = self._workspace(repo_uuid) / "semantic-staging" / "handoffs" / generation_id
         path = self.state.path(relative)
         with self.state._existing_private_directory(
             relative,
@@ -1676,9 +2123,7 @@ class GenerationStore:
                         self.state._stat_identity(opened) != identity
                         or self.state._stat_identity(current) != identity
                     ):
-                        raise StatePathError(
-                            "retained semantic handoff changed while scanning"
-                        )
+                        raise StatePathError("retained semantic handoff changed while scanning")
                     total += opened.st_size
                     if total > _MAX_CAPACITY_BYTES:
                         raise StatePathError("retained semantic handoff usage overflows")
@@ -1686,10 +2131,9 @@ class GenerationStore:
                     os.close(file_descriptor)
             after_names = self.state._tree_entry_names_descriptor(descriptor, path)
             after = os.fstat(descriptor)
-            if (
-                names != after_names
-                or self.state._stat_identity(before) != self.state._stat_identity(after)
-            ):
+            if names != after_names or self.state._stat_identity(
+                before
+            ) != self.state._stat_identity(after):
                 raise StatePathError("retained semantic handoff usage changed while scanning")
         return total
 
@@ -1745,9 +2189,7 @@ class GenerationStore:
                     allow_missing=True,
                 ):
                     if _GENERATION_ID_RE.fullmatch(generation_id) is None:
-                        raise StatePathError(
-                            "retained semantic handoff target is noncanonical"
-                        )
+                        raise StatePathError("retained semantic handoff target is noncanonical")
                     size = self._handoff_directory_bytes(repo_uuid, generation_id)
                     if size:
                         handoff_usage[(repo_uuid, generation_id)] = size
@@ -1756,15 +2198,21 @@ class GenerationStore:
         return primary_usage, handoff_usage
 
     def _usage(self, reservations: Sequence[CapacityReservation]) -> _Usage:
-        previous: tuple[
-            dict[tuple[str, str], int],
-            dict[tuple[str, str], int],
-        ] | None = None
+        previous: (
+            tuple[
+                dict[tuple[str, str], int],
+                dict[tuple[str, str], int],
+            ]
+            | None
+        ) = None
         repeated_change: str | None = None
-        observed_usage: tuple[
-            dict[tuple[str, str], int],
-            dict[tuple[str, str], int],
-        ] | None = None
+        observed_usage: (
+            tuple[
+                dict[tuple[str, str], int],
+                dict[tuple[str, str], int],
+            ]
+            | None
+        ) = None
         for _attempt in range(5):
             try:
                 observed = self._scan_usage_once()
@@ -1839,9 +2287,7 @@ class GenerationStore:
                 ),
             )
         )
-        projected_global_bytes = _bounded_capacity_sum(
-            (usage.global_bytes - prior, projected_size)
-        )
+        projected_global_bytes = _bounded_capacity_sum((usage.global_bytes - prior, projected_size))
         projected_workspace_bytes = _bounded_capacity_sum(
             (usage.workspace_bytes(repo_uuid) - prior, projected_size)
         )
@@ -1850,16 +2296,16 @@ class GenerationStore:
             raise CapacityExceeded("workspace byte limit would be exceeded")
         if projected_global_bytes > policy.global_max_bytes:
             raise CapacityExceeded("global byte limit would be exceeded")
-        if usage.workspace_generations(repo_uuid) + additional_generation > policy.workspace_max_generations:
+        if (
+            usage.workspace_generations(repo_uuid) + additional_generation
+            > policy.workspace_max_generations
+        ):
             raise CapacityExceeded("workspace generation limit would be exceeded")
         if usage.global_generations + additional_generation > policy.global_max_generations:
             raise CapacityExceeded("global generation limit would be exceeded")
         available = shutil.disk_usage(self.state.root.parent).free
         additional_bytes = 0 if existing is not None else expected_payload_bytes
-        if (
-            available - usage.unconsumed_reserved_bytes - additional_bytes
-            < policy.reserve_bytes
-        ):
+        if available - usage.unconsumed_reserved_bytes - additional_bytes < policy.reserve_bytes:
             raise CapacityExceeded("filesystem reserve threshold would be violated")
 
     def preflight_retained_handoff_locked(
@@ -1937,9 +2383,7 @@ class GenerationStore:
         if usage.global_generations + additional_generation > policy.global_max_generations:
             raise CapacityExceeded("global generation limit would be exceeded")
         available = shutil.disk_usage(self.state.root.parent).free
-        additional_reservation = (
-            0 if existing_reservation is not None else expected_payload_bytes
-        )
+        additional_reservation = 0 if existing_reservation is not None else expected_payload_bytes
         if (
             available
             - usage.unconsumed_reserved_bytes
@@ -1964,8 +2408,7 @@ class GenerationStore:
             (
                 item
                 for item in reservations
-                if (item.repo_uuid, item.generation_id)
-                == (operation.repo_uuid, generation_id)
+                if (item.repo_uuid, item.generation_id) == (operation.repo_uuid, generation_id)
             ),
             None,
         )
@@ -1974,8 +2417,7 @@ class GenerationStore:
                 existing.reserved_bytes != expected_payload_bytes
                 or existing.policy_sha256 != policy.sha256
                 or existing.compatibility_sha256 != self.compatibility_sha256
-                or existing.active_source_revision
-                != operation.grant.active_source_revision
+                or existing.active_source_revision != operation.grant.active_source_revision
             ):
                 raise GenerationConflict("generation has a different durable capacity reservation")
             if (
@@ -2133,9 +2575,7 @@ class GenerationStore:
                     fence_token=capacity_operation.fence_token,
                     created_at=_timestamp(occurred_at),
                 )
-                self.fault_hook(
-                    f"generation:{generation_id}:certification_recovery_allocation"
-                )
+                self.fault_hook(f"generation:{generation_id}:certification_recovery_allocation")
             else:
                 reservation = self._reserve_locked(
                     capacity_operation,
@@ -2196,9 +2636,7 @@ class GenerationStore:
                 )
                 latest = "STAGING"
             if latest not in {"STAGING", "BUILT", "VALIDATING", "CERTIFIED"}:
-                raise GenerationConflict(
-                    f"generation lifecycle cannot be adopted from {latest}"
-                )
+                raise GenerationConflict(f"generation lifecycle cannot be adopted from {latest}")
             return GenerationAllocation(
                 repo_uuid=operation.repo_uuid,
                 generation_id=generation_id,
@@ -2234,9 +2672,7 @@ class GenerationStore:
             allocation.active_source_revision,
         )
         if expected != actual:
-            raise GenerationConflict(
-                "generation allocation differs from its staged build request"
-            )
+            raise GenerationConflict("generation allocation differs from its staged build request")
 
     def _require_staged_allocation_request_locked(
         self,
@@ -2247,10 +2683,7 @@ class GenerationStore:
         capacity_policy: CapacityPolicy,
     ) -> StagedBuildState | None:
         state = self._load_staged_build_locked(operation.repo_uuid)
-        if (
-            state is None
-            or state.lifecycle_state in _STAGED_BUILD_TERMINAL_STATES
-        ):
+        if state is None or state.lifecycle_state in _STAGED_BUILD_TERMINAL_STATES:
             return None
         expected = (
             state.repo_uuid,
@@ -2269,9 +2702,7 @@ class GenerationStore:
             operation.grant.active_source_revision,
         )
         if expected != actual:
-            raise GenerationConflict(
-                "allocation request differs from staged build authority"
-            )
+            raise GenerationConflict("allocation request differs from staged build authority")
         return state
 
     def _staging_names(self, repo_uuid: str, generation_id: str) -> list[str]:
@@ -2296,11 +2727,7 @@ class GenerationStore:
             raise GenerationConflict(
                 "completed staged build must occupy exactly one generation location"
             )
-        container = (
-            allocation.staging_path
-            if staging_exists
-            else self.state.path(final_relative)
-        )
+        container = allocation.staging_path if staging_exists else self.state.path(final_relative)
         staged_receipt = (
             self.state.read_optional_existing_bytes(
                 staging_relative / "receipt.json",
@@ -2316,9 +2743,7 @@ class GenerationStore:
                     GenerationReceipt.from_json(staged_receipt),
                 )
             except Exception as exc:
-                raise GenerationConflict(
-                    f"durable staged receipt is invalid: {exc}"
-                ) from exc
+                raise GenerationConflict(f"durable staged receipt is invalid: {exc}") from exc
             receipt_value = receipt.to_dict()
             payload = cast(dict[str, Any], receipt_value["sealed_query_payload"])
             if (
@@ -2441,9 +2866,7 @@ class GenerationStore:
                         raise GenerationConflict(
                             f"interrupted staging cannot be reset safely: {exc}"
                         ) from exc
-                    self.fault_hook(
-                        f"generation:{state.generation_id}:successor_staging_empty"
-                    )
+                    self.fault_hook(f"generation:{state.generation_id}:successor_staging_empty")
                 publishing = self._staged_state(
                     revision=state.revision + 1,
                     repo_uuid=state.repo_uuid,
@@ -2507,8 +2930,7 @@ class GenerationStore:
                     )
             if recovery_state.lifecycle_state != "PUBLISHING":
                 raise GenerationConflict(
-                    "staged build cannot complete from "
-                    f"{recovery_state.lifecycle_state}"
+                    f"staged build cannot complete from {recovery_state.lifecycle_state}"
                 )
 
         self._require_structural_evidence(
@@ -2551,9 +2973,7 @@ class GenerationStore:
                     operation.grant.operation_epoch,
                     operation.fence_token,
                 ):
-                    raise GenerationConflict(
-                        "staged build publication belongs to another fence"
-                    )
+                    raise GenerationConflict("staged build publication belongs to another fence")
                 inventory = self._inventory(
                     preparation.allocation.staging_path,
                     allowed_root_entries=frozenset({"graphify-out"}),
@@ -2572,9 +2992,9 @@ class GenerationStore:
                         preparation.allocation.staging_path,
                         allowed_root_entries=frozenset({"graphify-out"}),
                     )
-                    if canonical_json_bytes(
-                        list(reinventory.entries)
-                    ) != canonical_json_bytes(list(inventory.entries)):
+                    if canonical_json_bytes(list(reinventory.entries)) != canonical_json_bytes(
+                        list(inventory.entries)
+                    ):
                         raise PayloadChanged("payload changed during staged completion")
                     manifest = payload_manifest_sha256(
                         "graphify-out",
@@ -2591,9 +3011,7 @@ class GenerationStore:
                         payload_manifest_sha256=manifest,
                     )
                     committed = self._commit_staged_build_locked(complete)
-                    self.fault_hook(
-                        f"generation:{state.generation_id}:completion_durable"
-                    )
+                    self.fault_hook(f"generation:{state.generation_id}:completion_durable")
                     return StagedBuildCompletion(
                         state=committed,
                         allocation=preparation.allocation,
@@ -2606,9 +3024,7 @@ class GenerationStore:
                 capacity_failure_payload_bytes=payload_bytes,
             )
             if proof is None:  # pragma: no cover - payload bytes prove closure
-                raise GenerationConflict(
-                    "payload capacity failure produced no terminal evidence"
-                )
+                raise GenerationConflict("payload capacity failure produced no terminal evidence")
             reason, evidence, _pointer = proof
             lease_value = preparation.grant.lease.to_dict()
             occurred_at = datetime.fromisoformat(
@@ -2621,9 +3037,7 @@ class GenerationStore:
                 evidence=evidence,
                 occurred_at=occurred_at,
             )
-            raise CapacityExceeded(
-                "staged payload exceeds its durable reservation"
-            )
+            raise CapacityExceeded("staged payload exceeds its durable reservation")
 
     def complete_staged_promotion(
         self,
@@ -2710,9 +3124,7 @@ class GenerationStore:
                 )
             pointer_revision = int(pointer_value["pointer_revision"])
             if pointer_revision <= request.expected_pointer_revision:
-                raise GenerationConflict(
-                    "visible pointer did not advance the staged request CAS"
-                )
+                raise GenerationConflict("visible pointer did not advance the staged request CAS")
             if (
                 int(pointer_value["operation_epoch"]) > operation.grant.operation_epoch
                 or int(pointer_value["fence_token"]) > operation.fence_token
@@ -2730,17 +3142,14 @@ class GenerationStore:
                     _expected_compatibility_sha256=state.request.compatibility_sha256,
                 )
                 if receipt.sha256 != state.receipt_sha256:
-                    raise GenerationConflict(
-                        "certified generation differs from staged build state"
-                    )
+                    raise GenerationConflict("certified generation differs from staged build state")
                 snapshot = self.journal.recover_locked(operation)
                 journal_match = any(
                     event.to_dict()["transition"] in {"PROMOTED", "REPAIRED"}
                     and event.to_dict()["generation_id"] == state.generation_id
                     and event.to_dict()["receipt_sha256"] == state.receipt_sha256
                     and event.to_dict()["pointer_revision"] == pointer_revision
-                    and event.to_dict()["operation_epoch"]
-                    == pointer_value["operation_epoch"]
+                    and event.to_dict()["operation_epoch"] == pointer_value["operation_epoch"]
                     and event.to_dict()["fence_token"] == pointer_value["fence_token"]
                     for event in snapshot.events
                 )
@@ -2767,9 +3176,7 @@ class GenerationStore:
                     pointer_revision=pointer_revision,
                 )
                 committed = self._commit_staged_build_locked(promoted)
-                self.fault_hook(
-                    f"generation:{state.generation_id}:staged_promoted_durable"
-                )
+                self.fault_hook(f"generation:{state.generation_id}:staged_promoted_durable")
                 return committed
 
     def _scan_directory(
@@ -2840,10 +3247,9 @@ class GenerationStore:
                     digest.update(chunk)
                 opened_after = os.fstat(file_descriptor)
                 current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                if (
-                    _identity(opened_before) != _identity(opened_after)
-                    or _identity(opened_after) != _identity(current)
-                ):
+                if _identity(opened_before) != _identity(opened_after) or _identity(
+                    opened_after
+                ) != _identity(current):
                     raise PayloadChanged(f"payload file changed while hashing: {relative}")
             finally:
                 os.close(file_descriptor)
@@ -3171,16 +3577,13 @@ class GenerationStore:
                     deadline_ns=deadline_ns,
                 )
             except SemanticCertificationBlocked as exc:
-                raise GenerationError(
-                    f"semantic certification binding is invalid: {exc}"
-                ) from exc
+                raise GenerationError(f"semantic certification binding is invalid: {exc}") from exc
             if (
                 queue_view.repo_uuid != repo_uuid
                 or queue_view.source_commit != request.source_commit
                 or queue_view.source_epoch != request.source_epoch
                 or queue_view.policy_sha256 != request.policy_sha256
-                or queue_view.observation_manifest_sha256
-                != request.observation_manifest_sha256
+                or queue_view.observation_manifest_sha256 != request.observation_manifest_sha256
                 or queue_view.queue_watermark != request.queue_watermark
                 or queue_view.semantic_completeness != request.semantic_completeness
             ):
@@ -3234,10 +3637,7 @@ class GenerationStore:
             raise GenerationConflict("durable receipt differs from the requested certification")
         receipt_epoch = int(actual["operation_epoch"])
         receipt_fence = int(actual["fence_token"])
-        if (
-            receipt_epoch > operation.grant.operation_epoch
-            or receipt_fence > operation.fence_token
-        ):
+        if receipt_epoch > operation.grant.operation_epoch or receipt_fence > operation.fence_token:
             raise GenerationConflict("durable receipt belongs to a newer fenced operation")
         if not any(
             int(event.to_dict()["operation_epoch"]) == receipt_epoch
@@ -3282,8 +3682,7 @@ class GenerationStore:
             )
             if certified:
                 if not any(
-                    event.to_dict()["receipt_sha256"] == receipt.sha256
-                    for event in certified
+                    event.to_dict()["receipt_sha256"] == receipt.sha256 for event in certified
                 ):
                     raise GenerationConflict(
                         "certified journal event does not bind the installed receipt"
@@ -3323,14 +3722,11 @@ class GenerationStore:
             latest == "VALIDATING"
             and latest_event is not None
             and (
-                int(latest_event.to_dict()["operation_epoch"])
-                != operation.grant.operation_epoch
+                int(latest_event.to_dict()["operation_epoch"]) != operation.grant.operation_epoch
                 or int(latest_event.to_dict()["fence_token"]) != operation.fence_token
             )
         )
-        if latest == "BUILT" or (
-            validating_requires_successor_recheck and not receipt_present
-        ):
+        if latest == "BUILT" or (validating_requires_successor_recheck and not receipt_present):
             self.journal.append_generation_locked(
                 operation,
                 transition="VALIDATING",
@@ -3463,13 +3859,9 @@ class GenerationStore:
                 f"trusted source observations are unavailable: {exc}"
             ) from exc
         if confirmed_source != source:
-            raise SemanticCertificationBlocked(
-                "trusted source identity changed during observation"
-            )
+            raise SemanticCertificationBlocked("trusted source identity changed during observation")
         if trusted[0] != trusted[1]:
-            raise SemanticCertificationBlocked(
-                "trusted source observations are not stable"
-            )
+            raise SemanticCertificationBlocked("trusted source observations are not stable")
         if tuple(expected) != trusted:
             raise SemanticCertificationBlocked(
                 "caller evidence differs from trusted source observations"
@@ -3485,19 +3877,14 @@ class GenerationStore:
         completion: StagedBuildCompletion | None,
     ) -> StagedBuildState | None:
         state = self._load_staged_build_locked(operation.repo_uuid)
-        if (
-            state is None
-            or state.lifecycle_state in _STAGED_BUILD_TERMINAL_STATES
-        ):
+        if state is None or state.lifecycle_state in _STAGED_BUILD_TERMINAL_STATES:
             if completion is not None:
                 raise GenerationConflict(
                     "staged completion was supplied without active staged-build authority"
                 )
             return None
         if completion is None:
-            raise GenerationConflict(
-                "active staged build requires durable completion proof"
-            )
+            raise GenerationConflict("active staged build requires durable completion proof")
         self._require_staged_binding(
             state,
             repo_uuid=operation.repo_uuid,
@@ -3505,9 +3892,7 @@ class GenerationStore:
             request=completion.state.request,
         )
         if state.lifecycle_state != "COMPLETE":
-            raise GenerationConflict(
-                f"staged build cannot certify from {state.lifecycle_state}"
-            )
+            raise GenerationConflict(f"staged build cannot certify from {state.lifecycle_state}")
         if completion.state.canonical != state.canonical:
             raise GenerationConflict("staged completion proof is stale")
         if completion.allocation != allocation:
@@ -3534,22 +3919,16 @@ class GenerationStore:
             allocation.active_source_revision,
         )
         if expected != actual:
-            raise GenerationConflict(
-                "certification request differs from staged build authority"
-            )
+            raise GenerationConflict("certification request differs from staged build authority")
         if canonical_json_bytes(list(completion.entries)) != canonical_json_bytes(
             list(declared_entries)
         ):
-            raise PayloadChanged(
-                "certification manifest differs from staged completion proof"
-            )
+            raise PayloadChanged("certification manifest differs from staged completion proof")
         if (
             payload_manifest_sha256("graphify-out", declared_entries)
             != state.payload_manifest_sha256
         ):
-            raise PayloadChanged(
-                "certification manifest differs from durable staged completion"
-            )
+            raise PayloadChanged("certification manifest differs from durable staged completion")
         return state
 
     def _mark_staged_certified_locked(
