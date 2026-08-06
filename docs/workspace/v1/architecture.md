@@ -140,12 +140,14 @@ public success receipt, promotion, pointer, projection, or content-release
 authority.
 
 The next unnumbered P5B2 semantic-generation promotion and pointer-finalization
-child is contract-frozen and remains `WAITING`. It composes no new store or
-format. Its fresh entry is the accepted certification terminal: the same staged
-`CERTIFIED` request/target/manifest/receipt, verified installed payload and
-immutable semantic certification binding, matching `CERTIFIED` journal event
-at pointer revision zero, absent target reservation, unchanged request pointer
-CAS, and absent certification `BUILD` recovery grant. Only
+child is contract-frozen and is the sole `READY` child recorded by the
+post-merge governance reconciliation. `READY` is implementation eligibility
+only. It composes no new store or format. Its fresh entry is the accepted
+certification terminal: the same staged `CERTIFIED`
+request/target/manifest/receipt, verified installed payload and immutable
+semantic certification binding, matching `CERTIFIED` journal event at pointer
+revision zero, absent target reservation, unchanged request pointer CAS, and
+absent certification `BUILD` recovery grant. Only
 `GenerationStore.acquire_staged_recovery()` may open the next lane. With no
 pending pointer intent it must return `PROMOTE`, including for an exact
 already-visible replay; only durable pending intent from the same exact
@@ -170,8 +172,9 @@ authoritative `PROMOTED` or `REPAIRED` journal event are durable and no pending
 intent remains. Terminal release must prove the exact promotion owner/fence
 absent. A retained terminal grant may be replaced after expiry or reboot only
 by request/target-bound cleanup authority and may not rewrite terminal evidence.
-The child adds no implementation, public transport, schema, runtime receipt,
-content release, graph/query projection, acceptance, or readiness.
+The child remains unimplemented and unaccepted and adds no execution authority,
+public transport, schema, runtime receipt, content release, or graph/query
+projection. No later successor is `READY`.
 
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
