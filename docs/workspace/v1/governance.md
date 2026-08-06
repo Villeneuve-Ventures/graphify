@@ -104,7 +104,7 @@ orientation only and cannot justify execution.
 | P5B2 host-agent semantic-worker transport | P5A, P5C1 | COMPLETE | Accepted exact `workspace semantic-worker --stdio` host-agent lifecycle in [`semantic-sync.md`](semantic-sync.md). P5A directly supplies queue semantics; P5C1 supplies installed runtime authority and transitively includes P5B1. Completion evidence: [`P5B2 host-agent semantic worker`](receipts/p5b2-semantic-worker.md). |
 | P5B2 semantic-result handoff and sealed-input finalization | P5A, P5B2b0, P5B2 host-agent semantic-worker transport | COMPLETE | Accepted internal handoff in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization). It preserves exact accepted worker evidence, distinguishes the optional carried-source generation from the new target generation, materializes one target-generation-owned semantic-input record, completes the staged payload manifest, and binds it through `bind_sealed_inputs()`. Completion evidence: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md), made canonical by PR #53. It grants no public command, parent-phase completion, or successor activation. |
 | P5B2 semantic-generation certification finalization | P5B2 semantic-result handoff and sealed-input finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-certification-finalization). Entry requires the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest; the only mutating lane is same-request `BUILD` recovery through the existing semantic certification view, immutable binding, generation receipt/journal, reservation, and staged-state authorities until exact `CERTIFIED` proof and lease release. Completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), accepting PR #56 only together with PR #57's corrective delivery. PR #58 made that acceptance canonical and promoted no parent phase or successor. |
-| P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | READY | Contract frozen only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization). Entry is the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority is limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires staged `PROMOTED`, exact visible current and authoritative journal revision, no pending intent, unchanged installed semantic evidence, and exact grant release. PR #59's exact merged-delivery, check, and review-disposition evidence above satisfies the dependency and preflight gate. `READY` is implementation eligibility only; this local transition remains proposed until publication and merge and does not implement, accept, complete, execute, or activate any later successor. |
+| P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | READY | Contract frozen only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization). Entry is the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority is limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires a staged `PROMOTED` record, exact visible current and authoritative journal revision, no pending intent, unchanged installed semantic evidence, and exact grant release. PR #59's exact merged-delivery, check, and review-disposition evidence above satisfies the dependency and preflight gate. `READY` is implementation eligibility only. Publication and merge of this change make this row canonical; it does not implement, accept, complete, execute, or activate any later successor. |
 | Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The accepted internal handoff and certification-finalization children and the promotion child's `READY` eligibility grant no broader or public command authority. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
@@ -121,11 +121,11 @@ implemented it; PR #57 supplied required retained-`CERTIFIED` cleanup and race
 corrections; PR #58 made only that corrected child's `COMPLETE` acceptance
 canonical; and PR #59 froze the promotion and pointer-finalization contract.
 PR #59's exact merge plus the refreshed live preflight support only that child's
-proposed `READY` transition. `READY` is implementation eligibility only, not
+`READY` transition. `READY` is implementation eligibility only, not
 implementation, acceptance, completion, execution, parent-phase promotion, or
-later-successor activation. Until this change is published and merged, the
-published canonical branch at `c928fbc8326c09cb0c51ea44164b7325a4c07122`
-remains authoritative.
+later-successor activation. Publication and merge of this change make that
+transition canonical; before then, the published canonical branch at
+`c928fbc8326c09cb0c51ea44164b7325a4c07122` remains authoritative.
 
 ## Justified out-of-scope follow-up register
 
@@ -558,8 +558,8 @@ no JOS row is activated or closed.
 
 This is the next separate unnumbered P5B2 child. The post-merge governance
 reconciliation records only this child as `READY`; `READY` is implementation
-eligibility only, and the transition remains a local proposal until publication
-and merge. The child is not `COMPLETE`, has no implementation, receipt,
+eligibility only. Publication and merge of this change make the transition
+canonical. The child is not `COMPLETE`, has no implementation, receipt,
 acceptance, completion, or execution authority, and activates no later
 successor.
 
