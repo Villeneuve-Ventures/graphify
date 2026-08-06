@@ -1037,9 +1037,12 @@ does not refresh the generated Graphify graph.
 ## P5B2 semantic-generation promotion and pointer-finalization contract gates
 
 These are frozen future implementation and acceptance gates for one unnumbered
-P5B2 child that remains `WAITING`. Passing the existing primitive suite during
-this contract-only change is mapping evidence, not implementation, acceptance,
-completion, a receipt, or readiness:
+P5B2 child that the post-merge governance reconciliation records as the sole
+`READY` child. `READY` is implementation eligibility only. Passing the existing
+primitive suite remains mapping evidence, not implementation, acceptance,
+completion, execution, or a receipt. PR #59's exact delivery evidence supports
+only the eligibility transition recorded in the
+[`governance.md` live snapshot](governance.md#current-live-snapshot):
 
 - fresh-entry vectors reopen the accepted certification terminal as one
   composite proof: exact staged `CERTIFIED` request/target/manifest/receipt, verified
@@ -1130,14 +1133,17 @@ uv run --frozen --all-extras pytest -q \
 ```
 
 A later implementation requires separately reviewed focused coverage for the
-new composition before any acceptance or status transition. Content release or
-DLP decisions, graph/query projection, changes to `query_structural()`, public
-semantic-sync commands, schemas, runtime formats, receipts,
-providers/backends, credentials, networking, migrate, repair, GC,
-service/watch, publication, P5C, H3, P6+, parent completion, implementation
-acceptance, and successor readiness are outside these gates. P5 and P5B2 remain
-`IN_PROGRESS`; H3 remains `DEFERRED`; the new child and remaining P5B2/P5C work
-remain `WAITING`; no successor is `READY`.
+new composition before any implementation delivery, acceptance, or completion
+transition.
+
+This eligibility transition authorizes no content release or DLP decision,
+graph/query projection, `query_structural()` change, public semantic-sync
+command, schema, runtime format, receipt, provider/backend, credential,
+networking, migrate, repair, GC, service/watch, publication, P5C, H3, P6+,
+parent completion, implementation, acceptance, completion, execution, or
+later-successor readiness. P5 and P5B2 remain `IN_PROGRESS`; H3 remains
+`DEFERRED`; this child alone is `READY` as implementation eligibility only;
+remaining P5B2 and P5C work remain `WAITING`; no later successor is `READY`.
 
 ## P5B2 public fenced pointer-repair CLI gates
 

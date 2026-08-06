@@ -384,12 +384,14 @@ generation installation and journaling. The claim remains local crash durability
 and stale-process fencing; it does not authenticate an uncompromised same-UID
 worker or semantic backend.
 
-The contract-frozen, `WAITING` semantic-generation promotion and
-pointer-finalization child protects the accepted certified target from
-substitution during pointer movement. Fresh entry requires the predecessor's
-complete cross-record `CERTIFIED` proof, unchanged request pointer CAS, absent target
-reservation, no pending pointer intent, and absent certification `BUILD`
-authority. Only the same request-bound staged-recovery path may acquire
+The contract-frozen semantic-generation promotion and pointer-finalization
+child is the sole `READY` child recorded by the post-merge governance
+reconciliation; `READY` is implementation eligibility only. Its frozen boundary
+protects the accepted certified target from substitution during pointer
+movement. Fresh entry requires the predecessor's complete cross-record
+`CERTIFIED` proof, unchanged request pointer CAS, absent target reservation, no
+pending pointer intent, and absent certification `BUILD` authority. Only the
+same request-bound staged-recovery path may acquire
 `PROMOTE` for a new exact move or exact already-visible replay, or
 `POINTER_RECOVERY` when durable pending intent remains from that same move.
 Commit-unknown recovery may reopen only the exact persisted
@@ -463,14 +465,16 @@ publication, production/runtime installation, performance qualification, P5C,
 H3, P6+, parent-phase completion, or successor authority.
 
 The semantic-generation promotion and pointer-finalization child has only a
-frozen `WAITING` contract. It makes no implementation, test, receipt,
-acceptance, completion, readiness, content-release/DLP, graph/query projection,
-`query_structural()` change, public semantic-sync, schema/format, provider,
-credential, network, migrate, repair, GC, service/watch, publication, P5C, H3,
-P6+, parent-completion, or successor claim. Its terminal pointer may make only
-the exact promoted current generation eligible to be considered as carried
-semantic-result evidence by a later separately authorized handoff; it does not
-run or accept that handoff.
+frozen contract and is the sole `READY` child recorded by the post-merge
+governance reconciliation. `READY` is implementation eligibility only. It makes
+no implementation, test, receipt, acceptance, completion, execution,
+content-release/DLP, graph/query projection, `query_structural()` change, public
+semantic-sync, schema/format, provider, credential, network, migrate, repair,
+GC, service/watch, publication, P5C, H3, P6+, parent-completion, or
+later-successor claim. Its terminal pointer may make only the exact promoted
+current generation eligible to be considered as carried semantic-result
+evidence by a later separately authorized handoff; it does not run or accept
+that handoff.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication
