@@ -33,13 +33,27 @@ The unnumbered P5B2 semantic-generation certification finalization child is
 implemented and accepted only at the frozen internal boundary below. Its
 completion evidence is the
 [P5B2 semantic-generation certification finalization acceptance receipt](receipts/p5b2-semantic-generation-certification-finalization.md),
-which accepts PR #56 only together with PR #57's corrective delivery. The
-child starts from the accepted handoff's exact reopened staged `COMPLETE`
-manifest plus the equal queue sealed-input digest, reuses only the existing
-semantic-certification-view and `GenerationStore` certification authorities,
-and stops after the same target generation is durably verified as staged
-`CERTIFIED` and its exact recovery lease is released. It adds no public command
-and promotes no successor.
+which merged PR #58 made canonical. It accepts PR #56 only together with PR
+#57's corrective delivery. The child starts from the accepted handoff's exact
+reopened staged `COMPLETE` manifest plus the equal queue sealed-input digest,
+reuses only the existing semantic-certification-view and `GenerationStore`
+certification authorities, and stops after the same target generation is
+durably verified as staged `CERTIFIED` and its exact recovery lease is
+released. It adds no public command and promotes no successor.
+
+The next unnumbered P5B2 semantic-generation promotion and pointer-finalization
+child is contract-frozen but remains `WAITING`. Its only admissible start is the
+accepted certification terminal for the same request, target, manifest,
+receipt, immutable semantic binding, pointer-CAS boundary, and absent `BUILD`
+recovery grant. The frozen forward path permits only that request's existing
+staged-recovery authority: `PROMOTE` for an exact new pointer move or
+already-visible replay, and `POINTER_RECOVERY` only when exact durable pending
+intent remains from that same move. It stops
+only after staged `PROMOTED`, the exact visible current pointer and authoritative
+promotion/recovery journal, no pending pointer intent, unchanged installed
+semantic generation evidence, and release of the exact promotion owner/fence
+are all durably proved. No implementation, test, schema, runtime receipt,
+acceptance, public command, or successor readiness is claimed.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -680,6 +694,7 @@ set.
 | Host-agent semantic worker | P5B2 host-agent semantic-worker transport (`COMPLETE`) | [`semantic-sync.md`](semantic-sync.md) freezes the one long-lived `workspace semantic-worker --stdio` host-agent queue lifecycle with a verified staged-result binding before completion. Accepted receipt: [`P5B2 semantic worker`](receipts/p5b2-semantic-worker.md). |
 | Semantic-result handoff and sealed-input finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal boundary](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization) admits only exact accepted worker sessions or identical carried format-version-1 evidence from the verified current source generation, binds that optional source separately from the new target generation, installs one immutable target-generation/request-bound handoff, copies its exact bytes to target-generation-owned `graphify-out/semantic-inputs.json`, completes the staged payload manifest, and calls `bind_sealed_inputs()`. Accepted receipt: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md). It has no public command and stops before content release, certification, promotion, or pointer mutation. |
 | Semantic-generation certification finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal contract](semantic-sync.md#p5b2-semantic-generation-certification-finalization) starts only from the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest, reacquires only the same request-bound `BUILD` recovery authority, and reuses the existing semantic certification view, immutable binding, generation receipt, journal, reservation, and staged-state transitions until the same target is durably verified as `CERTIFIED` and the lease is released. Accepted completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), limited to the corrected PR #56 plus PR #57 delivery chain. It grants no content-release, projection, promotion, pointer, public-command, or successor authority. |
+| Semantic-generation promotion and pointer-finalization | Unnumbered P5B2 child (`WAITING`) | The [contract-frozen internal boundary](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization) starts only from the accepted certification terminal, moves only the same request's exact certified target through staged `PROMOTE` (including exact already-visible replay) or pending-intent `POINTER_RECOVERY` authority, and requires staged `PROMOTED`, exact visible-current and journal proof, no pending pointer intent, unchanged installed semantic evidence, and exact grant release. It has no implementation, receipt, acceptance, public command, content-release/projection authority, or successor readiness. |
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` and the accepted internal handoff are implemented. The handoff acceptance grants no public semantic-sync route. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and execution contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |

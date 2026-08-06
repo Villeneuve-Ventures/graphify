@@ -384,6 +384,41 @@ generation installation and journaling. The claim remains local crash durability
 and stale-process fencing; it does not authenticate an uncompromised same-UID
 worker or semantic backend.
 
+The contract-frozen, `WAITING` semantic-generation promotion and
+pointer-finalization child protects the accepted certified target from
+substitution during pointer movement. Fresh entry requires the predecessor's
+complete cross-record `CERTIFIED` proof, unchanged request pointer CAS, absent target
+reservation, no pending pointer intent, and absent certification `BUILD`
+authority. Only the same request-bound staged-recovery path may acquire
+`PROMOTE` for a new exact move or exact already-visible replay, or
+`POINTER_RECOVERY` when durable pending intent remains from that same move.
+Commit-unknown recovery may reopen only the exact persisted
+promotion attempt and live grant, or replace that same attempt after
+expiry/reboot proof, together with matching target-bound pointer and journal
+residue. The pointer CAS binds target and receipt together with registry,
+active-source, source, operation, migration, schema and fence authority.
+
+Pointer recovery is not an arbitrary-history selector. Its locked plan must
+derive the exact target and receipt from the matching pending or visible move,
+have no quarantine or generic repair action, and rederive identically before
+mutation. An unrelated current, prior, last-good, arbitrary certified, newer,
+or substituted generation is not admissible even if individually valid.
+Corrupt, stale, incompatible, or ambiguous pointer residue remains a barrier.
+Existing registry-before-workspace and workspace-before-sorted-generation-lock
+ordering prevents the contract from creating an inverse acquisition path.
+
+Acquisition, pending intent, visible pointer, journal, staged `PROMOTED`
+transition, and lease release are separate commit-unknown boundaries. Each is
+accepted only through exact canonical reread, same-attempt live-grant recovery,
+or exact persisted-attempt replacement after expiry/reboot. A visible target
+without authoritative `PROMOTED` or exact recovery `REPAIRED` journal evidence,
+a journal event with unresolved intent, a staged marker without the same visible
+revision, or an absent lease after replacement authority is not success.
+Terminal proof also reopens unchanged installed payload, receipt, handoff and
+immutable semantic binding, so pointer movement cannot silently rewrite or
+recertify semantic content. This contract makes no content-level DLP, release,
+query-safety, correctness, or publication claim.
+
 ## Explicit non-claims
 
 V1 does not resist a compromised source-control or CI system, or a malicious
@@ -417,15 +452,25 @@ parent-phase completion, or successor authority.
 
 The accepted certification-finalization implementation and
 [receipt](receipts/p5b2-semantic-generation-certification-finalization.md) are
-authority only for the exact internal stop boundary. The local receipt remains
-staged until separately published and merged, and neither the implementation
-nor its receipt grants publication, merge, execution, or successor authority.
+authority only for the exact internal stop boundary. Merged PR #58 records that
+corrected acceptance as canonical, and neither the implementation nor its
+receipt grants publication, merge, execution, or successor authority.
 Even after the exact internal stop boundary, they grant no content-release
 or DLP decision, graph/query projection, promotion, pointer movement, public
 semantic-sync command, provider/backend/model or credential authority,
 networking, migrate, repair, GC, semantic-staging cleanup, service/watch,
 publication, production/runtime installation, performance qualification, P5C,
 H3, P6+, parent-phase completion, or successor authority.
+
+The semantic-generation promotion and pointer-finalization child has only a
+frozen `WAITING` contract. It makes no implementation, test, receipt,
+acceptance, completion, readiness, content-release/DLP, graph/query projection,
+`query_structural()` change, public semantic-sync, schema/format, provider,
+credential, network, migrate, repair, GC, service/watch, publication, P5C, H3,
+P6+, parent-completion, or successor claim. Its terminal pointer may make only
+the exact promoted current generation eligible to be considered as carried
+semantic-result evidence by a later separately authorized handoff; it does not
+run or accept that handoff.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

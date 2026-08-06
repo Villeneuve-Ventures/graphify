@@ -888,8 +888,9 @@ These gates accept the corrected internal lifecycle implementation only at the
 already frozen boundary. The
 [accepted completion receipt](receipts/p5b2-semantic-generation-certification-finalization.md)
 binds PR #56's implementation together with PR #57's corrective
-delivery; PR #56 alone is insufficient. The gates do not activate or make the lifecycle
-public. Every prior accepted receipt and acceptance gate remains unchanged:
+delivery; PR #56 alone is insufficient, and merged PR #58 records that corrected
+acceptance as canonical. The gates do not activate or make the lifecycle public.
+Every prior accepted receipt and acceptance gate remains unchanged:
 
 - the governance-closeout diff is limited to the nine allowlisted Markdown
   documents, including the new receipt and receipt index. No JOS row, code,
@@ -1032,6 +1033,111 @@ plus PR #57's exact corrective head against specification consistency,
 architecture/lock-order correctness, tests, and every review item. The
 documentation-only closeout audits all relative links and heading anchors and
 does not refresh the generated Graphify graph.
+
+## P5B2 semantic-generation promotion and pointer-finalization contract gates
+
+These are frozen future implementation and acceptance gates for one unnumbered
+P5B2 child that remains `WAITING`. Passing the existing primitive suite during
+this contract-only change is mapping evidence, not implementation, acceptance,
+completion, a receipt, or readiness:
+
+- fresh-entry vectors reopen the accepted certification terminal as one
+  composite proof: exact staged `CERTIFIED` request/target/manifest/receipt, verified
+  installed payload and immutable semantic binding, singular matching
+  `CERTIFIED` journal event with pointer revision zero, absent target
+  reservation, unchanged request pointer CAS, no pending pointer intent, and
+  absent certification `BUILD` owner plus staged-attempt digest;
+- rejection vectors cover missing, duplicated, foreign, substituted,
+  incompatible, unsafe, unreadable, ambiguous or drifted request, target,
+  manifest, receipt, installed generation, binding, journal, reservation,
+  pointer, registry, source, migration, operation, policy, compatibility and
+  lease evidence. No constituent record alone is entry or terminal authority;
+- acquisition vectors allow only
+  `GenerationStore.acquire_staged_recovery()` for the same repository, target,
+  and structural request. No pending pointer intent must yield `PROMOTE`; exact
+  durable pointer intent must yield `POINTER_RECOVERY`. Fresh acquisition
+  creates one attempt digest; the current OS owner reuses that digest and exact
+  live grant across commit uncertainty. After expiry/reboot proof, recovery
+  replaces only that persisted attempt through the request/target-bound
+  classifier. A different digest while the attempt remains, generic operation,
+  reopened `BUILD`, new target, or unrelated authority is rejected;
+- lock-order vectors preserve registry-before-workspace and
+  workspace-before-sorted-generation-lock order. Full authority and two equal
+  source observations are rechecked after acquisition before a new direct
+  pointer mutation; drift blocks without target substitution or inferred
+  success;
+- direct-promotion vectors derive every `PointerCAS` field from the frozen
+  request, exact certified receipt, current state schema, and accepted
+  `PROMOTE` grant. They prove exact candidate eligibility, revision/current
+  receipt CAS, one-revision movement, retained-prior ordering, durable pending,
+  visible, `PROMOTED` journal and pending-unlink boundaries, stale-CAS losing
+  behavior, and no arbitrary target or quarantine action;
+- exact-current replay vectors accept only the same target and receipt with a
+  complete authoritative pointer journal and no pending intent, perform no new
+  pointer move, and reject every other already-advanced current;
+- pointer-recovery vectors bind the locked plan and any `expected_plan` to
+  pending or visible residue from the same target/receipt move. They reject
+  plans selected from unrelated current, prior, last-good, arbitrary certified,
+  newer or substituted generations and reject any quarantine, rollback, GC or
+  generic repair action. Exact monotonic re-emission must retain the same target
+  and receipt and produce the matching single `REPAIRED` journal event. Once
+  exact intent or visibility is durable, recovery and already-visible
+  finalization remain possible with an unavailable selected checkout and do not
+  consume or adopt newer source observations;
+- pointer failpoint matrices cover retained-prior, pending-intent, visible,
+  journal and pending-unlink writes. Readers observe only a complete old or new
+  pointer; a visible exact target before journal durability is not success; and
+  stale, corrupt, incompatible or ambiguous intent remains a barrier without
+  mutation;
+- staged-finalization vectors call
+  `GenerationStore.complete_staged_promotion()` only after exact visible pointer
+  and pending-intent absence. They require unchanged installed receipt, target,
+  source authority, matching `PROMOTED` or admissible `REPAIRED` journal event,
+  and exact revision/epoch/fence, then advance only the same staged record by
+  one revision from `CERTIFIED` to `PROMOTED`;
+- acquisition, pointer intent, visible pointer, journal, staged transition and
+  release each receive independent process-death and commit-unknown vectors.
+  Recovery adopts only exact canonical reread, the same retained-attempt live
+  grant, or request/target-bound replacement of that persisted attempt after
+  expiry/reboot. Unrelated replacement authority, one-artifact
+  presence/absence, a journal head, or an unrelated successful current is never
+  inferred success;
+- release vectors retry only the exact unchanged live promotion grant or prove
+  the exact owner/fence and staged-attempt digest absent by locked durable
+  reread. A cleanup-only retained-grant path first proves the entire terminal
+  state, adopts the exact persisted attempt, and may release only that grant.
+  The same live owner may reuse it; an expired or rebooted grant may be replaced
+  only by request/target-bound cleanup authority whose newer epoch/fence is not
+  copied into terminal evidence. Generic unbound acquisition and foreign,
+  changed, newer or ambiguous authority fail closed; and
+- terminal vectors require staged `PROMOTED` for the same request, target,
+  manifest and receipt; visible current at the exact recorded pointer revision;
+  matching authoritative promotion/recovery journal; no pending pointer or
+  journal recovery; unchanged installed payload, receipt, coordination lock,
+  handoff and semantic binding; and exact promotion-grant absence. Only that
+  promoted current may be offered as carried semantic-result evidence to a
+  separately authorized later handoff.
+
+The existing primitive mapping suite for this contract freeze is:
+
+```bash
+uv run --frozen --all-extras pytest -q \
+  tests/test_workspace_semantic_generation_certification_finalization.py \
+  tests/test_workspace_semantic_result_handoff.py \
+  tests/test_workspace_sync.py \
+  tests/test_workspace_generations.py \
+  tests/test_workspace_pointers.py
+```
+
+A later implementation requires separately reviewed focused coverage for the
+new composition before any acceptance or status transition. Content release or
+DLP decisions, graph/query projection, changes to `query_structural()`, public
+semantic-sync commands, schemas, runtime formats, receipts,
+providers/backends, credentials, networking, migrate, repair, GC,
+service/watch, publication, P5C, H3, P6+, parent completion, implementation
+acceptance, and successor readiness are outside these gates. P5 and P5B2 remain
+`IN_PROGRESS`; H3 remains `DEFERRED`; the new child and remaining P5B2/P5C work
+remain `WAITING`; no successor is `READY`.
 
 ## P5B2 public fenced pointer-repair CLI gates
 
