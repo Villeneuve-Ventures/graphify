@@ -483,8 +483,8 @@ JOS rows remain `CLOSED` historical evidence.
 This separate unnumbered P5B2 child is `COMPLETE` only at the frozen internal
 boundary below. Merged PR #58 records the
 [accepted completion receipt](receipts/p5b2-semantic-generation-certification-finalization.md)
-as canonical. Acceptance binds PR #56's exact implementation together with PR
-#57's corrective delivery; PR #56 alone does not satisfy the final boundary.
+as canonical. Acceptance binds PR #56's exact implementation together with
+PR `#57`'s corrective delivery; PR #56 alone does not satisfy the final boundary.
 The transition changes no parent phase, JOS row, or later successor status.
 
 Its exact start boundary is the accepted semantic-result handoff terminal:

@@ -33,8 +33,8 @@ The unnumbered P5B2 semantic-generation certification finalization child is
 implemented and accepted only at the frozen internal boundary below. Its
 completion evidence is the
 [P5B2 semantic-generation certification finalization acceptance receipt](receipts/p5b2-semantic-generation-certification-finalization.md),
-which merged PR #58 made canonical. It accepts PR #56 only together with PR
-#57's corrective delivery. The child starts from the accepted handoff's exact
+which merged PR #58 made canonical. It accepts PR #56 only together with
+PR `#57`'s corrective delivery. The child starts from the accepted handoff's exact
 reopened staged `COMPLETE` manifest plus the equal queue sealed-input digest,
 reuses only the existing semantic-certification-view and `GenerationStore`
 certification authorities, and stops after the same target generation is
