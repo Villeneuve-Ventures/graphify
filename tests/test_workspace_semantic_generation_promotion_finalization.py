@@ -22,6 +22,7 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
 )
 from graphify.workspace.generations import GenerationConflict, GenerationError
+from graphify.workspace.identity import discover_source
 from graphify.workspace.journal import JournalCorrupt
 from graphify.workspace.leases import (
     LeaseBusy,
@@ -43,7 +44,13 @@ from tests.test_workspace_semantic_result_handoff import _handoff_path
 from tests.test_workspace_staged_build_abandonment import (
     _advance_active_source_revision,
 )
-from tests.workspace_p3_helpers import REPO_UUID, RuntimeHarness, tree_snapshot
+from tests.workspace_p3_helpers import (
+    REPO_UUID,
+    RuntimeHarness,
+    authorization,
+    create_repo,
+    tree_snapshot,
+)
 
 
 @dataclass(frozen=True)
@@ -278,6 +285,37 @@ def test_promoted_terminal_cleanup_reuses_same_owner_exact_promote_grant_and_rel
     assert cleanup.state.canonical == case.promoted.canonical
     assert cleanup.grant == case.retained_grant
     assert cleanup.grant.lease.to_dict()["operation"] == "PROMOTE"
+    released = case.runtime.leases.release(cleanup.grant)
+    assert released.leases.get("workspace") is None
+    assert released.staged_attempt_sha256 is None
+    assert _terminal_evidence(case) == before
+
+
+def test_promoted_terminal_cleanup_tolerates_unrelated_global_registry_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _promoted_cleanup_case(tmp_path, monkeypatch)
+    before = _terminal_evidence(case)
+    other_repo = create_repo(
+        tmp_path / "repo-two",
+        "22222222-2222-4222-8222-222222222222",
+    )
+    registry = case.harness.registry.enroll(
+        discover_source(other_repo),
+        authorization("enroll-unrelated-before-promoted-cleanup"),
+        expected_revision=case.structural_request.expected_registry_revision,
+    )
+    current_registry_revision = int(registry.to_dict()["revision"])
+    assert current_registry_revision > case.structural_request.expected_registry_revision
+
+    cleanup = _acquire_cleanup(case)
+
+    assert cleanup.state.canonical == case.promoted.canonical
+    assert cleanup.grant.registry_revision == current_registry_revision
+    assert cleanup.grant.active_source_revision == case.retained_grant.active_source_revision
+    assert cleanup.grant.lease == case.retained_grant.lease
+    assert cleanup.grant.operation_epoch == case.retained_grant.operation_epoch
     released = case.runtime.leases.release(cleanup.grant)
     assert released.leases.get("workspace") is None
     assert released.staged_attempt_sha256 is None

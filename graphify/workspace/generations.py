@@ -989,7 +989,7 @@ class GenerationStore:
         ]
         if (
             len(entries) != 1
-            or int(cast(int, registry_value["revision"])) != request.expected_registry_revision
+            or int(cast(int, registry_value["revision"])) < request.expected_registry_revision
             or int(cast(int, entries[0]["active_source_revision"]))
             != request.expected_active_source_revision
             or lease_state.migration_epoch != request.expected_migration_epoch
