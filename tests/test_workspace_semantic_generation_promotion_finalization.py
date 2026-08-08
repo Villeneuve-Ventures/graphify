@@ -1256,6 +1256,7 @@ def test_promotion_acquisition_commit_unknown_reuses_one_attempt_and_grant(
         ("pointer:promoted:complete:unlinked", "PROMOTE"),
         ("pointer:promoted:complete", "PROMOTE"),
         (f"staged-build:{REPO_UUID}:pending_durable", None),
+        (f"staged-build:{REPO_UUID}:previous_durable", None),
         (f"staged-build:{REPO_UUID}:current_durable", None),
         (f"generation:{GENERATION_ID}:staged_promoted_durable", None),
     ],
@@ -1500,6 +1501,7 @@ def test_process_death_after_pointer_recovery_reclassifies_visible_replay_to_pro
     "boundary",
     [
         f"staged-build:{REPO_UUID}:pending_durable",
+        f"staged-build:{REPO_UUID}:previous_durable",
         f"staged-build:{REPO_UUID}:current_durable",
         f"generation:{GENERATION_ID}:staged_promoted_durable",
     ],
@@ -1859,6 +1861,133 @@ def test_promotion_release_commit_unknown_retries_or_adopts_only_exact_absence(
     assert len(calls) == (2 if release_mode == "before_commit" else 1)
     assert all(grant == calls[0] for grant in calls)
     _assert_promotion_terminal(case, proof)
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "workspace:pending_durable",
+        "workspace:previous_durable",
+        "workspace:current_replaced",
+        "workspace:current_durable",
+        "workspace:pending_cleared",
+    ],
+)
+def test_promotion_release_recovers_each_durable_commit_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+) -> None:
+    fault = _ArmedFault(boundary)
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    semantic_before = _semantic_evidence(case)
+    real_release = workspace_sync._release_semantic_promotion_grant
+
+    def release_at_boundary(
+        runtime: WorkspaceRuntime,
+        grant: LeaseGrant,
+        *,
+        attempt_sha256: str,
+    ) -> None:
+        fault.armed = True
+        real_release(
+            runtime,
+            grant,
+            attempt_sha256=attempt_sha256,
+        )
+
+    monkeypatch.setattr(
+        workspace_sync,
+        "_release_semantic_promotion_grant",
+        release_at_boundary,
+    )
+
+    proof = workspace_sync._finalize_semantic_generation_promotion(
+        case.runtime,
+        case.request,
+    )
+
+    assert fault.fired
+    _assert_promotion_terminal(case, proof)
+    assert _semantic_evidence(case) == semantic_before
+    assert not (
+        _workspace_root(case) / "workspace.pending.json"
+    ).exists()
+
+
+def test_promotion_release_rejects_substituted_pending_outcome_before_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault("workspace:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    semantic_before = _semantic_evidence(case)
+    real_release = workspace_sync._release_semantic_promotion_grant
+    real_inspect = workspace_sync._inspect_promotion_grant_release
+    pending = _workspace_root(case) / "workspace.pending.json"
+    substituted: bytes | None = None
+
+    def release_at_boundary(
+        runtime: WorkspaceRuntime,
+        grant: LeaseGrant,
+        *,
+        attempt_sha256: str,
+    ) -> None:
+        fault.armed = True
+        real_release(
+            runtime,
+            grant,
+            attempt_sha256=attempt_sha256,
+        )
+
+    def inspect_after_substitution(
+        runtime: WorkspaceRuntime,
+        grant: LeaseGrant,
+        *,
+        attempt_sha256: str,
+    ) -> str:
+        nonlocal substituted
+        projected = WorkspaceLeaseState.from_json(pending.read_bytes())
+        substituted = replace(
+            projected,
+            migration_epoch=projected.migration_epoch + 1,
+        ).canonical
+        pending.write_bytes(substituted)
+        return real_inspect(
+            runtime,
+            grant,
+            attempt_sha256=attempt_sha256,
+        )
+
+    monkeypatch.setattr(
+        workspace_sync,
+        "_release_semantic_promotion_grant",
+        release_at_boundary,
+    )
+    monkeypatch.setattr(
+        workspace_sync,
+        "_inspect_promotion_grant_release",
+        inspect_after_substitution,
+    )
+
+    with pytest.raises(CommitUnknown, match="release"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            case.runtime,
+            case.request,
+        )
+
+    assert fault.fired
+    assert substituted is not None
+    assert pending.read_bytes() == substituted
+    assert _semantic_evidence(case) == semantic_before
 
 
 @pytest.mark.parametrize("retained_cleanup", [False, True])

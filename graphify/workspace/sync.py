@@ -2644,7 +2644,7 @@ def _projected_semantic_promotion_predecessor_locked(
     current_path, previous_path, _pending_path = (
         runtime.generations._staged_build_paths(projected.repo_uuid)
     )
-    candidates: list[StagedBuildState] = []
+    candidates: dict[bytes, StagedBuildState] = {}
     for relative in (current_path, previous_path):
         raw = runtime.generations.state.read_optional_existing_bytes(
             relative,
@@ -2677,12 +2677,12 @@ def _projected_semantic_promotion_predecessor_locked(
             and candidate.abandon_evidence is None
             and candidate.abandon_evidence_sha256 is None
         ):
-            candidates.append(candidate)
+            candidates[candidate.canonical] = candidate
     if len(candidates) != 1:
         raise GenerationConflict(
             "projected PROMOTED state has no singular exact CERTIFIED predecessor"
         )
-    return candidates[0]
+    return next(iter(candidates.values()))
 
 
 def _require_projected_semantic_promotion_locked(
@@ -3363,6 +3363,25 @@ def _promotion_grant_release_status_locked(
     raise CommitUnknown("promotion grant was replaced before release proof")
 
 
+def _expected_promotion_grant_release_state_locked(
+    lease_state: WorkspaceLeaseState,
+) -> WorkspaceLeaseState:
+    leases = dict(lease_state.leases)
+    lease_epochs = dict(lease_state.lease_epochs)
+    del leases["workspace"]
+    del lease_epochs["workspace"]
+    return WorkspaceLeaseState(
+        repo_uuid=lease_state.repo_uuid,
+        revision=lease_state.revision + 1,
+        fence_high_watermark=lease_state.fence_high_watermark,
+        operation_epoch=lease_state.operation_epoch,
+        migration_epoch=lease_state.migration_epoch,
+        leases=leases,
+        lease_epochs=lease_epochs,
+        staged_attempt_sha256=None,
+    )
+
+
 def _semantic_promotion_terminal_after_release(
     runtime: WorkspaceRuntime,
     request: SyncRequest,
@@ -3423,21 +3442,88 @@ def _inspect_promotion_grant_release(
 ) -> str:
     deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
     repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
+    projected_release: WorkspaceLeaseState | None = None
     with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
         with runtime.leases.read_only_workspace_lock(
             repo_uuid,
             deadline_ns=deadline_ns,
         ):
-            state = runtime.leases.read_only_snapshot_locked(
-                registry,
-                repo_uuid,
-                deadline_ns=deadline_ns,
-            )
-            return _promotion_grant_release_status_locked(
-                state,
-                grant,
-                attempt_sha256=attempt_sha256,
-            )
+            try:
+                state = runtime.leases.read_only_snapshot_locked(
+                    registry,
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            except StateRecoveryRequired:
+                current, pending_present = (
+                    runtime.leases.read_uncertain_snapshot_locked(
+                        registry,
+                        repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
+                )
+                if not pending_present:
+                    raise CommitUnknown(
+                        "promotion grant release recovery evidence disappeared"
+                    )
+                projected, requires_recovery = (
+                    runtime.leases.project_uncertain_snapshot_locked(
+                        registry,
+                        repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
+                )
+                if not requires_recovery:
+                    raise CommitUnknown(
+                        "promotion grant release projection requires no recovery"
+                    )
+                current_status = _promotion_grant_release_status_locked(
+                    current,
+                    grant,
+                    attempt_sha256=attempt_sha256,
+                )
+                if current_status == "same":
+                    expected = _expected_promotion_grant_release_state_locked(current)
+                    if projected.canonical != expected.canonical:
+                        raise CommitUnknown(
+                            "promotion grant release pending outcome is not exact"
+                        )
+                elif projected.canonical != current.canonical:
+                    raise CommitUnknown(
+                        "promotion grant release installed outcome is not exact"
+                    )
+                projected_status = _promotion_grant_release_status_locked(
+                    projected,
+                    grant,
+                    attempt_sha256=attempt_sha256,
+                )
+                if projected_status != "absent":  # pragma: no cover - helper values
+                    raise CommitUnknown(
+                        "promotion grant release projection retains authority"
+                    )
+                projected_release = projected
+            else:
+                return _promotion_grant_release_status_locked(
+                    state,
+                    grant,
+                    attempt_sha256=attempt_sha256,
+                )
+    if projected_release is None:  # pragma: no cover - pending branch assigns it
+        raise CommitUnknown("promotion grant release projection is missing")
+    try:
+        recovered = runtime.leases.recover_uncertain_snapshot(
+            repo_uuid,
+            deadline_ns=deadline_ns,
+        )
+    except Exception as exc:
+        raise CommitUnknown("promotion grant release recovery is ambiguous") from exc
+    if recovered.canonical != projected_release.canonical:
+        raise CommitUnknown("promotion grant release recovery changed projected state")
+    return _promotion_grant_release_status_locked(
+        recovered,
+        grant,
+        attempt_sha256=attempt_sha256,
+    )
 
 
 def _release_semantic_promotion_grant(

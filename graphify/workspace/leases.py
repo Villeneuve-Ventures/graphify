@@ -438,6 +438,59 @@ class LeaseStore:
         )
         return state, pending_present
 
+    def project_uncertain_snapshot_locked(
+        self,
+        document: Registry,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> tuple[WorkspaceLeaseState, bool]:
+        """Project lease persistence recovery while the caller owns both locks."""
+
+        require_before_deadline(
+            deadline_ns,
+            "uncertain workspace lease recovery projection exceeded its deadline",
+        )
+        entry = _registry_entry(document, repo_uuid)
+        current, previous, pending = self._paths(repo_uuid)
+        projection = self.state.project_record_recovery(
+            label="workspace",
+            current=current,
+            previous=previous,
+            pending=pending,
+            decoder=WorkspaceLeaseState.from_json,
+            revision=lambda state: state.revision,
+            allow_missing=False,
+            max_bytes=_MAX_WORKSPACE_LEASE_STATE_BYTES,
+            deadline_ns=deadline_ns,
+        )
+        projected = projection.record
+        assert projected is not None
+        if projected.repo_uuid != repo_uuid:
+            raise StateCorrupt("workspace lease state is installed under the wrong UUID")
+        active_evidence = entry["active_source_evidence"]
+        state = WorkspaceLeaseState(
+            repo_uuid=projected.repo_uuid,
+            revision=projected.revision,
+            fence_high_watermark=max(
+                projected.fence_high_watermark,
+                int(active_evidence["fence_token"]),
+            ),
+            operation_epoch=max(
+                projected.operation_epoch,
+                int(active_evidence["operation_epoch"]),
+            ),
+            migration_epoch=projected.migration_epoch,
+            leases=dict(projected.leases),
+            lease_epochs=dict(projected.lease_epochs),
+            staged_attempt_sha256=projected.staged_attempt_sha256,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "uncertain workspace lease recovery projection exceeded its deadline",
+        )
+        return state, projection.requires_recovery
+
     def recover_uncertain_snapshot(
         self,
         repo_uuid: str,
