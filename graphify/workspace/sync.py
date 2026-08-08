@@ -2910,16 +2910,16 @@ def _matching_promotion_journal_transition(
     if projection.actions:
         raise GenerationConflict("promotion lifecycle journal requires durable recovery")
     pointer_value = pointer.to_dict()
+    target_events = projection.snapshot.for_generation(request.generation_id)
     matches = tuple(
         event
-        for event in projection.snapshot.for_generation(request.generation_id)
+        for event in target_events
         if event.to_dict()["transition"] in {"PROMOTED", "REPAIRED"}
         and event.to_dict()["receipt_sha256"] == staged.receipt_sha256
         and event.to_dict()["pointer_revision"] == pointer_value["pointer_revision"]
         and event.to_dict()["operation_epoch"] == pointer_value["operation_epoch"]
         and event.to_dict()["fence_token"] == pointer_value["fence_token"]
     )
-    target_events = projection.snapshot.for_generation(request.generation_id)
     if len(matches) != 1 or not target_events or target_events[-1].canonical != matches[0].canonical:
         raise GenerationConflict("visible promotion has no exact authoritative journal event")
     return str(matches[0].to_dict()["transition"])
@@ -3743,15 +3743,15 @@ def _finalize_semantic_generation_promotion(
                 raise GenerationConflict("exact-current promotion pointer is missing")
             pointer = current_entry.current
         def validate_promotion_completion(
-            operation: LeaseOperation,
-            staged: StagedBuildState,
+            completion_operation: LeaseOperation,
+            completion_staged: StagedBuildState,
         ) -> None:
             _validate_semantic_promotion_completion_locked(
                 runtime,
                 request,
                 current_entry,
-                operation,
-                staged,
+                completion_operation,
+                completion_staged,
                 pointer,
                 attempt_sha256=attempt_sha256,
             )

@@ -186,7 +186,10 @@ def _leave_promotion_grant_after_process_death(
             )
 
 
-def _assert_promotion_terminal(case: _CertifiedPromotionCase, proof: Any) -> None:
+def _assert_promotion_terminal(
+    case: _CertifiedPromotionCase,
+    proof: workspace_sync._SemanticGenerationPromotionFinalization,
+) -> None:
     staged = case.runtime.generations.recover_staged_build(REPO_UUID)
     assert staged is not None
     assert staged.lifecycle_state == "PROMOTED"
