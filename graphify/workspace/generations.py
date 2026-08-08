@@ -40,7 +40,7 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
     payload_manifest_sha256,
 )
-from graphify.workspace.journal import JournalStore
+from graphify.workspace.journal import JournalCorrupt, JournalStore
 from graphify.workspace.leases import (
     LeaseGrant,
     LeaseOperation,
@@ -1027,7 +1027,7 @@ class GenerationStore:
 
         try:
             journal = self.journal.project_recovery(repo_uuid)
-        except Exception as exc:
+        except (JournalCorrupt, StateCorrupt) as exc:
             raise GenerationConflict(f"promoted lifecycle journal is invalid: {exc}") from exc
         if journal.actions:
             raise GenerationConflict("promoted lifecycle journal requires durable recovery")
@@ -1128,7 +1128,7 @@ class GenerationStore:
                             document,
                             repo_uuid,
                         )
-                    except StateRecoveryRequired:
+                    except StateRecoveryRequired as exc:
                         self.leases.read_uncertain_snapshot_locked(
                             document,
                             repo_uuid,
@@ -1140,20 +1140,22 @@ class GenerationStore:
                         }:
                             raise GenerationConflict(
                                 "terminal cleanup lease state is not durably stable"
-                            )
+                            ) from exc
                         return None
                     try:
                         state = self.read_only_staged_build_locked(
                             repo_uuid,
                             deadline_ns=None,
                         )
-                    except StagedBuildReadRecoveryRequired:
+                    except StagedBuildReadRecoveryRequired as exc:
                         projected, _ = self._project_staged_build_recovery_locked(repo_uuid)
                         if projected is not None and projected.lifecycle_state in {
                             "PROMOTED",
                             "ABANDONED",
                         }:
-                            raise GenerationConflict("terminal staged state is not durably stable")
+                            raise GenerationConflict(
+                                "terminal staged state is not durably stable"
+                            ) from exc
                         return None
                     if state is None or state.lifecycle_state not in {
                         "PROMOTED",

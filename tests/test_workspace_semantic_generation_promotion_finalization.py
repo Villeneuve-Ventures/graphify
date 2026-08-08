@@ -22,12 +22,18 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
 )
 from graphify.workspace.generations import GenerationConflict, GenerationError
+from graphify.workspace.journal import JournalCorrupt
 from graphify.workspace.leases import (
     LeaseBusy,
     LeaseGrant,
     LeaseRecoveryRequired,
 )
-from graphify.workspace.persistence import InjectedFault
+from graphify.workspace.persistence import (
+    InjectedFault,
+    LockTimeout,
+    StateCorrupt,
+    StatePathError,
+)
 from graphify.workspace.sync import SyncRequest
 from tests.test_workspace_semantic_generation_certification_finalization import (
     GENERATION_ID,
@@ -584,6 +590,44 @@ def test_promoted_terminal_cleanup_rejects_incomplete_terminal_evidence_before_m
 
     assert case.runtime.leases.inspect(REPO_UUID).canonical == retained.canonical
     assert tree_snapshot(workspace) == before
+
+
+@pytest.mark.parametrize(
+    ("error", "wrapped"),
+    [
+        (JournalCorrupt("invalid recovery journal"), True),
+        (StateCorrupt("invalid journal state"), True),
+        (StatePathError("unsafe journal path"), False),
+        (LockTimeout("journal read timed out"), False),
+        (RuntimeError("unexpected journal failure"), False),
+    ],
+)
+def test_promoted_terminal_cleanup_preserves_journal_projection_exception_taxonomy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    wrapped: bool,
+) -> None:
+    case = _promoted_cleanup_case(tmp_path, monkeypatch)
+    retained = case.runtime.leases.inspect(REPO_UUID)
+
+    def fail_projection(*_args: Any, **_kwargs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(case.runtime.journal, "project_recovery", fail_projection)
+
+    if wrapped:
+        with pytest.raises(
+            GenerationConflict, match="promoted lifecycle journal is invalid"
+        ) as caught:
+            _acquire_cleanup(case)
+        assert caught.value.__cause__ is error
+    else:
+        with pytest.raises(type(error)) as caught:
+            _acquire_cleanup(case)
+        assert caught.value is error
+
+    assert case.runtime.leases.inspect(REPO_UUID).canonical == retained.canonical
 
 
 def test_promoted_terminal_cleanup_rejects_abandoned_terminal_state(
