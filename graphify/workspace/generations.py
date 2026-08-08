@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import (
     AdapterError,
@@ -3047,12 +3047,15 @@ class GenerationStore:
         pointer: PointerSet,
         *,
         monotonic_ns: int,
+        validate_current: Callable[[LeaseOperation, StagedBuildState], None]
+        | None = None,
     ) -> StagedBuildState:
         """Record a separately-authoritative pointer move as terminal.
 
         This method never moves or repairs pointers. It only verifies the
         visible pointer plus its authoritative journal event, then releases the
-        staged-build recovery barrier.
+        staged-build recovery barrier. An optional current-state validator runs
+        under the same workspace lock before the staged transition.
         """
 
         try:
@@ -3132,6 +3135,8 @@ class GenerationStore:
                 or int(pointer_value["fence_token"]) > operation.fence_token
             ):
                 raise GenerationConflict("visible pointer belongs to a newer fence")
+            if validate_current is not None:
+                validate_current(operation, state)
             lock = self._lock(operation.repo_uuid, state.generation_id)
             with self.state.existing_generation_lock(
                 lock,
