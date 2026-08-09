@@ -1437,15 +1437,18 @@ governance acceptance, or merge authority.
 
 ## P5B2 semantic-generation promotion and pointer-finalization
 
-This next unnumbered P5B2 child is contract-frozen only, and the post-merge
-governance reconciliation records it as the sole `READY` child. `READY` is
-implementation eligibility only. Nothing in this section implements, accepts,
-completes, executes, or activates a later successor. It introduces no public
-command, request/result family, schema, durable format, runtime receipt,
-provider/backend path, or completion evidence. Merged PR #58 remains acceptance
-only for the corrected predecessor certification-finalization child; PR #59's
-exact delivery evidence supports only the eligibility transition recorded in
-the [`governance.md` live snapshot](governance.md#current-live-snapshot).
+This next unnumbered P5B2 child is contract-frozen and internally implemented;
+the post-merge governance reconciliation still records it as the sole `READY`
+child. Focused regression coverage exercises direct promotion, exact-current
+replay, pointer and staged recovery, every documented acquisition and release
+commit boundary, substitution rejection, semantic-evidence preservation, and
+exact terminal cleanup. `READY` remains unaccepted: this implementation does
+not accept, complete, execute, or activate a later successor. It introduces no
+public command, request/result family, schema, durable format, runtime receipt,
+or provider/backend path. Merged PR #58 remains acceptance only for the
+corrected predecessor certification-finalization child; PR #59's evidence
+supports only the eligibility transition recorded in the
+[`governance.md` live snapshot](governance.md#current-live-snapshot).
 
 The child composes only existing authorities:
 
@@ -1745,8 +1748,7 @@ changes to `query_structural()`, public semantic-sync commands, schemas,
 runtime formats, receipts, providers/backends/models, credentials, networking,
 migrate, repair, GC, service/watch, publication, production/runtime
 installation, performance/resource qualification, P5C, H3, P6+, parent
-completion, governance acceptance, implementation, and later-successor
-readiness are explicitly excluded. P5 and P5B2 remain `IN_PROGRESS`; H3 remains
-`DEFERRED`; this child alone is `READY` as implementation eligibility only;
-remaining P5B2, P5C, and remaining P5C concerns remain `WAITING`; no later
-successor is `READY`.
+completion, governance acceptance, and later-successor readiness are explicitly
+excluded. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; this child
+alone is internally implemented but unaccepted at `READY`; remaining P5B2, P5C,
+and remaining P5C concerns remain `WAITING`; no later successor is `READY`.

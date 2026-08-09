@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Callable, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import (
     AdapterError,
@@ -363,9 +363,17 @@ class GenerationStore:
         except (AttributeError, ContractError, TypeError, ValueError) as exc:
             raise GenerationConflict(f"staged build request is invalid: {exc}") from exc
 
-    def _load_staged_build_locked(self, repo_uuid: str) -> StagedBuildState | None:
+    def _load_staged_build_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> StagedBuildState | None:
         try:
-            return self.leases._load_staged_build_locked(repo_uuid)
+            return self.leases._load_staged_build_locked(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
         except LeaseRecoveryRequired as exc:
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
 
@@ -420,13 +428,24 @@ class GenerationStore:
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
         return projection.record, projection.requires_recovery
 
-    def recover_staged_build(self, repo_uuid: str) -> StagedBuildState | None:
+    def recover_staged_build(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> StagedBuildState | None:
         """Recover one pending staged record under canonical lock ordering."""
 
         try:
-            with self.leases.registry.recovered_snapshot():
-                with self.leases.workspace_lock(repo_uuid):
-                    return self._load_staged_build_locked(repo_uuid)
+            with self.leases.registry.recovered_snapshot(deadline_ns=deadline_ns):
+                with self.leases.workspace_lock(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                ):
+                    return self._load_staged_build_locked(
+                        repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
         except LeaseRecoveryRequired as exc:
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
 
@@ -3047,12 +3066,15 @@ class GenerationStore:
         pointer: PointerSet,
         *,
         monotonic_ns: int,
+        validate_current: Callable[[LeaseOperation, StagedBuildState], None]
+        | None = None,
     ) -> StagedBuildState:
         """Record a separately-authoritative pointer move as terminal.
 
         This method never moves or repairs pointers. It only verifies the
         visible pointer plus its authoritative journal event, then releases the
-        staged-build recovery barrier.
+        staged-build recovery barrier. An optional current-state validator runs
+        under the same workspace lock before the staged transition.
         """
 
         try:
@@ -3132,6 +3154,8 @@ class GenerationStore:
                 or int(pointer_value["fence_token"]) > operation.fence_token
             ):
                 raise GenerationConflict("visible pointer belongs to a newer fence")
+            if validate_current is not None:
+                validate_current(operation, state)
             lock = self._lock(operation.repo_uuid, state.generation_id)
             with self.state.existing_generation_lock(
                 lock,

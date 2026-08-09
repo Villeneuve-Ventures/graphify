@@ -1036,12 +1036,13 @@ does not refresh the generated Graphify graph.
 
 ## P5B2 semantic-generation promotion and pointer-finalization contract gates
 
-These are frozen future implementation and acceptance gates for one unnumbered
+These are the frozen implementation and acceptance gates for one unnumbered
 P5B2 child that the post-merge governance reconciliation records as the sole
-`READY` child. `READY` is implementation eligibility only. Passing the existing
-primitive suite remains mapping evidence, not implementation, acceptance,
-completion, execution, or a receipt. PR #59's exact delivery evidence supports
-only the eligibility transition recorded in the
+`READY` child. The internal composition and its focused regression suite are now
+implemented, but `READY` remains unaccepted. Passing either the focused or
+primitive suite is verification evidence, not acceptance, completion,
+execution, or a receipt. PR #59's exact delivery evidence supports only the
+eligibility transition recorded in the
 [`governance.md` live snapshot](governance.md#current-live-snapshot):
 
 - fresh-entry vectors reopen the accepted certification terminal as one
@@ -1121,7 +1122,14 @@ only the eligibility transition recorded in the
   promoted current may be offered as carried semantic-result evidence to a
   separately authorized later handoff.
 
-The existing primitive mapping suite for this contract freeze is:
+The focused implementation suite is:
+
+```bash
+uv run --frozen --all-extras pytest -q \
+  tests/test_workspace_semantic_generation_promotion_finalization.py
+```
+
+The existing primitive mapping suite for this contract freeze remains:
 
 ```bash
 uv run --frozen --all-extras pytest -q \
@@ -1132,18 +1140,17 @@ uv run --frozen --all-extras pytest -q \
   tests/test_workspace_pointers.py
 ```
 
-A later implementation requires separately reviewed focused coverage for the
-new composition before any implementation delivery, acceptance, or completion
-transition.
+The focused composition coverage is required for implementation delivery.
+Neither suite is governance acceptance or a completion transition.
 
-This eligibility transition authorizes no content release or DLP decision,
+This implementation delivery authorizes no content release or DLP decision,
 graph/query projection, `query_structural()` change, public semantic-sync
 command, schema, runtime format, receipt, provider/backend, credential,
 networking, migrate, repair, GC, service/watch, publication, P5C, H3, P6+,
-parent completion, implementation, acceptance, completion, execution, or
-later-successor readiness. P5 and P5B2 remain `IN_PROGRESS`; H3 remains
-`DEFERRED`; this child alone is `READY` as implementation eligibility only;
-remaining P5B2 and P5C work remain `WAITING`; no later successor is `READY`.
+parent completion, governance acceptance, completion, or later-successor
+readiness. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; this child
+alone is implemented but unaccepted at `READY`; remaining P5B2 and P5C work
+remain `WAITING`; no later successor is `READY`.
 
 ## P5B2 public fenced pointer-repair CLI gates
 

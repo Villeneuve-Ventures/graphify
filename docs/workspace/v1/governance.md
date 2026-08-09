@@ -86,10 +86,10 @@ orientation only and cannot justify execution.
 | H1 | P4F | COMPLETE | Inherited labeling-order test stabilization closed. |
 | H2 | H1 | COMPLETE | Candidate packaging, dependency, and blocking security hygiene closed. |
 | H3 | H2 | DEFERRED | Full-repository Pyright and medium-severity Bandit debt remains non-blocking. |
-| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, semantic-result handoff, and corrected semantic-generation certification finalization, are complete. The promotion and pointer-finalization child is the sole `READY` child recorded by this local reconciliation; `READY` is implementation eligibility only. Remaining P5B2 and the broad P5C gate are not complete. |
+| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, semantic-result handoff, and corrected semantic-generation certification finalization, are complete. The promotion and pointer-finalization child is internally implemented but remains the sole unaccepted `READY` child recorded by this local reconciliation. Remaining P5B2 and the broad P5C gate are not complete. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, semantic-result handoff, and corrected semantic-generation certification finalization, are complete. The promotion and pointer-finalization child is the sole `READY` child recorded by this local reconciliation and remains unimplemented. Full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and every other undelivered command remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, semantic-result handoff, and corrected semantic-generation certification finalization, are complete. The promotion and pointer-finalization child is internally implemented but remains the sole unaccepted `READY` child recorded by this local reconciliation. Full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and every other undelivered command remain waiting. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
@@ -104,7 +104,7 @@ orientation only and cannot justify execution.
 | P5B2 host-agent semantic-worker transport | P5A, P5C1 | COMPLETE | Accepted exact `workspace semantic-worker --stdio` host-agent lifecycle in [`semantic-sync.md`](semantic-sync.md). P5A directly supplies queue semantics; P5C1 supplies installed runtime authority and transitively includes P5B1. Completion evidence: [`P5B2 host-agent semantic worker`](receipts/p5b2-semantic-worker.md). |
 | P5B2 semantic-result handoff and sealed-input finalization | P5A, P5B2b0, P5B2 host-agent semantic-worker transport | COMPLETE | Accepted internal handoff in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization). It preserves exact accepted worker evidence, distinguishes the optional carried-source generation from the new target generation, materializes one target-generation-owned semantic-input record, completes the staged payload manifest, and binds it through `bind_sealed_inputs()`. Completion evidence: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md), made canonical by PR #53. It grants no public command, parent-phase completion, or successor activation. |
 | P5B2 semantic-generation certification finalization | P5B2 semantic-result handoff and sealed-input finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-certification-finalization). Entry requires the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest; the only mutating lane is same-request `BUILD` recovery through the existing semantic certification view, immutable binding, generation receipt/journal, reservation, and staged-state authorities until exact `CERTIFIED` proof and lease release. Completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), accepting PR #56 only together with PR #57's corrective delivery. PR #58 made that acceptance canonical and promoted no parent phase or successor. |
-| P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | READY | Contract frozen only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization). Entry is the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority is limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires a staged `PROMOTED` record, exact visible current and authoritative journal revision, no pending intent, unchanged installed semantic evidence, and exact grant release. PR #59's exact merged-delivery, check, and review-disposition evidence above satisfies the dependency and preflight gate. `READY` is implementation eligibility only. Publication and merge of this change make this row canonical; it does not implement, accept, complete, execute, or activate any later successor. |
+| P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | READY | The frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization) is internally implemented with focused direct-promotion, replay, pointer/staged/acquisition/release uncertainty, substitution, evidence-preservation, and exact-cleanup regressions. Entry remains the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority remains limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires staged `PROMOTED`, exact visible-current and journal evidence, no pending intent, unchanged semantic evidence, and exact grant release. PR #59's evidence satisfied only the dependency and preflight gate. This child remains unaccepted at `READY`; publication of the implementation record does not accept, complete, execute, or activate it or any later successor. |
 | Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The accepted internal handoff and certification-finalization children and the promotion child's `READY` eligibility grant no broader or public command authority. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
@@ -121,11 +121,11 @@ implemented it; PR #57 supplied required retained-`CERTIFIED` cleanup and race
 corrections; PR #58 made only that corrected child's `COMPLETE` acceptance
 canonical; and PR #59 froze the promotion and pointer-finalization contract.
 PR #59's exact merge plus the refreshed live preflight support only that child's
-`READY` transition. `READY` is implementation eligibility only, not
-implementation, acceptance, completion, execution, parent-phase promotion, or
-later-successor activation. Publication and merge of this change make that
-transition canonical; before then, the published canonical branch at
-`c928fbc8326c09cb0c51ea44164b7325a4c07122` remains authoritative.
+`READY` transition, not implementation authority. The separately authorized
+internal implementation and its focused coverage do not accept or complete the
+child, promote the parent phase, or activate a later successor. Publication of
+the implementation record makes only that delivery canonical; governance
+acceptance remains a separate transition.
 
 ## Justified out-of-scope follow-up register
 
@@ -629,9 +629,9 @@ Content release or DLP decisions, graph/query projection, changes to
 receipts, providers/backends, credentials, networking, migrate, repair, GC,
 service/watch, publication, P5C, H3, P6+, parent completion, acceptance,
 completion, and later-successor readiness are excluded. P5 and P5B2 remain
-`IN_PROGRESS`; H3 remains `DEFERRED`; this child alone is `READY` as
-implementation eligibility only; remaining P5B2, P5C, and remaining P5C
-concerns remain `WAITING`; every later successor remains not `READY`.
+`IN_PROGRESS`; H3 remains `DEFERRED`; this child alone is internally implemented
+but unaccepted at `READY`; remaining P5B2, P5C, and remaining P5C concerns remain
+`WAITING`; every later successor remains not `READY`.
 
 ## P5B2 identity-maintenance boundary freeze
 
