@@ -22,7 +22,11 @@ from graphify.workspace.contracts import (
     WorkspaceLeaseState,
     canonical_json_bytes,
 )
-from graphify.workspace.generations import GenerationConflict, GenerationError
+from graphify.workspace.generations import (
+    GenerationConflict,
+    GenerationError,
+    StagedBuildReadRecoveryRequired,
+)
 from graphify.workspace.identity import discover_source
 from graphify.workspace.journal import JournalCorrupt
 from graphify.workspace.leases import (
@@ -36,6 +40,7 @@ from graphify.workspace.persistence import (
     LockTimeout,
     StateCorrupt,
     StatePathError,
+    StateRecoveryRequired,
 )
 from graphify.workspace.semantic_handoff import (
     CarriedSemanticResultEvidence,
@@ -54,6 +59,7 @@ from tests.test_workspace_semantic_result_handoff import (
 from tests.test_workspace_staged_build_abandonment import (
     _advance_active_source_revision,
 )
+from tests.test_workspace_sync import _compose
 from tests.workspace_p3_helpers import (
     REPO_UUID,
     RuntimeHarness,
@@ -195,6 +201,33 @@ def _leave_promotion_grant_after_process_death(
             )
 
 
+def _leave_promotion_acquisition_pending_after_process_death(
+    case: _CertifiedPromotionCase,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: _ArmedFault,
+) -> Callable[..., Any]:
+    acquire = case.runtime.generations.acquire_staged_recovery
+
+    def interrupt(*args: Any, **kwargs: Any):
+        try:
+            return acquire(*args, **kwargs)
+        except CommitUnknown as exc:
+            raise InjectedFault("process died during acquisition") from exc
+
+    monkeypatch.setattr(
+        case.runtime.generations,
+        "acquire_staged_recovery",
+        interrupt,
+    )
+    fault.armed = True
+    with pytest.raises(InjectedFault, match="process died"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            case.runtime,
+            case.request,
+        )
+    return acquire
+
+
 def _assert_promotion_terminal(
     case: _CertifiedPromotionCase,
     proof: workspace_sync._SemanticGenerationPromotionFinalization,
@@ -283,10 +316,12 @@ def _promoted_cleanup_case(
     monkeypatch: pytest.MonkeyPatch,
     *,
     pointer_recovery: bool = False,
+    fault_hook: Any = None,
 ) -> _PromotedCleanupCase:
     harness, runtime, request, _, _ = _complete_handoff(
         tmp_path,
         monkeypatch,
+        fault_hook=fault_hook,
     )
     workspace_sync._finalize_semantic_generation_certification(runtime, request)
     certified = runtime.generations.recover_staged_build(REPO_UUID)
@@ -1341,6 +1376,301 @@ def test_promotion_acquisition_recovers_each_durable_commit_boundary_after_resta
     assert _semantic_evidence(case) == semantic_before
 
 
+def test_promotion_acquisition_accepts_registry_floored_durable_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault("workspace:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    workspace = _workspace_root(case)
+    raw_predecessor = WorkspaceLeaseState.from_json(
+        (workspace / "workspace.json").read_bytes()
+    )
+    _advance_active_source_revision(case.harness)
+    registry = case.runtime.registry.load()
+    registry_entry = registry.to_dict()["workspaces"][0]
+    active_evidence = cast(dict[str, Any], registry_entry["active_source_evidence"])
+    attempt_sha256 = hashlib.sha256(b"registry-floored-promotion").hexdigest()
+    fault.armed = True
+
+    with pytest.raises(CommitUnknown):
+        case.runtime.generations.acquire_staged_recovery(
+            REPO_UUID,
+            GENERATION_ID,
+            case.certified.request,
+            attempt_sha256=attempt_sha256,
+            acquired_at=datetime.now(timezone.utc),
+            monotonic_ns=time.monotonic_ns(),
+            ttl_ns=60_000_000_000,
+        )
+
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    with case.runtime.registry.read_only_snapshot(deadline_ns=deadline_ns) as document:
+        with case.runtime.leases.read_only_workspace_lock(
+            REPO_UUID,
+            deadline_ns=deadline_ns,
+        ):
+            projected, requires_recovery = (
+                case.runtime.leases.project_uncertain_snapshot_locked(
+                    document,
+                    REPO_UUID,
+                    deadline_ns=deadline_ns,
+                )
+            )
+            predecessor = (
+                workspace_sync._promotion_grant_acquisition_predecessor_locked(
+                    case.runtime,
+                    document.to_dict(),
+                    projected,
+                    pointer_mode="fresh",
+                    deadline_ns=deadline_ns,
+                )
+            )
+
+    assert requires_recovery
+    assert raw_predecessor.operation_epoch < active_evidence["operation_epoch"]
+    assert raw_predecessor.fence_high_watermark < active_evidence["fence_token"]
+    assert predecessor.revision == raw_predecessor.revision
+    assert predecessor.operation_epoch == active_evidence["operation_epoch"]
+    assert predecessor.fence_high_watermark == active_evidence["fence_token"]
+    assert projected.operation_epoch == predecessor.operation_epoch + 1
+    assert projected.fence_high_watermark == predecessor.fence_high_watermark + 1
+
+
+def test_promotion_capture_recovery_uses_one_deadline_and_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault("workspace:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    semantic_before = _semantic_evidence(case)
+    real_acquire = _leave_promotion_acquisition_pending_after_process_death(
+        case,
+        monkeypatch,
+        fault,
+    )
+
+    pending = _workspace_root(case) / "workspace.pending.json"
+    assert pending.exists()
+    monkeypatch.setattr(
+        case.runtime.generations,
+        "acquire_staged_recovery",
+        real_acquire,
+    )
+    prior_owner = case.runtime.leases.current_owner()
+    rebooted_owner = replace(prior_owner, boot_id="rebooted-during-capture-recovery")
+    monkeypatch.setattr(case.runtime.leases, "current_owner", lambda: rebooted_owner)
+
+    read_deadlines: list[int | None] = []
+    recovery_deadlines: list[int | None] = []
+    real_read = case.runtime.leases.read_only_snapshot_locked
+    real_recover = case.runtime.leases.recover_uncertain_snapshot
+
+    def read_snapshot(*args: Any, **kwargs: Any):
+        read_deadlines.append(kwargs.get("deadline_ns"))
+        return real_read(*args, **kwargs)
+
+    def recover_then_install_replacement(*args: Any, **kwargs: Any):
+        recovery_deadlines.append(kwargs.get("deadline_ns"))
+        if len(recovery_deadlines) != 1:
+            raise AssertionError("promotion acquisition recovery repeated")
+        recovered = real_recover(*args, **kwargs)
+        attempt_sha256 = recovered.staged_attempt_sha256
+        assert attempt_sha256 is not None
+        fault.fired = False
+        fault.armed = True
+        with pytest.raises(CommitUnknown):
+            real_acquire(
+                REPO_UUID,
+                GENERATION_ID,
+                case.certified.request,
+                attempt_sha256=attempt_sha256,
+                acquired_at=datetime.now(timezone.utc),
+                monotonic_ns=time.monotonic_ns(),
+                ttl_ns=60_000_000_000,
+            )
+        assert pending.exists()
+        return recovered
+
+    monkeypatch.setattr(
+        case.runtime.leases,
+        "read_only_snapshot_locked",
+        read_snapshot,
+    )
+    monkeypatch.setattr(
+        case.runtime.leases,
+        "recover_uncertain_snapshot",
+        recover_then_install_replacement,
+    )
+
+    with pytest.raises(CommitUnknown, match="did not converge"):
+        workspace_sync._capture_semantic_promotion_entry(
+            case.runtime,
+            case.request,
+            case.certified,
+        )
+
+    assert len(recovery_deadlines) == 1
+    assert read_deadlines
+    bounded_read_deadlines = [value for value in read_deadlines if value is not None]
+    assert len(set(bounded_read_deadlines)) == 1
+    assert recovery_deadlines == [bounded_read_deadlines[0]]
+    assert pending.exists()
+    assert case.runtime.pointers.load(REPO_UUID, allow_missing=True) is None
+    assert _semantic_evidence(case) == semantic_before
+
+
+def test_promotion_acquisition_recovery_rejects_concurrent_staged_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault("workspace:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    semantic_before = _semantic_evidence(case)
+    _leave_promotion_acquisition_pending_after_process_death(
+        case,
+        monkeypatch,
+        fault,
+    )
+
+    pending = _workspace_root(case) / "workspace.pending.json"
+    pending_before = pending.read_bytes()
+
+    def concurrent_staged_pending(*_args: Any, **_kwargs: Any):
+        raise StagedBuildReadRecoveryRequired("concurrent staged pending commit")
+
+    monkeypatch.setattr(
+        case.runtime.generations,
+        "read_only_staged_build_locked",
+        concurrent_staged_pending,
+    )
+    monkeypatch.setattr(
+        case.runtime.leases,
+        "recover_uncertain_snapshot",
+        _forbidden_finalization("cross-kind lease recovery"),
+    )
+
+    with pytest.raises(CommitUnknown, match="did not converge"):
+        workspace_sync._capture_semantic_promotion_entry(
+            case.runtime,
+            case.request,
+            case.certified,
+        )
+
+    assert pending.read_bytes() == pending_before
+    assert case.runtime.pointers.load(REPO_UUID, allow_missing=True) is None
+    assert _semantic_evidence(case) == semantic_before
+
+
+def test_promotion_capture_recovers_pending_staged_transition_before_rejecting_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault(f"staged-build:{REPO_UUID}:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    semantic_before = _semantic_evidence(case)
+    fault.armed = True
+    _leave_promotion_grant_after_process_death(case, monkeypatch)
+    pending = _workspace_root(case) / "staged-build.pending.json"
+    assert pending.exists()
+
+    recovery_deadlines: list[int | None] = []
+    real_recover = case.runtime.generations.recover_staged_build
+
+    def recover_staged(*args: Any, **kwargs: Any):
+        recovery_deadlines.append(kwargs.get("deadline_ns"))
+        return real_recover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        case.runtime.generations,
+        "recover_staged_build",
+        recover_staged,
+    )
+
+    with pytest.raises(GenerationConflict, match="promotion staged entry changed"):
+        workspace_sync._capture_semantic_promotion_entry(
+            case.runtime,
+            case.request,
+            case.certified,
+        )
+
+    assert recovery_deadlines and recovery_deadlines[0] is not None
+    assert not pending.exists()
+    staged = case.runtime.generations.recover_staged_build(REPO_UUID)
+    assert staged is not None
+    assert staged.lifecycle_state == "PROMOTED"
+    assert _semantic_evidence(case) == semantic_before
+    proof = workspace_sync._finalize_semantic_generation_promotion(
+        case.runtime,
+        case.request,
+    )
+    _assert_promotion_terminal(case, proof)
+
+
+def test_promotion_staged_recovery_rejects_concurrent_lease_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault(f"staged-build:{REPO_UUID}:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    semantic_before = _semantic_evidence(case)
+    fault.armed = True
+    _leave_promotion_grant_after_process_death(case, monkeypatch)
+    pending = _workspace_root(case) / "staged-build.pending.json"
+    pending_before = pending.read_bytes()
+    real_read = case.runtime.leases.read_only_snapshot_locked
+    reads = 0
+
+    def concurrent_lease_pending(*args: Any, **kwargs: Any):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return real_read(*args, **kwargs)
+        raise StateRecoveryRequired("concurrent lease pending commit")
+
+    monkeypatch.setattr(
+        case.runtime.leases,
+        "read_only_snapshot_locked",
+        concurrent_lease_pending,
+    )
+    monkeypatch.setattr(
+        case.runtime.generations,
+        "recover_staged_build",
+        _forbidden_finalization("cross-kind staged recovery"),
+    )
+
+    with pytest.raises(CommitUnknown, match="did not converge"):
+        workspace_sync._capture_semantic_promotion_entry(
+            case.runtime,
+            case.request,
+            case.certified,
+        )
+
+    assert reads == 2
+    assert pending.read_bytes() == pending_before
+    assert _semantic_evidence(case) == semantic_before
+
+
 def test_promotion_acquisition_rejects_substituted_pending_outcome_before_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1355,26 +1685,11 @@ def test_promotion_acquisition_rejects_substituted_pending_outcome_before_recove
     assert pre_acquisition.leases.get("workspace") is None
     assert pre_acquisition.staged_attempt_sha256 is None
     semantic_before = _semantic_evidence(case)
-    real_acquire = case.runtime.generations.acquire_staged_recovery
-
-    def acquire_before_process_death(*args: Any, **kwargs: Any):
-        try:
-            return real_acquire(*args, **kwargs)
-        except CommitUnknown as exc:
-            raise InjectedFault("process died during acquisition") from exc
-
-    monkeypatch.setattr(
-        case.runtime.generations,
-        "acquire_staged_recovery",
-        acquire_before_process_death,
+    _leave_promotion_acquisition_pending_after_process_death(
+        case,
+        monkeypatch,
+        fault,
     )
-    fault.armed = True
-
-    with pytest.raises(InjectedFault, match="process died"):
-        workspace_sync._finalize_semantic_generation_promotion(
-            case.runtime,
-            case.request,
-        )
 
     pending = _workspace_root(case) / "workspace.pending.json"
     projected = WorkspaceLeaseState.from_json(pending.read_bytes())
@@ -1988,6 +2303,11 @@ def test_finalizer_replaces_rebooted_terminal_cleanup_without_rewriting_proof(
     released = case.runtime.leases.inspect(REPO_UUID)
     assert released.leases.get("workspace") is None
     assert released.staged_attempt_sha256 is None
+    replay = workspace_sync._finalize_semantic_generation_promotion(
+        _compose(case.harness),
+        case.request,
+    )
+    assert replay == proof
 
 
 @pytest.mark.parametrize("release_mode", ["before_commit", "after_commit"])
@@ -2025,47 +2345,82 @@ def test_promotion_release_commit_unknown_retries_or_adopts_only_exact_absence(
     "boundary",
     _WORKSPACE_COMMIT_BOUNDARIES,
 )
+@pytest.mark.parametrize(
+    "case_kind",
+    ["direct", "cleanup-promote", "cleanup-pointer-recovery"],
+)
 def test_promotion_release_recovers_each_durable_commit_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     boundary: str,
+    case_kind: str,
 ) -> None:
     fault = _ArmedFault(boundary)
-    case = _certified_promotion_case(
-        tmp_path,
-        monkeypatch,
-        fault_hook=fault,
-    )
-    semantic_before = _semantic_evidence(case)
-    real_release = workspace_sync._release_semantic_promotion_grant
+    case: _CertifiedPromotionCase | _PromotedCleanupCase
+    if case_kind == "direct":
+        case = _certified_promotion_case(
+            tmp_path,
+            monkeypatch,
+            fault_hook=fault,
+        )
+        evidence_before = _semantic_evidence(case)
+    else:
+        case = _promoted_cleanup_case(
+            tmp_path,
+            monkeypatch,
+            pointer_recovery=case_kind == "cleanup-pointer-recovery",
+            fault_hook=fault,
+        )
+        evidence_before = _terminal_evidence(case)
 
-    def release_at_boundary(
+    def release_before_process_death(
         runtime: WorkspaceRuntime,
         grant: LeaseGrant,
         *,
         attempt_sha256: str,
     ) -> None:
+        del attempt_sha256
         fault.armed = True
-        real_release(
-            runtime,
-            grant,
-            attempt_sha256=attempt_sha256,
-        )
+        try:
+            runtime.leases.release(grant)
+        except CommitUnknown as exc:
+            raise InjectedFault(f"process died during release at {boundary}") from exc
 
     monkeypatch.setattr(
         workspace_sync,
         "_release_semantic_promotion_grant",
-        release_at_boundary,
+        release_before_process_death,
     )
 
-    proof = workspace_sync._finalize_semantic_generation_promotion(
-        case.runtime,
-        case.request,
-    )
+    with pytest.raises(InjectedFault, match="process died during release"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            case.runtime,
+            case.request,
+        )
 
     assert fault.fired
-    _assert_promotion_terminal(case, proof)
-    assert _semantic_evidence(case) == semantic_before
+    staged = case.runtime.generations.recover_staged_build(REPO_UUID)
+    assert staged is not None
+    assert staged.lifecycle_state == "PROMOTED"
+    restarted = replace(case, runtime=_compose(case.harness))
+    proof = workspace_sync._finalize_semantic_generation_promotion(
+        restarted.runtime,
+        restarted.request,
+    )
+
+    if isinstance(restarted, _CertifiedPromotionCase):
+        _assert_promotion_terminal(restarted, proof)
+        assert _semantic_evidence(restarted) == evidence_before
+    else:
+        assert proof.target_generation_id == restarted.request.generation_id
+        assert proof.receipt_sha256 == restarted.promoted.receipt_sha256
+        assert proof.pointer_revision == restarted.promoted.pointer_revision
+        assert proof.pointer_operation_epoch == restarted.promoted.operation_epoch
+        assert proof.pointer_fence_token == restarted.promoted.fence_token
+        assert _terminal_evidence(restarted) == evidence_before
+        released = restarted.runtime.leases.inspect(REPO_UUID)
+        assert released.leases.get("workspace") is None
+        assert released.staged_attempt_sha256 is None
     assert not (
         _workspace_root(case) / "workspace.pending.json"
     ).exists()
@@ -2208,3 +2563,11 @@ def test_terminal_release_rejects_later_unrelated_fenced_authority(
     )
     assert released.leases.get("workspace") is None
     assert released.staged_attempt_sha256 is None
+    before_replay = tree_snapshot(case.harness.state_root)
+    restarted = _compose(case.harness)
+    with pytest.raises(CommitUnknown, match="release predecessor"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            restarted,
+            case.request,
+        )
+    assert tree_snapshot(case.harness.state_root) == before_replay

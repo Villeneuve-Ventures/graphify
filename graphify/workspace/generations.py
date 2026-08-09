@@ -363,9 +363,17 @@ class GenerationStore:
         except (AttributeError, ContractError, TypeError, ValueError) as exc:
             raise GenerationConflict(f"staged build request is invalid: {exc}") from exc
 
-    def _load_staged_build_locked(self, repo_uuid: str) -> StagedBuildState | None:
+    def _load_staged_build_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> StagedBuildState | None:
         try:
-            return self.leases._load_staged_build_locked(repo_uuid)
+            return self.leases._load_staged_build_locked(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
         except LeaseRecoveryRequired as exc:
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
 
@@ -420,13 +428,24 @@ class GenerationStore:
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
         return projection.record, projection.requires_recovery
 
-    def recover_staged_build(self, repo_uuid: str) -> StagedBuildState | None:
+    def recover_staged_build(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> StagedBuildState | None:
         """Recover one pending staged record under canonical lock ordering."""
 
         try:
-            with self.leases.registry.recovered_snapshot():
-                with self.leases.workspace_lock(repo_uuid):
-                    return self._load_staged_build_locked(repo_uuid)
+            with self.leases.registry.recovered_snapshot(deadline_ns=deadline_ns):
+                with self.leases.workspace_lock(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                ):
+                    return self._load_staged_build_locked(
+                        repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
         except LeaseRecoveryRequired as exc:
             raise GenerationError(f"staged build state is corrupt: {exc}") from exc
 
