@@ -3371,14 +3371,14 @@ def _capture_semantic_promotion_entry(
             staged,
             deadline_ns=deadline_ns,
         )
-    except StagedBuildReadRecoveryRequired:
+    except StagedBuildReadRecoveryRequired as exc:
         recovered = _project_and_recover_semantic_promotion_staged_state(
             runtime,
             request,
             deadline_ns=deadline_ns,
         )
         if recovered.canonical != staged.canonical:
-            raise GenerationConflict("promotion staged entry changed")
+            raise GenerationConflict("promotion staged entry changed") from exc
         try:
             return _capture_semantic_promotion_entry_once(
                 runtime,
@@ -3794,10 +3794,15 @@ def _recover_semantic_promotion_terminal_release(
                 raise CommitUnknown(
                     "promotion release recovery evidence disappeared"
                 )
-            staged = runtime.generations.read_only_staged_build_locked(
-                request.repo_uuid,
-                deadline_ns=deadline_ns,
-            )
+            try:
+                staged = runtime.generations.read_only_staged_build_locked(
+                    request.repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            except StagedBuildReadRecoveryRequired as exc:
+                raise CommitUnknown(
+                    "promotion release recovery did not converge"
+                ) from exc
             if staged is None:
                 raise GenerationConflict("promotion terminal staged state is missing")
             registry_value = registry.to_dict()
@@ -3850,10 +3855,15 @@ def _recover_semantic_promotion_terminal_release(
                 request.repo_uuid,
                 deadline_ns=deadline_ns,
             )
-            reopened_staged = runtime.generations.read_only_staged_build_locked(
-                request.repo_uuid,
-                deadline_ns=deadline_ns,
-            )
+            try:
+                reopened_staged = runtime.generations.read_only_staged_build_locked(
+                    request.repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            except StagedBuildReadRecoveryRequired as exc:
+                raise CommitUnknown(
+                    "promotion release recovery did not converge"
+                ) from exc
             if reopened_staged is None:
                 raise GenerationConflict("promotion terminal staged state is missing")
             if reopened_state.canonical != projected.canonical:

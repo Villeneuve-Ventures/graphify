@@ -1623,6 +1623,45 @@ def test_promotion_capture_recovers_pending_staged_transition_before_rejecting_d
     _assert_promotion_terminal(case, proof)
 
 
+def test_promotion_capture_chains_staged_recovery_before_rejecting_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _certified_promotion_case(tmp_path, monkeypatch)
+    recovery_error = StagedBuildReadRecoveryRequired(
+        "staged build has a pending durable commit"
+    )
+
+    def require_staged_recovery(*_args: Any, **_kwargs: Any):
+        raise recovery_error
+
+    monkeypatch.setattr(
+        workspace_sync,
+        "_capture_semantic_promotion_entry_once",
+        require_staged_recovery,
+    )
+    monkeypatch.setattr(
+        workspace_sync,
+        "_project_and_recover_semantic_promotion_staged_state",
+        lambda *_args, **_kwargs: replace(
+            case.certified,
+            revision=case.certified.revision + 1,
+        ),
+    )
+
+    with pytest.raises(
+        GenerationConflict,
+        match="promotion staged entry changed",
+    ) as raised:
+        workspace_sync._capture_semantic_promotion_entry(
+            case.runtime,
+            case.request,
+            case.certified,
+        )
+
+    assert raised.value.__cause__ is recovery_error
+
+
 def test_promotion_staged_recovery_rejects_concurrent_lease_uncertainty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2424,6 +2463,91 @@ def test_promotion_release_recovers_each_durable_commit_boundary(
     assert not (
         _workspace_root(case) / "workspace.pending.json"
     ).exists()
+
+
+@pytest.mark.parametrize("uncertain_read", [1, 2])
+def test_promotion_release_recovery_converts_staged_read_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    uncertain_read: int,
+) -> None:
+    fault = _ArmedFault("workspace:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    semantic_before = _semantic_evidence(case)
+
+    def release_before_process_death(
+        runtime: WorkspaceRuntime,
+        grant: LeaseGrant,
+        *,
+        attempt_sha256: str,
+    ) -> None:
+        del attempt_sha256
+        fault.armed = True
+        try:
+            runtime.leases.release(grant)
+        except CommitUnknown as exc:
+            raise InjectedFault("process died during release") from exc
+
+    monkeypatch.setattr(
+        workspace_sync,
+        "_release_semantic_promotion_grant",
+        release_before_process_death,
+    )
+    with pytest.raises(InjectedFault, match="process died during release"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            case.runtime,
+            case.request,
+        )
+
+    pending = _workspace_root(case) / "workspace.pending.json"
+    pending_before = pending.read_bytes()
+    restarted = replace(case, runtime=_compose(case.harness))
+    real_read = restarted.runtime.generations.read_only_staged_build_locked
+    recovery_error = StagedBuildReadRecoveryRequired(
+        "concurrent staged pending commit"
+    )
+    reads = 0
+
+    def staged_read(*args: Any, **kwargs: Any):
+        nonlocal reads
+        reads += 1
+        if reads == uncertain_read:
+            raise recovery_error
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        restarted.runtime.generations,
+        "read_only_staged_build_locked",
+        staged_read,
+    )
+    if uncertain_read == 1:
+        monkeypatch.setattr(
+            restarted.runtime.leases,
+            "recover_uncertain_snapshot",
+            _forbidden_finalization("release recovery before staged proof"),
+        )
+
+    with pytest.raises(
+        CommitUnknown,
+        match="promotion release recovery did not converge",
+    ) as raised:
+        workspace_sync._semantic_promotion_terminal_after_release(
+            restarted.runtime,
+            restarted.request,
+            expected_entry=None,
+        )
+
+    assert raised.value.__cause__ is recovery_error
+    assert reads == uncertain_read
+    if uncertain_read == 1:
+        assert pending.read_bytes() == pending_before
+    else:
+        assert not pending.exists()
+    assert _semantic_evidence(restarted) == semantic_before
 
 
 def test_promotion_release_rejects_substituted_pending_outcome_before_recovery(
