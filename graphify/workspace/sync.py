@@ -4286,6 +4286,7 @@ def _finalize_semantic_generation_promotion(
 
     primary: tuple[BaseException, TracebackType | None] | None = None
     pre_release: _SemanticGenerationPromotionFinalization | None = None
+    retain_recovery_grant_on_primary = False
     try:
         operation = str(attempt.grant.lease.to_dict()["operation"])
         if (
@@ -4348,12 +4349,16 @@ def _finalize_semantic_generation_promotion(
                 monotonic_ns=time.monotonic_ns(),
             )
         elif current_entry.pointer_mode == "pending":
-            plan = _promotion_recovery_plan_under_grant(
-                runtime,
-                request,
-                current_entry,
-                attempt.grant,
-            )
+            try:
+                plan = _promotion_recovery_plan_under_grant(
+                    runtime,
+                    request,
+                    current_entry,
+                    attempt.grant,
+                )
+            except GenerationConflict:
+                retain_recovery_grant_on_primary = True
+                raise
             pointer = runtime.pointers.recover(
                 attempt.grant,
                 occurred_at=acquired_at,
@@ -4396,6 +4401,9 @@ def _finalize_semantic_generation_promotion(
     except BaseException as exc:
         primary = (exc, exc.__traceback__)
 
+    if primary is not None and retain_recovery_grant_on_primary:
+        error, traceback = primary
+        raise error.with_traceback(traceback)
     _release_semantic_promotion_grant_after_primary(
         runtime,
         attempt.grant,
