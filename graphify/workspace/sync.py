@@ -38,7 +38,12 @@ from graphify.workspace.generations import (
     _MAX_STAGED_BUILD_STATE_BYTES,
 )
 from graphify.workspace.identity import SourceIdentity
-from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseRecoveryRequired
+from graphify.workspace.leases import (
+    LeaseGrant,
+    LeaseOperation,
+    LeaseRecoveryRequired,
+    _MAX_WORKSPACE_LEASE_STATE_BYTES,
+)
 from graphify.workspace.persistence import CommitUnknown, StateRecoveryRequired
 from graphify.workspace.pointers import (
     PointerCAS,
@@ -3025,6 +3030,226 @@ def _semantic_promotion_entry_locked(
     return entry
 
 
+def _validate_promotion_grant_acquisition_state_locked(
+    predecessor: WorkspaceLeaseState,
+    projected: WorkspaceLeaseState,
+    *,
+    pointer_mode: str,
+) -> None:
+    expected_operation = "POINTER_RECOVERY" if pointer_mode == "pending" else "PROMOTE"
+    projected_lease = projected.leases.get("workspace")
+    projected_epoch = projected.lease_epochs.get("workspace")
+    projected_attempt = projected.staged_attempt_sha256
+    if projected_lease is None or projected_epoch is None or projected_attempt is None:
+        raise CommitUnknown("promotion acquisition projection lacks exact authority")
+    projected_lease_value = projected_lease.to_dict()
+    if (
+        projected_lease_value["operation"] != expected_operation
+        or int(projected_lease_value["fence_token"])
+        != projected.fence_high_watermark
+        or projected_epoch != projected.operation_epoch
+        or projected_lease_value["acquired_at"]
+        != projected_lease_value["heartbeat_at"]
+    ):
+        raise CommitUnknown("promotion acquisition projection has wrong authority")
+
+    predecessor_lease = predecessor.leases.get("workspace")
+    predecessor_attempt = predecessor.staged_attempt_sha256
+    if (predecessor_lease is None) != (predecessor_attempt is None):
+        raise CommitUnknown("promotion acquisition predecessor authority is unpaired")
+    if predecessor_attempt is not None and predecessor_attempt != projected_attempt:
+        raise CommitUnknown("promotion acquisition changed the retained attempt")
+
+    predecessor_other_leases = {
+        name: lease for name, lease in predecessor.leases.items() if name != "workspace"
+    }
+    projected_other_leases = {
+        name: lease for name, lease in projected.leases.items() if name != "workspace"
+    }
+    predecessor_other_epochs = {
+        name: epoch
+        for name, epoch in predecessor.lease_epochs.items()
+        if name != "workspace"
+    }
+    projected_other_epochs = {
+        name: epoch
+        for name, epoch in projected.lease_epochs.items()
+        if name != "workspace"
+    }
+    if (
+        predecessor_other_leases != projected_other_leases
+        or predecessor_other_epochs != projected_other_epochs
+    ):
+        raise CommitUnknown("promotion acquisition changed unrelated authority")
+
+    if predecessor_lease is not None:
+        predecessor_value = predecessor_lease.to_dict()
+        predecessor_owner = cast(Mapping[str, object], predecessor_value["owner"])
+        projected_owner = cast(Mapping[str, object], projected_lease_value["owner"])
+        if (
+            predecessor_owner["boot_id"] == projected_owner["boot_id"]
+            and int(projected_lease_value["liveness_deadline_monotonic_ns"])
+            < int(predecessor_value["liveness_deadline_monotonic_ns"])
+            + _SYNC_LEASE_TTL_NS
+        ):
+            raise CommitUnknown(
+                "promotion acquisition did not prove expiry or reboot replacement"
+            )
+
+    expected_leases = dict(predecessor_other_leases)
+    expected_leases["workspace"] = projected_lease
+    expected_epochs = dict(predecessor_other_epochs)
+    expected_epochs["workspace"] = projected.operation_epoch
+    expected = WorkspaceLeaseState(
+        repo_uuid=predecessor.repo_uuid,
+        revision=predecessor.revision + 1,
+        fence_high_watermark=predecessor.fence_high_watermark + 1,
+        operation_epoch=predecessor.operation_epoch + 1,
+        migration_epoch=predecessor.migration_epoch,
+        leases=expected_leases,
+        lease_epochs=expected_epochs,
+        staged_attempt_sha256=projected_attempt,
+    )
+    if projected.canonical != expected.canonical:
+        raise CommitUnknown("promotion acquisition pending outcome is not exact")
+
+
+def _promotion_grant_acquisition_predecessor_locked(
+    runtime: WorkspaceRuntime,
+    projected: WorkspaceLeaseState,
+    *,
+    pointer_mode: str,
+    deadline_ns: int,
+) -> WorkspaceLeaseState:
+    current_path, previous_path, _pending_path = runtime.leases._paths(
+        projected.repo_uuid
+    )
+    candidates: dict[bytes, WorkspaceLeaseState] = {}
+    for relative in (current_path, previous_path):
+        raw = runtime.leases.state.read_optional_existing_bytes(
+            relative,
+            max_bytes=_MAX_WORKSPACE_LEASE_STATE_BYTES,
+            deadline_ns=deadline_ns,
+        )
+        if raw is None:
+            continue
+        try:
+            candidate = WorkspaceLeaseState.from_json(raw)
+        except Exception as exc:
+            raise CommitUnknown("promotion acquisition predecessor is invalid") from exc
+        if (
+            candidate.repo_uuid != projected.repo_uuid
+            or candidate.revision + 1 != projected.revision
+        ):
+            continue
+        candidates[candidate.canonical] = candidate
+    if len(candidates) != 1:
+        raise CommitUnknown(
+            "promotion acquisition has no singular exact durable predecessor"
+        )
+    predecessor = next(iter(candidates.values()))
+    try:
+        _validate_promotion_grant_acquisition_state_locked(
+            predecessor,
+            projected,
+            pointer_mode=pointer_mode,
+        )
+    except CommitUnknown as exc:
+        raise CommitUnknown(
+            "promotion acquisition durable successor is not exact"
+        ) from exc
+    return predecessor
+
+
+def _recover_semantic_promotion_acquisition(
+    runtime: WorkspaceRuntime,
+    request: SyncRequest,
+    staged: StagedBuildState,
+) -> _SemanticPromotionEntry:
+    deadline_ns = time.monotonic_ns() + _SYNC_READ_TIMEOUT_NS
+    with runtime.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
+        with runtime.leases.read_only_workspace_lock(
+            request.repo_uuid,
+            deadline_ns=deadline_ns,
+        ):
+            _current, pending_present = runtime.leases.read_uncertain_snapshot_locked(
+                registry,
+                request.repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+            projected, requires_recovery = (
+                runtime.leases.project_uncertain_snapshot_locked(
+                    registry,
+                    request.repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            )
+            if not pending_present or not requires_recovery:
+                raise CommitUnknown(
+                    "promotion acquisition recovery evidence disappeared"
+                )
+            current_staged = runtime.generations.read_only_staged_build_locked(
+                request.repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+            if current_staged is None or current_staged.canonical != staged.canonical:
+                raise CommitUnknown("promotion acquisition staged entry changed")
+            registry_value = registry.to_dict()
+            try:
+                projected_entry = _semantic_promotion_entry_locked(
+                    runtime,
+                    request,
+                    registry_value,
+                    projected,
+                    current_staged,
+                    expected=None,
+                    grant=None,
+                    attempt_sha256=None,
+                    deadline_ns=deadline_ns,
+                )
+            except Exception as exc:
+                raise CommitUnknown(
+                    "promotion acquisition projection is not an exact entry"
+                ) from exc
+            predecessor = _promotion_grant_acquisition_predecessor_locked(
+                runtime,
+                projected,
+                pointer_mode=projected_entry.pointer_mode,
+                deadline_ns=deadline_ns,
+            )
+            try:
+                _semantic_promotion_entry_locked(
+                    runtime,
+                    request,
+                    registry_value,
+                    predecessor,
+                    current_staged,
+                    expected=projected_entry,
+                    grant=None,
+                    attempt_sha256=None,
+                    deadline_ns=deadline_ns,
+                )
+            except Exception as exc:
+                raise CommitUnknown(
+                    "promotion acquisition predecessor is not an exact entry"
+                ) from exc
+            projected_state = projected
+
+    try:
+        recovered = runtime.leases.recover_uncertain_snapshot(
+            request.repo_uuid,
+            deadline_ns=deadline_ns,
+        )
+    except Exception as exc:
+        raise CommitUnknown("promotion acquisition recovery is ambiguous") from exc
+    if recovered.canonical != projected_state.canonical:
+        raise CommitUnknown("promotion acquisition recovery changed projected state")
+    reopened = _capture_semantic_promotion_entry(runtime, request, staged)
+    if reopened != projected_entry:
+        raise CommitUnknown("promotion acquisition entry changed during recovery")
+    return reopened
+
+
 def _capture_semantic_promotion_entry(
     runtime: WorkspaceRuntime,
     request: SyncRequest,
@@ -3036,28 +3261,33 @@ def _capture_semantic_promotion_entry(
             request.repo_uuid,
             deadline_ns=deadline_ns,
         ):
-            lease_state = runtime.leases.read_only_snapshot_locked(
-                registry,
-                request.repo_uuid,
-                deadline_ns=deadline_ns,
-            )
-            current = runtime.generations.read_only_staged_build_locked(
-                request.repo_uuid,
-                deadline_ns=deadline_ns,
-            )
-            if current is None or current.canonical != staged.canonical:
-                raise GenerationConflict("promotion staged entry changed")
-            return _semantic_promotion_entry_locked(
-                runtime,
-                request,
-                registry.to_dict(),
-                lease_state,
-                current,
-                expected=None,
-                grant=None,
-                attempt_sha256=None,
-                deadline_ns=deadline_ns,
-            )
+            try:
+                lease_state = runtime.leases.read_only_snapshot_locked(
+                    registry,
+                    request.repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+            except StateRecoveryRequired:
+                pass
+            else:
+                current = runtime.generations.read_only_staged_build_locked(
+                    request.repo_uuid,
+                    deadline_ns=deadline_ns,
+                )
+                if current is None or current.canonical != staged.canonical:
+                    raise GenerationConflict("promotion staged entry changed")
+                return _semantic_promotion_entry_locked(
+                    runtime,
+                    request,
+                    registry.to_dict(),
+                    lease_state,
+                    current,
+                    expected=None,
+                    grant=None,
+                    attempt_sha256=None,
+                    deadline_ns=deadline_ns,
+                )
+    return _recover_semantic_promotion_acquisition(runtime, request, staged)
 
 
 def _validate_semantic_promotion_entry_under_grant(
@@ -3454,7 +3684,7 @@ def _inspect_promotion_grant_release(
                     repo_uuid,
                     deadline_ns=deadline_ns,
                 )
-            except StateRecoveryRequired:
+            except StateRecoveryRequired as exc:
                 current, pending_present = (
                     runtime.leases.read_uncertain_snapshot_locked(
                         registry,
@@ -3465,7 +3695,7 @@ def _inspect_promotion_grant_release(
                 if not pending_present:
                     raise CommitUnknown(
                         "promotion grant release recovery evidence disappeared"
-                    )
+                    ) from exc
                 projected, requires_recovery = (
                     runtime.leases.project_uncertain_snapshot_locked(
                         registry,
@@ -3476,7 +3706,7 @@ def _inspect_promotion_grant_release(
                 if not requires_recovery:
                     raise CommitUnknown(
                         "promotion grant release projection requires no recovery"
-                    )
+                    ) from exc
                 current_status = _promotion_grant_release_status_locked(
                     current,
                     grant,
@@ -3487,11 +3717,11 @@ def _inspect_promotion_grant_release(
                     if projected.canonical != expected.canonical:
                         raise CommitUnknown(
                             "promotion grant release pending outcome is not exact"
-                        )
+                        ) from exc
                 elif projected.canonical != current.canonical:
                     raise CommitUnknown(
                         "promotion grant release installed outcome is not exact"
-                    )
+                    ) from exc
                 projected_status = _promotion_grant_release_status_locked(
                     projected,
                     grant,
@@ -3500,7 +3730,7 @@ def _inspect_promotion_grant_release(
                 if projected_status != "absent":  # pragma: no cover - helper values
                     raise CommitUnknown(
                         "promotion grant release projection retains authority"
-                    )
+                    ) from exc
                 projected_release = projected
             else:
                 return _promotion_grant_release_status_locked(

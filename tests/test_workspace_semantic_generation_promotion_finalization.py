@@ -63,6 +63,15 @@ from tests.workspace_p3_helpers import (
 )
 
 
+_WORKSPACE_COMMIT_BOUNDARIES = (
+    "workspace:pending_durable",
+    "workspace:previous_durable",
+    "workspace:current_replaced",
+    "workspace:current_durable",
+    "workspace:pending_cleared",
+)
+
+
 @dataclass(frozen=True)
 class _PromotedCleanupCase:
     harness: RuntimeHarness
@@ -1244,6 +1253,155 @@ def test_promotion_acquisition_commit_unknown_reuses_one_attempt_and_grant(
 
 
 @pytest.mark.parametrize(
+    "boundary",
+    _WORKSPACE_COMMIT_BOUNDARIES,
+)
+@pytest.mark.parametrize(
+    "retained_recovery",
+    [False, True],
+    ids=["fresh", "rebooted-retained"],
+)
+def test_promotion_acquisition_recovers_each_durable_commit_boundary_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+    retained_recovery: bool,
+) -> None:
+    fault = _ArmedFault(boundary)
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    pre_acquisition = case.runtime.leases.inspect(REPO_UUID)
+    assert pre_acquisition.leases.get("workspace") is None
+    assert pre_acquisition.staged_attempt_sha256 is None
+    if retained_recovery:
+        retained_attempt = hashlib.sha256(b"retained-acquisition-recovery").hexdigest()
+        retained = case.runtime.generations.acquire_staged_recovery(
+            REPO_UUID,
+            GENERATION_ID,
+            case.certified.request,
+            attempt_sha256=retained_attempt,
+            acquired_at=datetime.now(timezone.utc),
+            monotonic_ns=time.monotonic_ns(),
+            ttl_ns=60_000_000_000,
+        )
+        assert retained.grant.lease.to_dict()["operation"] == "PROMOTE"
+        prior_owner = case.runtime.leases.current_owner()
+        rebooted_owner = replace(
+            prior_owner,
+            boot_id=f"rebooted-during-{boundary}",
+        )
+        monkeypatch.setattr(
+            case.runtime.leases,
+            "current_owner",
+            lambda: rebooted_owner,
+        )
+    semantic_before = _semantic_evidence(case)
+    acquired_attempts: list[str] = []
+    real_acquire = case.runtime.generations.acquire_staged_recovery
+
+    def acquire_before_process_death(*args: Any, **kwargs: Any):
+        acquired_attempts.append(str(kwargs["attempt_sha256"]))
+        try:
+            return real_acquire(*args, **kwargs)
+        except CommitUnknown as exc:
+            raise InjectedFault(f"process died during {boundary}") from exc
+
+    monkeypatch.setattr(
+        case.runtime.generations,
+        "acquire_staged_recovery",
+        acquire_before_process_death,
+    )
+    fault.armed = True
+
+    with pytest.raises(InjectedFault, match="process died"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            case.runtime,
+            case.request,
+        )
+
+    assert fault.fired
+    workspace = _workspace_root(case)
+    pending = workspace / "workspace.pending.json"
+    durable = pending if pending.exists() else workspace / "workspace.json"
+    persisted = WorkspaceLeaseState.from_json(durable.read_bytes())
+    persisted_attempt = persisted.staged_attempt_sha256
+    assert persisted_attempt is not None
+
+    proof = workspace_sync._finalize_semantic_generation_promotion(
+        case.runtime,
+        case.request,
+    )
+
+    assert acquired_attempts == [persisted_attempt, persisted_attempt]
+    assert not pending.exists()
+    _assert_promotion_terminal(case, proof)
+    assert _semantic_evidence(case) == semantic_before
+
+
+def test_promotion_acquisition_rejects_substituted_pending_outcome_before_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault = _ArmedFault("workspace:pending_durable")
+    case = _certified_promotion_case(
+        tmp_path,
+        monkeypatch,
+        fault_hook=fault,
+    )
+    pre_acquisition = case.runtime.leases.inspect(REPO_UUID)
+    assert pre_acquisition.leases.get("workspace") is None
+    assert pre_acquisition.staged_attempt_sha256 is None
+    semantic_before = _semantic_evidence(case)
+    real_acquire = case.runtime.generations.acquire_staged_recovery
+
+    def acquire_before_process_death(*args: Any, **kwargs: Any):
+        try:
+            return real_acquire(*args, **kwargs)
+        except CommitUnknown as exc:
+            raise InjectedFault("process died during acquisition") from exc
+
+    monkeypatch.setattr(
+        case.runtime.generations,
+        "acquire_staged_recovery",
+        acquire_before_process_death,
+    )
+    fault.armed = True
+
+    with pytest.raises(InjectedFault, match="process died"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            case.runtime,
+            case.request,
+        )
+
+    pending = _workspace_root(case) / "workspace.pending.json"
+    projected = WorkspaceLeaseState.from_json(pending.read_bytes())
+    substituted = replace(
+        projected,
+        migration_epoch=projected.migration_epoch + 1,
+    ).canonical
+    pending.write_bytes(substituted)
+    monkeypatch.setattr(
+        case.runtime.leases,
+        "recover_uncertain_snapshot",
+        _forbidden_finalization("substituted acquisition recovery"),
+    )
+
+    with pytest.raises(CommitUnknown, match="acquisition"):
+        workspace_sync._finalize_semantic_generation_promotion(
+            case.runtime,
+            case.request,
+        )
+
+    assert pending.read_bytes() == substituted
+    assert case.runtime.pointers.load(REPO_UUID, allow_missing=True) is None
+    assert case.runtime.generations.recover_staged_build(REPO_UUID) == case.certified
+    assert _semantic_evidence(case) == semantic_before
+
+
+@pytest.mark.parametrize(
     ("boundary", "expected_operation"),
     [
         ("pointer:promoted:pending:replaced", "POINTER_RECOVERY"),
@@ -1865,13 +2023,7 @@ def test_promotion_release_commit_unknown_retries_or_adopts_only_exact_absence(
 
 @pytest.mark.parametrize(
     "boundary",
-    [
-        "workspace:pending_durable",
-        "workspace:previous_durable",
-        "workspace:current_replaced",
-        "workspace:current_durable",
-        "workspace:pending_cleared",
-    ],
+    _WORKSPACE_COMMIT_BOUNDARIES,
 )
 def test_promotion_release_recovers_each_durable_commit_boundary(
     tmp_path: Path,
