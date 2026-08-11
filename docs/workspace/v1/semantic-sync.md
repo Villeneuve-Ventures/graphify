@@ -1753,15 +1753,64 @@ installation, performance/resource qualification, P5C, H3, P6+, parent
 completion, execution authority, and later-successor readiness are explicitly
 excluded. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; this child
 alone transitions from `READY` to `COMPLETE`; remaining P5B2 work and P5C work
-remain `WAITING`; no later successor is `READY`.
+remained `WAITING` and no later successor was `READY` at that acceptance point.
+The separate current trust-root eligibility recorded below does not expand or
+reopen this accepted boundary.
+
+## P5B2 semantic-release bundle and deterministic-classifier trust-root
+
+This proposed separate unnumbered P5B2 prerequisite subchild is `READY` for
+implementation eligibility only. It has no implementation, acceptance receipt,
+completion, execution, content-release, or publication authority. Its entire
+scope is the repo-owned installed package-data trust root:
+
+- `graphify/workspace/semantic_release_manifest.json`;
+- the manifest-inventoried deterministic classifier implementation and
+  byte-defined classifier ABI;
+- the closed taxonomy, text-normalization contract, and ordered ruleset;
+- the required explicit-evidence-only `core_secrets.v1` profile; and
+- every repo-owned selectable coverage-profile artifact and its manifest-bound
+  identity, version, bytes, size, mode, and SHA-256.
+
+The manifest and referenced artifacts are never caller, workspace, operator,
+provider, backend, model, credential, network, environment, or policy input.
+The exact installed-root, path-normal-form, descriptor-relative no-follow,
+single-link regular-file, mode, size, digest, deterministic-pattern-only ABI,
+`utf8_lex_v1`, taxonomy/profile separation, `core_secrets.v1`, hard-limit, and
+fail-closed contracts are the canonical requirements in
+[Classifier trust root and installed bundle](#classifier-trust-root-and-installed-bundle)
+and
+[Closed classification and coverage contracts](#closed-classification-and-coverage-contracts).
+Those requirements belong to this prerequisite even though the encompassing
+decision child composes their eventual implementation.
+
+This subchild may implement only installed-bundle loading and validation plus
+the manifest-bound deterministic factual classifier over explicit,
+already-canonical bounded UTF-8 bytes. It does not select profiles for a
+workspace or release context, interpret `NO_MATCH` as release safety, map
+categories to dispositions, read semantic-generation state, or persist any
+record. Its stop boundary excludes operator policy-authority provisioning,
+`SemanticReleaseDecisionStore`, capacity or GC integration, semantic-input
+field/inventory composition, policy reduction, omission execution, projection,
+public CLI/schema/receipt surfaces, provider/backend behavior, publication,
+and every broader release/DLP decision.
+
+P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content
+release/DLP decision child, remaining P5B2 work, and P5C remain `WAITING`; H3
+remains `DEFERRED`; no later successor is `READY`. `READY` here records only
+that this bounded internal prerequisite can be implemented without inventing
+operator-policy provisioning or decision-store behavior.
 
 ## P5B2 semantic-content release/DLP decision
 
-This proposed unnumbered P5B2 child is contract-frozen only at the private
-internal decision boundary in this section. It is `WAITING`, not `READY` or
-`COMPLETE`, and has no implementation or acceptance receipt. The freeze grants
-no execution authority and changes no parent phase, accepted receipt, JOS row,
-or later-successor status.
+This encompassing proposed unnumbered P5B2 child is contract-frozen only at the
+private internal decision boundary in this section. It remains `WAITING`, not
+`READY` or `COMPLETE`, and has no implementation or acceptance receipt. It
+depends on separate implementation and acceptance of the `READY` trust-root
+subchild above, stable operator policy-authority provisioning, decision-store
+capacity and GC integration, classification composition, and every other
+prerequisite named below. The freeze grants no execution authority and changes
+no parent phase, accepted receipt, JOS row, or later-successor status.
 
 ### Exact promoted entry and decision request
 
@@ -1793,7 +1842,10 @@ decision binding but cannot start or finish a release decision. Missing,
 duplicated, foreign, substituted, incompatible, unsafe, unreadable, drifted, or
 ambiguous evidence fails closed before classification.
 
-The classifier trust root is a future repo-owned installed package-data file at
+### Classifier trust root and installed bundle
+
+The classifier trust root owned by the separate `READY` prerequisite is a
+future repo-owned installed package-data file at
 `graphify/workspace/semantic_release_manifest.json`. It is not caller input.
 The canonical manifest binds its own format and compatibility version plus a
 sorted package-relative inventory of the classifier implementation, classifier
@@ -1814,6 +1866,8 @@ single-link regular file, have exact manifest bytes/size/digest, and have mode
 `0444` or `0644`; group/other write bits and all execute bits are forbidden.
 Symlinks at any component, hard links, special files, mode drift, or inability
 to prove containment rejects release.
+
+### Operator policy-authority prerequisite
 
 Operator selection is a separate prerequisite owned by a future
 `SemanticReleasePolicyAuthorityStore`, not by this decision child. Its private
@@ -1976,6 +2030,12 @@ conflicting digests, authority drift, or substitution are `INDETERMINATE` and
 require release rejection.
 
 ### Closed classification and coverage contracts
+
+The separate `READY` trust-root subchild owns the deterministic classifier ABI,
+closed taxonomy, ruleset, normalization, and installed profile artifacts in
+this subsection. The encompassing `WAITING` decision child owns their later
+composition with exact semantic fields and operator-selected policy; this
+subsection does not provision or select that policy.
 
 Version 1 is deterministic-pattern-only. It permits only locally pinned closed
 patterns, exact grammars, and exact dictionaries whose canonical rules and
@@ -2318,8 +2378,13 @@ commands, provider/backend/model or credential selection, networking, public or
 runtime schemas and receipts, status fields, migrate, repair, GC or
 decision-binding cleanup, service/watch, publication, production/runtime
 installation, performance/resource qualification, P5C, H3, P6+, parent completion,
-implementation, readiness, acceptance, execution, or later-successor authority.
+implementation of the encompassing child, its readiness, acceptance, execution,
+or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
-trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; this child, remaining P5B2
-work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
-`READY`.
+trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; only the separate
+trust-root prerequisite is `READY` for implementation eligibility. This
+encompassing child, operator policy-authority provisioning,
+`SemanticReleaseDecisionStore`, capacity/GC integration, classification
+composition, omission execution, projection, public CLI/schema/receipt,
+provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
+H3 remains `DEFERRED`; no later successor is `READY`.

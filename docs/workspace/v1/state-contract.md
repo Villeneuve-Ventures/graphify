@@ -866,15 +866,59 @@ after release. Only this exact promoted current generation may later serve as
 carried semantic-result evidence for a separately authorized handoff. That
 fact grants no content release, DLP, graph/query projection, public semantic
 sync, runtime receipt, provider, networking, repair, GC, publication, execution,
-or later-successor readiness. Parent P5 and P5B2 remain `IN_PROGRESS`, remaining
-P5B2 work and P5C work remain `WAITING`, and H3 remains `DEFERRED`.
+or later-successor readiness. Parent P5 and P5B2 remain `IN_PROGRESS`, and H3
+remains `DEFERRED`. At that acceptance point remaining P5B2 and P5C work were
+`WAITING`; the separate current trust-root eligibility below does not expand
+the accepted promotion boundary.
+
+## Semantic-release bundle and deterministic-classifier trust-root
+
+The proposed unnumbered P5B2 semantic-release bundle and
+deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
+only. It owns no external durable-state path, workspace authority, policy
+selection, decision binding, lifecycle transition, public format, or receipt.
+
+Its trust root is the future repo-owned installed package-data file
+`graphify/workspace/semantic_release_manifest.json`, loaded through
+installed-package authority rather than caller input. It is at most 1 MiB and
+inventories the classifier implementation, byte-defined ABI, taxonomy,
+ruleset, normalization contract, required `core_secrets.v1`, and every
+selectable profile by package-relative path, regular-file mode, byte count, and
+digest. Total referenced bundle-artifact bytes are at most 25 MiB. Taxonomy,
+classifier implementation, ABI, ruleset, normalization, and profiles retain
+distinct identities, versions, canonical bytes where applicable, and digests;
+no profile is selected or made active by installation alone.
+
+Paths are unique sorted UTF-8 POSIX relative-normal-form beneath the canonical
+installed `graphify` package root. Absolute, empty/`.`/`..`, repeated-separator,
+backslash, NUL/control, and alias paths are invalid. Descriptor-relative
+no-follow opens prove every component contained and each artifact a single-link
+regular file of exact bytes/size/digest and mode `0444` or `0644`, with no
+execute or group/other write bit. Any unknown version, path, file type, mode,
+size, digest, grammar, taxonomy, normalization, ruleset, profile, limit, or ABI
+ambiguity fails closed.
+
+The manifest-bound classifier is deterministic-pattern-only and operates on
+explicit already-canonical bounded UTF-8 bytes. Its exact grammar, dictionary
+encoding, byte comparison, ordering, duplicate reduction, ASCII-only
+syntax-name fold, and error behavior are repo-owned bundle artifacts. It
+produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` outcomes and never
+maps them to policy dispositions. This internal boundary is independently
+implementable without `SemanticReleasePolicyAuthorityStore`,
+`SemanticReleaseDecisionStore`, capacity/GC integration, semantic-input
+composition, omission, projection, public CLI/schema/receipt, provider/backend,
+or publication behavior. It has no implementation or acceptance receipt yet.
 
 ## Semantic-content release/DLP decision
 
-The proposed unnumbered P5B2 semantic-content release/DLP decision child is a
-contract freeze at `WAITING`. It may later add one private internal decision
-binding but no lifecycle transition, staged-build state, journal event,
-generation receipt, public schema, runtime receipt, or public result.
+The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
+child is a contract freeze at `WAITING`. Besides implemented and accepted
+trust-root bytes, it still requires operator policy-authority provisioning,
+`SemanticReleaseDecisionStore`, capacity/GC integration, classification
+composition, and every other frozen prerequisite. It may later add one private
+internal decision binding but no lifecycle transition, staged-build state,
+journal event, generation receipt, public schema, runtime receipt, or public
+result.
 
 Its exact entry is the accepted promotion terminal reopened as one state: the
 same staged `PROMOTED` request/target/manifest/receipt and pointer authority;
@@ -889,19 +933,11 @@ exact installed semantic-release bundle manifest; and the stable current
 One coordinate alone, a historical promoted generation, or drift is never
 decision authority.
 
-The trusted bundle is the future repo-owned installed package-data file
-`graphify/workspace/semantic_release_manifest.json`, loaded through
-installed-package authority rather than caller input. It is at most 1 MiB and inventories
-the classifier implementation, byte-defined ABI, taxonomy, ruleset,
-normalization contract, and selectable profiles by package-relative path,
-regular-file mode, byte count, and digest. Total referenced artifact bytes are
-at most 25 MiB.
-Paths are unique sorted UTF-8 POSIX relative-normal-form beneath the canonical
-installed `graphify` package root. Absolute, empty/`.`/`..`, repeated-separator,
-backslash, NUL/control, and alias paths are invalid. Descriptor-relative
-no-follow opens must prove every component contained and each artifact a
-single-link regular file of exact bytes/size/digest and mode `0444` or `0644`,
-with no execute or group/other write bit.
+The decision child consumes the exact installed bundle contract above; it does
+not own or weaken that trust root. Because the trust-root subchild is only
+`READY`, not implemented or accepted, the encompassing decision child remains
+`WAITING` even before its separate policy and persistence prerequisites are
+considered.
 
 The separate future `SemanticReleasePolicyAuthorityStore` owns these private
 stable paths:
@@ -968,7 +1004,8 @@ identity and exact value SHA-256 without copying field values. Each field-value
 digest is over the exact captured UTF-8 value bytes, with no JSON quoting,
 newline, salt, domain prefix, renormalization, or case conversion.
 
-The version-1 classifier ABI operates on exact captured UTF-8 bytes and cannot
+The separate `READY` trust-root prerequisite owns the version-1 classifier ABI
+described here. It operates on exact captured UTF-8 bytes and cannot
 use runtime Unicode categories, locale, renormalization, or host-dependent text
 behavior. Only syntax-defined ASCII names may use the ABI-defined ASCII fold;
 value bytes remain exact. Its grammar, dictionary encoding, comparison,
@@ -1086,8 +1123,14 @@ entity removal, ID remapping, graph construction/merge/query projection,
 `query_structural()` changes, public semantic sync, provider/backend/model
 selection, networking, public/runtime schemas or receipts, status, repair,
 migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
-implementation, readiness, acceptance, parent completion, execution, or later
-successor authority.
+implementation or readiness of the encompassing decision child, acceptance,
+parent completion, execution, or later successor authority. P5 and P5B2 remain
+`IN_PROGRESS`; only the separate trust-root prerequisite is `READY` for
+implementation eligibility. This decision child, operator policy-authority
+provisioning, `SemanticReleaseDecisionStore`, capacity/GC integration,
+classification composition, omission execution, projection, public
+CLI/schema/receipt, provider/backend, publication, remaining P5B2 work, and P5C
+remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct
