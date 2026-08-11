@@ -755,10 +755,12 @@ acceptance, or merge authority.
 
 ## Semantic-generation promotion and pointer-finalization
 
-The next unnumbered P5B2 child is contract-frozen, internally implemented, and
-remains the sole unaccepted `READY` child recorded by the post-merge governance
-reconciliation. It adds no new durable record contract, format version, schema,
-receipt, public command, or operator execution authority. It composes the
+The unnumbered P5B2 child is implemented and accepted only as the frozen
+composition of existing durable formats and authorities below. Its
+[accepted completion receipt](receipts/p5b2-semantic-generation-promotion-finalization.md)
+binds the exact PR #59 through PR #64 chain. The child adds no new durable record
+contract, format version, schema, runtime receipt, public command, or operator
+execution authority. It composes the
 existing staged-build, generation receipt, semantic certification binding,
 journal, pointer, prior-pointer, lease, and coordination-lock records only.
 
@@ -863,8 +865,9 @@ certification binding; and durable absence of the exact promotion owner/fence
 after release. Only this exact promoted current generation may later serve as
 carried semantic-result evidence for a separately authorized handoff. That
 fact grants no content release, DLP, graph/query projection, public semantic
-sync, receipt, provider, networking, repair, GC, publication, acceptance,
-completion, implementation, execution, or later-successor readiness.
+sync, runtime receipt, provider, networking, repair, GC, publication, execution,
+or later-successor readiness. Parent P5 and P5B2 remain `IN_PROGRESS`, remaining
+P5B2 work and P5C work remain `WAITING`, and H3 remains `DEFERRED`.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

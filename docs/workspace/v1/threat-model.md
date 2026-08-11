@@ -384,11 +384,11 @@ generation installation and journaling. The claim remains local crash durability
 and stale-process fencing; it does not authenticate an uncompromised same-UID
 worker or semantic backend.
 
-The contract-frozen semantic-generation promotion and pointer-finalization
-child is internally implemented and remains the sole unaccepted `READY` child
-recorded by the post-merge governance reconciliation. Its frozen boundary
-protects the accepted certified target from substitution during pointer
-movement. Fresh entry requires the predecessor's complete cross-record
+The semantic-generation promotion and pointer-finalization child is implemented
+and accepted only at its frozen internal boundary, with evidence in the
+[accepted completion receipt](receipts/p5b2-semantic-generation-promotion-finalization.md).
+Its frozen boundary protects the accepted certified target from substitution
+during pointer movement. Fresh entry requires the predecessor's complete cross-record
 `CERTIFIED` proof, unchanged request pointer CAS, absent target reservation, no
 pending pointer intent, and absent certification `BUILD` authority. Only the
 same request-bound staged-recovery path may acquire
@@ -464,17 +464,17 @@ networking, migrate, repair, GC, semantic-staging cleanup, service/watch,
 publication, production/runtime installation, performance qualification, P5C,
 H3, P6+, parent-phase completion, or successor authority.
 
-The semantic-generation promotion and pointer-finalization child has a frozen
-internal implementation and focused regression coverage but remains the sole
-unaccepted `READY` child recorded by the post-merge governance reconciliation.
-It makes no receipt, acceptance, completion, operator execution authority,
-content-release/DLP, graph/query projection, `query_structural()` change, public
-semantic-sync, schema/format, provider, credential, network, migrate, repair,
-GC, service/watch, publication, P5C, H3, P6+, parent-completion, or
-later-successor claim. Its terminal pointer may make only the exact promoted
-current generation eligible to be considered as carried semantic-result
-evidence by a later separately authorized handoff; it does not run or accept
-that handoff.
+The accepted semantic-generation promotion and pointer-finalization
+implementation and
+[receipt](receipts/p5b2-semantic-generation-promotion-finalization.md) are
+authority only for the exact internal stop boundary. Neither grants operator
+execution authority, content-release/DLP, graph/query projection, a
+`query_structural()` change, public semantic sync, schema/format, runtime
+receipt, provider, credential, network, migrate, repair, GC, service/watch,
+publication, P5C, H3, P6+, parent completion, or later-successor authority. The
+terminal pointer may make only the exact promoted current generation eligible
+to be considered as carried semantic-result evidence by a later separately
+authorized handoff; it does not run or accept that handoff.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication

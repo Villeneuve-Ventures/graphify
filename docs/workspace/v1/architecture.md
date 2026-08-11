@@ -139,9 +139,10 @@ to bind and seal the same target. Its terminal boundary is a verified staged
 public success receipt, promotion, pointer, projection, or content-release
 authority.
 
-The next unnumbered P5B2 semantic-generation promotion and pointer-finalization
-child is contract-frozen, internally implemented, and remains the sole
-unaccepted `READY` child recorded by the post-merge governance reconciliation.
+The unnumbered P5B2 semantic-generation promotion and pointer-finalization
+child is implemented and accepted only at its frozen internal boundary, with
+evidence in the
+[P5B2 promotion and pointer-finalization receipt](receipts/p5b2-semantic-generation-promotion-finalization.md).
 It composes no new store or format. Its fresh entry is the accepted
 certification terminal: the same staged `CERTIFIED`
 request/target/manifest/receipt, verified installed payload and immutable
@@ -172,9 +173,9 @@ authoritative `PROMOTED` or `REPAIRED` journal event are durable and no pending
 intent remains. Terminal release must prove the exact promotion owner/fence
 absent. A retained terminal grant may be replaced after expiry or reboot only
 by request/target-bound cleanup authority and may not rewrite terminal evidence.
-The child is internally implemented but remains unaccepted and adds no operator
-execution authority, public transport, schema, runtime receipt, content release,
-or graph/query projection. No later successor is `READY`.
+The accepted child adds no operator execution authority, public transport,
+schema, runtime receipt, content release, or graph/query projection. Its
+acceptance changes no parent phase and activates no later successor.
 
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime

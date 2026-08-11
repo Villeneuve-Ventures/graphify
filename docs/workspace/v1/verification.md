@@ -1034,16 +1034,21 @@ architecture/lock-order correctness, tests, and every review item. The
 documentation-only closeout audits all relative links and heading anchors and
 does not refresh the generated Graphify graph.
 
-## P5B2 semantic-generation promotion and pointer-finalization contract gates
+## P5B2 semantic-generation promotion and pointer-finalization acceptance gates
 
-These are the frozen implementation and acceptance gates for one unnumbered
-P5B2 child that the post-merge governance reconciliation records as the sole
-`READY` child. The internal composition and its focused regression suite are now
-implemented, but `READY` remains unaccepted. Passing either the focused or
-primitive suite is verification evidence, not acceptance, completion,
-execution, or a receipt. PR #59's exact delivery evidence supports only the
-eligibility transition recorded in the
-[`governance.md` live snapshot](governance.md#current-live-snapshot):
+These gates accept the implemented internal lifecycle only at the already frozen
+boundary. The
+[accepted completion receipt](receipts/p5b2-semantic-generation-promotion-finalization.md)
+binds the exact PR #59 contract freeze, PR #60 readiness reconciliation, PR #61
+regression, PR #62 cleanup-acquisition correction, PR #63 implementation, and
+PR #64 acceptance-coverage completion. Passing either the focused or primitive
+suite remains verification evidence; only this separate governance closeout
+records the bounded `READY` to `COMPLETE` transition:
+
+- the governance-closeout diff is limited to the nine allowlisted Markdown
+  documents, including the new receipt and receipt index. No code, test,
+  contract-boundary, schema, fixture, dependency, configuration, workflow, or
+  generated Graphify output changes;
 
 - fresh-entry vectors reopen the accepted certification terminal as one
   composite proof: exact staged `CERTIFIED` request/target/manifest/receipt, verified
@@ -1140,17 +1145,20 @@ uv run --frozen --all-extras pytest -q \
   tests/test_workspace_pointers.py
 ```
 
-The focused composition coverage is required for implementation delivery.
-Neither suite is governance acceptance or a completion transition.
+The focused composition and primitive coverage are required acceptance evidence.
+Acceptance review independently verifies every PR #59 through PR #64 head,
+merge, tree, check, review disposition, and frozen vector. The documentation-only
+closeout audits every relative link and heading anchor across the changed files
+and does not refresh the generated Graphify graph.
 
-This implementation delivery authorizes no content release or DLP decision,
+This accepted closeout authorizes no content release or DLP decision,
 graph/query projection, `query_structural()` change, public semantic-sync
-command, schema, runtime format, receipt, provider/backend, credential,
+command, schema, runtime format, runtime receipt, provider/backend, credential,
 networking, migrate, repair, GC, service/watch, publication, P5C, H3, P6+,
-parent completion, governance acceptance, completion, or later-successor
-readiness. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; this child
-alone is implemented but unaccepted at `READY`; remaining P5B2 and P5C work
-remain `WAITING`; no later successor is `READY`.
+parent completion, execution, or later-successor readiness. P5 and P5B2 remain
+`IN_PROGRESS`; H3 remains `DEFERRED`; this child alone transitions from `READY`
+to `COMPLETE`; remaining P5B2 and P5C work remain `WAITING`; no later successor
+is `READY`.
 
 ## P5B2 public fenced pointer-repair CLI gates
 
