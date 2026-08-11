@@ -1850,11 +1850,32 @@ future repo-owned installed package-data file at
 The canonical manifest binds its own format and compatibility version plus a
 sorted package-relative inventory of the classifier implementation, classifier
 ABI, taxonomy, normalization contract, ruleset, and every selectable coverage
-profile. Each inventory entry binds a regular-file mode, byte count, and
-SHA-256. The manifest is loaded through installed-package authority before any
-caller policy input; a missing, unsafe, oversized, foreign, unlisted,
-duplicated, or digest-mismatched artifact rejects release. The caller cannot
-add, replace, select around, or override this inventory.
+profile. The manifest and its inventory use the hashed-JSON base encoding at
+the top of [`state-contract.md`](state-contract.md). Every inventory entry's
+common member set is exactly `artifact_kind`, `path`, `mode`, `byte_count`, and
+`sha256`. `artifact_kind` is exactly `classifier`, `classifier_abi`, `taxonomy`,
+`normalization`, `ruleset`, or `profile`; the entry adds exactly the matching
+kind-specific ID/version pair: `classifier_id`/`classifier_version`,
+`abi_id`/`abi_version`, `taxonomy_id`/`taxonomy_version`,
+`normalization_id`/`normalization_version`, `ruleset_id`/`ruleset_version`, or
+`profile_id`/`profile_version`. A profile entry's complete member set is
+therefore exactly the five common members plus `profile_id` and
+`profile_version`.
+
+Every ID is a nonempty NFC JSON string of at most 256 UTF-8 bytes, and every
+version is a positive JSON integer. `profile_id` is an ASCII identifier matching
+`[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_-]*)*\.v[1-9][0-9]*`; its terminal decimal
+version has no leading zero and must equal `profile_version`. Thus the required
+profile coordinate is encoded as `profile_id` `"core_secrets.v1"` and
+`profile_version` `1`. `mode` is exactly the JSON string `"0444"` or `"0644"`,
+`byte_count` is a positive JSON integer, and `sha256` is exactly 64 lowercase
+hexadecimal digits over the complete artifact bytes. Inventory paths and every
+kind-specific ID/version coordinate are each unique; entries are ordered by
+`path` under `utf8_lex_v1`. The manifest is loaded through installed-package
+authority before any caller policy input; a missing, unsafe, oversized,
+foreign, unlisted, duplicated, coordinate-mismatched, or digest-mismatched
+artifact rejects release. The caller cannot add, replace, select around, or
+override this inventory.
 
 The manifest and every inventory path are resolved beneath the one canonical
 installed `graphify` package root. Inventory paths are unique, strictly sorted
@@ -1928,13 +1949,15 @@ format-version-1 declaration. Its top-level member set is exactly `contract`,
 `coverage_state`. `coverage_state` is exactly `SUFFICIENT` or `INSUFFICIENT`.
 Each `selected_profiles` entry contains exactly `profile_id`,
 `profile_version`, and `profile_sha256`; the array is unique and ordered by the
-identifier comparator below. Its entries must equal the authority record's
-selected-profile set without omission or addition, and `release_context` must
-equal the authority record byte-for-byte. `SUFFICIENT` additionally requires
-the exact `core_secrets.v1` coordinate and every manifest-required profile for
-that named context. `INSUFFICIENT` always rejects release. Unknown members,
-values, versions, missing profiles, mismatches, or an invalid declaration are
-`INDETERMINATE` and reject.
+identifier comparator below. Each entry must equal one manifest `profile`
+inventory entry's exact `profile_id`, `profile_version`, and `sha256`, with that
+digest represented here as `profile_sha256`. Its entries must also equal the
+authority record's selected-profile set without omission or addition, and
+`release_context` must equal the authority record byte-for-byte. `SUFFICIENT`
+additionally requires the exact `core_secrets.v1` coordinate and every
+manifest-required profile for that named context. `INSUFFICIENT` always rejects
+release. Unknown members, values, versions, missing profiles, mismatches, or an
+invalid declaration are `INDETERMINATE` and reject.
 
 `coverage_sufficiency_sha256` is the SHA-256 of those complete declaration
 bytes. The policy's own canonical bytes include that exact digest, and the

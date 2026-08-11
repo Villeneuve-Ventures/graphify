@@ -1189,8 +1189,11 @@ inventing operator policy or decision-store behavior:
   normalization contract, ordered ruleset, required `core_secrets.v1`, and
   selectable coverage-profile artifacts;
 - the manifest is at most 1 MiB, uses one canonical installed `graphify` package
-  root, and binds every unique sorted package-relative inventory entry by
-  distinct identity/version, regular-file mode, byte count, and SHA-256. Total
+  root, and binds every unique sorted package-relative inventory entry through
+  the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`
+  members plus only its kind-specific ID/version pair. Profile entries add
+  exactly `profile_id` and `profile_version`; the positive integer version must
+  equal the no-leading-zero terminal `.vN` component of the profile ID. Total
   referenced bundle bytes are at most 25 MiB;
 - path validation rejects absolute, empty, dot/dotdot, repeated-separator,
   backslash, NUL/control, alias, symlink-at-any-component, hard-link,
@@ -1231,7 +1234,8 @@ inventing operator policy or decision-store behavior:
 
 A later implementation review must prove positive and hostile
 installed-manifest fixtures, every no-follow/path/mode/size/digest rejection, byte-exact
-cross-run classifier vectors, taxonomy/profile identity separation,
+cross-run classifier vectors, taxonomy/profile identity separation, duplicate
+or mismatched kind-specific coordinates, profile ID/version/suffix disagreement,
 `core_secrets.v1` category behavior, limit rejection, and absence of ambient or
 workspace authority reads. Those are future implementation/acceptance gates,
 not evidence that this documentation change delivered them.

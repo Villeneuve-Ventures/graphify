@@ -437,7 +437,9 @@ relative-normal-form paths, descriptor-relative no-follow traversal,
 single-link regular-file proof, exact read-only-compatible mode, size, digest,
 and hard limits reject absolute, dot/dotdot, alias, symlink, hard-link,
 special-file, unsafe-mode, oversized, foreign, duplicated, or unlisted
-artifacts before use.
+artifacts before use. Exact kind-specific ID/version inventory members also
+reject a profile whose `profile_id`, terminal `.vN`, `profile_version`, or
+manifest-bound digest disagrees with the selected coordinate.
 
 Host-runtime disagreement is contained by the deterministic-pattern-only byte
 ABI: exact pinned grammar and dictionaries, `utf8_lex_v1`, explicit ASCII fold

@@ -883,11 +883,15 @@ Its trust root is the future repo-owned installed package-data file
 installed-package authority rather than caller input. It is at most 1 MiB and
 inventories the classifier implementation, byte-defined ABI, taxonomy,
 ruleset, normalization contract, required `core_secrets.v1`, and every
-selectable profile by package-relative path, regular-file mode, byte count, and
-digest. Total referenced bundle-artifact bytes are at most 25 MiB. Taxonomy,
-classifier implementation, ABI, ruleset, normalization, and profiles retain
-distinct identities, versions, canonical bytes where applicable, and digests;
-no profile is selected or made active by installation alone.
+selectable profile. Each canonical inventory entry contains the exact common
+`artifact_kind`, `path`, `mode`, `byte_count`, and `sha256` members plus only its
+kind-specific ID/version pair. A profile entry therefore adds exactly
+`profile_id` and `profile_version`; the version must equal the no-leading-zero
+terminal `.vN` component of the profile ID, so `core_secrets.v1` binds integer
+version `1`. Total referenced bundle-artifact bytes are at most 25 MiB.
+Taxonomy, classifier implementation, ABI, ruleset, normalization, and profiles
+retain distinct identities, versions, canonical bytes where applicable, and
+digests; no profile is selected or made active by installation alone.
 
 Paths are unique sorted UTF-8 POSIX relative-normal-form beneath the canonical
 installed `graphify` package root. Absolute, empty/`.`/`..`, repeated-separator,
