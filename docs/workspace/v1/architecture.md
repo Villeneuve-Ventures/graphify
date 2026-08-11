@@ -177,6 +177,51 @@ The accepted child adds no operator execution authority, public transport,
 schema, runtime receipt, content release, or graph/query projection. Its
 acceptance changes no parent phase and activates no later successor.
 
+The proposed unnumbered P5B2 semantic-content release/DLP decision child is
+contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
+promoted visible-current terminal. It captures the private target-owned
+semantic inputs under existing read authority, classifies only node labels,
+optional node rationales, and hyperedge labels outside the coordination locks,
+then reacquires the locks and rejects any authority or byte drift before one
+install-once write.
+
+Classification and release policy remain separate authorities. A trusted
+repo-owned installed manifest, never caller input, inventories and digest-binds
+the classifier implementation, byte-defined ABI, taxonomy, normalization,
+ruleset, and selectable profiles. A separate durable operator policy-authority
+store selects one stable current `ACTIVE` revision; older-revision bindings are
+historical candidates only. The deterministic-pattern-only classifier reports
+only `NO_MATCH`, `MATCH` with sorted stable category IDs, or `INDETERMINATE`.
+Every allow-capable policy requires `core_secrets.v1`; jurisdiction, domain,
+and organization profiles are active only when selected by current authority.
+That policy maps `(field_type, category_id)` pairs
+to `ALLOW_FIELD`, `OMIT_RATIONALE`, or `REJECT_RELEASE`. `INDETERMINATE`
+rejects; `NO_MATCH` allows a field only under the exact coverage-sufficiency
+declaration; unknown or unmapped `MATCH` pairs reject. It may produce only
+`ALLOW_UNCHANGED`,
+`ALLOW_WITH_OMISSIONS`, or `REJECTED`. No environment, provider, model, network,
+credential, live catalogue, or fallback selects authority.
+
+The only new durable artifact at this boundary is a private canonical
+release-decision binding at the bounded, capacity-accounted external workspace
+namespace defined by the canonical contract, addressed by generation and the
+complete decision-request digest. It commits to exact promoted authority,
+installed bundle, current policy revision, inputs, complete bounded field
+results, and terminal outcome without duplicating semantic prose. Its own
+digest is computed over completed binding bytes and is not stored recursively.
+Capture uses shared registry, exclusive workspace, then shared generation
+locks; classification runs outside them. Final capacity revalidation, install,
+and reopen use exclusive registry, exclusive workspace, then shared generation
+locks so cross-workspace installs cannot oversubscribe global capacity. A redacted internal proof
+contains only coordinates, authority/result/binding digests, counts, and
+outcome; omission locators remain exclusively in the mode-`0600` binding. The
+lifecycle journal, staged-build state, generation receipt, public schemas, and
+runtime receipts do not become release authority. Nonempty decision state
+protects the generation from GC until a separately accepted integration. The
+freeze stops before omission execution, graph construction,
+projection, query, public semantic sync, publication, implementation,
+readiness, or acceptance.
+
 The separate rollback slice exposes only
 `graphify workspace rollback --request-stdin`. It composes installed runtime
 authority before consuming one bounded canonical request, requires its target

@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-08-11T01:47:23Z`
+Ledger refresh: `2026-08-11T08:29:14Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -52,9 +52,9 @@ branch.
 
 | Surface | State at refresh |
 |---|---|
-| Canonical base | At pre-edit, the checkout, local `workspace/v1`, local tracking ref, and repository-qualified remote branch observation all resolved to `3a24d32196e80d521c3fa77fca10bca3c899c597`, tree `f52480178c2d57f20200a08247719f0e7fc5a535`, with local divergence `0/0` and a clean working tree. No fetch or ref mutation was required. |
+| Canonical base | At pre-edit, the checkout, local `workspace/v1`, local tracking ref, and repository-qualified remote branch observation all resolved to `c8fbf10bd6d7e25790c81f18db0ce906a16bb562`, tree `7d4a597ed509513471dfcd7be4b2a6349a3bc1f4`, with local divergence `0/0` and a clean working tree. The remote branch was read with `git ls-remote`; no fetch or ref mutation was required. |
 | Worktrees | One worktree existed at preflight, clean on `workspace/v1` at the canonical base above. No additional delivery or governance worktree, competing local work, or open pull request was present, and no branch or worktree operation, cleanup, or fast-forward occurred. |
-| GitHub | PR [#64](https://github.com/Villeneuve-Ventures/graphify/pull/64) is the latest merge to `workspace/v1` and produced the canonical base above. Repository-qualified live inspection found zero open pull requests; GitHub Issues are disabled. Exact-head CI [31333003405](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31333003405) passed `skillgen-check`, `test (3.14)`, and `security-scan`; PR-Agent [31333132796](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31333132796) passed `review`; and the separate `CodeRabbit` context succeeded. |
+| GitHub | PR [#65](https://github.com/Villeneuve-Ventures/graphify/pull/65) is the latest merge to `workspace/v1` and produced the canonical base above. Repository-qualified GitHub connector and CLI inspection both found zero open pull requests; GitHub Issues are disabled. Exact-head CI [31452781923](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31452781923) passed `skillgen-check`, `test (3.14)`, and `security-scan`; PR-Agent [31452835350](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31452835350) passed `review`; the separate `CodeRabbit` context succeeded; and post-merge CI [31453499349](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31453499349) passed all three jobs at the canonical base. |
 | P5B2 host-agent semantic-worker contract provenance | PR [#43](https://github.com/Villeneuve-Ventures/graphify/pull/43) exact head `1f202c9134ee0993e4bba40482fa8113f598920a`; merge `5d730fe6e7d781c4d44f87989bf148ab2fdb63e3`; tree `27f7259fc3d716a78a3b28417204b1968c05d421`. Exact-head CI [30681324681](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30681324681) passed `skillgen-check`, `test (3.14)`, and `security-scan`. |
 | P5B2 host-agent semantic-worker implementation delivery | PR #45 exact base `99af03803a44d575123a18f1c0eafa48149df492`; head `5f57e565bd188789c984bc1370943caa758148c3`; merge/current commit `36b2e3426ebe3095a0b81c36656789b6790f103f`; delivery/merge/current tree `06d20480337bc94edba4de37c06d2dbf1ab595f2`. Exact-head CI [30730561721](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30730561721) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. |
 | P5B2 host-agent semantic-worker governance acceptance | PR [#46](https://github.com/Villeneuve-Ventures/graphify/pull/46) exact head `a0c3763acd20cb9886a4e26cc3c2e776597fe162`; merge `c2bb53d733d43784b76ab3cf559c48c16688f298`; tree `98b0ed85599794a152c1fd8ddde6ae3ebacb98aa`. Exact-head CI [30734181344](https://github.com/Villeneuve-Ventures/graphify/actions/runs/30734181344) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. The acceptance is limited to the worker transport and promotes no successor. |
@@ -74,6 +74,8 @@ branch.
 | Promoted-terminal cleanup acquisition correction | PR [#62](https://github.com/Villeneuve-Ventures/graphify/pull/62) exact base `b7e646fb1e58c4b7b184c2cc604b6486d083deb9`; head `1a99b09fcf8bc563845d38c9a19f80e59be86bcb`; merge `9fc8e2568ae52a599a8fe26039fa33066642b3d5`; head/merge tree `e1f5b0911aa15e0e4dea4f81364c3a854d594d86`; merged at `2026-08-08T13:50:47Z`. Exact-head CI [31258660015](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31258660015) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. The correction supplied exact request/target/attempt-bound cleanup acquisition and its focused regression evidence; unresolved review UI state is dispositioned in the accepted receipt rather than mutated. |
 | Semantic-generation promotion and pointer-finalization implementation delivery | PR [#63](https://github.com/Villeneuve-Ventures/graphify/pull/63) exact base `9fc8e2568ae52a599a8fe26039fa33066642b3d5`; head `eb57c8ab60f9fede26661c8c2c733dd2a8a641ac`; merge `2ab6a4060a2c132b89e79dcd21a12292b69f2b89`; head/merge tree `967e7a24cae68427353fbea805be8a51b1346981`; merged at `2026-08-09T16:58:17Z`. Exact-head CI [31324484102](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31324484102) passed `skillgen-check`, `test (3.14)`, and `security-scan`; the separate `CodeRabbit` context succeeded. The delivery implemented the frozen internal composition and corrections, but did not grant governance acceptance. |
 | Semantic-generation promotion acceptance-coverage completion | PR [#64](https://github.com/Villeneuve-Ventures/graphify/pull/64) exact base `2ab6a4060a2c132b89e79dcd21a12292b69f2b89`; head `aa1ec40291b0e10dfc85e82a4a89483514c35379`; merge/current canonical commit `3a24d32196e80d521c3fa77fca10bca3c899c597`; head/merge/current tree `f52480178c2d57f20200a08247719f0e7fc5a535`; merged at `2026-08-09T23:02:01Z`. Exact-head CI [31333003405](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31333003405) passed `skillgen-check`, `test (3.14)`, and `security-scan`; PR-Agent [31333132796](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31333132796) passed `review`; and the separate `CodeRabbit` context succeeded. The delivery completed the frozen rejection and terminal-proof coverage needed for separate acceptance; its one low-value schema-constant nit remains deferred and does not change the frozen boundary. |
+| Semantic-generation promotion governance acceptance | PR [#65](https://github.com/Villeneuve-Ventures/graphify/pull/65) exact base `3a24d32196e80d521c3fa77fca10bca3c899c597`; head `2f46c2ff6f9e2c31407234b7da9ad0d98abb539d`; merge/current canonical commit `c8fbf10bd6d7e25790c81f18db0ce906a16bb562`; head/merge/current tree `7d4a597ed509513471dfcd7be4b2a6349a3bc1f4`; merged at `2026-08-11T02:48:52Z`. Exact-head CI [31452781923](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31452781923) passed `skillgen-check`, `test (3.14)`, and `security-scan`; PR-Agent [31452835350](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31452835350) passed `review`; and the separate `CodeRabbit` context succeeded. PR #65 accepts only the promotion/pointer-finalization child, makes its receipt canonical, and activates no later successor. |
+| Semantic-content release/DLP contract preflight | At `2026-08-11T08:29:14Z`, the canonical owned repository, `workspace/v1` HEAD/tree, clean `0/0` divergence, one-worktree inventory, empty open-PR inventory, disabled Issues, PR #65 acceptance, exact-head and post-merge CI, and stale generated graph report were revalidated with repository-qualified live calls. `graphify-out/GRAPH_REPORT.md` remains orientation from `2ab6a4060a2c132b89e79dcd21a12292b69f2b89` and was not rebuilt or used as current authority. This local change freezes only the next semantic-content release/DLP decision child in `WAITING`; no code, test, schema, receipt, generated output, GitHub thread, branch/worktree operation, commit, push, PR, merge, fast-forward, cleanup, implementation, readiness, acceptance, execution, or later-successor mutation is claimed. |
 | Support baseline | Observed host CPython `3.14.6`; project CPython `3.14.3`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
@@ -91,10 +93,10 @@ orientation only and cannot justify execution.
 | H1 | P4F | COMPLETE | Inherited labeling-order test stabilization closed. |
 | H2 | H1 | COMPLETE | Candidate packaging, dependency, and blocking security hygiene closed. |
 | H3 | H2 | DEFERRED | Full-repository Pyright and medium-severity Bandit debt remains non-blocking. |
-| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, and semantic-generation promotion and pointer-finalization, are complete. Remaining P5B2 and the broad P5C gate are not complete. |
+| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, and semantic-generation promotion and pointer-finalization, are complete. The semantic-content release/DLP decision child and remaining P5B2/P5C work are not complete. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, and semantic-generation promotion and pointer-finalization, are complete. Full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and every other undelivered command remain waiting. |
+| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, and semantic-generation promotion and pointer-finalization, are complete. The semantic-content release/DLP decision contract is frozen only at `WAITING`; full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and every other undelivered command remain waiting. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
@@ -109,8 +111,9 @@ orientation only and cannot justify execution.
 | P5B2 host-agent semantic-worker transport | P5A, P5C1 | COMPLETE | Accepted exact `workspace semantic-worker --stdio` host-agent lifecycle in [`semantic-sync.md`](semantic-sync.md). P5A directly supplies queue semantics; P5C1 supplies installed runtime authority and transitively includes P5B1. Completion evidence: [`P5B2 host-agent semantic worker`](receipts/p5b2-semantic-worker.md). |
 | P5B2 semantic-result handoff and sealed-input finalization | P5A, P5B2b0, P5B2 host-agent semantic-worker transport | COMPLETE | Accepted internal handoff in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization). It preserves exact accepted worker evidence, distinguishes the optional carried-source generation from the new target generation, materializes one target-generation-owned semantic-input record, completes the staged payload manifest, and binds it through `bind_sealed_inputs()`. Completion evidence: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md), made canonical by PR #53. It grants no public command, parent-phase completion, or successor activation. |
 | P5B2 semantic-generation certification finalization | P5B2 semantic-result handoff and sealed-input finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-certification-finalization). Entry requires the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest; the only mutating lane is same-request `BUILD` recovery through the existing semantic certification view, immutable binding, generation receipt/journal, reservation, and staged-state authorities until exact `CERTIFIED` proof and lease release. Completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), accepting PR #56 only together with PR #57's corrective delivery. PR #58 made that acceptance canonical and promoted no parent phase or successor. |
-| P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization). Entry remains the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority remains limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires staged `PROMOTED`, exact visible-current and journal evidence, no pending intent, unchanged semantic evidence, and exact grant release. Completion evidence: [`P5B2 semantic-generation promotion and pointer-finalization`](receipts/p5b2-semantic-generation-promotion-finalization.md), binding the exact PR #59 through PR #64 chain. This local transition remains staged until publication and merge and does not execute or activate any later successor. |
-| Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The accepted internal handoff, certification-finalization, and promotion/pointer-finalization children grant no broader or public command authority. |
+| P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization). Entry remains the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority remains limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires staged `PROMOTED`, exact visible-current and journal evidence, no pending intent, unchanged semantic evidence, and exact grant release. Completion evidence: [`P5B2 semantic-generation promotion and pointer-finalization`](receipts/p5b2-semantic-generation-promotion-finalization.md), binding the exact PR #59 through PR #64 chain and made canonical by PR #65. It grants no execution or later-successor authority. |
+| P5B2 semantic-content release/DLP decision | P5B2 semantic-generation promotion and pointer-finalization | WAITING | Contract freeze only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-content-releasedlp-decision). Entry requires the exact accepted staged `PROMOTED` and visible-current terminal, trusted installed bundle manifest, and stable current `ACTIVE` operator policy-authority revision. The byte-defined deterministic-pattern-only classifier, closed taxonomy, and explicit profiles require `core_secrets.v1` for every allow-capable policy and produce only a bounded private request-addressed binding plus digest/count-only proof. Prerequisite policy-authority provisioning, decision-store capacity/GC integration, implementation, receipt, readiness, omission execution, graph/query projection, public command, provider/backend, publication, and successor authority do not exist. |
+| Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The accepted internal handoff, certification-finalization, and promotion/pointer-finalization children plus the release/DLP contract freeze grant no broader or public command authority. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
 | Remaining P5C concerns | P5C | WAITING | Watch/service, performance, shared-lock/root-traversal optimization, publication, retained query/service authority, and all other P5C work remain unchanged. |
@@ -565,11 +568,11 @@ no JOS row is activated or closed.
 This separate unnumbered P5B2 child transitions from `READY` to `COMPLETE` only
 at the frozen internal boundary below. The transition and
 [accepted completion receipt](receipts/p5b2-semantic-generation-promotion-finalization.md)
-remain a local proposal until publication and merge. Acceptance binds the exact
-PR #59 contract freeze, PR #60 readiness reconciliation, PR #61 regression,
-PR #62 cleanup-acquisition correction, PR #63 implementation, and PR #64
-acceptance-coverage completion. The transition changes no parent phase, JOS row,
-or later successor status.
+were made canonical by merged PR #65. Acceptance binds the exact PR #59
+contract freeze, PR #60 readiness reconciliation, PR #61 regression, PR #62
+cleanup-acquisition correction, PR #63 implementation, and PR #64
+acceptance-coverage completion. The transition changes no parent phase, JOS
+row, or later successor status.
 
 Its exact start boundary is the already accepted certification terminal for one
 canonical request and target:
@@ -642,6 +645,142 @@ configuration, workflow, or generated Graphify output.
 P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; only this child
 transitions to `COMPLETE`. Remaining P5B2 work and P5C work remain `WAITING`;
 every later successor remains not `READY`.
+
+## P5B2 semantic-content release/DLP decision contract freeze
+
+This proposed separate unnumbered P5B2 child is `WAITING`, not `READY` or
+`COMPLETE`, and has no implementation or acceptance receipt. Freezing the
+contract changes no accepted receipt, parent phase, JOS row, execution
+authority, or later-successor status.
+
+For this contract freeze, the operator selected the following normative policy
+semantics: a policy-restricted node or hyperedge label rejects the release; a
+policy-restricted optional node rationale is omitted; ambiguity, drift,
+classifier failure, policy-evaluation failure, missing coverage, and unknown or
+unmapped categories reject; otherwise a field may be allowed only under the
+exact selected coverage-sufficiency declaration. These decisions define the
+future policy contract but are not themselves a provisioned runtime authority
+record or acceptance receipt. Classifier facts and policy dispositions remain
+separate.
+
+Its sole entry is the accepted promotion terminal as one unchanged composite:
+exact staged `PROMOTED` request/target/manifest/receipt and pointer authority;
+the same visible current and authoritative promotion/recovery journal; no
+pending pointer or journal recovery; unchanged installed payload, retained
+handoff, target-owned semantic-input bytes, coordination lock, and immutable
+semantic certification binding; exact promotion-grant absence; and current
+registry, active-source, migration, operation, compatibility, state-schema,
+queue-policy, and certified-source authority. A historical generation, one
+constituent artifact, or any drift is not entry authority.
+
+One canonical `decision_request_sha256` binds that entry plus the exact private
+semantic inputs and eligible-field inventory, trusted repo-owned installed
+bundle manifest, and stable current `ACTIVE` operator policy-authority revision.
+The manifest inventories and digest-binds the byte-defined classifier ABI,
+implementation, ruleset, closed taxonomy, normalization contract, and every
+selectable profile; a caller cannot supply or override it. The separately
+owned policy-authority record binds the named release context, exact selected
+profiles and policy, monotonic revision, predecessor digest, and operator
+selection envelope. That envelope binds the authority-body digest to the
+existing five operator fields while explicitly adding only the internal
+`SELECT_SEMANTIC_RELEASE_POLICY` action. Older revisions and their bindings are historical candidates
+only. `core_secrets.v1` is mandatory for every
+allow-capable policy. No provider, backend, model, credential, network, live
+catalogue, environment variable, ambient default, or implicit fallback may
+select or modify decision authority. Taxonomy, classifier implementation,
+ruleset, normalization, profiles, and policy retain distinct identities,
+versions, canonical bytes where applicable, and digests.
+
+Installed manifest paths are unique sorted POSIX relative-normal-form beneath
+the canonical `graphify` package root. Descriptor-relative no-follow traversal
+rejects absolute, dot/dotdot, empty, repeated-separator, backslash, alias,
+symlink, hard-link, special-file, unsafe-mode, containment, size, or digest
+disagreement; artifacts are single-link regular mode `0444` or `0644` files.
+
+The version-1 deterministic-pattern-only, byte-defined classifier reports only `NO_MATCH`,
+`MATCH` with sorted stable factual category IDs, or `INDETERMINATE`. It scans
+required node labels, present optional node rationales, and required hyperedge
+labels at the existing 16 KiB UTF-8 field bound and exact canonical
+normalization. There is no hyperedge rationale in the accepted schema.
+It does not consult runtime Unicode categories, locale, or host-dependent text
+behavior; only syntax-defined ASCII names use the ABI-defined ASCII fold.
+Entropy-only guesses, confidence scores, free-form classifications, generated
+explanations, and contextual confidentiality inference are excluded. `NO_MATCH`
+is not a safety claim; an
+allow outcome additionally requires an exact policy declaration that the
+selected profile set is sufficient for the named release context.
+
+`INDETERMINATE` rejects. `NO_MATCH` produces `ALLOW_FIELD` only under that exact
+coverage declaration. For `MATCH`, policy maps every
+`(field_type, category_id)` pair to `ALLOW_FIELD`, `OMIT_RATIONALE`, or
+`REJECT_RELEASE`; an unknown or unmapped pair rejects, and rejection takes
+precedence over omission and omission over allow. Label omission is invalid,
+so a restricted node or hyperedge label
+rejects the release. A restricted optional node rationale may be omitted. The
+aggregate outcome is exactly `ALLOW_UNCHANGED`, `ALLOW_WITH_OMISSIONS`, or
+`REJECTED`. Deterministic redaction, label removal, entity pruning, ID remapping,
+and topology rewriting remain outside the child.
+
+A future implementation may durably install only one private canonical
+format-version-1 release-decision binding at
+`workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`.
+The external mode-`0700` namespace and single-link mode-`0600` file use
+descriptor-relative no-follow access and are not added to the sealed generation.
+The binding commits to authority/input/profile/policy digests, complete bounded
+field results, dispositions, and terminal outcome. `full_result_sha256` excludes
+both digest members; `binding_sha256` is computed over completed binding bytes
+and is never stored recursively. It duplicates no semantic prose,
+matched substring, confidence score, or public source location. The binding is
+not a public or runtime receipt, lifecycle journal event, staged-build state,
+generation receipt, or publication artifact.
+
+Hard version-1 limits are 64 KiB per decision request and policy-authority
+record, 1 MiB for the installed manifest, 25 MiB total referenced bundle bytes,
+64 selected profiles, 4,096 categories, 4,096 rules, 256 UTF-8 bytes per
+classifier-related ID, 30,000 eligible fields, 256 category and rule IDs per
+field, 25 MiB per binding, 64 bindings per generation, and 4,096 per workspace.
+Decision bytes count against the existing global/workspace `CapacityPolicy`
+ceilings and reserve. Exceeding or failing to prove any limit rejects release.
+
+Classification follows capture-classify-revalidate-install: capture the exact
+entry, current policy authority, installed bundle, store capacity, and bounded
+private bytes under shared registry, exclusive workspace, then shared
+target-generation locks; classify outside coordination locks; then acquire
+exclusive registry, exclusive workspace, and shared target-generation locks in
+that order for global/workspace capacity and reserve revalidation, install, and
+exact reopen. Identical concurrent requests
+converge; a same-path different-byte result conflicts. Proven absence may retry
+only while the full request remains exact. Unsafe, unreadable, partial,
+ambiguous, different, or drifted state is commit-unknown and fails closed. No
+new lease, journal transition, lifecycle state, inferred cleanup, destructive
+rollback, or rewrite authority exists.
+
+This child never deletes bindings. Until separately accepted GC integration
+exists, any nonempty generation decision directory protects that generation
+from purge. This is a retention constraint, not cleanup or GC authority.
+
+Terminal proof reopens the still-current exact promoted terminal, decision
+request, and private binding and proves equal classifier/taxonomy/profile/
+policy/input/result digests, bounded counts, and terminal outcome. An
+`ALLOW_WITH_OMISSIONS` proof contains no entity/field locator or value digest;
+those remain exclusively in the private binding. A later pointer or authority change
+leaves the binding as historical private evidence but removes release
+authority. Any future projection or publication consumer must name the exact
+generation/request/binding-digest tuple, independently reopen the entire proof,
+and prove the bound policy revision is still current `ACTIVE`; enumeration or
+newest/historical selection is not authority.
+
+This freeze adds no product code, tests, schema file, fixture, dependency,
+configuration, workflow, generated Graphify output, receipt, public command,
+status field, omission execution, graph construction/merge/query projection,
+`query_structural()` change, provider/backend/model or credential path,
+networking, migrate, repair, GC or binding cleanup, service/watch, publication,
+production/runtime installation, performance/resource qualification, P5C, H3,
+P6+, parent completion, implementation, readiness, acceptance, execution, or
+later-successor authority. `JOS-SEMANTIC-RATIONALE-PROJECTION` remains
+`OPPORTUNISTIC` with its trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`;
+this child, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
+`DEFERRED`; no later successor is `READY`.
 
 ## P5B2 identity-maintenance boundary freeze
 

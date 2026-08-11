@@ -869,6 +869,200 @@ sync, runtime receipt, provider, networking, repair, GC, publication, execution,
 or later-successor readiness. Parent P5 and P5B2 remain `IN_PROGRESS`, remaining
 P5B2 work and P5C work remain `WAITING`, and H3 remains `DEFERRED`.
 
+## Semantic-content release/DLP decision
+
+The proposed unnumbered P5B2 semantic-content release/DLP decision child is a
+contract freeze at `WAITING`. It may later add one private internal decision
+binding but no lifecycle transition, staged-build state, journal event,
+generation receipt, public schema, runtime receipt, or public result.
+
+Its exact entry is the accepted promotion terminal reopened as one state: the
+same staged `PROMOTED` request/target/manifest/receipt and pointer authority;
+the visible current plus matching authoritative `PROMOTED` or admissible
+`REPAIRED` journal event; no pending pointer or journal recovery; unchanged
+installed inventory, handoff, target-owned semantic input, coordination lock,
+and immutable semantic certification binding; exact promotion-grant and
+staged-attempt absence; and unchanged registry, active-source, migration,
+operation, queue-policy, compatibility, state-schema, and source authority; the
+exact installed semantic-release bundle manifest; and the stable current
+`ACTIVE` operator policy-authority record.
+One coordinate alone, a historical promoted generation, or drift is never
+decision authority.
+
+The trusted bundle is the future repo-owned installed package-data file
+`graphify/workspace/semantic_release_manifest.json`, loaded through
+installed-package authority rather than caller input. It is at most 1 MiB and inventories
+the classifier implementation, byte-defined ABI, taxonomy, ruleset,
+normalization contract, and selectable profiles by package-relative path,
+regular-file mode, byte count, and digest. Total referenced artifact bytes are
+at most 25 MiB.
+Paths are unique sorted UTF-8 POSIX relative-normal-form beneath the canonical
+installed `graphify` package root. Absolute, empty/`.`/`..`, repeated-separator,
+backslash, NUL/control, and alias paths are invalid. Descriptor-relative
+no-follow opens must prove every component contained and each artifact a
+single-link regular file of exact bytes/size/digest and mode `0444` or `0644`,
+with no execute or group/other write bit.
+
+The separate future `SemanticReleasePolicyAuthorityStore` owns these private
+stable paths:
+
+- `workspaces/<repository_uuid>/semantic-release-policy-authority.json`;
+- `workspaces/<repository_uuid>/semantic-release-policy-authority.previous.json`;
+  and
+- `workspaces/<repository_uuid>/semantic-release-policy-authority.pending.json`.
+
+Its at-most-64-KiB format-version-1 current record binds repository UUID, named
+release context, positive monotonic revision, predecessor-record digest or
+genesis marker, `ACTIVE` or `REVOKED`, bundle-manifest digest, selected profile
+IDs/digests, canonical policy ID/version/bytes/digest, and the existing-shaped
+operator authorization nested inside an at-most-16-KiB version-1
+policy-selection envelope. The envelope explicitly adds internal action
+`SELECT_SEMANTIC_RELEASE_POLICY` and contains `authority_body_sha256`, computed
+over the authority-body projection excluding both the whole envelope and its
+sibling `selection_authorization_sha256`, plus the five fields `action`,
+`issued_at`, `nonce`, `operator_id`, and `reason`. The selection digest hashes
+the completed envelope bytes and is stored only as that sibling; the
+complete-record digest is computed externally over completed record bytes. No digest
+preimage contains its own digest. Missing or
+pending state, bad predecessor chain, rollback, revocation, invalid
+authorization, or bundle/policy/profile disagreement fails closed. This child
+consumes but never provisions, advances, repairs, revokes, or cleans that state.
+
+The canonical decision request contains or binds by digest:
+
+- repository, generation, staged request, manifest, receipt, pointer revision,
+  pointer operation epoch/fence, and authoritative journal identity;
+- complete payload inventory, retained handoff, semantic-input, certification
+  binding, and eligible-field-inventory digests;
+- installed bundle-manifest identity/digest and current policy-authority
+  revision/complete-record digest;
+- distinct taxonomy, normalization, classifier implementation/ABI, ruleset,
+  and selected coverage-profile IDs, versions, and manifest-bound SHA-256
+  values; and
+- one authority-selected policy ID, version, SHA-256, named release context,
+  and exact coverage-sufficiency declaration.
+
+Canonical bytes produce `decision_request_sha256`. Policy authority is explicit
+and non-ambient. No environment, provider, model, credential, network, live
+catalogue, or fallback may supply a missing value. Any unsupported version,
+unknown category or profile, digest disagreement, missing mapping, or
+insufficient coverage is fail-closed release rejection.
+The canonical decision request is at most 64 KiB. A caller may request only the
+exact current authority and cannot supply policy or bundle bytes.
+
+The eligible field inventory contains exactly every required node label,
+present optional node rationale, and required hyperedge label. Each entry uses
+exactly one `field_type`: `node_label`, `node_rationale`, or `hyperedge_label`,
+and is ordered by entity kind, UTF-8 entity ID, and field name. There is no
+hyperedge-rationale slot. Each field retains the accepted 16 KiB UTF-8 limit and
+exact canonical normalization. The inventory commits to every entity/field
+identity and exact value SHA-256 without copying field values.
+
+The version-1 classifier ABI operates on exact captured UTF-8 bytes and cannot
+use runtime Unicode categories, locale, renormalization, or host-dependent text
+behavior. Only syntax-defined ASCII names may use the ABI-defined ASCII fold;
+value bytes remain exact. Its grammar, dictionary encoding, comparison,
+ordering, duplicate reduction, and error behavior are manifest-bound.
+
+Hard independent limits are 64 selected profiles, 4,096 categories, 4,096
+rules, 256 UTF-8 bytes for any classifier-related ID, and 30,000 eligible
+fields. Every field has exactly one result record and at most 256 category IDs
+and 256 private rule IDs. Exceeding a limit is `INDETERMINATE` and rejects; no
+bundle, request, or environment may enlarge one.
+
+The closed classifier outcome is `NO_MATCH`, `MATCH`, or `INDETERMINATE`.
+`INDETERMINATE` rejects. `NO_MATCH` produces `ALLOW_FIELD` only under the exact
+coverage-sufficiency declaration; otherwise it rejects. `MATCH` preserves all
+sorted unique category IDs and sorted private rule IDs, and policy maps every
+`(field_type, category_id)` pair. An unknown or unmapped pair rejects; otherwise
+the pair actions reduce to `ALLOW_FIELD`, `OMIT_RATIONALE`, or `REJECT_RELEASE`
+with rejection over omission over allow. A label cannot receive
+`OMIT_RATIONALE`. The final decision is `ALLOW_UNCHANGED`,
+`ALLOW_WITH_OMISSIONS`, or `REJECTED`. `NO_MATCH` alone never proves sufficient
+coverage or release safety.
+
+The future `SemanticReleaseDecisionStore` owns the private canonical
+`graphify.workspace.semantic_release_decision.internal` format-version-1
+binding at
+`workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`.
+The namespace is outside the sealed generation and uses descriptor-relative
+no-follow access, mode-`0700` directories, and one single-link regular
+mode-`0600` binding. Unexpected entries, unsafe modes, symlinks, special files,
+or ambiguous enumeration fail closed. Request addressing permits separate
+authority revisions for one generation without overwriting or substitution.
+Install-once equal bytes are idempotent; same-path different bytes conflict.
+
+The binding contains only entry and authority digests; bundle and current
+policy-authority coordinates; exact input and eligible-field-inventory digests;
+taxonomy, normalization, classifier/ABI/ruleset, profile, and policy
+coordinates; scanned-field counts; every ordered field-result record; terminal
+outcome; and `full_result_sha256`. A field-result record has entity kind,
+private entity ID, field name, field-value SHA-256, classifier outcome, sorted
+category IDs, sorted private rule IDs, and field disposition. The full-result
+digest preimage is the canonical result object containing inventory digest,
+counts, all field-result records, and outcome, excluding both digest members.
+The binding never contains its own digest; external `binding_sha256` is
+computed over completed canonical binding bytes. Raw semantic prose, matched
+substrings, generated explanations, confidence scores, public source locations,
+provider responses, and credentials are forbidden.
+
+The binding is at most 25 MiB. Bounded no-follow enumeration permits at most 64
+bindings per generation and 4,096 per workspace. All decision-store bytes are
+charged against existing `CapacityPolicy` global/workspace byte ceilings and
+reserve, and the authoritative usage scanner must include this namespace before
+the child can be `READY`. Limit, enumeration, or capacity uncertainty rejects.
+
+The write boundary uses capture-classify-revalidate-install. Under the existing
+shared registry lock, exclusive workspace lock, then target-generation shared
+lock, the implementation captures the exact promoted proof, installed bundle,
+current policy authority, decision-store counts/capacity, and bounded private
+semantic-input bytes. Classification occurs without coordination locks or
+durable writes. Final revalidation acquires the exclusive registry lock,
+exclusive workspace lock, then shared generation lock; every coordinate, byte
+count, digest, store count, capacity ceiling, and filesystem reserve is
+revalidated, and the binding is installed once and reopened before those final
+locks are released. The exclusive registry lock serializes global capacity and
+reserve accounting across workspaces. Any drift discards the computed result.
+It is never rebased onto newer authority.
+
+After install uncertainty, exact reopened bytes adopt the commit. Proven
+absence may retry only while the complete decision request remains exact.
+Different, unreadable, unsafe, partially present, or ambiguous state is
+commit-unknown. Identical concurrent requests converge; different requests use
+different derived paths. No failure or replay deletes, rewrites, or repairs a
+binding, semantic input, handoff, generation, receipt, journal, staged record,
+pointer, or policy. A later pointer or authority change makes a prior binding
+historical evidence only.
+
+This child never deletes decision state. Until separately accepted GC
+integration exists, a nonempty decision directory is a protected reason that
+blocks purge of its generation. Any later removal or quarantine must be
+authorized and coordinated with the same generation; no such authority is
+granted here.
+
+Terminal proof is derived, not separately persisted. Under the existing lock
+order it reopens the still-current promoted terminal, exact decision request,
+and immutable binding and proves equal input, taxonomy, normalization,
+classifier/ABI/ruleset, profile, policy, result, and binding digests plus
+bounded counts and one exact terminal outcome. The proof contains no private
+entity/field locator, field-value digest, category ID, or rule ID; an authorized
+projection consumer must reopen the mode-`0600` binding for omissions. No new
+lease or lifecycle/journal authority participates.
+
+A consumer must name the exact
+`(generation_id, decision_request_sha256, binding_sha256)` tuple and prove the
+request-bound policy-authority revision remains stable current `ACTIVE`.
+Enumeration, newest-file choice, historical fallback, or caller-selected
+binding substitution is not authority.
+
+That proof stops before omission execution, deterministic redaction, label or
+entity removal, ID remapping, graph construction/merge/query projection,
+`query_structural()` changes, public semantic sync, provider/backend/model
+selection, networking, public/runtime schemas or receipts, status, repair,
+migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
+implementation, readiness, acceptance, parent completion, execution, or later
+successor authority.
+
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct
 accepted fence token used by a future compare-and-swap.

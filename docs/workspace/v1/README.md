@@ -64,6 +64,24 @@ and release commit boundary, substitution rejection, and terminal cleanup. The
 accepted child adds no schema change, runtime receipt, public command, or broader
 execution authority, and its acceptance activates no later successor.
 
+The next proposed unnumbered P5B2 semantic-content release/DLP decision child
+is contract-frozen only and remains `WAITING`. It starts solely from the exact
+accepted staged `PROMOTED` and visible-current terminal, reopens the private
+semantic inputs, and binds one deterministic decision request to a trusted
+repo-owned installed bundle manifest plus the exact stable current `ACTIVE`
+operator policy-authority revision. The manifest pins the byte-defined
+deterministic-pattern-only classifier ABI, closed taxonomy, ruleset,
+normalization, and coverage profiles; callers cannot supply or override them.
+Every
+allow-capable policy requires explicit-evidence-only `core_secrets.v1`; labels
+reject when policy-restricted,
+optional node rationales may be omitted, and every ambiguity fails closed. A
+private, capacity-accounted request-addressed binding outside the sealed
+generation plus a digest-and-count-only terminal proof is the stop boundary.
+The freeze adds no implementation, receipt, public command, graph/query
+projection, omission execution, provider/backend path,
+publication, or later-successor readiness.
+
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
 operator-authorized UUID/source binding, explicit active-source selection, and
@@ -704,6 +722,7 @@ set.
 | Semantic-result handoff and sealed-input finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal boundary](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization) admits only exact accepted worker sessions or identical carried format-version-1 evidence from the verified current source generation, binds that optional source separately from the new target generation, installs one immutable target-generation/request-bound handoff, copies its exact bytes to target-generation-owned `graphify-out/semantic-inputs.json`, completes the staged payload manifest, and calls `bind_sealed_inputs()`. Accepted receipt: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md). It has no public command and stops before content release, certification, promotion, or pointer mutation. |
 | Semantic-generation certification finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal contract](semantic-sync.md#p5b2-semantic-generation-certification-finalization) starts only from the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest, reacquires only the same request-bound `BUILD` recovery authority, and reuses the existing semantic certification view, immutable binding, generation receipt, journal, reservation, and staged-state transitions until the same target is durably verified as `CERTIFIED` and the lease is released. Accepted completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), limited to the corrected PR #56 plus PR #57 delivery chain. It grants no content-release, projection, promotion, pointer, public-command, or successor authority. |
 | Semantic-generation promotion and pointer-finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal boundary](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization) starts only from the accepted certification terminal, moves only the same request's exact certified target through staged `PROMOTE` (including exact already-visible replay) or pending-intent `POINTER_RECOVERY` authority, and requires a staged `PROMOTED` record, exact visible-current and journal proof, no pending pointer intent, unchanged installed semantic evidence, and exact grant release. Accepted completion evidence: [`P5B2 semantic-generation promotion and pointer-finalization`](receipts/p5b2-semantic-generation-promotion-finalization.md), binding the exact PR #59 through PR #64 chain. The accepted child has no public command, grants no content-release, projection, or broader execution authority, and activates no later successor. |
+| Semantic-content release/DLP decision | Proposed unnumbered P5B2 child (`WAITING`; contract freeze only) | The [frozen private decision boundary](semantic-sync.md#p5b2-semantic-content-releasedlp-decision) begins only from the accepted exact promoted visible-current terminal plus a trusted installed bundle and stable current `ACTIVE` operator policy authority. It classifies only bounded node labels, optional node rationales, and hyperedge labels through the byte-defined deterministic profiles, then installs one private capacity-accounted decision-request-addressed binding outside the sealed generation. It performs no omission, projection, release, public command, provider/backend execution, or successor activation. |
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` and the accepted internal handoff are implemented. The handoff acceptance grants no public semantic-sync route. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and execution contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |

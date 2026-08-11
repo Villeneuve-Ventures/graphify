@@ -1160,6 +1160,170 @@ parent completion, execution, or later-successor readiness. P5 and P5B2 remain
 to `COMPLETE`; remaining P5B2 and P5C work remain `WAITING`; no later successor
 is `READY`.
 
+## P5B2 semantic-content release/DLP decision contract-freeze gates
+
+This proposed unnumbered P5B2 child is documentation-only and remains
+`WAITING`. The freeze is complete only when all seven maintained-current
+documents agree and the diff changes no code, tests, schemas, fixtures,
+receipts, generated Graphify output, JOS row, or runtime artifact:
+
+- `README.md` indexes the child and preserves the parent and successor status;
+- `architecture.md` keeps the repo-owned deterministic classifier separate
+  from the operator-selected release policy and private terminal proof;
+- `semantic-sync.md` is the canonical semantic contract;
+- `state-contract.md` freezes the immutable request-addressed binding,
+  capture/revalidation/install sequence, replay, and commit-unknown behavior;
+- `threat-model.md` covers substitution, incomplete coverage, private-evidence
+  leakage, concurrency, stale authority, and fail-closed recovery;
+- `governance.md` records the exact accepted predecessor and the child as
+  contract-frozen but not ready or accepted; and
+- this file freezes the evidence and validation gates without creating an
+  acceptance receipt.
+
+Contract review must prove each of the following:
+
+- entry is the complete accepted promotion terminal for the exact promoted and
+  still-visible-current generation, with unchanged staged, payload, receipt,
+  pointer, journal, handoff, semantic-input, certification-binding, registry,
+  source, migration, operation, compatibility, schema, queue-policy, and
+  grant-absence evidence. No constituent record or historical binding suffices;
+- the canonical decision request binds the promoted authority, exact semantic
+  input and eligible-field inventory, taxonomy, normalization,
+  installed repo-owned bundle manifest, classifier implementation/byte-defined
+  ABI/ruleset/taxonomy/profiles, and the stable current `ACTIVE` operator
+  policy-authority revision by exact identity, version, canonical bytes where
+  applicable, and digest. Callers cannot supply or override the bundle or
+  policy bytes. Ambient
+  defaults, providers, models, credentials, network state, and fallback are
+  absent;
+- the separate policy-authority store has exact current, previous, and pending
+  stable paths; at most 64 KiB canonical records; monotonic revision and
+  predecessor-digest chaining; `ACTIVE`/`REVOKED` state; bundle, profile,
+  policy, release-context, and repository binding; and existing-shaped operator
+  selection-authorization envelope containing the authority-body digest and the
+  five existing operator fields, with the explicit internal-only action
+  `SELECT_SEMANTIC_RELEASE_POLICY`. Envelope and complete-record digests have
+  nonrecursive exact preimages: the body projection excludes both the entire
+  envelope and sibling selection digest; that sibling hashes only the completed
+  envelope; the complete-record digest remains external. Missing current,
+  present pending, rollback, bad chain, invalid authorization, or revocation
+  rejects. The decision child cannot provision, advance, recover, or clean it;
+- installed manifest tests reject absolute, empty, dot/dotdot,
+  repeated-separator, backslash, NUL/control, alias, symlink-at-any-component, hard-link,
+  special-file, unsafe-mode, containment, size, and digest cases. Accepted
+  artifacts are unique sorted relative-normal-form paths below the canonical
+  installed `graphify` package root, opened descriptor-relatively with no-follow
+  semantics as single-link regular mode-`0444` or mode-`0644` files;
+- classification uses only `NO_MATCH`, `MATCH`, or `INDETERMINATE`; `MATCH`
+  preserves sorted unique stable category IDs; taxonomy identity is distinct
+  from classifier-implementation and ruleset identity; and taxonomy,
+  classifier implementation, ruleset, normalization, profiles, and policy each
+  have an exact identity, version, canonical bytes where applicable, and
+  digest;
+- version 1 is deterministic-pattern-only: locally pinned closed patterns,
+  exact grammars, and exact dictionaries with a digest-bound evaluation order.
+  ML, embeddings, statistical or entropy scores, opaque vendor detectors,
+  generated inference, and contextual semantic judgments are excluded;
+- the manifest-bound byte ABI scans exact captured UTF-8, freezes grammar,
+  dictionary, comparison, ordering, duplicate reduction, and error semantics,
+  uses only its defined ASCII fold for syntax names, and has no runtime Unicode,
+  locale, renormalization, or host-text dependency;
+- every allow-capable policy requires exact `core_secrets.v1`. Its categories
+  are explicit-evidence-only for complete private-key material,
+  credential-bearing URIs, authorization credentials, closed-name credential assignments
+  with non-placeholder values, pinned provider credentials, and complete
+  defined seed or recovery formats. It has no entropy-only match, bare-hash,
+  UUID, arbitrary-Base64, vague-prose match, or example/test exemption;
+- optional jurisdictional, domain, and organization profiles require exact IDs
+  and digests. The policy declares selected coverage sufficient for a named
+  release context; missing, unknown, incompatible, or insufficient profiles
+  reject. `NO_MATCH` is not safety, and contextual categories remain deferred
+  until separately authorized authoritative metadata exists;
+- the eligible fields are exactly every node label, every present node
+  rationale, and every hyperedge label. No hyperedge rationale exists in the
+  accepted schema. Edges, IDs, relations, confidence, paths, locations, and
+  metadata are excluded. Every scanned value obeys the existing 16 KiB UTF-8
+  bound and accepted NFC contract; global NFKC, whitespace rewriting,
+  transliteration, and case fold are forbidden, with ASCII case-insensitive
+  comparison allowed only for syntax-defined names;
+- exact hard caps are enforced before unbounded work: 64 KiB each for request
+  and policy-authority record, 1 MiB manifest, 25 MiB referenced bundle bytes,
+  64 profiles, 4,096 categories, 4,096 rules, 256 UTF-8 bytes per
+  classifier-related ID, 30,000 fields, 256 category and rule IDs per field, 25 MiB per
+  binding, 64 bindings per generation, and 4,096 per workspace. None is
+  caller-expandable;
+- field actions are exactly `ALLOW_FIELD`, `OMIT_RATIONALE`, and
+  `REJECT_RELEASE`; terminal outcomes are separately `ALLOW_UNCHANGED`,
+  `ALLOW_WITH_OMISSIONS`, and `REJECTED`. Restricted labels reject the release;
+  only optional node rationales may be omitted; rejection outranks omission,
+  which outranks allow. `INDETERMINATE` rejects; `NO_MATCH` allows a field only
+  under the exact coverage-sufficiency declaration; and `MATCH` maps every
+  `(field_type, category_id)` pair, with ambiguity, unknown or unmapped pairs,
+  drift, and classifier/policy failure rejecting;
+- the private immutable binding path is exactly the external
+  `semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
+  workspace namespace, outside the sealed generation, with no-follow mode-
+  `0700` directories and one single-link mode-`0600` file. It commits authority,
+  inputs, field inventory, profiles, policy, complete result, and bounded counts.
+  Full-result bytes exclude digest members; the binding never contains its own
+  digest, and `binding_sha256` covers completed canonical binding bytes. Records contain only
+  entity kind, private entity ID, field name, value digest, category IDs,
+  private rule IDs, and disposition. Raw prose, substrings, explanations,
+  confidence, public source locations, provider responses, and credentials are
+  absent;
+- decision-store bytes are included in existing global/workspace capacity and
+  reserve accounting; inability to prove bounded enumeration, usage, or
+  capacity rejects. Nonempty decision state protects its generation from GC
+  until separately accepted integration exists;
+- bounded private bytes are captured under shared registry, exclusive workspace,
+  then shared target-generation locks and classified outside coordination locks
+  without durable write. Final revalidation, install, and exact reopen occur
+  while holding exclusive registry, exclusive workspace, then shared
+  target-generation locks, so global capacity and reserve cannot race across workspaces.
+  Identical requests converge, same-path
+  different bytes conflict, and different requests use different paths. Exact
+  existing bytes are idempotent; only proven absence under exact authority may
+  retry; partial, unreadable, different, unsafe, or ambiguous state is
+  commit-unknown and fails closed without cleanup or destructive rollback; and
+- terminal proof reopens the exact current promotion proof and binding. A later
+  pointer or authority change makes the binding historical only. It contains
+  only exact coordinates, authority/result/binding digests, bounded counts, and
+  outcome; entity/field locators and value digests remain exclusively in the
+  private binding. A consumer names the exact generation/request/binding tuple,
+  reopens that binding, and revalidates the same stable current `ACTIVE` policy
+  revision; enumeration, newest selection, and historical fallback fail. The child
+  adds no lease, lifecycle state, journal transition, staged state, runtime or
+  public receipt, schema, command, omission execution, graph construction,
+  merge, query projection, publication, cleanup, or JOS change.
+
+The focused predecessor-regression suite for this documentation freeze is:
+
+```bash
+uv run --frozen --all-extras pytest -q \
+  tests/test_semantic_cleanup.py \
+  tests/test_workspace_semantic_worker.py \
+  tests/test_workspace_semantic_result_handoff.py \
+  tests/test_workspace_semantic_generation_certification_finalization.py \
+  tests/test_workspace_semantic_generation_promotion_finalization.py \
+  tests/test_workspace_query_cli.py
+```
+
+It proves only that the already-accepted predecessor boundaries remain
+unchanged; it is not implementation, readiness, or acceptance evidence for
+this child. The freeze also requires `uv lock --check`,
+`uv run --frozen python -m tools.skillgen --check`,
+`uv run --frozen pre-commit run --all-files`,
+`uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, the
+repository's Markdown relative-link and heading-anchor audit across every
+changed document, and an independent documentation review. Generated Graphify
+output is not refreshed because no code changes and this batch expressly
+excludes generated artifacts.
+
+Passing those gates establishes only documentation consistency. It leaves P5
+and P5B2 `IN_PROGRESS`, this child and remaining P5B2/P5C work `WAITING`, H3
+`DEFERRED`, `JOS-SEMANTIC-RATIONALE-PROJECTION` `OPPORTUNISTIC`, and no later
+successor `READY`.
+
 ## P5B2 public fenced pointer-repair CLI gates
 
 - the only accepted repair argv forms are `workspace repair --dry-run

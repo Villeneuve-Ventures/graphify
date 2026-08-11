@@ -421,6 +421,125 @@ immutable semantic binding, so pointer movement cannot silently rewrite or
 recertify semantic content. This contract makes no content-level DLP, release,
 query-safety, correctness, or publication claim.
 
+## Semantic-content release/DLP decision threats
+
+The proposed unnumbered P5B2 semantic-content release/DLP decision child is
+contract-frozen only and remains `WAITING`. It begins only from the complete
+accepted promotion terminal for the exact visible-current generation. A
+promoted generation, visible pointer, staged marker, receipt, handoff, semantic
+input, certification binding, or historical release-decision binding is not
+entry or release authority by itself. Missing, foreign, substituted,
+incompatible, drifted, unsafe, unreadable, or ambiguous evidence fails closed.
+
+The child protects against caller-supplied classifier, taxonomy, profile,
+policy, input, and field-inventory substitution through two independent trust
+roots: a repo-owned installed bundle manifest that inventories exact package
+artifacts, and a stable current `ACTIVE` operator policy-authority record with a
+monotonic revision and predecessor digest. Both are bound into the request.
+Manifest artifacts use unique relative-normal-form paths beneath one canonical
+installed package root plus descriptor-relative no-follow traversal, exact
+single-link regular-file modes, sizes, and digests, preventing dot/dotdot,
+absolute, alias, symlink, hard-link, and special-file substitution. Policy
+authority embeds a versioned selection envelope whose body digest and completed
+envelope digest bind the existing five operator fields to that exact policy
+record rather than replaying them across bodies.
+Missing, pending, revoked, rolled-back, or invalid authority rejects. Older
+bindings are historical candidates only, and future consumers must name an
+exact generation/request/binding-digest tuple and revalidate the same current
+authority. Enumeration, newest-file selection, and policy shopping cannot
+select release authority. Classification
+reports only `NO_MATCH`, `MATCH`, or `INDETERMINATE`; operator policy separately
+maps every closed `(field_type, category_id)` pair to `ALLOW_FIELD`,
+`OMIT_RATIONALE`, or `REJECT_RELEASE`. `INDETERMINATE` rejects. `NO_MATCH`
+produces `ALLOW_FIELD` only under the exact coverage-sufficiency declaration;
+it is not a claim that content is safe. Unknown categories, undefined policy
+mappings, unavailable required profiles, classifier or policy failure,
+normalization disagreement, and coverage drift reject release. For multiple
+matches, rejection outranks rationale omission, which outranks allow.
+
+Version 1 is deterministic-pattern-only: locally pinned closed patterns, exact
+grammars, and exact dictionaries with a digest-bound evaluation order. ML,
+embeddings, statistical or entropy scores, opaque vendor detectors, generated
+inference, and contextual semantic judgments are outside this child.
+Its manifest-bound ABI scans exact UTF-8 bytes and freezes grammar, dictionary,
+comparison, ordering, duplicate reduction, and error behavior. It does not use
+runtime Unicode categories, locale, or host-dependent text normalization, so a
+runtime or Unicode-library change cannot silently change classification.
+
+Every allow-capable policy requires the exact `core_secrets.v1` profile. That
+profile recognizes only the complete explicit formats enumerated in the
+[canonical contract](semantic-sync.md#closed-classification-and-coverage-contracts).
+It excludes entropy-only evidence, bare hashes, UUIDs, arbitrary Base64, vague
+secret-looking prose, and automatic example or fixture exemptions. Optional
+jurisdictional, domain, and organization profiles require exact IDs and
+digests. Contextual judgments remain deferred, and the operator must declare
+the selected coverage sufficient for the named release context.
+
+The scan surface is limited to required node labels, present node rationales,
+and required hyperedge labels under the accepted 16 KiB UTF-8 and NFC bounds.
+Edges, IDs, relations, confidence values, paths, locations, and metadata remain
+outside classification. Global NFKC, whitespace rewrite, transliteration, and
+case fold are forbidden; only syntax-defined names may use ASCII
+case-insensitive comparison. Any surface, encoding, normalization, or bound
+disagreement is `INDETERMINATE` and rejects release.
+
+Restricted node or hyperedge labels reject the entire release. Restricted
+optional node rationales may produce `ALLOW_WITH_OMISSIONS`; the decision child
+does not perform the omission. It performs no redaction, label removal,
+pruning, ID remap, topology rewrite, graph construction, merge, query
+projection, or publication. A later projection must independently reopen the
+complete proof and may consume only the exact private omitted-rationale
+locators under separate authority.
+
+The immutable private decision binding is addressed by the complete
+decision-request digest, not generation alone, in an external workspace
+namespace outside the sealed generation. Descriptor-relative no-follow access,
+mode-`0700` directories, a single-link mode-`0600` file, bounded enumeration,
+and fail-closed unexpected-entry handling protect its shape. It commits the full eligible-field
+inventory and scan result while storing only bounded counts and complete
+field-result records containing private entity/field locators, value digests, category IDs,
+private rule IDs, and dispositions. Raw semantic prose, matched substrings,
+generated explanations, confidence scores, public source locations, provider
+responses, and credentials are excluded. A derived redacted internal terminal
+proof does not become a public receipt or content-release surface and never
+carries entity/field locators or value digests. Those stable locators and
+unkeyed hashes remain exclusively inside the private binding. If mode-`0600`
+binding confidentiality is lost, low-entropy field guesses remain an offline
+oracle risk; private placement, no-follow access, capacity limits, and retention
+reduce exposure but do not claim cryptographic secrecy against same-UID
+compromise. A separately authorized projection consumer must reopen the binding.
+
+Concrete request, manifest, artifact, profile, category, rule, ID, field,
+per-field match, binding, per-generation binding, and per-workspace binding caps
+reject oversized inputs before unbounded parsing or classification. Binding
+bytes are charged to the existing global/workspace capacity policy and reserve.
+The binding excludes its own digest; the external digest is over completed
+canonical bytes, preventing recursive or divergent digest preimages.
+
+Classification uses captured bounded private bytes outside coordination locks,
+without provider, model, network, ambient input, or durable write. Existing
+shared-registry, exclusive-workspace, then shared-generation locks are used for
+capture. Final revalidation, install, and reopen instead use exclusive registry,
+exclusive workspace, then shared generation locks, serializing global capacity
+and reserve accounting across workspaces while every authority coordinate,
+byte count, store count, capacity value, and digest is revalidated. Identical concurrent requests converge on
+one install-once binding; same-path different bytes conflict; distinct requests
+use distinct paths. After an install fault, only exact existing bytes are
+idempotent success. Proven absence is retryable only while all authority remains
+exact; partial, unreadable, different, unsafe, or ambiguous state is
+commit-unknown and fails closed. No new lease, lifecycle state, journal transition,
+cleanup, deletion, rollback, or destructive recovery is introduced.
+
+Nonempty decision state protects its generation from GC until separately
+accepted store integration exists. This prevents orphaning the audit/projection
+evidence and does not grant the decision child cleanup authority.
+
+A later pointer or authority change makes an exact binding historical evidence
+only. It cannot be repaired into current authority. `REJECTED`,
+`ALLOW_WITH_OMISSIONS`, and `ALLOW_UNCHANGED` are private terminal decisions for
+one exact request; only the two allow outcomes can be offered to a separately
+authorized consumer, and neither publishes or projects content by itself.
+
 ## Explicit non-claims
 
 V1 does not resist a compromised source-control or CI system, or a malicious
