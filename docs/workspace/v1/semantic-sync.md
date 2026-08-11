@@ -1437,18 +1437,18 @@ governance acceptance, or merge authority.
 
 ## P5B2 semantic-generation promotion and pointer-finalization
 
-This next unnumbered P5B2 child is contract-frozen and internally implemented;
-the post-merge governance reconciliation still records it as the sole `READY`
-child. Focused regression coverage exercises direct promotion, exact-current
+This unnumbered P5B2 child is implemented and accepted only at the frozen
+internal boundary in this section. The
+[accepted completion receipt](receipts/p5b2-semantic-generation-promotion-finalization.md)
+binds the exact PR #59 through PR #64 delivery and correction chain. Focused
+regression coverage exercises direct promotion, exact-current
 replay, pointer and staged recovery, every documented acquisition and release
 commit boundary, substitution rejection, semantic-evidence preservation, and
-exact terminal cleanup. `READY` remains unaccepted: this implementation does
-not accept, complete, execute, or activate a later successor. It introduces no
+exact terminal cleanup. Acceptance introduces no
 public command, request/result family, schema, durable format, runtime receipt,
-or provider/backend path. Merged PR #58 remains acceptance only for the
-corrected predecessor certification-finalization child; PR #59's evidence
-supports only the eligibility transition recorded in the
-[`governance.md` live snapshot](governance.md#current-live-snapshot).
+or provider/backend path and activates no later successor. The receipt remains
+repo-local staged evidence until its separate governance-only change is
+published and merged.
 
 The child composes only existing authorities:
 
@@ -1745,10 +1745,10 @@ semantically correct, or publication-ready.
 
 Content release or DLP decisions, graph construction/merge/query projection,
 changes to `query_structural()`, public semantic-sync commands, schemas,
-runtime formats, receipts, providers/backends/models, credentials, networking,
-migrate, repair, GC, service/watch, publication, production/runtime
+runtime formats, runtime receipts, providers/backends/models, credentials,
+networking, migrate, repair, GC, service/watch, publication, production/runtime
 installation, performance/resource qualification, P5C, H3, P6+, parent
-completion, governance acceptance, and later-successor readiness are explicitly
+completion, execution authority, and later-successor readiness are explicitly
 excluded. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; this child
-alone is internally implemented but unaccepted at `READY`; remaining P5B2, P5C,
-and remaining P5C concerns remain `WAITING`; no later successor is `READY`.
+alone transitions from `READY` to `COMPLETE`; remaining P5B2 work and P5C work
+remain `WAITING`; no later successor is `READY`.
