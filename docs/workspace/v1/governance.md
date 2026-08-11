@@ -112,7 +112,7 @@ orientation only and cannot justify execution.
 | P5B2 semantic-result handoff and sealed-input finalization | P5A, P5B2b0, P5B2 host-agent semantic-worker transport | COMPLETE | Accepted internal handoff in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization). It preserves exact accepted worker evidence, distinguishes the optional carried-source generation from the new target generation, materializes one target-generation-owned semantic-input record, completes the staged payload manifest, and binds it through `bind_sealed_inputs()`. Completion evidence: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md), made canonical by PR #53. It grants no public command, parent-phase completion, or successor activation. |
 | P5B2 semantic-generation certification finalization | P5B2 semantic-result handoff and sealed-input finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-certification-finalization). Entry requires the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest; the only mutating lane is same-request `BUILD` recovery through the existing semantic certification view, immutable binding, generation receipt/journal, reservation, and staged-state authorities until exact `CERTIFIED` proof and lease release. Completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), accepting PR #56 only together with PR #57's corrective delivery. PR #58 made that acceptance canonical and promoted no parent phase or successor. |
 | P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization). Entry remains the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority remains limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires staged `PROMOTED`, exact visible-current and journal evidence, no pending intent, unchanged semantic evidence, and exact grant release. Completion evidence: [`P5B2 semantic-generation promotion and pointer-finalization`](receipts/p5b2-semantic-generation-promotion-finalization.md), binding the exact PR #59 through PR #64 chain and made canonical by PR #65. It grants no execution or later-successor authority. |
-| P5B2 semantic-content release/DLP decision | P5B2 semantic-generation promotion and pointer-finalization | WAITING | Contract freeze only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-content-releasedlp-decision). Entry requires the exact accepted staged `PROMOTED` and visible-current terminal, trusted installed bundle manifest, and stable current `ACTIVE` operator policy-authority revision. The byte-defined deterministic-pattern-only classifier, closed taxonomy, and explicit profiles require `core_secrets.v1` for every allow-capable policy and produce only a bounded private request-addressed binding plus digest/count-only proof. Prerequisite policy-authority provisioning, decision-store capacity/GC integration, implementation, receipt, readiness, omission execution, graph/query projection, public command, provider/backend, publication, and successor authority do not exist. |
+| P5B2 semantic-content release/DLP decision | P5B2 semantic-generation promotion and pointer-finalization | WAITING | Contract freeze only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-content-releasedlp-decision). Entry requires the exact accepted staged `PROMOTED` and visible-current terminal, trusted installed bundle manifest, and stable current `ACTIVE` operator policy-authority revision. The byte-defined deterministic-pattern-only classifier, closed taxonomy, and explicit profiles require `core_secrets.v1` for every allow-capable policy and produce only a bounded private request-addressed binding plus digest/count/outcome-only proof. Prerequisite policy-authority provisioning, decision-store capacity/GC integration, implementation, receipt, readiness, omission execution, graph/query projection, public command, provider/backend, publication, and successor authority do not exist. |
 | Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The accepted internal handoff, certification-finalization, and promotion/pointer-finalization children plus the release/DLP contract freeze grant no broader or public command authority. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
@@ -674,17 +674,21 @@ queue-policy, and certified-source authority. A historical generation, one
 constituent artifact, or any drift is not entry authority.
 
 One canonical `decision_request_sha256` binds that entry plus the exact private
-semantic inputs and eligible-field inventory, trusted repo-owned installed
-bundle manifest, and stable current `ACTIVE` operator policy-authority revision.
+semantic-input byte count and digest, the eligible-field inventory, the trusted
+repo-owned installed bundle manifest, and the stable current `ACTIVE` operator
+policy-authority revision.
 The manifest inventories and digest-binds the byte-defined classifier ABI,
 implementation, ruleset, closed taxonomy, normalization contract, and every
 selectable profile; a caller cannot supply or override it. The separately
 owned policy-authority record binds the named release context, exact selected
-profiles and policy, monotonic revision, predecessor digest, and operator
-selection envelope. That envelope binds the authority-body digest to the
+profiles and policy, the closed version-1 coverage-sufficiency declaration and
+its digest, monotonic revision, predecessor digest, and operator selection
+envelope. The declaration's release context and selected-profile set must
+equal the surrounding authority record exactly; `INSUFFICIENT`, mismatch, or
+invalidity rejects. That envelope binds the authority-body digest to the
 existing five operator fields while explicitly adding only the internal
-`SELECT_SEMANTIC_RELEASE_POLICY` action. Older revisions and their bindings are historical candidates
-only. `core_secrets.v1` is mandatory for every
+`SELECT_SEMANTIC_RELEASE_POLICY` action. Older revisions and their bindings are
+historical candidates only. `core_secrets.v1` is mandatory for every
 allow-capable policy. No provider, backend, model, credential, network, live
 catalogue, environment variable, ambient default, or implicit fallback may
 select or modify decision authority. Taxonomy, classifier implementation,
@@ -697,8 +701,13 @@ rejects absolute, dot/dotdot, empty, repeated-separator, backslash, alias,
 symlink, hard-link, special-file, unsafe-mode, containment, size, or digest
 disagreement; artifacts are single-link regular mode `0444` or `0644` files.
 
-The version-1 deterministic-pattern-only, byte-defined classifier reports only `NO_MATCH`,
-`MATCH` with sorted stable factual category IDs, or `INDETERMINATE`. It scans
+The version-1 deterministic-pattern-only, byte-defined classifier reports only
+`NO_MATCH`, `MATCH` with `utf8_lex_v1`-sorted unique factual category IDs, or
+`INDETERMINATE`. `utf8_lex_v1` compares unsigned canonical UTF-8 bytes,
+shorter-prefix-first, without locale, Unicode collation, or runtime text
+ordering; selected profiles and private rule IDs use the same comparator, and
+complete field results use the canonical contract's fixed field ordering. It
+scans
 required node labels, present optional node rationales, and required hyperedge
 labels at the existing 16 KiB UTF-8 field bound and exact canonical
 normalization. There is no hyperedge rationale in the accepted schema.
@@ -745,10 +754,12 @@ ceilings and reserve. Exceeding or failing to prove any limit rejects release.
 Classification follows capture-classify-revalidate-install: capture the exact
 entry, current policy authority, installed bundle, store capacity, and bounded
 private bytes under shared registry, exclusive workspace, then shared
-target-generation locks; classify outside coordination locks; then acquire
+target-generation locks; store only their exact byte count and digest in the
+decision request and classify those same captured bytes outside coordination
+locks; then acquire
 exclusive registry, exclusive workspace, and shared target-generation locks in
-that order for global/workspace capacity and reserve revalidation, install, and
-exact reopen. Identical concurrent requests
+that order for global/workspace capacity and reserve revalidation, exact
+semantic-input reread, install, and binding reopen. Identical concurrent requests
 converge; a same-path different-byte result conflicts. Proven absence may retry
 only while the full request remains exact. Unsafe, unreadable, partial,
 ambiguous, different, or drifted state is commit-unknown and fails closed. No
@@ -759,9 +770,12 @@ This child never deletes bindings. Until separately accepted GC integration
 exists, any nonempty generation decision directory protects that generation
 from purge. This is a retention constraint, not cleanup or GC authority.
 
-Terminal proof reopens the still-current exact promoted terminal, decision
-request, and private binding and proves equal classifier/taxonomy/profile/
-policy/input/result digests, bounded counts, and terminal outcome. An
+Terminal proof takes shared registry, exclusive workspace, then shared
+target-generation locks; reopens the still-current exact promoted terminal, decision
+request, current `ACTIVE` policy authority, and private binding; and revalidates
+all entry, request, authority, input, result, and binding coordinates before
+releasing any lock. It proves equal classifier/taxonomy/profile/policy/input/
+result digests, bounded counts, and terminal outcome. An
 `ALLOW_WITH_OMISSIONS` proof contains no entity/field locator or value digest;
 those remain exclusively in the private binding. A later pointer or authority change
 leaves the binding as historical private evidence but removes release

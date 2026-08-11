@@ -443,6 +443,11 @@ absolute, alias, symlink, hard-link, and special-file substitution. Policy
 authority embeds a versioned selection envelope whose body digest and completed
 envelope digest bind the existing five operator fields to that exact policy
 record rather than replaying them across bodies.
+The authority also embeds one closed version-1 coverage-sufficiency declaration
+whose release context and selected-profile coordinates must equal the
+surrounding record exactly. Its digest is bound into both the policy and
+decision request; duplicate, mismatched, unknown, invalid, or `INSUFFICIENT`
+coverage therefore rejects rather than selecting a second interpretation.
 Missing, pending, revoked, rolled-back, or invalid authority rejects. Older
 bindings are historical candidates only, and future consumers must name an
 exact generation/request/binding-digest tuple and revalidate the same current
@@ -465,6 +470,11 @@ Its manifest-bound ABI scans exact UTF-8 bytes and freezes grammar, dictionary,
 comparison, ordering, duplicate reduction, and error behavior. It does not use
 runtime Unicode categories, locale, or host-dependent text normalization, so a
 runtime or Unicode-library change cannot silently change classification.
+The closed `utf8_lex_v1` comparator orders canonical identifiers by unsigned
+UTF-8 bytes, shorter-prefix-first, without locale, Unicode collation, or host
+runtime ordering. It governs selected profiles, category IDs, private rule IDs,
+and the canonical field-result order, preventing implementations from deriving
+different result or request digests from the same facts.
 
 Every allow-capable policy requires the exact `core_secrets.v1` profile. That
 profile recognizes only the complete explicit formats enumerated in the
@@ -482,6 +492,11 @@ outside classification. Global NFKC, whitespace rewrite, transliteration, and
 case fold are forbidden; only syntax-defined names may use ASCII
 case-insensitive comparison. Any surface, encoding, normalization, or bound
 disagreement is `INDETERMINATE` and rejects release.
+The decision request embeds no semantic content: it binds only the exact
+target-owned semantic-input byte count and digest. Classification uses the same
+captured bytes, and final locked revalidation must reproduce both values, so a
+same-path content swap cannot be classified under one input and installed under
+another.
 
 Restricted node or hyperedge labels reject the entire release. Restricted
 optional node rationales may produce `ALLOW_WITH_OMISSIONS`; the decision child
@@ -515,6 +530,11 @@ reject oversized inputs before unbounded parsing or classification. Binding
 bytes are charged to the existing global/workspace capacity policy and reserve.
 The binding excludes its own digest; the external digest is over completed
 canonical bytes, preventing recursive or divergent digest preimages.
+Policy authority, selection envelope, decision request, full result, binding,
+and field-value digests each use the canonical contract's closed member sets
+and exact preimages. A field-value digest covers only the exact captured UTF-8
+value bytes, so JSON quoting, final-newline, salt, prefix, normalization, or
+case-conversion variants cannot silently create a competing identifier.
 
 Classification uses captured bounded private bytes outside coordination locks,
 without provider, model, network, ambient input, or durable write. Existing
@@ -539,6 +559,11 @@ only. It cannot be repaired into current authority. `REJECTED`,
 `ALLOW_WITH_OMISSIONS`, and `ALLOW_UNCHANGED` are private terminal decisions for
 one exact request; only the two allow outcomes can be offered to a separately
 authorized consumer, and neither publishes or projects content by itself.
+Before exposing that derived proof, the consumer takes shared registry,
+exclusive workspace, then target-generation shared locks; reopens the exact
+current promotion terminal, request, current `ACTIVE` policy authority, and
+binding; and revalidates every entry, authority, input, result, and binding
+coordinate before releasing the locks.
 
 ## Explicit non-claims
 

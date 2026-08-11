@@ -77,7 +77,8 @@ allow-capable policy requires explicit-evidence-only `core_secrets.v1`; labels
 reject when policy-restricted,
 optional node rationales may be omitted, and every ambiguity fails closed. A
 private, capacity-accounted request-addressed binding outside the sealed
-generation plus a digest-and-count-only terminal proof is the stop boundary.
+generation plus a digest/count/outcome-only terminal proof, excluding private
+locators and values, is the stop boundary.
 The freeze adds no implementation, receipt, public command, graph/query
 projection, omission execution, provider/backend path,
 publication, or later-successor readiness.

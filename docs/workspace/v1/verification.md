@@ -1187,25 +1187,42 @@ Contract review must prove each of the following:
   pointer, journal, handoff, semantic-input, certification-binding, registry,
   source, migration, operation, compatibility, schema, queue-policy, and
   grant-absence evidence. No constituent record or historical binding suffices;
-- the canonical decision request binds the promoted authority, exact semantic
-  input and eligible-field inventory, taxonomy, normalization,
-  installed repo-owned bundle manifest, classifier implementation/byte-defined
+- the canonical decision request binds the promoted authority, exact
+  semantic-input byte count and digest, eligible-field inventory, taxonomy, and
+  normalization, the installed repo-owned bundle manifest, classifier
+  implementation/byte-defined
   ABI/ruleset/taxonomy/profiles, and the stable current `ACTIVE` operator
   policy-authority revision by exact identity, version, canonical bytes where
   applicable, and digest. Callers cannot supply or override the bundle or
-  policy bytes. Ambient
-  defaults, providers, models, credentials, network state, and fallback are
-  absent;
+  policy bytes. Ambient defaults, providers, models, credentials, network state,
+  and fallback are
+  absent. It embeds no semantic-input content: capture hashes and counts the
+  exact target-owned bytes, classification uses that same capture, and final
+  locked reread must reproduce both values;
+- all release-decision hashes use duplicate-free UTF-8 JSON, NFC strings,
+  lexicographically sorted object keys, compact separators, integer-only
+  numeric values, normative array order, and one final newline; every digest is
+  exactly 64 lowercase hexadecimal digits. Tests reject missing, duplicate,
+  unknown, or additional members in the canonical contract's closed
+  decision-request and nested promoted-entry shapes and prove the exact request
+  digest preimage;
 - the separate policy-authority store has exact current, previous, and pending
   stable paths; at most 64 KiB canonical records; monotonic revision and
   predecessor-digest chaining; `ACTIVE`/`REVOKED` state; bundle, profile,
-  policy, release-context, and repository binding; and existing-shaped operator
+  policy, release-context, repository binding, and one closed version-1
+  coverage-sufficiency declaration whose context and selected-profile set equal
+  the surrounding authority exactly. Its digest is bound into the policy,
+  authority, and request; `INSUFFICIENT`, unknown, duplicate, mismatched, or
+  invalid declarations reject. The record also has an existing-shaped operator
   selection-authorization envelope containing the authority-body digest and the
   five existing operator fields, with the explicit internal-only action
   `SELECT_SEMANTIC_RELEASE_POLICY`. Envelope and complete-record digests have
   nonrecursive exact preimages: the body projection excludes both the entire
   envelope and sibling selection digest; that sibling hashes only the completed
-  envelope; the complete-record digest remains external. Missing current,
+  envelope; the complete-record digest remains external. The canonical
+  contract freezes the exact closed top-level and nested member sets for the
+  authority, policy, coverage declaration, and selection envelope. Missing
+  current,
   present pending, rollback, bad chain, invalid authorization, or revocation
   rejects. The decision child cannot provision, advance, recover, or clean it;
 - installed manifest tests reject absolute, empty, dot/dotdot,
@@ -1215,7 +1232,11 @@ Contract review must prove each of the following:
   installed `graphify` package root, opened descriptor-relatively with no-follow
   semantics as single-link regular mode-`0444` or mode-`0644` files;
 - classification uses only `NO_MATCH`, `MATCH`, or `INDETERMINATE`; `MATCH`
-  preserves sorted unique stable category IDs; taxonomy identity is distinct
+  preserves unique stable category IDs ordered by `utf8_lex_v1`, which compares
+  unsigned canonical UTF-8 bytes and sorts a shorter exact prefix first without
+  locale, Unicode collation, or runtime ordering. Selected-profile and private
+  rule-ID arrays use the same comparator; complete field results use fixed
+  entity-kind, entity-ID, and field-name order. Taxonomy identity is distinct
   from classifier-implementation and ruleset identity; and taxonomy,
   classifier implementation, ruleset, normalization, profiles, and policy each
   have an exact identity, version, canonical bytes where applicable, and
@@ -1261,12 +1282,16 @@ Contract review must prove each of the following:
   `(field_type, category_id)` pair, with ambiguity, unknown or unmapped pairs,
   drift, and classifier/policy failure rejecting;
 - the private immutable binding path is exactly the external
-  `semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
+  `workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
   workspace namespace, outside the sealed generation, with no-follow mode-
   `0700` directories and one single-link mode-`0600` file. It commits authority,
   inputs, field inventory, profiles, policy, complete result, and bounded counts.
-  Full-result bytes exclude digest members; the binding never contains its own
-  digest, and `binding_sha256` covers completed canonical binding bytes. Records contain only
+  Decision-request, full-result, and binding bytes use the canonical contract's
+  exact closed top-level and nested member sets. Full-result bytes exclude
+  digest members; the binding never contains its own digest, and
+  `binding_sha256` covers completed canonical binding bytes. Each field-value
+  digest covers the exact captured UTF-8 value bytes without JSON quoting,
+  newline, salt, prefix, renormalization, or case conversion. Records contain only
   entity kind, private entity ID, field name, value digest, category IDs,
   private rule IDs, and disposition. Raw prose, substrings, explanations,
   confidence, public source locations, provider responses, and credentials are
@@ -1277,7 +1302,9 @@ Contract review must prove each of the following:
   until separately accepted integration exists;
 - bounded private bytes are captured under shared registry, exclusive workspace,
   then shared target-generation locks and classified outside coordination locks
-  without durable write. Final revalidation, install, and exact reopen occur
+  without durable write; only their exact count and digest enter the request.
+  Final locked semantic-input reread, revalidation, install, and exact reopen
+  occur
   while holding exclusive registry, exclusive workspace, then shared
   target-generation locks, so global capacity and reserve cannot race across workspaces.
   Identical requests converge, same-path
@@ -1285,7 +1312,11 @@ Contract review must prove each of the following:
   existing bytes are idempotent; only proven absence under exact authority may
   retry; partial, unreadable, different, unsafe, or ambiguous state is
   commit-unknown and fails closed without cleanup or destructive rollback; and
-- terminal proof reopens the exact current promotion proof and binding. A later
+- terminal proof takes shared registry, exclusive workspace, then
+  target-generation shared locks; reopens the exact current promotion proof, request,
+  stable current `ACTIVE` policy authority, and binding; and revalidates every
+  entry, request, authority, input, result, and binding coordinate before any
+  lock is released. A later
   pointer or authority change makes the binding historical only. It contains
   only exact coordinates, authority/result/binding digests, bounded counts, and
   outcome; entity/field locators and value digests remain exclusively in the

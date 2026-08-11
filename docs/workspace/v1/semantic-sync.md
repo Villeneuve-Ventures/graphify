@@ -1832,9 +1832,10 @@ authority-record SHA-256 or canonical genesis marker, `ACTIVE` or `REVOKED`
 state, installed bundle-manifest SHA-256, exact selected profile IDs and
 digests, canonical policy ID/version/bytes/SHA-256, and one canonical
 `graphify.workspace.semantic_release_policy_selection_authorization.internal`
-format-version-1 envelope. The at-most-16-KiB envelope contains exactly
-`authority_body_sha256` plus a nested five-field authorization mapping
-`action`, `issued_at`, `nonce`, `operator_id`, and `reason`. That mapping uses
+format-version-1 envelope. The at-most-16-KiB envelope's top-level member set
+is exactly `contract`, `format_version`, `authority_body_sha256`, and
+`authorization`; the nested authorization mapping contains exactly `action`,
+`issued_at`, `nonce`, `operator_id`, and `reason`. That mapping uses
 the existing field validation but explicitly extends the closed internal action
 vocabulary by the sole token `SELECT_SEMANTIC_RELEASE_POLICY`; it does not
 change the accepted public identity action enum or schema. `authority_body_sha256`
@@ -1857,6 +1858,57 @@ record and makes bindings under the older revision historical candidates only.
 Provisioning this prerequisite remains outside this contract freeze, so this
 child remains `WAITING`.
 
+All release-decision objects in this section use the hashed-JSON base encoding
+defined at the top of [`state-contract.md`](state-contract.md): UTF-8 JSON,
+NFC-normalized strings, lexicographically sorted object keys, compact separators,
+and one final newline. This contract additionally requires duplicate-free
+objects and integers as the only numeric values. Arrays retain the normative
+order specified below and are not reordered by JSON key sorting.
+Every SHA-256 representation is exactly 64 lowercase hexadecimal digits over
+the stated complete canonical bytes.
+
+The policy authority contains one closed canonical
+`graphify.workspace.semantic_release_coverage_sufficiency.internal`
+format-version-1 declaration. Its top-level member set is exactly `contract`,
+`format_version`, `release_context`, `selected_profiles`, and
+`coverage_state`. `coverage_state` is exactly `SUFFICIENT` or `INSUFFICIENT`.
+Each `selected_profiles` entry contains exactly `profile_id`,
+`profile_version`, and `profile_sha256`; the array is unique and ordered by the
+identifier comparator below. Its entries must equal the authority record's
+selected-profile set without omission or addition, and `release_context` must
+equal the authority record byte-for-byte. `SUFFICIENT` additionally requires
+the exact `core_secrets.v1` coordinate and every manifest-required profile for
+that named context. `INSUFFICIENT` always rejects release. Unknown members,
+values, versions, missing profiles, mismatches, or an invalid declaration are
+`INDETERMINATE` and reject.
+
+`coverage_sufficiency_sha256` is the SHA-256 of those complete declaration
+bytes. The policy's own canonical bytes include that exact digest, and the
+policy-authority record contains both the declaration and its digest. Thus the
+same `policy_sha256` cannot produce different coverage decisions.
+
+The policy-authority record's top-level member set is exactly `contract`,
+`format_version`, `repo_uuid`, `release_context`, `authority_revision`,
+`previous_authority_sha256`, `state`, `bundle_manifest_sha256`,
+`selected_profiles`, `coverage_sufficiency`,
+`coverage_sufficiency_sha256`, `policy_id`, `policy_version`, `policy`,
+`policy_sha256`, `selection_authorization`, and
+`selection_authorization_sha256`. `previous_authority_sha256` is JSON `null`
+only at revision 1 and otherwise the complete prior-record digest.
+`selected_profiles` uses the declaration entry shape and order above. `policy`
+is one canonical JSON object whose complete bytes hash to `policy_sha256`. Its
+top-level member set is exactly `contract`, `format_version`, `policy_id`,
+`policy_version`, `release_context`, `coverage_sufficiency_sha256`,
+`pair_dispositions`, and `reduction_precedence`. Each unique
+`pair_dispositions` entry contains exactly `field_type`, `category_id`, and
+`disposition`, ordered by fixed field-type order `node_label`,
+`node_rationale`, `hyperedge_label` and then `utf8_lex_v1` category ID.
+`reduction_precedence` is exactly `REJECT_RELEASE`, `OMIT_RATIONALE`, then
+`ALLOW_FIELD`. The `authority_body_sha256` projection is this complete record
+with only `selection_authorization` and
+`selection_authorization_sha256` removed. Unknown, missing, duplicated, or
+additional members reject the authority record.
+
 One canonical decision request, at most 64 KiB, binds all entry coordinates and
 digests plus:
 
@@ -1868,10 +1920,51 @@ digests plus:
 - ruleset ID, version, and manifest-bound SHA-256;
 - text-normalization contract ID, version, and manifest-bound SHA-256;
 - ordered selected coverage-profile IDs, versions, and manifest-bound digests;
+- the complete coverage-sufficiency declaration and
+  `coverage_sufficiency_sha256` equal to the current policy authority and
+  policy bytes;
 - operator-selected release-policy ID, version, and SHA-256 equal to the
   current policy-authority record; and
-- the exact semantic-input bytes, payload-inventory digest, and derived
-  eligible-field-inventory digest.
+- `semantic_input_byte_count`, `semantic_input_sha256`, payload-inventory
+  digest, and derived eligible-field-inventory digest.
+
+The request's top-level member set is exactly `contract`, `format_version`,
+`repo_uuid`, `target_generation_id`, `promoted_entry`, `bundle_manifest`,
+`promoted_entry_sha256`, `policy_authority`, `taxonomy`, `classifier`, `ruleset`, `normalization`,
+`selected_profiles`, `coverage_sufficiency`,
+`coverage_sufficiency_sha256`, `policy`, `semantic_input_byte_count`,
+`semantic_input_sha256`, and `eligible_field_inventory_sha256`.
+`bundle_manifest` contains exactly `manifest_id` and `manifest_sha256`;
+`policy_authority` contains exactly `authority_revision` and
+`authority_sha256`; each taxonomy, ruleset, normalization, policy, or profile
+coordinate contains exactly its type-specific `*_id`, `*_version`, and
+`*_sha256`; and `classifier` contains exactly `classifier_id`,
+`classifier_version`, `implementation_sha256`, `abi_id`, `abi_version`, and
+`abi_sha256`.
+
+`promoted_entry` contains exactly `sync_request_sha256`,
+`structural_request_sha256`, `staged_record_sha256`, `target_generation_id`,
+`payload_manifest_sha256`, `payload_inventory_sha256`,
+`generation_receipt_sha256`, `pointer_revision`, `pointer_operation_epoch`,
+`pointer_fence`, `promotion_journal_event_sha256`, `semantic_handoff_sha256`,
+`semantic_certification_binding_sha256`, `entry_authority`,
+`promotion_grant_absent`, and `staged_attempt_absent`. The last two values must
+be JSON `true` and are re-proved rather than trusted during every locked
+composition. `entry_authority` contains exactly `registry_revision`,
+`active_source_authority_sha256`, `migration_authority_sha256`,
+`operation_authority_sha256`, `compatibility_authority_sha256`,
+`state_schema_authority_sha256`, `queue_policy_sha256`, and
+`certified_source_authority_sha256`. Unknown, missing, duplicated, or
+additional members at any level reject the request. `promoted_entry_sha256` is
+SHA-256 over the complete canonical `promoted_entry` object bytes.
+
+The request never embeds semantic-input content. Under the capture lock
+composition, the implementation reopens the exact target-owned
+`graphify-out/semantic-inputs.json` regular-file bytes, proves their existing
+bound and canonicality, and computes `semantic_input_byte_count` plus
+`semantic_input_sha256` directly over those complete bytes. It then classifies
+the same captured bytes outside the locks. Any locked reread, byte-count, or
+digest disagreement before install is drift and rejects release.
 
 The complete canonical request bytes produce `decision_request_sha256`. No
 provider, backend, model, credential, environment variable, network response,
@@ -1901,11 +1994,21 @@ ordering, and error behavior are part of the manifest-bound ABI bytes. Runtime
 or Unicode-library differences therefore cannot silently change a result; an
 implementation unable to execute that exact ABI returns `INDETERMINATE`.
 
+The closed identifier comparator is `utf8_lex_v1`: compare the unsigned bytes
+of each already-canonical NFC string's UTF-8 encoding lexicographically; when
+one byte string is an exact prefix, the shorter sorts first. It uses no locale,
+Unicode collation table, or runtime text ordering. Selected-profile arrays,
+category-ID arrays, and private rule-ID arrays use `utf8_lex_v1`. Complete
+field-result arrays use fixed entity-kind order `node` then `hyperedge`, then
+`utf8_lex_v1` entity ID, then fixed field-name order `label` then `rationale`.
+No classifier outcome or disposition is an implicit sort key.
+
 The classifier reports facts, not policy. Each eligible field receives exactly
 one closed outcome:
 
 - `NO_MATCH`: no category in the pinned selected profiles matched;
-- `MATCH`: one or more sorted, unique stable category IDs matched; or
+- `MATCH`: one or more `utf8_lex_v1`-sorted, unique stable category IDs
+  matched; or
 - `INDETERMINATE`: the field, classifier, ruleset, normalization, taxonomy, or
   required coverage could not be evaluated exactly.
 
@@ -1987,12 +2090,12 @@ size, canonicalization, or ABI disagreement is `INDETERMINATE`.
 
 The eligible-field inventory has exactly one entry for each field above. Each
 entry carries exactly one closed `field_type`: `node_label`, `node_rationale`,
-or `hyperedge_label`. Entries are ordered by entity kind, UTF-8 entity ID, and
-field name. There are at most 30,000 eligible fields: two fields for each of
+or `hyperedge_label`. Entries and field-result records use the fixed entity,
+`utf8_lex_v1` ID, and field-name order above. There are at most 30,000 eligible fields: two fields for each of
 the existing 10,000-node maximum plus one for each of the existing
 10,000-hyperedge maximum. There is exactly one field-result record per eligible
-field, with at most 256 sorted unique category IDs and 256 sorted unique
-private rule IDs. Exceeding any cap is `INDETERMINATE` and produces
+field, with at most 256 `utf8_lex_v1`-sorted unique category IDs and 256
+`utf8_lex_v1`-sorted unique private rule IDs. Exceeding any cap is `INDETERMINATE` and produces
 `REJECT_RELEASE`; no environment or request may enlarge a cap.
 
 ### Policy dispositions and release outcome
@@ -2058,14 +2161,38 @@ identities and digests; scanned node-label, node-rationale, and hyperedge-label
 counts; the complete ordered field-result records; aggregate terminal outcome;
 and `full_result_sha256`. Each field-result record contains only the entity
 kind, private entity ID, field name, exact field-value SHA-256, closed
-classifier outcome, sorted category IDs, sorted private rule IDs, and field
-disposition.
+classifier outcome, `utf8_lex_v1`-ordered category IDs and private rule IDs,
+and field disposition.
 
-`full_result_sha256` is computed over the canonical result object containing
-the eligible-field-inventory digest, all counts, every ordered field-result
-record, and aggregate outcome, with no `full_result_sha256` or
-`binding_sha256` member. The binding contains that digest but never contains
-its own digest. `binding_sha256` is computed only after the complete canonical
+The binding's top-level member set is exactly `contract`, `format_version`,
+`repo_uuid`, `target_generation_id`, `decision_request_sha256`,
+`promoted_entry_sha256`, `bundle_manifest_sha256`,
+`policy_authority_revision`, `policy_authority_sha256`,
+`semantic_input_byte_count`, `semantic_input_sha256`,
+`eligible_field_inventory_sha256`, `taxonomy_sha256`,
+`normalization_sha256`, `classifier_implementation_sha256`,
+`classifier_abi_sha256`, `ruleset_sha256`, `selected_profile_sha256s`,
+`coverage_sufficiency_sha256`, `policy_sha256`, `counts`, `field_results`,
+`terminal_outcome`, and `full_result_sha256`. The selected-profile digest array
+uses the corresponding `utf8_lex_v1` profile-ID order from the decision
+request. `counts` contains exactly `node_label_count`, `node_rationale_count`,
+`hyperedge_label_count`, `field_result_count`, and `matched_field_count`.
+Each `field_results` entry contains exactly `entity_kind`, `entity_id`,
+`field_name`, `field_value_sha256`, `classifier_outcome`, `category_ids`,
+`rule_ids`, and `disposition`, in the canonical field-result order above.
+
+`field_value_sha256` is SHA-256 directly over the exact captured UTF-8 field
+value bytes, with no JSON quoting, newline, terminator, salt, domain prefix,
+renormalization, or case conversion. `category_ids` and `rule_ids` use
+`utf8_lex_v1`. Unknown, missing, duplicated, or additional binding, count, or
+field-result members reject release.
+
+`full_result_sha256` is computed over a canonical result object whose top-level
+member set is exactly `eligible_field_inventory_sha256`, `counts`,
+`field_results`, and `terminal_outcome`, with the exact nested shapes and order
+above and with no `full_result_sha256` or `binding_sha256` member. The binding
+contains that digest but never contains its own digest. `binding_sha256` is
+computed only after the complete canonical
 binding bytes exist and is carried by the derived terminal proof and external
 binding identity. This removes any recursive or implementation-dependent
 digest preimage.
@@ -2165,6 +2292,13 @@ Terminal proof is one locked composition of:
   classifier/ABI/ruleset, profile, policy, field-inventory, result, and binding
   digests; and
 - field and match counts within the frozen bounds and an exact terminal outcome.
+
+The consumer acquires the existing shared registry lock, exclusive workspace
+lock, and target-generation shared lock in that order. While retaining all
+three, it reopens every item above and revalidates all entry, request,
+policy-authority, input, result, and binding coordinates. Any disagreement
+rejects; no proof or allow outcome is exposed before that revalidation completes
+and all three locks are released.
 
 No absent or present artifact alone is success. `REJECTED` is a durable
 decision, not content-release authority. `ALLOW_UNCHANGED` and

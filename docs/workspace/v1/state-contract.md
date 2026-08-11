@@ -914,7 +914,8 @@ stable paths:
 Its at-most-64-KiB format-version-1 current record binds repository UUID, named
 release context, positive monotonic revision, predecessor-record digest or
 genesis marker, `ACTIVE` or `REVOKED`, bundle-manifest digest, selected profile
-IDs/digests, canonical policy ID/version/bytes/digest, and the existing-shaped
+IDs/digests, the closed coverage-sufficiency declaration and digest, canonical
+policy ID/version/bytes/digest, and the existing-shaped
 operator authorization nested inside an at-most-16-KiB version-1
 policy-selection envelope. The envelope explicitly adds internal action
 `SELECT_SEMANTIC_RELEASE_POLICY` and contains `authority_body_sha256`, computed
@@ -922,8 +923,11 @@ over the authority-body projection excluding both the whole envelope and its
 sibling `selection_authorization_sha256`, plus the five fields `action`,
 `issued_at`, `nonce`, `operator_id`, and `reason`. The selection digest hashes
 the completed envelope bytes and is stored only as that sibling; the
-complete-record digest is computed externally over completed record bytes. No digest
-preimage contains its own digest. Missing or
+complete-record digest is computed externally over completed record bytes. The
+exact top-level and nested member sets, array orders, and digest projections are
+the closed canonical sets in
+[`semantic-sync.md`](semantic-sync.md#p5b2-semantic-content-releasedlp-decision).
+No digest preimage contains its own digest. Missing or
 pending state, bad predecessor chain, rollback, revocation, invalid
 authorization, or bundle/policy/profile disagreement fails closed. This child
 consumes but never provisions, advances, repairs, revokes, or cleans that state.
@@ -932,15 +936,15 @@ The canonical decision request contains or binds by digest:
 
 - repository, generation, staged request, manifest, receipt, pointer revision,
   pointer operation epoch/fence, and authoritative journal identity;
-- complete payload inventory, retained handoff, semantic-input, certification
-  binding, and eligible-field-inventory digests;
+- complete payload inventory, retained handoff, semantic-input byte count and
+  digest, certification binding, and eligible-field-inventory digest;
 - installed bundle-manifest identity/digest and current policy-authority
   revision/complete-record digest;
 - distinct taxonomy, normalization, classifier implementation/ABI, ruleset,
   and selected coverage-profile IDs, versions, and manifest-bound SHA-256
   values; and
 - one authority-selected policy ID, version, SHA-256, named release context,
-  and exact coverage-sufficiency declaration.
+  and exact closed coverage-sufficiency declaration and digest.
 
 Canonical bytes produce `decision_request_sha256`. Policy authority is explicit
 and non-ambient. No environment, provider, model, credential, network, live
@@ -949,6 +953,10 @@ unknown category or profile, digest disagreement, missing mapping, or
 insufficient coverage is fail-closed release rejection.
 The canonical decision request is at most 64 KiB. A caller may request only the
 exact current authority and cannot supply policy or bundle bytes.
+It never embeds semantic-input content. The implementation hashes and counts
+the exact target-owned `graphify-out/semantic-inputs.json` bytes under the
+capture locks, classifies those same captured bytes, and requires the final
+locked reread to reproduce both values before install.
 
 The eligible field inventory contains exactly every required node label,
 present optional node rationale, and required hyperedge label. Each entry uses
@@ -956,7 +964,9 @@ exactly one `field_type`: `node_label`, `node_rationale`, or `hyperedge_label`,
 and is ordered by entity kind, UTF-8 entity ID, and field name. There is no
 hyperedge-rationale slot. Each field retains the accepted 16 KiB UTF-8 limit and
 exact canonical normalization. The inventory commits to every entity/field
-identity and exact value SHA-256 without copying field values.
+identity and exact value SHA-256 without copying field values. Each field-value
+digest is over the exact captured UTF-8 value bytes, with no JSON quoting,
+newline, salt, domain prefix, renormalization, or case conversion.
 
 The version-1 classifier ABI operates on exact captured UTF-8 bytes and cannot
 use runtime Unicode categories, locale, renormalization, or host-dependent text
@@ -973,8 +983,14 @@ bundle, request, or environment may enlarge one.
 The closed classifier outcome is `NO_MATCH`, `MATCH`, or `INDETERMINATE`.
 `INDETERMINATE` rejects. `NO_MATCH` produces `ALLOW_FIELD` only under the exact
 coverage-sufficiency declaration; otherwise it rejects. `MATCH` preserves all
-sorted unique category IDs and sorted private rule IDs, and policy maps every
-`(field_type, category_id)` pair. An unknown or unmapped pair rejects; otherwise
+unique category IDs and private rule IDs ordered by `utf8_lex_v1`, which
+compares unsigned canonical UTF-8 bytes lexicographically with the shorter
+exact prefix first and uses no locale, Unicode collation, or runtime text
+ordering. Selected-profile arrays use the same comparator. Complete field
+results use fixed entity-kind order `node` then `hyperedge`, then
+`utf8_lex_v1` entity ID, then field-name order `label` then `rationale`. Policy
+maps every `(field_type, category_id)` pair. An unknown or unmapped pair
+rejects; otherwise
 the pair actions reduce to `ALLOW_FIELD`, `OMIT_RATIONALE`, or `REJECT_RELEASE`
 with rejection over omission over allow. A label cannot receive
 `OMIT_RATIONALE`. The final decision is `ALLOW_UNCHANGED`,
@@ -993,14 +1009,19 @@ authority revisions for one generation without overwriting or substitution.
 Install-once equal bytes are idempotent; same-path different bytes conflict.
 
 The binding contains only entry and authority digests; bundle and current
-policy-authority coordinates; exact input and eligible-field-inventory digests;
+policy-authority coordinates; exact input byte count and digest; the
+eligible-field-inventory digest;
 taxonomy, normalization, classifier/ABI/ruleset, profile, and policy
 coordinates; scanned-field counts; every ordered field-result record; terminal
 outcome; and `full_result_sha256`. A field-result record has entity kind,
-private entity ID, field name, field-value SHA-256, classifier outcome, sorted
-category IDs, sorted private rule IDs, and field disposition. The full-result
+private entity ID, field name, field-value SHA-256, classifier outcome,
+`utf8_lex_v1`-ordered category IDs and private rule IDs, and field disposition.
+The full-result
 digest preimage is the canonical result object containing inventory digest,
 counts, all field-result records, and outcome, excluding both digest members.
+The decision request, full result, and binding use the exact closed top-level
+and nested member sets and preimages frozen in the canonical semantic contract;
+unknown or additional members reject.
 The binding never contains its own digest; external `binding_sha256` is
 computed over completed canonical binding bytes. Raw semantic prose, matched
 substrings, generated explanations, confidence scores, public source locations,
@@ -1016,10 +1037,12 @@ The write boundary uses capture-classify-revalidate-install. Under the existing
 shared registry lock, exclusive workspace lock, then target-generation shared
 lock, the implementation captures the exact promoted proof, installed bundle,
 current policy authority, decision-store counts/capacity, and bounded private
-semantic-input bytes. Classification occurs without coordination locks or
-durable writes. Final revalidation acquires the exclusive registry lock,
-exclusive workspace lock, then shared generation lock; every coordinate, byte
-count, digest, store count, capacity ceiling, and filesystem reserve is
+semantic-input bytes. It places only their exact byte count and digest in the
+decision request. Classification of those same captured bytes occurs without
+coordination locks or durable writes. Final revalidation acquires the exclusive
+registry lock, exclusive workspace lock, then shared generation lock; every
+coordinate, byte count, digest, exact semantic-input reread, store count,
+capacity ceiling, and filesystem reserve is
 revalidated, and the binding is installed once and reopened before those final
 locks are released. The exclusive registry lock serializes global capacity and
 reserve accounting across workspaces. Any drift discards the computed result.
@@ -1040,9 +1063,12 @@ blocks purge of its generation. Any later removal or quarantine must be
 authorized and coordinated with the same generation; no such authority is
 granted here.
 
-Terminal proof is derived, not separately persisted. Under the existing lock
-order it reopens the still-current promoted terminal, exact decision request,
-and immutable binding and proves equal input, taxonomy, normalization,
+Terminal proof is derived, not separately persisted. It takes the shared
+registry lock, exclusive workspace lock, then target-generation shared lock;
+reopens the still-current promoted terminal, exact decision request, stable
+current `ACTIVE` policy authority, and immutable binding; and revalidates every
+entry, request, authority, input, result, and binding coordinate before
+releasing any lock. It proves equal input, taxonomy, normalization,
 classifier/ABI/ruleset, profile, policy, result, and binding digests plus
 bounded counts and one exact terminal outcome. The proof contains no private
 entity/field locator, field-value digest, category ID, or rule ID; an authorized

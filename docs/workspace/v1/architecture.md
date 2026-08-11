@@ -184,14 +184,23 @@ semantic inputs under existing read authority, classifies only node labels,
 optional node rationales, and hyperedge labels outside the coordination locks,
 then reacquires the locks and rejects any authority or byte drift before one
 install-once write.
+The decision request stores only the locked semantic-input byte count and
+SHA-256; it never embeds semantic-input content. Classification uses the exact
+captured bytes, and final locked reread must reproduce both values.
 
 Classification and release policy remain separate authorities. A trusted
 repo-owned installed manifest, never caller input, inventories and digest-binds
 the classifier implementation, byte-defined ABI, taxonomy, normalization,
 ruleset, and selectable profiles. A separate durable operator policy-authority
 store selects one stable current `ACTIVE` revision; older-revision bindings are
-historical candidates only. The deterministic-pattern-only classifier reports
-only `NO_MATCH`, `MATCH` with sorted stable category IDs, or `INDETERMINATE`.
+historical candidates only. The authority embeds a closed version-1
+coverage-sufficiency declaration whose release context and exact selected-profile set
+must match the authority, and whose digest is included in the policy bytes and
+decision request. The deterministic-pattern-only classifier reports only
+`NO_MATCH`, `MATCH` with `utf8_lex_v1`-sorted unique stable category IDs, or
+`INDETERMINATE`. `utf8_lex_v1` compares unsigned canonical UTF-8 bytes with a
+shorter exact prefix first and governs profile, category, rule, and canonical
+result-array ordering without locale or runtime collation.
 Every allow-capable policy requires `core_secrets.v1`; jurisdiction, domain,
 and organization profiles are active only when selected by current authority.
 That policy maps `(field_type, category_id)` pairs
