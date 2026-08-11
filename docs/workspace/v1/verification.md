@@ -1157,26 +1157,117 @@ command, schema, runtime format, runtime receipt, provider/backend, credential,
 networking, migrate, repair, GC, service/watch, publication, P5C, H3, P6+,
 parent completion, execution, or later-successor readiness. P5 and P5B2 remain
 `IN_PROGRESS`; H3 remains `DEFERRED`; this child alone transitions from `READY`
-to `COMPLETE`; remaining P5B2 and P5C work remain `WAITING`; no later successor
-is `READY`.
+to `COMPLETE`; remaining P5B2 and P5C work remained `WAITING` and no later
+successor was `READY` at that acceptance point. The separate current trust-root
+eligibility below does not expand or reopen the accepted promotion boundary.
+
+## P5B2 semantic-release bundle and deterministic-classifier trust-root readiness gates
+
+This documentation-only reconciliation records exactly one proposed unnumbered
+P5B2 prerequisite as `READY`: the semantic-release bundle and
+deterministic-classifier trust root. `READY` is implementation eligibility only. It proves no
+implementation, package data, test completion, acceptance, receipt, execution,
+release, or publication authority.
+
+The reconciliation is exact-head-bound to pre-edit `workspace/v1` commit
+`d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
+`904a91047bcdbaae724d9688c586ec88fd3198f7`, clean divergence `0/0`, one
+worktree, and zero open pull requests. PR #66 head
+`772fd8809f6784c9cc859dcc654bfcdf873df40f` and merge/current commit have the
+same tree; all nine review threads are resolved; exact-head CI run `31519403573`
+and post-merge CI run `31521042681` passed `skillgen-check`, `test (3.14)`, and
+`security-scan`. The generated Graphify report remains stale orientation from
+`2ab6a4060a2c132b89e79dcd21a12292b69f2b89` and is not readiness authority.
+
+The trust-root subchild is independently implementable only because the
+canonical semantic contract freezes all of these gates without consulting or
+inventing operator policy or decision-store behavior:
+
+- scope is exactly the repo-owned installed
+  `graphify/workspace/semantic_release_manifest.json`, manifest-inventoried
+  deterministic classifier implementation and byte ABI, closed taxonomy,
+  normalization contract, ordered ruleset, required `core_secrets.v1`, and
+  selectable coverage-profile artifacts;
+- the manifest is at most 1 MiB, uses one canonical installed `graphify` package
+  root, and binds every unique sorted package-relative inventory entry through
+  the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`
+  members plus only its kind-specific ID/version pair. Profile entries add
+  exactly `profile_id` and `profile_version`; the positive integer version must
+  equal the no-leading-zero terminal `.vN` component of the profile ID. Total
+  referenced bundle bytes are at most 25 MiB;
+- path validation rejects absolute, empty, dot/dotdot, repeated-separator,
+  backslash, NUL/control, alias, symlink-at-any-component, hard-link,
+  special-file, unsafe-mode, containment, size, and digest cases. Accepted
+  artifacts are descriptor-relative no-follow, single-link regular files of
+  exact mode `0444` or `0644` beneath the installed package root;
+- the byte ABI is deterministic-pattern-only over explicit already-canonical
+  bounded UTF-8 bytes and freezes grammar, dictionary encoding, comparison,
+  `utf8_lex_v1` ordering, duplicate reduction, rule ordering, ASCII-only
+  syntax-name fold, and error behavior. It cannot use runtime Unicode
+  categories, locale, renormalization, ML, embeddings, statistical/entropy
+  scores, opaque detectors, generated inference, or contextual judgment;
+- classifier facts are only `NO_MATCH`, `MATCH`, or `INDETERMINATE`; matches
+  preserve unique stable category IDs in `utf8_lex_v1` order. Any unknown,
+  unsupported, ambiguous, oversized, or unexecutable manifest, artifact, ABI,
+  taxonomy, normalization, ruleset, profile, category, or limit is
+  `INDETERMINATE`. `NO_MATCH` is never a release-safety or coverage claim;
+- taxonomy, classifier implementation, ABI, normalization, ruleset, and
+  profiles have distinct identities and digests. Installing a profile never
+  selects it. The installed bundle must include exact explicit-evidence-only
+  `core_secrets.v1` with the frozen complete private-key, credential-URI,
+  authorization-credential, credential-assignment, provider-credential, and
+  seed/recovery categories; it excludes entropy-only, bare-hash, UUID,
+  arbitrary-Base64, vague-prose, and example/test exemptions;
+- optional jurisdictional, domain, and organization profiles are repo-owned
+  selectable artifacts only. Workspace/release-context selection and coverage
+  sufficiency remain separate operator-policy responsibilities;
+- bundle validation enforces the frozen independent caps before unbounded work:
+  4,096 taxonomy categories, 4,096 rules, and 256 UTF-8 bytes for any
+  classifier, ABI, taxonomy, ruleset, normalization, profile, category, or rule
+  ID. No caller or environment can enlarge a cap; and
+- the implementation stop boundary is installed-bundle loading/validation and
+  deterministic factual classification over explicit bytes. It must not read
+  promoted-generation or semantic-input state, choose active profiles, provision
+  policy authority, map dispositions, create `SemanticReleaseDecisionStore`,
+  integrate capacity/GC, execute omission, project content, add a public
+  CLI/schema/receipt, invoke a provider/backend, or publish.
+
+A later implementation review must prove positive and hostile
+installed-manifest fixtures, every no-follow/path/mode/size/digest rejection, byte-exact
+cross-run classifier vectors, taxonomy/profile identity separation, duplicate
+or mismatched kind-specific coordinates, profile ID/version/suffix disagreement,
+`core_secrets.v1` category behavior, limit rejection, and absence of ambient or
+workspace authority reads. Those are future implementation/acceptance gates,
+not evidence that this documentation change delivered them.
+
+P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP
+decision, policy-authority provisioning, `SemanticReleaseDecisionStore`,
+capacity/GC integration, classification composition, omission execution,
+projection, public surfaces, provider/backend, publication, remaining P5B2
+work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
+`READY`.
 
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
-This proposed unnumbered P5B2 child is documentation-only and remains
-`WAITING`. The freeze is complete only when all seven maintained-current
-documents agree and the diff changes no code, tests, schemas, fixtures,
-receipts, generated Graphify output, JOS row, or runtime artifact:
+This encompassing proposed unnumbered P5B2 child is documentation-only and
+remains `WAITING`. It consumes the trust-root contract above but cannot become
+`READY` until that prerequisite is implemented and separately accepted and its
+operator-policy, decision-store, capacity/GC, and composition prerequisites
+exist. The freeze is complete only when all seven maintained-current documents
+agree and the diff changes no code, tests, schemas, fixtures, receipts,
+generated Graphify output, JOS row, or runtime artifact:
 
-- `README.md` indexes the child and preserves the parent and successor status;
-- `architecture.md` keeps the repo-owned deterministic classifier separate
-  from the operator-selected release policy and private terminal proof;
-- `semantic-sync.md` is the canonical semantic contract;
+- `README.md` indexes the `READY` trust-root prerequisite separately from the
+  encompassing `WAITING` decision child and preserves parent/successor status;
+- `architecture.md` keeps the repo-owned deterministic classifier separate from
+  operator policy, semantic-field composition, and private terminal proof;
+- `semantic-sync.md` is the canonical semantic contract and status split;
 - `state-contract.md` freezes the immutable request-addressed binding,
   capture/revalidation/install sequence, replay, and commit-unknown behavior;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records the exact accepted predecessor and the child as
-  contract-frozen but not ready or accepted; and
+- `governance.md` records exact PR #66 provenance, only the trust-root
+  prerequisite as `READY`, and the encompassing child as `WAITING`; and
 - this file freezes the evidence and validation gates without creating an
   acceptance receipt.
 
@@ -1351,9 +1442,14 @@ output is not refreshed because no code changes and this batch expressly
 excludes generated artifacts.
 
 Passing those gates establishes only documentation consistency. It leaves P5
-and P5B2 `IN_PROGRESS`, this child and remaining P5B2/P5C work `WAITING`, H3
-`DEFERRED`, `JOS-SEMANTIC-RATIONALE-PROJECTION` `OPPORTUNISTIC`, and no later
-successor `READY`.
+and P5B2 `IN_PROGRESS` and records only the trust-root prerequisite as `READY`
+for implementation eligibility. The encompassing decision child,
+operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
+integration, classification composition, omission execution, projection,
+public surfaces, provider/backend, publication, and remaining P5B2/P5C work
+remain `WAITING`; H3 remains `DEFERRED`,
+`JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC`, and no later
+successor is `READY`.
 
 ## P5B2 public fenced pointer-repair CLI gates
 

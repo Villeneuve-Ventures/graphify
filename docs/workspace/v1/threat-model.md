@@ -421,10 +421,53 @@ immutable semantic binding, so pointer movement cannot silently rewrite or
 recertify semantic content. This contract makes no content-level DLP, release,
 query-safety, correctness, or publication claim.
 
+## Semantic-release bundle and deterministic-classifier trust-root threats
+
+The proposed unnumbered P5B2 semantic-release bundle and
+deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
+only. Its bounded threat surface is installed repo-owned package data, not a
+workspace, operator, provider, network, or release authority.
+
+The trust root rejects caller or ambient substitution by anchoring one installed
+`graphify/workspace/semantic_release_manifest.json` beneath the canonical
+installed package root and digest-binding the classifier implementation,
+byte-defined ABI, taxonomy, normalization, ruleset, required
+`core_secrets.v1`, and every selectable profile. Unique sorted
+relative-normal-form paths, descriptor-relative no-follow traversal,
+single-link regular-file proof, exact read-only-compatible mode, size, digest,
+and hard limits reject absolute, dot/dotdot, alias, symlink, hard-link,
+special-file, unsafe-mode, oversized, foreign, duplicated, or unlisted
+artifacts before use. Exact kind-specific ID/version inventory members also
+reject a profile whose `profile_id`, terminal `.vN`, `profile_version`, or
+manifest-bound digest disagrees with the selected coordinate.
+
+Host-runtime disagreement is contained by the deterministic-pattern-only byte
+ABI: exact pinned grammar and dictionaries, `utf8_lex_v1`, explicit ASCII fold
+only for syntax names, and frozen comparison, match ordering, duplicate
+reduction, and error semantics. Runtime Unicode categories, locale,
+renormalization, ML, entropy scoring, provider output, and contextual judgment
+cannot silently change a result. Unknown or unexecutable ABI, taxonomy,
+normalization, ruleset, profile, category, or limit state produces
+`INDETERMINATE`; `NO_MATCH` remains only a factual classifier outcome, never a
+release-safety claim.
+
+Taxonomy and selectable-profile identities remain distinct so installation of
+a profile never activates it. `core_secrets.v1` is present as the required
+explicit-evidence-only base profile, while jurisdictional, domain, and
+organization profiles remain inert until a later operator authority selects
+them. This subchild owns no policy selection, field composition, disposition,
+decision binding, capacity/GC accounting, omission, projection, public
+transport, provider/backend, or publication behavior and has no implementation
+or acceptance receipt.
+
 ## Semantic-content release/DLP decision threats
 
-The proposed unnumbered P5B2 semantic-content release/DLP decision child is
-contract-frozen only and remains `WAITING`. It begins only from the complete
+The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
+child is contract-frozen only and remains `WAITING`. The separate trust-root
+prerequisite above is only `READY`, not implemented or accepted; operator
+policy-authority provisioning, decision-store capacity/GC integration,
+classification composition, and the other decision prerequisites also remain
+absent. The decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
 promoted generation, visible pointer, staged marker, receipt, handoff, semantic
 input, certification binding, or historical release-decision binding is not
@@ -564,6 +607,13 @@ exclusive workspace, then target-generation shared locks; reopens the exact
 current promotion terminal, request, current `ACTIVE` policy authority, and
 binding; and revalidates every entry, authority, input, result, and binding
 coordinate before releasing the locks.
+
+P5 and P5B2 remain `IN_PROGRESS`; only the trust-root prerequisite is `READY`
+for implementation eligibility. The encompassing release/DLP decision,
+operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
+integration, classification composition, omission execution, projection,
+public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
+remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Explicit non-claims
 
