@@ -65,7 +65,17 @@ def _install_wheel_without_dependencies(
         venv.EnvBuilder(with_pip=True).create(venv_dir)
     python, scripts = _venv_paths(venv_dir)
     command = (
-        [uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)]
+        [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            str(python),
+            "--no-deps",
+            "--link-mode",
+            "copy",
+            str(wheel),
+        ]
         if uv
         else [str(python), "-m", "pip", "install", "--no-deps", str(wheel)]
     )
