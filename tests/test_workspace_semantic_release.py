@@ -327,6 +327,7 @@ def test_profiles_are_explicit_validated_input_and_never_ambient(
         b"line\xc2\x85break",
         b"\xff",
         b"x" * (FIELD_MAX_BYTES + 1),
+        b"ghp_abcdefghijklmnopqrstuvwxyz0123456789\ncafe\xcc\x81",
     ],
 )
 def test_invalid_or_out_of_contract_field_bytes_are_indeterminate(field: bytes) -> None:
@@ -573,6 +574,25 @@ def test_descriptor_relative_file_identity_and_inventory_fail_closed(
     _select_bundle(monkeypatch, root)
     with pytest.raises(SemanticReleaseBundleError):
         load_installed_semantic_release_bundle()
+
+
+def test_data_inventory_depth_limit_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    nested = root / DATA_RELATIVE / "hostile"
+    nested.mkdir()
+    for _ in range(semantic_release._MAX_DIRECTORY_DEPTH + 1):
+        nested /= "d"
+        nested.mkdir()
+
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="inventory exceeds depth limit"):
+        load_installed_semantic_release_bundle()
+    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
+        "INDETERMINATE"
+    )
 
 
 def test_post_read_identity_revalidation_rejects_a_read_race(

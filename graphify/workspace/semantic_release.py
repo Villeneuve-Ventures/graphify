@@ -39,6 +39,7 @@ _FORMAT_VERSION = 1
 _COMPATIBILITY_VERSION = 1
 _READ_CHUNK_BYTES = 1024 * 1024
 _MAX_DIRECTORY_ENTRIES = 8_192
+_MAX_DIRECTORY_DEPTH = 8
 _ALLOWED_FILE_MODES = frozenset({0o444, 0o644})
 _ARTIFACT_KINDS = frozenset(
     {"classifier", "classifier_abi", "taxonomy", "normalization", "ruleset", "profile"}
@@ -751,8 +752,12 @@ def _scan_data_inventory(package_root: Path) -> set[str]:
             bindings.append((component, parent, child))
             parent = child
 
-        def scan(descriptor: int, relative: PurePosixPath) -> None:
+        def scan(descriptor: int, relative: PurePosixPath, depth: int = 0) -> None:
             nonlocal total_entries
+            if depth > _MAX_DIRECTORY_DEPTH:
+                raise SemanticReleaseBundleError(
+                    "semantic-release data inventory exceeds depth limit"
+                )
             before = os.fstat(descriptor)
             try:
                 with os.scandir(descriptor) as entries:
@@ -777,7 +782,7 @@ def _scan_data_inventory(package_root: Path) -> set[str]:
                         raise SemanticReleaseBundleError(
                             "semantic-release data directory binding changed"
                         )
-                    scan(child, child_relative)
+                    scan(child, child_relative, depth + 1)
                     rebound = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
                     if _stat_identity(rebound) != _stat_identity(opened):
                         raise SemanticReleaseBundleError(
@@ -1172,6 +1177,8 @@ def _valid_field_bytes(value: object) -> bytes | None:
     except UnicodeDecodeError:
         return None
     if not text:
+        return None
+    if text != unicodedata.normalize("NFC", text):
         return None
     if ord(text[0]) in _PINNED_TRIM_CODE_POINTS or ord(text[-1]) in _PINNED_TRIM_CODE_POINTS:
         return None
