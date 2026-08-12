@@ -7,6 +7,8 @@ This builds the wheel once and asserts every committed skill artifact ships in i
 """
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
 import importlib.util
 import json
@@ -244,6 +246,35 @@ def test_wheel_ships_pre_import_bootstrap_scripts(
             assert "_GRAPHIFY_BOOTSTRAP_ISOLATED" not in raw
             assert "sys.pycache_prefix = prefix" in raw
             assert raw.index("sys.pycache_prefix = prefix") < raw.index(target_import)
+
+
+def test_wheel_record_binds_bootstrap_and_classifier_source(
+    wheel_build: tuple[set[str], str, str, Path],
+) -> None:
+    names, _, _, wheel = wheel_build
+    record_names = [name for name in names if name.endswith(".dist-info/RECORD")]
+    assert len(record_names) == 1
+    with zipfile.ZipFile(wheel) as archive:
+        rows = {
+            path: (digest, byte_count)
+            for path, digest, byte_count in csv.reader(
+                archive.read(record_names[0]).decode("utf-8").splitlines()
+            )
+        }
+        protected = {
+            "graphify/workspace/semantic_release.py",
+            *{
+                name
+                for name in names
+                if name.endswith(".data/scripts/graphify")
+                or name.endswith(".data/scripts/graphify-mcp")
+            },
+        }
+        assert len(protected) == 3
+        for name in protected:
+            raw = archive.read(name)
+            digest = base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b"=")
+            assert rows[name] == (f"sha256={digest.decode('ascii')}", str(len(raw)))
 
 
 def test_installed_graphify_script_ignores_package_local_bytecode_cache(

@@ -913,6 +913,15 @@ therefore untrusted and ignored for the installed executable path. Direct
 library imports that bypass this bootstrap are not semantic-release decision
 authority.
 
+That pre-import boundary has an explicit external integrity prerequisite. The
+CPython executable and standard library, an installer that verifies the chosen
+wheel and its `RECORD`, the installed bootstrap source, and post-install
+filesystem protection of bootstrap and package-source bytes are in the trusted
+computing base. The wheel `RECORD` binds both bootstrap scripts and
+`semantic_release.py`; runtime code does not claim to authenticate instructions
+that have already begun executing. Package-local bytecode caches remain
+untrusted and outside this prerequisite.
+
 The manifest-bound classifier is deterministic-pattern-only and operates on
 explicit already-canonical bounded UTF-8 bytes. Its exact grammar, dictionary
 encoding, byte comparison, ordering, duplicate reduction, ASCII-only

@@ -84,6 +84,15 @@ set a fresh private package-external `sys.pycache_prefix`; and disable bytecode
 writes before any Graphify module import. Direct library imports that bypass
 this bootstrap are not semantic-release decision authority.
 
+This does not make the package its own first-instruction trust anchor. The
+CPython executable and standard library, an installer that verifies the
+selected wheel and its `RECORD`, the installed bootstrap source, and
+post-install filesystem protection of bootstrap and package-source bytes are
+explicit trusted-computing-base prerequisites. The wheel `RECORD` binds the
+bootstrap and classifier source. Hostile package-local bytecode is excluded;
+hostile source, launcher, interpreter, or standard-library substitution must be
+rejected by that external installation/runtime integrity boundary.
+
 State-root policy requires expected ownership, `0700` directories, `0600`
 mutable records, exclusive creation, safe umask/ACL behavior, descriptor-relative
 no-follow traversal, regular-file-only payloads, path containment, and rejection

@@ -1778,6 +1778,16 @@ executable bootstrap needed to establish that root before Graphify imports:
 
 The manifest and referenced artifacts are never caller, workspace, operator,
 provider, backend, model, credential, network, environment, or policy input.
+This candidate does not self-authenticate the instructions that establish its
+first import boundary. The CPython executable and standard library, an
+installer that verifies the selected wheel and its `RECORD`, the installed
+source-executed bootstrap bytes, and post-install filesystem protection of the
+bootstrap and package source are explicit trusted-computing-base prerequisites.
+The wheel `RECORD` binds both bootstrap scripts and the classifier source; it is
+the external installer and operating environment, not classifier code that has
+already started executing, that must reject source or launcher substitution.
+Package-local bytecode caches remain outside that prerequisite and are ignored
+by the installed executable path.
 The exact installed-root, path-normal-form, descriptor-relative no-follow,
 single-link regular-file, mode, size, digest, deterministic-pattern-only ABI,
 `utf8_lex_v1`, taxonomy/profile separation, `core_secrets.v1`, hard-limit, and
@@ -2080,6 +2090,13 @@ disabled, and safe-path mode enabled, set a fresh private package-external
 `sys.pycache_prefix`, and disabled bytecode writes. Source-tree `__pycache__`
 entries are ignored in that runtime path. A direct library import that bypasses
 this pre-import bootstrap is not semantic-release decision authority.
+
+The bootstrap boundary assumes the CPython executable, frozen import
+machinery, standard library, wheel installer/`RECORD` verification, installed
+bootstrap source, and post-install package-source integrity. It does not claim
+to authenticate those already-executing prerequisites from inside the package.
+If an operator cannot establish them, no installed invocation is
+semantic-release decision authority even when bundle validation later succeeds.
 
 Version 1 also uses one byte-defined classifier ABI. It scans the exact
 captured UTF-8 byte sequence of each already-validated canonical field. The ABI
