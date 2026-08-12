@@ -51,6 +51,12 @@ REALISTIC_RSA_PRIVATE_KEY_WITH_SHORT_FINAL_LINE = (
     b"pIlQI18OlGV4aHI=\n"
     b"-----END PRIVATE KEY-----"
 )
+STANDARD_OPENSSH_PRIVATE_KEY_WITH_70_COLUMN_WRAPPING = (
+    b"-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    + (b"A" * 70 + b"\n") * 5
+    + b"AAAAAA\n"
+    + b"-----END OPENSSH PRIVATE KEY-----"
+)
 
 
 def _canonical_load(path: Path) -> dict[str, object]:
@@ -203,7 +209,12 @@ def test_installed_bundle_manifest_and_inventory_are_exact() -> None:
             "secret.private_key_material",
         ),
         (REALISTIC_RSA_PRIVATE_KEY_WITH_SHORT_FINAL_LINE, "secret.private_key_material"),
+        (
+            STANDARD_OPENSSH_PRIVATE_KEY_WITH_70_COLUMN_WRAPPING,
+            "secret.private_key_material",
+        ),
         (b"postgresql://service:swordfish@example.test/db", "secret.credential_uri"),
+        (b"postgresql://service:changeme@example.test/db", "secret.credential_uri"),
         (
             b"Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==",
             "secret.authorization_credential",
@@ -265,16 +276,18 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
             b"not-valid-base64-material-not-valid\n"
             b"-----END PRIVATE KEY-----"
         ),
+        (b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 64 + b"\nQU=J\n-----END PRIVATE KEY-----"),
+        (b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 68 + b"\nQUJDRA==\n-----END PRIVATE KEY-----"),
         (
-            b"-----BEGIN PRIVATE KEY-----\n"
-            + b"A" * 64
-            + b"\nQU=J\n"
-            b"-----END PRIVATE KEY-----"
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + b"A" * 69 + b"\nAAAAAAA=\n"
+            b"-----END OPENSSH PRIVATE KEY-----"
         ),
         (
-            b"-----BEGIN PRIVATE KEY-----\n"
-            + b"A" * 68
-            + b"\nQUJDRA==\n"
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + b"A" * 70 + b"\nAAAA=\n"
+            b"-----END OPENSSH PRIVATE KEY-----"
+        ),
+        (
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + b"A" * 70 + b"\nAAAAAA\n"
             b"-----END PRIVATE KEY-----"
         ),
         b"seed words might appear in this ordinary sentence",
@@ -313,7 +326,9 @@ def test_profiles_are_explicit_validated_input_and_never_ambient(
     assert classify_canonical_bytes(field, unknown).outcome == "INDETERMINATE"
     bad_suffix = (ProfileCoordinate("core_secrets.v2", 1),)
     assert classify_canonical_bytes(field, bad_suffix).outcome == "INDETERMINATE"
-    too_many = tuple(ProfileCoordinate(f"profile_{index}.v1", 1) for index in range(MAX_PROFILES + 1))
+    too_many = tuple(
+        ProfileCoordinate(f"profile_{index}.v1", 1) for index in range(MAX_PROFILES + 1)
+    )
     assert classify_canonical_bytes(field, too_many).outcome == "INDETERMINATE"
 
 
@@ -490,6 +505,54 @@ def test_manifest_structure_order_coordinates_and_members_fail_closed(
 
 
 @pytest.mark.parametrize(
+    ("kind", "field"),
+    [
+        (None, "format_version"),
+        (None, "compatibility_version"),
+        ("classifier_abi", "format_version"),
+        ("classifier_abi", "abi_version"),
+        ("normalization", "format_version"),
+        ("normalization", "normalization_version"),
+        ("taxonomy", "format_version"),
+        ("taxonomy", "taxonomy_version"),
+        ("ruleset", "format_version"),
+        ("ruleset", "ruleset_version"),
+        ("ruleset", "taxonomy_version"),
+        ("profile", "format_version"),
+        ("profile", "profile_version"),
+        ("profile", "taxonomy_version"),
+    ],
+)
+def test_boolean_versions_fail_closed(
+    kind: str | None,
+    field: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    if kind is None:
+        manifest[field] = True
+    else:
+        entry = (
+            _profile_entry(manifest, "core_secrets.v1")
+            if kind == "profile"
+            else _entry(manifest, kind=kind)
+        )
+        document = _canonical_load(_artifact_path(root, entry))
+        document[field] = True
+        _write_artifact_json(root, entry, document)
+    _write_manifest(root, manifest)
+
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="positive integer"):
+        load_installed_semantic_release_bundle()
+    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
+        "INDETERMINATE"
+    )
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "/absolute.json",
@@ -595,6 +658,59 @@ def test_data_inventory_depth_limit_fails_closed(
     )
 
 
+def test_data_inventory_limit_is_enforced_before_sorting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_details = (PACKAGE_ROOT / DATA_RELATIVE).stat()
+    data_identity = (data_details.st_dev, data_details.st_ino)
+    original_scandir = semantic_release.os.scandir
+
+    class OverflowingEntries:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def __iter__(self):
+            for index in range(semantic_release._MAX_DIRECTORY_ENTRIES + 1):
+                yield type("Entry", (), {"name": f"entry-{index:05d}"})()
+            raise AssertionError("inventory iterator was consumed past the hard limit")
+
+    def bounded_scandir(path: int | str | bytes | os.PathLike[str]):
+        if isinstance(path, int):
+            details = os.fstat(path)
+            if (details.st_dev, details.st_ino) == data_identity:
+                return OverflowingEntries()
+        return original_scandir(path)
+
+    monkeypatch.setattr(semantic_release.os, "scandir", bounded_scandir)
+    with pytest.raises(SemanticReleaseBundleError, match="inventory exceeds limit"):
+        semantic_release._scan_data_inventory(PACKAGE_ROOT)
+
+
+def test_excessive_json_nesting_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    entry = _entry(manifest, kind="taxonomy")
+    depth = sys.getrecursionlimit() + 50
+    path = _artifact_path(root, entry)
+    path.write_bytes(b'{"a":' * depth + b"0" + b"}" * depth + b"\n")
+    path.chmod(0o644)
+    _refresh_entry(root, entry)
+    _write_manifest(root, manifest)
+
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="JSON nesting exceeds supported depth"):
+        load_installed_semantic_release_bundle()
+    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
+        "INDETERMINATE"
+    )
+
+
 def test_post_read_identity_revalidation_rejects_a_read_race(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -608,7 +724,9 @@ def test_post_read_identity_revalidation_rejects_a_read_race(
     def racing_read(descriptor: int, max_bytes: int) -> bytes:
         nonlocal raced
         raw = original_read(descriptor, max_bytes)
-        if not raced and raw.startswith(b'{"contract":"graphify.workspace.semantic_release_ruleset'):
+        if not raced and raw.startswith(
+            b'{"contract":"graphify.workspace.semantic_release_ruleset'
+        ):
             raced = True
             target.write_bytes(target.read_bytes() + b" ")
         return raw
@@ -616,6 +734,31 @@ def test_post_read_identity_revalidation_rejects_a_read_race(
     monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
     _select_bundle(monkeypatch, root)
     with pytest.raises(SemanticReleaseBundleError, match="changed during read"):
+        load_installed_semantic_release_bundle()
+    assert raced
+
+
+def test_final_inventory_revalidation_rejects_an_unlisted_file_race(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    original_read = semantic_release._read_chunks
+    raced = False
+
+    def racing_read(descriptor: int, max_bytes: int) -> bytes:
+        nonlocal raced
+        raw = original_read(descriptor, max_bytes)
+        if not raced and raw.startswith(b'"""Internal P5B2 semantic-release'):
+            raced = True
+            extra = root / DATA_RELATIVE / "foreign.json"
+            extra.write_bytes(b"{}\n")
+            extra.chmod(0o644)
+        return raw
+
+    monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="missing or unlisted"):
         load_installed_semantic_release_bundle()
     assert raced
 

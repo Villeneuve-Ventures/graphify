@@ -41,6 +41,9 @@ _READ_CHUNK_BYTES = 1024 * 1024
 _MAX_DIRECTORY_ENTRIES = 8_192
 _MAX_DIRECTORY_DEPTH = 8
 _ALLOWED_FILE_MODES = frozenset({0o444, 0o644})
+_PLACEHOLDER_EXCLUSION_RULE_IDS = frozenset(
+    {"core.assignment.bare.v1", "core.assignment.quoted.v1"}
+)
 _ARTIFACT_KINDS = frozenset(
     {"classifier", "classifier_abi", "taxonomy", "normalization", "ruleset", "profile"}
 )
@@ -189,12 +192,23 @@ _RULE_DOCUMENTS = (
         "credential_group": None,
         "matcher": "byte_regex_search_v1",
         "pattern": (
-            r"-----BEGIN (?P<label>(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----"
+            r"(?:-----BEGIN (?P<label>(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----"
             r"\r?\n(?:(?:[A-Za-z0-9+/]{4}){16}\r?\n)+"
             r"(?:(?:[A-Za-z0-9+/]{4}){1,16}|"
             r"(?:[A-Za-z0-9+/]{4}){0,15}[A-Za-z0-9+/]{3}=|"
             r"(?:[A-Za-z0-9+/]{4}){0,15}[A-Za-z0-9+/]{2}==)"
-            r"\r?\n-----END (?P=label)-----"
+            r"\r?\n-----END (?P=label)-----|"
+            r"-----BEGIN OPENSSH PRIVATE KEY-----\r?\n(?:"
+            r"(?:(?:[A-Za-z0-9+/]{70}\r?\n){2})+"
+            r"(?:(?:[A-Za-z0-9+/]{4}){1,17}|"
+            r"(?:[A-Za-z0-9+/]{4}){0,16}[A-Za-z0-9+/]{3}=|"
+            r"(?:[A-Za-z0-9+/]{4}){0,16}[A-Za-z0-9+/]{2}==)|"
+            r"(?:[A-Za-z0-9+/]{70}\r?\n)"
+            r"(?:(?:[A-Za-z0-9+/]{70}\r?\n){2})*"
+            r"(?:(?:[A-Za-z0-9+/]{4}){0,17}[A-Za-z0-9+/]{2}|"
+            r"(?:[A-Za-z0-9+/]{4}){0,17}[A-Za-z0-9+/]=|"
+            r"(?:[A-Za-z0-9+/]{4}){1,17}==))"
+            r"\r?\n-----END OPENSSH PRIVATE KEY-----)"
         ),
         "rule_id": "core.pem.private_key.v1",
     },
@@ -516,7 +530,9 @@ def _read_package_file(
                 raise SemanticReleaseBundleError("semantic-release manifest exceeds 1 MiB")
             raise SemanticReleaseBundleError(f"{relative_path}: artifact exceeds bounded size")
         if expected_byte_count is not None and before.st_size != expected_byte_count:
-            raise SemanticReleaseBundleError(f"{relative_path}: artifact size differs from manifest")
+            raise SemanticReleaseBundleError(
+                f"{relative_path}: artifact size differs from manifest"
+            )
 
         raw = _read_chunks(descriptor, max_bytes)
         after = os.fstat(descriptor)
@@ -532,7 +548,9 @@ def _read_package_file(
             raise SemanticReleaseBundleError(f"{relative_path}: artifact changed during read")
         _revalidate_directories(package_root, root_descriptor, bindings, root_identity)
         if expected_sha256 is not None and hashlib.sha256(raw).hexdigest() != expected_sha256:
-            raise SemanticReleaseBundleError(f"{relative_path}: artifact digest differs from manifest")
+            raise SemanticReleaseBundleError(
+                f"{relative_path}: artifact digest differs from manifest"
+            )
         return raw
     except SemanticReleaseBundleError:
         raise
@@ -579,12 +597,16 @@ def _canonical_json_document(raw: bytes, label: str) -> dict[str, object]:
         value = json.loads(raw, object_pairs_hook=_duplicate_pairs)
     except SemanticReleaseBundleError:
         raise
+    except RecursionError as exc:
+        raise SemanticReleaseBundleError(f"{label}: JSON nesting exceeds supported depth") from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise SemanticReleaseBundleError(f"{label}: malformed UTF-8 JSON") from exc
     if not isinstance(value, dict):
         raise SemanticReleaseBundleError(f"{label}: expected JSON object")
     try:
         expected = canonical_json_bytes(value)
+    except RecursionError as exc:
+        raise SemanticReleaseBundleError(f"{label}: JSON nesting exceeds supported depth") from exc
     except ContractError as exc:
         raise SemanticReleaseBundleError(f"{label}: JSON is not canonical") from exc
     if raw != expected:
@@ -617,7 +639,9 @@ def _identifier(value: object, label: str) -> str:
     return value
 
 
-def _profile_coordinate(profile_id: object, profile_version: object, label: str) -> ProfileCoordinate:
+def _profile_coordinate(
+    profile_id: object, profile_version: object, label: str
+) -> ProfileCoordinate:
     identifier = _identifier(profile_id, f"{label}.profile_id")
     version = _positive_integer(profile_version, f"{label}.profile_version")
     if _PROFILE_ID_RE.fullmatch(identifier) is None:
@@ -694,9 +718,18 @@ def _manifest_document(raw: bytes) -> tuple[dict[str, object], tuple[BundleArtif
     )
     if manifest["contract"] != _MANIFEST_CONTRACT:
         raise SemanticReleaseBundleError("semantic-release manifest contract is unsupported")
-    if manifest["format_version"] != _FORMAT_VERSION:
+    if (
+        _positive_integer(manifest["format_version"], "semantic-release manifest.format_version")
+        != _FORMAT_VERSION
+    ):
         raise SemanticReleaseBundleError("semantic-release manifest format version is unsupported")
-    if manifest["compatibility_version"] != _COMPATIBILITY_VERSION:
+    if (
+        _positive_integer(
+            manifest["compatibility_version"],
+            "semantic-release manifest.compatibility_version",
+        )
+        != _COMPATIBILITY_VERSION
+    ):
         raise SemanticReleaseBundleError(
             "semantic-release manifest compatibility version is unsupported"
         )
@@ -761,16 +794,20 @@ def _scan_data_inventory(package_root: Path) -> set[str]:
             before = os.fstat(descriptor)
             try:
                 with os.scandir(descriptor) as entries:
-                    names = sorted(
-                        (entry.name for entry in entries),
-                        key=lambda value: value.encode("utf-8"),
-                    )
+                    names: list[str] = []
+                    for entry in entries:
+                        total_entries += 1
+                        if total_entries > _MAX_DIRECTORY_ENTRIES:
+                            raise SemanticReleaseBundleError(
+                                "semantic-release data inventory exceeds limit"
+                            )
+                        names.append(entry.name)
+                    names.sort(key=lambda value: value.encode("utf-8"))
             except OSError as exc:
-                raise SemanticReleaseBundleError("semantic-release data inventory is unreadable") from exc
+                raise SemanticReleaseBundleError(
+                    "semantic-release data inventory is unreadable"
+                ) from exc
             for name in names:
-                total_entries += 1
-                if total_entries > _MAX_DIRECTORY_ENTRIES:
-                    raise SemanticReleaseBundleError("semantic-release data inventory exceeds limit")
                 _validated_relative_path(name, "semantic-release data entry")
                 details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
                 child_relative = relative / name
@@ -828,10 +865,8 @@ def _document_coordinate(
     version_field: str,
     label: str,
 ) -> None:
-    if (
-        document.get(id_field) != artifact.artifact_id
-        or document.get(version_field) != artifact.artifact_version
-    ):
+    version = _positive_integer(document.get(version_field), f"{label}.{version_field}")
+    if document.get(id_field) != artifact.artifact_id or version != artifact.artifact_version:
         raise SemanticReleaseBundleError(f"{label}: artifact coordinate differs from manifest")
 
 
@@ -862,6 +897,7 @@ def _validate_abi(document: dict[str, object], artifact: BundleArtifact) -> None
     }
     _exact_members(document, set(expected), "classifier ABI")
     _document_coordinate(document, artifact, "abi_id", "abi_version", "classifier ABI")
+    _positive_integer(document["format_version"], "classifier ABI.format_version")
     if document != expected:
         raise SemanticReleaseBundleError("classifier ABI semantics are unsupported")
 
@@ -897,6 +933,7 @@ def _validate_normalization(document: dict[str, object], artifact: BundleArtifac
         "normalization_version",
         "normalization",
     )
+    _positive_integer(document["format_version"], "normalization.format_version")
     if document != expected:
         raise SemanticReleaseBundleError("normalization semantics are unsupported")
 
@@ -913,7 +950,7 @@ def _validate_taxonomy(
     _document_coordinate(document, artifact, "taxonomy_id", "taxonomy_version", "taxonomy")
     if (
         document["contract"] != "graphify.workspace.semantic_release_taxonomy.internal"
-        or document["format_version"] != 1
+        or _positive_integer(document["format_version"], "taxonomy.format_version") != 1
         or artifact.artifact_id != _TAXONOMY_ID
         or artifact.artifact_version != _TAXONOMY_VERSION
     ):
@@ -965,11 +1002,12 @@ def _validate_ruleset(
     _document_coordinate(document, artifact, "ruleset_id", "ruleset_version", "ruleset")
     if (
         document["contract"] != "graphify.workspace.semantic_release_ruleset.internal"
-        or document["format_version"] != 1
+        or _positive_integer(document["format_version"], "ruleset.format_version") != 1
         or artifact.artifact_id != _RULESET_ID
         or artifact.artifact_version != _RULESET_VERSION
         or document["taxonomy_id"] != _TAXONOMY_ID
-        or document["taxonomy_version"] != _TAXONOMY_VERSION
+        or _positive_integer(document["taxonomy_version"], "ruleset.taxonomy_version")
+        != _TAXONOMY_VERSION
     ):
         raise SemanticReleaseBundleError("ruleset coordinate is unsupported")
     excluded = document["excluded_credential_values"]
@@ -1070,12 +1108,15 @@ def _validate_profile(
         raise SemanticReleaseBundleError("profile: artifact coordinate differs from manifest")
     if (
         document["contract"] != "graphify.workspace.semantic_release_profile.internal"
-        or document["format_version"] != 1
+        or _positive_integer(document["format_version"], "profile.format_version") != 1
         or document["taxonomy_id"] != _TAXONOMY_ID
-        or document["taxonomy_version"] != _TAXONOMY_VERSION
+        or _positive_integer(document["taxonomy_version"], "profile.taxonomy_version")
+        != _TAXONOMY_VERSION
     ):
         raise SemanticReleaseBundleError("profile coordinate is unsupported")
-    selected_categories = _ordered_unique_identifiers(document["category_ids"], "profile categories")
+    selected_categories = _ordered_unique_identifiers(
+        document["category_ids"], "profile categories"
+    )
     selected_rules = _ordered_unique_identifiers(document["rule_ids"], "profile rules")
     if not set(selected_categories).issubset(category_ids):
         raise SemanticReleaseBundleError("profile contains an unknown category")
@@ -1158,6 +1199,10 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
         sorted(profile_coordinates, key=lambda value: value.encode("utf-8"))
     ):
         raise SemanticReleaseBundleError("profiles are not utf8_lex_v1 ordered")
+    if _scan_data_inventory(package_root) != inventoried_data:
+        raise SemanticReleaseBundleError(
+            "semantic-release data inventory contains missing or unlisted artifacts"
+        )
     return SemanticReleaseBundle(
         manifest_id=_MANIFEST_ID,
         manifest_bytes=manifest_bytes,
@@ -1183,8 +1228,7 @@ def _valid_field_bytes(value: object) -> bytes | None:
     if ord(text[0]) in _PINNED_TRIM_CODE_POINTS or ord(text[-1]) in _PINNED_TRIM_CODE_POINTS:
         return None
     if any(
-        (ord(character) <= 0x001F and character != "\n")
-        or 0x007F <= ord(character) <= 0x009F
+        (ord(character) <= 0x001F and character != "\n") or 0x007F <= ord(character) <= 0x009F
         for character in text
     ):
         return None
@@ -1238,14 +1282,12 @@ def classify_canonical_bytes(
         return _indeterminate()
     try:
         bundle = load_installed_semantic_release_bundle()
-    except (SemanticReleaseBundleError, OSError, ValueError, re.error):
+    except SemanticReleaseBundleError, OSError, ValueError, re.error:
         return _indeterminate()
     selected_profiles = _validated_selected_profiles(profile_coordinates, bundle)
     if selected_profiles is None:
         return _indeterminate()
-    selected_rule_ids = {
-        rule_id for profile in selected_profiles for rule_id in profile.rule_ids
-    }
+    selected_rule_ids = {rule_id for profile in selected_profiles for rule_id in profile.rule_ids}
     matched_categories: set[str] = set()
     matched_rules: set[str] = set()
     try:
@@ -1253,13 +1295,16 @@ def classify_canonical_bytes(
             if rule.rule_id not in selected_rule_ids:
                 continue
             for match in rule.pattern.finditer(value):
-                if rule.credential_group is not None:
+                if (
+                    rule.rule_id in _PLACEHOLDER_EXCLUSION_RULE_IDS
+                    and rule.credential_group is not None
+                ):
                     credential = match.group(rule.credential_group)
                     if credential.translate(_ASCII_LOWER) in bundle.excluded_credential_values:
                         continue
                 matched_categories.add(rule.category_id)
                 matched_rules.add(rule.rule_id)
-    except (IndexError, re.error):
+    except IndexError, re.error:
         return _indeterminate()
     if len(matched_categories) > MAX_MATCH_IDS or len(matched_rules) > MAX_MATCH_IDS:
         return _indeterminate()
