@@ -1163,11 +1163,10 @@ eligibility below does not expand or reopen the accepted promotion boundary.
 
 ## P5B2 semantic-release bundle and deterministic-classifier trust-root readiness gates
 
-This documentation-only reconciliation records exactly one proposed unnumbered
-P5B2 prerequisite as `READY`: the semantic-release bundle and
-deterministic-classifier trust root. `READY` is implementation eligibility only. It proves no
-implementation, package data, test completion, acceptance, receipt, execution,
-release, or publication authority.
+This reconciliation records the current unnumbered P5B2 semantic-release bundle
+and deterministic-classifier trust-root implementation candidate. It proves no
+acceptance, receipt, content-release, publication, successor authority, or
+broader release/DLP decision.
 
 The reconciliation is exact-head-bound to pre-edit `workspace/v1` commit
 `d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
@@ -1187,7 +1186,10 @@ inventing operator policy or decision-store behavior:
   `graphify/workspace/semantic_release_manifest.json`, manifest-inventoried
   deterministic classifier implementation and byte ABI, closed taxonomy,
   normalization contract, ordered ruleset, required `core_secrets.v1`, and
-  selectable coverage-profile artifacts;
+  selectable coverage-profile artifacts, plus the existing installed
+  `graphify` and `graphify-mcp` source-executed bootstrap scripts that establish
+  a fresh package-external pycache prefix and disable user-site imports before
+  importing Graphify;
 - the manifest is at most 1 MiB, uses one canonical installed `graphify` package
   root, and binds every unique sorted package-relative inventory entry through
   the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`
@@ -1225,12 +1227,14 @@ inventing operator policy or decision-store behavior:
   4,096 taxonomy categories, 4,096 rules, and 256 UTF-8 bytes for any
   classifier, ABI, taxonomy, ruleset, normalization, profile, category, or rule
   ID. No caller or environment can enlarge a cap; and
-- the implementation stop boundary is installed-bundle loading/validation and
-  deterministic factual classification over explicit bytes. It must not read
-  promoted-generation or semantic-input state, choose active profiles, provision
-  policy authority, map dispositions, create `SemanticReleaseDecisionStore`,
-  integrate capacity/GC, execute omission, project content, add a public
-  CLI/schema/receipt, invoke a provider/backend, or publish.
+- the implementation stop boundary is installed-bundle loading/validation,
+  deterministic factual classification over explicit bytes, and the existing
+  executable bootstrap needed to exclude package-local bytecode caches. It must
+  not read promoted-generation or semantic-input state, choose active profiles,
+  provision policy authority, map dispositions, create
+  `SemanticReleaseDecisionStore`, integrate capacity/GC, execute omission,
+  project content, add a new public CLI/schema/receipt, invoke a
+  provider/backend, or publish.
 
 A later implementation review must prove positive and hostile
 installed-manifest fixtures, every no-follow/path/mode/size/digest rejection, byte-exact
@@ -1251,14 +1255,15 @@ work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
 remains `WAITING`. It consumes the trust-root contract above but cannot become
-`READY` until that prerequisite is implemented and separately accepted and its
-operator-policy, decision-store, capacity/GC, and composition prerequisites
-exist. The freeze is complete only when all seven maintained-current documents
-agree and the diff changes no code, tests, schemas, fixtures, receipts,
-generated Graphify output, JOS row, or runtime artifact:
+`READY` until that prerequisite is separately accepted and its operator-policy,
+decision-store, capacity/GC, and composition prerequisites exist. The freeze is
+complete only when all seven maintained-current documents agree and the diff
+changes no code, tests, schemas, fixtures, receipts, generated Graphify output,
+JOS row, or runtime artifact:
 
-- `README.md` indexes the `READY` trust-root prerequisite separately from the
-  encompassing `WAITING` decision child and preserves parent/successor status;
+- `README.md` indexes the trust-root implementation candidate separately from
+  the encompassing `WAITING` decision child and preserves parent/successor
+  status;
 - `architecture.md` keeps the repo-owned deterministic classifier separate from
   operator policy, semantic-field composition, and private terminal proof;
 - `semantic-sync.md` is the canonical semantic contract and status split;
@@ -1266,8 +1271,8 @@ generated Graphify output, JOS row, or runtime artifact:
   capture/revalidation/install sequence, replay, and commit-unknown behavior;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66 provenance, only the trust-root
-  prerequisite as `READY`, and the encompassing child as `WAITING`; and
+- `governance.md` records exact PR #66 provenance, the trust-root prerequisite
+  as pending acceptance, and the encompassing child as `WAITING`; and
 - this file freezes the evidence and validation gates without creating an
   acceptance receipt.
 
@@ -1442,8 +1447,8 @@ output is not refreshed because no code changes and this batch expressly
 excludes generated artifacts.
 
 Passing those gates establishes only documentation consistency. It leaves P5
-and P5B2 `IN_PROGRESS` and records only the trust-root prerequisite as `READY`
-for implementation eligibility. The encompassing decision child,
+and P5B2 `IN_PROGRESS` and records the trust-root prerequisite as pending
+acceptance. The encompassing decision child,
 operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, and remaining P5B2/P5C work

@@ -868,17 +868,17 @@ fact grants no content release, DLP, graph/query projection, public semantic
 sync, runtime receipt, provider, networking, repair, GC, publication, execution,
 or later-successor readiness. Parent P5 and P5B2 remain `IN_PROGRESS`, and H3
 remains `DEFERRED`. At that acceptance point remaining P5B2 and P5C work were
-`WAITING`; the separate current trust-root eligibility below does not expand
-the accepted promotion boundary.
+`WAITING`; the separate current trust-root implementation candidate below does
+not expand the accepted promotion boundary.
 
 ## Semantic-release bundle and deterministic-classifier trust-root
 
-The proposed unnumbered P5B2 semantic-release bundle and
-deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
-only. It owns no external durable-state path, workspace authority, policy
-selection, decision binding, lifecycle transition, public format, or receipt.
+The unnumbered P5B2 semantic-release bundle and deterministic-classifier
+trust-root prerequisite is an implementation candidate pending acceptance. It
+owns no external durable-state path, workspace authority, policy selection,
+decision binding, lifecycle transition, public format, or receipt.
 
-Its trust root is the future repo-owned installed package-data file
+Its trust root is the repo-owned installed package-data file
 `graphify/workspace/semantic_release_manifest.json`, loaded through
 installed-package authority rather than caller input. It is at most 1 MiB and
 inventories the classifier implementation, byte-defined ABI, taxonomy,
@@ -902,6 +902,17 @@ execute or group/other write bit. Any unknown version, path, file type, mode,
 size, digest, grammar, taxonomy, normalization, ruleset, profile, limit, or ABI
 ambiguity fails closed.
 
+Installed executable operation also requires the existing source-executed
+`graphify` and `graphify-mcp` bootstrap scripts as the pre-import runtime
+boundary. Before importing any Graphify module, the scripts re-execute the same
+interpreter with bytecode writes disabled, Python environment configuration
+ignored, user-site imports disabled, and safe-path mode enabled; then they set
+`sys.pycache_prefix` to a fresh private package-external directory and keep
+`sys.dont_write_bytecode` true. Package-local `__pycache__` contents are
+therefore untrusted and ignored for the installed executable path. Direct
+library imports that bypass this bootstrap are not semantic-release decision
+authority.
+
 The manifest-bound classifier is deterministic-pattern-only and operates on
 explicit already-canonical bounded UTF-8 bytes. Its exact grammar, dictionary
 encoding, byte comparison, ordering, duplicate reduction, ASCII-only
@@ -910,8 +921,8 @@ produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` outcomes and never
 maps them to policy dispositions. This internal boundary is independently
 implementable without `SemanticReleasePolicyAuthorityStore`,
 `SemanticReleaseDecisionStore`, capacity/GC integration, semantic-input
-composition, omission, projection, public CLI/schema/receipt, provider/backend,
-or publication behavior. It has no implementation or acceptance receipt yet.
+composition, omission, projection, new public CLI/schema/receipt,
+provider/backend, or publication behavior. It has no acceptance receipt yet.
 
 ## Semantic-content release/DLP decision
 
@@ -938,10 +949,10 @@ One coordinate alone, a historical promoted generation, or drift is never
 decision authority.
 
 The decision child consumes the exact installed bundle contract above; it does
-not own or weaken that trust root. Because the trust-root subchild is only
-`READY`, not implemented or accepted, the encompassing decision child remains
-`WAITING` even before its separate policy and persistence prerequisites are
-considered.
+not own or weaken that trust root. Because the trust-root subchild is only an
+implementation candidate pending acceptance, the encompassing decision child
+remains `WAITING` even before its separate policy and persistence prerequisites
+are considered.
 
 The separate future `SemanticReleasePolicyAuthorityStore` owns these private
 stable paths:
@@ -1008,8 +1019,8 @@ identity and exact value SHA-256 without copying field values. Each field-value
 digest is over the exact captured UTF-8 value bytes, with no JSON quoting,
 newline, salt, domain prefix, renormalization, or case conversion.
 
-The separate `READY` trust-root prerequisite owns the version-1 classifier ABI
-described here. It operates on exact captured UTF-8 bytes and cannot
+The separate trust-root prerequisite owns the version-1 classifier ABI described
+here. It operates on exact captured UTF-8 bytes and cannot
 use runtime Unicode categories, locale, renormalization, or host-dependent text
 behavior. Only syntax-defined ASCII names may use the ABI-defined ASCII fold;
 value bytes remain exact. Its grammar, dictionary encoding, comparison,
@@ -1129,9 +1140,9 @@ selection, networking, public/runtime schemas or receipts, status, repair,
 migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
 implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
-`IN_PROGRESS`; only the separate trust-root prerequisite is `READY` for
-implementation eligibility. This decision child, operator policy-authority
-provisioning, `SemanticReleaseDecisionStore`, capacity/GC integration,
+`IN_PROGRESS`; the separate trust-root prerequisite remains pending acceptance.
+This decision child, operator policy-authority provisioning,
+`SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, omission execution, projection, public
 CLI/schema/receipt, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.

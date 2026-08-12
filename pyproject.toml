@@ -82,10 +82,6 @@ dm = ["tree-sitter-dm"]
 terraform = ["tree-sitter-hcl"]
 all = ["mcp>=1.28.1", "starlette>=1.3.1", "neo4j", "falkordb", "pypdf>=6.15.0", "markdownify", "watchdog", "python-docx", "openpyxl", "faster-whisper", "yt-dlp>=2026.7.4", "matplotlib", "numpy>=2.0", "openai", "tiktoken", "boto3", "anthropic", "tree-sitter-sql", "jieba", "tree-sitter-dm", "tree-sitter-hcl", "tree-sitter-pascal"]
 
-[project.scripts]
-graphify = "graphify.__main__:main"
-graphify-mcp = "graphify.serve:_main"
-
 [dependency-groups]
 dev = [
     "bandit>=1.9.4",
@@ -113,6 +109,7 @@ package = true
 [tool.setuptools]
 packages = ["graphify", "graphify.extractors", "graphify.exporters", "graphify.workspace", "graphify.workspace.adapters"]
 include-package-data = false
+script-files = ["bin/graphify", "bin/graphify-mcp"]
 
 [tool.setuptools.package-data]
 # The skill bodies ship as graphify/skill*.md (the SKILL.md a host installs is

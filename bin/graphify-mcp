@@ -1,0 +1,88 @@
+#!python
+from __future__ import annotations
+
+import os
+import sys
+
+
+if not (
+    sys.flags.dont_write_bytecode
+    and sys.flags.ignore_environment
+    and sys.flags.no_user_site
+    and sys.flags.safe_path
+):
+    if not sys.executable:
+        raise SystemExit("graphify bootstrap cannot resolve the Python executable")
+    os.execv(
+        sys.executable,
+        [
+            sys.executable,
+            "-B",
+            "-E",
+            "-P",
+            "-s",
+            os.path.realpath(__file__),
+            *sys.argv[1:],
+        ],
+    )
+
+import importlib
+import shutil
+import site
+import sysconfig
+import tempfile
+
+
+def _real(path: str) -> str:
+    return os.path.realpath(path or os.getcwd())
+
+
+def _allowed_import_roots() -> tuple[str, ...]:
+    roots: list[str] = []
+    for key in ("purelib", "platlib", "stdlib", "platstdlib"):
+        value = sysconfig.get_paths().get(key)
+        if value:
+            roots.append(_real(value))
+    getsitepackages = getattr(site, "getsitepackages", None)
+    if callable(getsitepackages):
+        for value in getsitepackages():
+            roots.append(_real(value))
+    unique: list[str] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return tuple(unique)
+
+
+def _is_allowed_import_entry(entry: str, roots: tuple[str, ...]) -> bool:
+    real = _real(entry)
+    return any(real == root or real.startswith(root + os.sep) for root in roots)
+
+
+def _prepare_import_boundary() -> str:
+    roots = _allowed_import_roots()
+    sys.path[:] = [entry for entry in sys.path if _is_allowed_import_entry(entry, roots)]
+    prefix = tempfile.mkdtemp(prefix="graphify-pycache-")
+    os.chmod(prefix, 0o700)
+    sys.pycache_prefix = prefix
+    sys.dont_write_bytecode = True
+    return prefix
+
+
+def _main() -> None:
+    prefix = _prepare_import_boundary()
+    try:
+        module = importlib.import_module("graphify.serve")
+        result = module._main()
+        if isinstance(result, int):
+            raise SystemExit(result)
+    finally:
+        try:
+            shutil.rmtree(prefix)
+        finally:
+            if sys.pycache_prefix == prefix:
+                sys.pycache_prefix = None
+
+
+if __name__ == "__main__":
+    _main()

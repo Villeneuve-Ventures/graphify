@@ -75,6 +75,15 @@ concurrent processes, untrusted corpus contents, path tricks, secret leakage,
 and artifact mismatch/substitution relative to a locally frozen trusted
 manifest.
 
+For installed executable operation, the semantic-release trust-root candidate
+also treats package-local bytecode caches as untrusted. The existing
+source-executed `graphify` and `graphify-mcp` scripts are the pre-import
+bootstrap: they re-execute the same interpreter with Python environment
+configuration ignored, user-site imports disabled, and safe-path mode enabled;
+set a fresh private package-external `sys.pycache_prefix`; and disable bytecode
+writes before any Graphify module import. Direct library imports that bypass
+this bootstrap are not semantic-release decision authority.
+
 State-root policy requires expected ownership, `0700` directories, `0600`
 mutable records, exclusive creation, safe umask/ACL behavior, descriptor-relative
 no-follow traversal, regular-file-only payloads, path containment, and rejection
@@ -423,10 +432,11 @@ query-safety, correctness, or publication claim.
 
 ## Semantic-release bundle and deterministic-classifier trust-root threats
 
-The proposed unnumbered P5B2 semantic-release bundle and
-deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
-only. Its bounded threat surface is installed repo-owned package data, not a
-workspace, operator, provider, network, or release authority.
+The unnumbered P5B2 semantic-release bundle and deterministic-classifier
+trust-root prerequisite is an implementation candidate pending acceptance. Its
+bounded threat surface is installed repo-owned package data plus the existing
+installed executable bootstrap, not a workspace, operator, provider, network, or
+release authority.
 
 The trust root rejects caller or ambient substitution by anchoring one installed
 `graphify/workspace/semantic_release_manifest.json` beneath the canonical
@@ -456,16 +466,16 @@ a profile never activates it. `core_secrets.v1` is present as the required
 explicit-evidence-only base profile, while jurisdictional, domain, and
 organization profiles remain inert until a later operator authority selects
 them. This subchild owns no policy selection, field composition, disposition,
-decision binding, capacity/GC accounting, omission, projection, public
-transport, provider/backend, or publication behavior and has no implementation
-or acceptance receipt.
+decision binding, capacity/GC accounting, omission, projection, new public
+transport, provider/backend, or publication behavior and has no acceptance
+receipt.
 
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is contract-frozen only and remains `WAITING`. The separate trust-root
-prerequisite above is only `READY`, not implemented or accepted; operator
-policy-authority provisioning, decision-store capacity/GC integration,
+prerequisite above is implemented only as a candidate and is not accepted;
+operator policy-authority provisioning, decision-store capacity/GC integration,
 classification composition, and the other decision prerequisites also remain
 absent. The decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
@@ -608,8 +618,8 @@ current promotion terminal, request, current `ACTIVE` policy authority, and
 binding; and revalidates every entry, authority, input, result, and binding
 coordinate before releasing the locks.
 
-P5 and P5B2 remain `IN_PROGRESS`; only the trust-root prerequisite is `READY`
-for implementation eligibility. The encompassing release/DLP decision,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite remains pending
+acceptance. The encompassing release/DLP decision,
 operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C

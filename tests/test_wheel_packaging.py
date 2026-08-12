@@ -11,9 +11,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import py_compile
+import shutil
 import stat
 import subprocess
 import sys
+import venv
 import zipfile
 from pathlib import Path
 
@@ -28,6 +31,117 @@ PKG = REPO / "graphify"
 
 def _has_build() -> bool:
     return importlib.util.find_spec("build") is not None
+
+
+def _clean_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    return environment
+
+
+def _venv_paths(root: Path) -> tuple[Path, Path]:
+    scripts = root / ("Scripts" if os.name == "nt" else "bin")
+    python = scripts / ("python.exe" if os.name == "nt" else "python")
+    return python, scripts
+
+
+def _install_wheel_without_dependencies(
+    wheel: Path,
+    root: Path,
+) -> tuple[Path, Path, Path]:
+    venv_dir = root / "venv"
+    uv = shutil.which("uv")
+    if uv:
+        proc = subprocess.run(
+            [uv, "venv", "--python", sys.executable, str(venv_dir)],
+            cwd=root,
+            env=_clean_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+    else:
+        venv.EnvBuilder(with_pip=True).create(venv_dir)
+    python, scripts = _venv_paths(venv_dir)
+    command = (
+        [uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)]
+        if uv
+        else [str(python), "-m", "pip", "install", "--no-deps", str(wheel)]
+    )
+    proc = subprocess.run(
+        command,
+        cwd=root,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    graphify_script = scripts / ("graphify.exe" if os.name == "nt" else "graphify")
+    if not graphify_script.exists():
+        graphify_script = scripts / "graphify"
+    assert graphify_script.exists()
+    return python, scripts, graphify_script
+
+
+def _module_paths(
+    python: Path,
+    module_name: str,
+    cwd: Path,
+) -> tuple[Path, Path]:
+    script = (
+        "import importlib, json\n"
+        f"module = importlib.import_module({module_name!r})\n"
+        "print(json.dumps({'file': module.__file__, 'cached': module.__cached__}, sort_keys=True))\n"
+    )
+    proc = subprocess.run(
+        [str(python), "-B", "-E", "-P", "-c", script],
+        cwd=cwd,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    evidence = json.loads(proc.stdout)
+    return Path(evidence["file"]), Path(evidence["cached"])
+
+
+def _hostile_source(length: int, sentinel: Path, *, function_name: str = "main") -> bytes:
+    payload = (
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+        f"def {function_name}():\n"
+        "    print('hostile bytecode executed')\n"
+    ).encode("utf-8")
+    assert len(payload) < length
+    return payload + b"#" * (length - len(payload))
+
+
+def _compile_hostile_timestamp_pyc(
+    source: Path,
+    cache: Path,
+    hostile: bytes,
+) -> tuple[bytes, os.stat_result]:
+    genuine = source.read_bytes()
+    assert len(hostile) == len(genuine)
+    source_stat = source.stat()
+    try:
+        source.write_bytes(hostile)
+        source.chmod(stat.S_IMODE(source_stat.st_mode))
+        os.utime(source, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        py_compile.compile(
+            str(source),
+            cfile=str(cache),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+        )
+    finally:
+        source.write_bytes(genuine)
+        source.chmod(stat.S_IMODE(source_stat.st_mode))
+        os.utime(source, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+    return genuine, source_stat
 
 
 def _skill_bodies() -> list[Path]:
@@ -89,6 +203,195 @@ def test_wheel_build_uses_current_packaging_metadata_without_tool_warnings(
     assert "License-Expression: MIT\n" in metadata
     assert "License-File: LICENSE\n" in metadata
     assert "Requires-Python: >=3.14\n" in metadata
+
+
+def test_wheel_ships_pre_import_bootstrap_scripts(
+    wheel_build: tuple[set[str], str, str, Path],
+) -> None:
+    names, _, _, wheel = wheel_build
+    assert not any(name.endswith(".dist-info/entry_points.txt") for name in names)
+    scripts = {
+        "graphify": 'importlib.import_module("graphify.__main__")',
+        "graphify-mcp": 'importlib.import_module("graphify.serve")',
+    }
+    with zipfile.ZipFile(wheel) as archive:
+        for script_name, target_import in scripts.items():
+            matches = [
+                name
+                for name in names
+                if name.endswith(f".data/scripts/{script_name}")
+            ]
+            assert len(matches) == 1
+            raw = archive.read(matches[0]).decode("utf-8")
+            assert raw.startswith("#!python\n")
+            assert "sys.flags.dont_write_bytecode" in raw
+            assert "sys.flags.ignore_environment" in raw
+            assert "sys.flags.no_user_site" in raw
+            assert "sys.flags.safe_path" in raw
+            assert "os.execv(" in raw
+            assert '"-B",\n            "-E",\n            "-P",\n            "-s"' in raw
+            assert "getusersitepackages" not in raw
+            assert "_GRAPHIFY_BOOTSTRAP_ISOLATED" not in raw
+            assert "sys.pycache_prefix = prefix" in raw
+            assert raw.index("sys.pycache_prefix = prefix") < raw.index(target_import)
+
+
+def test_installed_graphify_script_ignores_package_local_bytecode_cache(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    python, _, graphify_script = _install_wheel_without_dependencies(wheel, tmp_path)
+    module_source, module_cache = _module_paths(python, "graphify.__main__", tmp_path)
+    sentinel = tmp_path / "hostile-main-executed"
+    genuine, source_stat = _compile_hostile_timestamp_pyc(
+        module_source,
+        module_cache,
+        _hostile_source(module_source.stat().st_size, sentinel),
+    )
+    direct = subprocess.run(
+        [str(python), "-B", "-E", "-P", "-c", "import graphify.__main__"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert direct.returncode == 0, direct.stderr
+    assert sentinel.read_text(encoding="utf-8") == "executed"
+    sentinel.unlink()
+
+    proc = subprocess.run(
+        [str(graphify_script), "--version"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "graphify 0.9.16+workspace.1\n"
+    assert not sentinel.exists()
+    assert module_source.read_bytes() == genuine
+    restored = module_source.stat()
+    assert restored.st_size == source_stat.st_size
+    assert restored.st_mtime_ns == source_stat.st_mtime_ns
+
+    hostile_path = tmp_path / "hostile-pythonpath"
+    hostile_package = hostile_path / "graphify"
+    hostile_package.mkdir(parents=True)
+    hostile_pythonpath_sentinel = tmp_path / "hostile-pythonpath-executed"
+    hostile_stdlib_sentinel = tmp_path / "hostile-stdlib-executed"
+    (hostile_package / "__init__.py").write_text("", encoding="utf-8")
+    (hostile_package / "__main__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(hostile_pythonpath_sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+        "def main():\n"
+        "    print('hostile pythonpath executed')\n",
+        encoding="utf-8",
+    )
+    (hostile_path / "shutil.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(hostile_stdlib_sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    hostile_env = _clean_environment()
+    hostile_env["PYTHONPATH"] = str(hostile_path)
+    hostile_env["_GRAPHIFY_BOOTSTRAP_ISOLATED"] = "1"
+    proc = subprocess.run(
+        [str(graphify_script), "--version"],
+        cwd=tmp_path,
+        env=hostile_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "graphify 0.9.16+workspace.1\n"
+    assert not hostile_pythonpath_sentinel.exists()
+    assert not hostile_stdlib_sentinel.exists()
+
+
+def test_semantic_release_classifier_ignores_package_local_cache_with_bootstrap_prefix(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    python, _, _ = _install_wheel_without_dependencies(wheel, tmp_path)
+    module_source, module_cache = _module_paths(
+        python,
+        "graphify.workspace.semantic_release",
+        tmp_path,
+    )
+    sentinel = tmp_path / "hostile-semantic-release-executed"
+    genuine, source_stat = _compile_hostile_timestamp_pyc(
+        module_source,
+        module_cache,
+        _hostile_source(module_source.stat().st_size, sentinel),
+    )
+    direct = subprocess.run(
+        [
+            str(python),
+            "-B",
+            "-E",
+            "-P",
+            "-c",
+            "import graphify.workspace.semantic_release",
+        ],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert direct.returncode == 0, direct.stderr
+    assert sentinel.read_text(encoding="utf-8") == "executed"
+    sentinel.unlink()
+
+    script = "\n".join(
+        [
+            "import json, shutil, sys, tempfile",
+            "prefix = tempfile.mkdtemp(prefix='graphify-pycache-')",
+            "sys.pycache_prefix = prefix",
+            "sys.dont_write_bytecode = True",
+            "try:",
+            "    import graphify.workspace.semantic_release as semantic_release",
+            "    result = semantic_release.classify_canonical_bytes(",
+            "        b'ghp_abcdefghijklmnopqrstuvwxyz0123456789',",
+            "        (semantic_release.CORE_SECRETS_PROFILE,),",
+            "    )",
+            "    print(json.dumps({",
+            "        'cached': semantic_release.__cached__,",
+            "        'file': semantic_release.__file__,",
+            "        'prefix': prefix,",
+            "        'result': result.to_dict(),",
+            "    }, sort_keys=True))",
+            "finally:",
+            "    shutil.rmtree(prefix)",
+        ]
+    )
+    proc = subprocess.run(
+        [str(python), "-B", "-E", "-P", "-c", script],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    evidence = json.loads(proc.stdout)
+    assert evidence["result"] == {
+        "category_ids": ["secret.provider_credential"],
+        "outcome": "MATCH",
+        "rule_ids": ["core.provider.github_token.v1"],
+    }
+    assert Path(evidence["cached"]).is_relative_to(Path(evidence["prefix"]))
+    assert Path(evidence["file"]) == module_source
+    assert not sentinel.exists()
+    assert module_source.read_bytes() == genuine
+    restored = module_source.stat()
+    assert restored.st_size == source_stat.st_size
+    assert restored.st_mtime_ns == source_stat.st_mtime_ns
 
 
 @pytest.mark.parametrize(
