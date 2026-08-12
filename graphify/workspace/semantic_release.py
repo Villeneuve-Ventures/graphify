@@ -267,7 +267,7 @@ _RULE_DOCUMENTS = (
         "pattern": (
             r"[A-Za-z][A-Za-z0-9+.-]{1,31}://"
             r"[A-Za-z0-9._~!$&'()*+,;=%-]{1,128}:"
-            r"(?P<credential>[^\s/@:]{8,256})@"
+            r"(?P<credential>[^\s/@:]{1,256})@"
             r"[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?(?:[/?#][^\s]*)?"
         ),
         "rule_id": "core.uri.userinfo_password.v1",
@@ -659,9 +659,8 @@ def _artifact_entry(value: object, index: int) -> BundleArtifact:
     if not isinstance(value, dict):
         raise SemanticReleaseBundleError(f"{label}: expected object")
     kind = value.get("artifact_kind")
-    if kind not in _ARTIFACT_KINDS:
+    if not isinstance(kind, str) or kind not in _ARTIFACT_KINDS:
         raise SemanticReleaseBundleError(f"{label}: unknown artifact kind")
-    assert isinstance(kind, str)
     id_field, version_field = _COORDINATE_FIELDS[kind]
     _exact_members(
         value,
@@ -685,7 +684,7 @@ def _artifact_entry(value: object, index: int) -> BundleArtifact:
     if kind == "profile" and not path.startswith(_DATA_PREFIX + "profiles/"):
         raise SemanticReleaseBundleError(f"{label}: profile is outside profile data root")
     mode = value["mode"]
-    if mode not in {"0444", "0644"}:
+    if not isinstance(mode, str) or mode not in {"0444", "0644"}:
         raise SemanticReleaseBundleError(f"{label}.mode: unsupported mode")
     byte_count = _positive_integer(value["byte_count"], f"{label}.byte_count")
     digest = value["sha256"]
@@ -1049,7 +1048,7 @@ def _validate_ruleset(
         if value["ascii_case_insensitive"] is not False:
             raise SemanticReleaseBundleError(f"{label}: global case folding is forbidden")
         credential_group = value["credential_group"]
-        if credential_group not in {None, "credential"}:
+        if credential_group is not None and credential_group != "credential":
             raise SemanticReleaseBundleError(f"{label}: credential group is invalid")
         pattern_text = value["pattern"]
         if not isinstance(pattern_text, str):
@@ -1222,8 +1221,6 @@ def _valid_field_bytes(value: object) -> bytes | None:
     except UnicodeDecodeError:
         return None
     if not text:
-        return None
-    if text != unicodedata.normalize("NFC", text):
         return None
     if ord(text[0]) in _PINNED_TRIM_CODE_POINTS or ord(text[-1]) in _PINNED_TRIM_CODE_POINTS:
         return None

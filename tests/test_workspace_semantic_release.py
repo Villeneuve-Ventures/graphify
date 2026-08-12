@@ -214,6 +214,7 @@ def test_installed_bundle_manifest_and_inventory_are_exact() -> None:
             "secret.private_key_material",
         ),
         (b"postgresql://service:swordfish@example.test/db", "secret.credential_uri"),
+        (b"postgresql://service:x@example.test/db", "secret.credential_uri"),
         (b"postgresql://service:changeme@example.test/db", "secret.credential_uri"),
         (
             b"Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==",
@@ -342,7 +343,6 @@ def test_profiles_are_explicit_validated_input_and_never_ambient(
         b"line\xc2\x85break",
         b"\xff",
         b"x" * (FIELD_MAX_BYTES + 1),
-        b"ghp_abcdefghijklmnopqrstuvwxyz0123456789\ncafe\xcc\x81",
     ],
 )
 def test_invalid_or_out_of_contract_field_bytes_are_indeterminate(field: bytes) -> None:
@@ -350,6 +350,18 @@ def test_invalid_or_out_of_contract_field_bytes_are_indeterminate(field: bytes) 
     assert result.outcome == "INDETERMINATE"
     assert result.category_ids == ()
     assert result.rule_ids == ()
+
+
+def test_field_validation_does_not_consult_host_unicode_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_normalization(*_args: object) -> str:
+        raise AssertionError("field validation consulted the host Unicode database")
+
+    unicode_probe = type("UnicodeProbe", (), {"normalize": staticmethod(unexpected_normalization)})
+    monkeypatch.setattr(semantic_release, "unicodedata", unicode_probe)
+    field = b"ghp_abcdefghijklmnopqrstuvwxyz0123456789\ncafe\xcc\x81"
+    assert semantic_release._valid_field_bytes(field) == field
 
 
 def test_classification_is_byte_exact_and_repeated_process_deterministic(tmp_path: Path) -> None:
@@ -546,6 +558,44 @@ def test_boolean_versions_fail_closed(
 
     _select_bundle(monkeypatch, root)
     with pytest.raises(SemanticReleaseBundleError, match="positive integer"):
+        load_installed_semantic_release_bundle()
+    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
+        "INDETERMINATE"
+    )
+
+
+@pytest.mark.parametrize(
+    ("location", "field", "expected"),
+    [
+        ("manifest", "artifact_kind", "unknown artifact kind"),
+        ("manifest", "mode", "unsupported mode"),
+        ("ruleset", "credential_group", "credential group is invalid"),
+    ],
+)
+def test_unhashable_closed_vocabulary_values_fail_closed(
+    location: str,
+    field: str,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    if location == "manifest":
+        _entries(manifest)[0][field] = []
+    else:
+        entry = _entry(manifest, kind="ruleset")
+        document = _canonical_load(_artifact_path(root, entry))
+        rules = document["rules"]
+        assert isinstance(rules, list)
+        rule = rules[0]
+        assert isinstance(rule, dict)
+        rule[field] = []
+        _write_artifact_json(root, entry, document)
+    _write_manifest(root, manifest)
+
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match=expected):
         load_installed_semantic_release_bundle()
     assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
         "INDETERMINATE"
