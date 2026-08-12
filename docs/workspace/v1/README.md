@@ -85,8 +85,9 @@ capacity/GC integration, classification composition, and the other frozen
 decision prerequisites before any private request-addressed binding can exist.
 Operator policy provisioning, omission execution, projection, public
 CLI/schema/receipt, provider/backend, publication, and successor activation all
-remain outside the `READY` subchild. P5 and P5B2 remain `IN_PROGRESS`, P5C
-remains `WAITING`, H3 remains `DEFERRED`, and no later successor is `READY`.
+remain outside the trust-root implementation candidate. P5 and P5B2 remain
+`IN_PROGRESS`, P5C remains `WAITING`, H3 remains `DEFERRED`, and no later
+successor is `READY`.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,

@@ -724,8 +724,8 @@ constituent artifact, or any drift is not entry authority.
 
 One canonical `decision_request_sha256` binds that entry plus the exact private
 semantic-input byte count and digest, the eligible-field inventory, the trusted
-repo-owned installed bundle manifest owned by the `READY` prerequisite, and the
-stable current `ACTIVE` operator policy-authority revision. The decision child
+repo-owned installed bundle manifest owned by the trust-root prerequisite, and
+the stable current `ACTIVE` operator policy-authority revision. The decision child
 consumes but cannot supply, select around, override, or weaken that installed
 bundle. The separately owned policy-authority record binds the named release context, exact selected
 profiles and policy, the closed version-1 coverage-sufficiency declaration and

@@ -77,8 +77,13 @@ def _main() -> None:
         if isinstance(result, int):
             raise SystemExit(result)
     finally:
+        pending = sys.exception()
         try:
             shutil.rmtree(prefix)
+        except OSError as exc:
+            if pending is None:
+                raise
+            pending.add_note(f"private bytecode cache cleanup failed: {exc}")
         finally:
             if sys.pycache_prefix == prefix:
                 sys.pycache_prefix = None

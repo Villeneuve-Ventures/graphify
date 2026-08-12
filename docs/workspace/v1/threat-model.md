@@ -482,8 +482,8 @@ receipt.
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
-child is contract-frozen only and remains `WAITING`. The separate trust-root
-prerequisite above is implemented only as a candidate and is not accepted;
+child is contract-frozen only and remains `WAITING`. The trust-root prerequisite
+above has an implementation candidate but is not accepted;
 operator policy-authority provisioning, decision-store capacity/GC integration,
 classification composition, and the other decision prerequisites also remain
 absent. The decision child begins only from the complete

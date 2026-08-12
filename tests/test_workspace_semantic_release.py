@@ -198,6 +198,22 @@ def test_installed_bundle_manifest_and_inventory_are_exact() -> None:
         assert artifact.mode == f"{stat.S_IMODE(path.stat().st_mode):04o}" == "0644"
 
 
+def test_missing_parsed_profile_document_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = semantic_release._canonical_json_document
+
+    def missing_profile(raw: bytes, label: str) -> dict[str, object] | None:
+        if label.endswith("profiles/provider_credentials.v1.json"):
+            return None
+        return original(raw, label)
+
+    monkeypatch.setattr(semantic_release, "_canonical_json_document", missing_profile)
+
+    with pytest.raises(SemanticReleaseBundleError, match="profile document is unavailable"):
+        load_installed_semantic_release_bundle()
+
+
 @pytest.mark.parametrize(
     ("field", "category"),
     [

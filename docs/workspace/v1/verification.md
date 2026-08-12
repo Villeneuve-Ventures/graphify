@@ -1168,8 +1168,8 @@ and deterministic-classifier trust-root implementation candidate. It proves no
 acceptance, receipt, content-release, publication, successor authority, or
 broader release/DLP decision.
 
-The reconciliation is exact-head-bound to pre-edit `workspace/v1` commit
-`d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
+The prior readiness reconciliation is exact-head-bound to pre-edit
+`workspace/v1` commit `d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
 `904a91047bcdbaae724d9688c586ec88fd3198f7`, clean divergence `0/0`, one
 worktree, and zero open pull requests. PR #66 head
 `772fd8809f6784c9cc859dcc654bfcdf873df40f` and merge/current commit have the
@@ -1236,13 +1236,13 @@ inventing operator policy or decision-store behavior:
   project content, add a new public CLI/schema/receipt, invoke a
   provider/backend, or publish.
 
-A later implementation review must prove positive and hostile
+A later acceptance review must prove positive and hostile
 installed-manifest fixtures, every no-follow/path/mode/size/digest rejection, byte-exact
 cross-run classifier vectors, taxonomy/profile identity separation, duplicate
 or mismatched kind-specific coordinates, profile ID/version/suffix disagreement,
 `core_secrets.v1` category behavior, limit rejection, and absence of ambient or
-workspace authority reads. Those are future implementation/acceptance gates,
-not evidence that this documentation change delivered them.
+workspace authority reads. Those are acceptance gates; delivery of the candidate
+does not itself grant acceptance.
 
 P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP
 decision, policy-authority provisioning, `SemanticReleaseDecisionStore`,

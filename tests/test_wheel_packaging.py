@@ -120,6 +120,72 @@ def _module_paths(
     return Path(evidence["file"]), Path(evidence["cached"])
 
 
+def _probe_installed_bootstrap(
+    python: Path,
+    script_path: Path,
+    *,
+    target_module: str,
+    target_entrypoint: str,
+    target_error: bool = False,
+    target_result: int | None = None,
+    cleanup_error: bool = False,
+) -> dict[str, object]:
+    target_failure = ["    raise RuntimeError('target failed')"] if target_error else []
+    target_return = [f"    return {target_result}"] if target_result is not None else []
+    cleanup_failure = ["    raise OSError('cleanup failed')"] if cleanup_error else []
+    script = "\n".join(
+        [
+            "import json, runpy, sys, types",
+            f"namespace = runpy.run_path({str(script_path)!r}, run_name='bootstrap_probe')",
+            "entrypoint = namespace['_main']",
+            "scope = entrypoint.__globals__",
+            "events = []",
+            "prefix = 'probe-prefix'",
+            "scope['_prepare_import_boundary'] = lambda: prefix",
+            "sys.pycache_prefix = prefix",
+            "def target():",
+            f"    events.append(['call', {target_entrypoint!r}])",
+            *target_failure,
+            *target_return,
+            "def import_module(name):",
+            "    events.append(['import', name])",
+            f"    assert name == {target_module!r}",
+            f"    return types.SimpleNamespace(**{{{target_entrypoint!r}: target}})",
+            "scope['importlib'] = types.SimpleNamespace(import_module=import_module)",
+            "def rmtree(value):",
+            "    events.append(['rmtree', value])",
+            *cleanup_failure,
+            "scope['shutil'] = types.SimpleNamespace(rmtree=rmtree)",
+            "caught = None",
+            "try:",
+            "    entrypoint()",
+            "except BaseException as exc:",
+            "    caught = {",
+            "        'message': str(exc),",
+            "        'notes': getattr(exc, '__notes__', []),",
+            "        'type': type(exc).__name__,",
+            "    }",
+            "print(json.dumps({",
+            "    'caught': caught,",
+            "    'events': events,",
+            "    'pycache_prefix': sys.pycache_prefix,",
+            "}, sort_keys=True))",
+        ]
+    )
+    proc = subprocess.run(
+        [str(python), "-B", "-E", "-P", "-s", "-c", script],
+        cwd=script_path.parent,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    evidence = json.loads(proc.stdout)
+    assert isinstance(evidence, dict)
+    return evidence
+
+
 def _hostile_source(length: int, sentinel: Path, *, function_name: str = "main") -> bytes:
     payload = (
         "from pathlib import Path\n"
@@ -246,6 +312,91 @@ def test_wheel_ships_pre_import_bootstrap_scripts(
             assert "_GRAPHIFY_BOOTSTRAP_ISOLATED" not in raw
             assert "sys.pycache_prefix = prefix" in raw
             assert raw.index("sys.pycache_prefix = prefix") < raw.index(target_import)
+
+
+@pytest.mark.parametrize(
+    ("script_name", "target_module", "target_entrypoint"),
+    [
+        ("graphify", "graphify.__main__", "main"),
+        ("graphify-mcp", "graphify.serve", "_main"),
+    ],
+)
+def test_installed_bootstrap_dispatches_the_expected_target(
+    script_name: str,
+    target_module: str,
+    target_entrypoint: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    python, scripts, _ = _install_wheel_without_dependencies(wheel, tmp_path)
+    evidence = _probe_installed_bootstrap(
+        python,
+        scripts / script_name,
+        target_module=target_module,
+        target_entrypoint=target_entrypoint,
+    )
+
+    assert evidence == {
+        "caught": None,
+        "events": [
+            ["import", target_module],
+            ["call", target_entrypoint],
+            ["rmtree", "probe-prefix"],
+        ],
+        "pycache_prefix": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("script_name", "target_module", "target_entrypoint"),
+    [
+        ("graphify", "graphify.__main__", "main"),
+        ("graphify-mcp", "graphify.serve", "_main"),
+    ],
+)
+@pytest.mark.parametrize("target_outcome", ["success", "exception", "exit"])
+def test_installed_bootstrap_cleanup_preserves_the_primary_outcome(
+    script_name: str,
+    target_module: str,
+    target_entrypoint: str,
+    target_outcome: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    python, scripts, _ = _install_wheel_without_dependencies(wheel, tmp_path)
+    evidence = _probe_installed_bootstrap(
+        python,
+        scripts / script_name,
+        target_module=target_module,
+        target_entrypoint=target_entrypoint,
+        target_error=target_outcome == "exception",
+        target_result=7 if target_outcome == "exit" else None,
+        cleanup_error=True,
+    )
+
+    assert evidence["pycache_prefix"] is None
+    caught = evidence["caught"]
+    assert isinstance(caught, dict)
+    if target_outcome == "exception":
+        assert caught == {
+            "message": "target failed",
+            "notes": ["private bytecode cache cleanup failed: cleanup failed"],
+            "type": "RuntimeError",
+        }
+    elif target_outcome == "exit":
+        assert caught == {
+            "message": "7",
+            "notes": ["private bytecode cache cleanup failed: cleanup failed"],
+            "type": "SystemExit",
+        }
+    else:
+        assert caught == {
+            "message": "cleanup failed",
+            "notes": [],
+            "type": "OSError",
+        }
 
 
 def test_wheel_record_binds_bootstrap_and_classifier_source(

@@ -14,8 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Mapping, Sequence
 import unicodedata
 
 from graphify.workspace.contracts import ContractError, canonical_json_bytes
@@ -708,7 +707,7 @@ def _artifact_entry(value: object, index: int) -> BundleArtifact:
     )
 
 
-def _manifest_document(raw: bytes) -> tuple[dict[str, object], tuple[BundleArtifact, ...]]:
+def _validated_manifest_artifacts(raw: bytes) -> tuple[BundleArtifact, ...]:
     manifest = _canonical_json_document(raw, "semantic-release manifest")
     _exact_members(
         manifest,
@@ -761,7 +760,7 @@ def _manifest_document(raw: bytes) -> tuple[dict[str, object], tuple[BundleArtif
         raise SemanticReleaseBundleError("semantic-release manifest requires core_secrets.v1")
     if sum(artifact.byte_count for artifact in artifacts) > BUNDLE_ARTIFACT_MAX_BYTES:
         raise SemanticReleaseBundleError("semantic-release bundle byte limit exceeded")
-    return manifest, artifacts
+    return artifacts
 
 
 def _scan_data_inventory(package_root: Path) -> set[str]:
@@ -1145,7 +1144,7 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
         _MANIFEST_RELATIVE_PATH,
         max_bytes=BUNDLE_MANIFEST_MAX_BYTES,
     )
-    _, artifacts = _manifest_document(manifest_bytes)
+    artifacts = _validated_manifest_artifacts(manifest_bytes)
     inventoried_data = {
         artifact.path for artifact in artifacts if artifact.path.startswith(_DATA_PREFIX)
     }
@@ -1154,7 +1153,9 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
             "semantic-release data inventory contains missing or unlisted artifacts"
         )
 
-    documents: dict[str, dict[str, object]] = {}
+    documents_by_kind: dict[str, list[tuple[BundleArtifact, dict[str, object]]]] = {
+        kind: [] for kind in _ARTIFACT_KINDS if kind != "classifier"
+    }
     for artifact in artifacts:
         raw = _read_package_file(
             package_root,
@@ -1167,31 +1168,25 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
         if artifact.artifact_kind == "classifier":
             _validate_classifier_artifact(artifact)
         else:
-            documents[artifact.path] = _canonical_json_document(raw, artifact.path)
+            document = _canonical_json_document(raw, artifact.path)
+            if not isinstance(document, dict):
+                raise SemanticReleaseBundleError(
+                    f"{artifact.artifact_kind} document is unavailable"
+                )
+            documents_by_kind[artifact.artifact_kind].append((artifact, document))
 
-    by_kind: dict[str, list[tuple[BundleArtifact, dict[str, object] | None]]] = {
-        kind: [] for kind in _ARTIFACT_KINDS
-    }
-    for artifact in artifacts:
-        by_kind[artifact.artifact_kind].append((artifact, documents.get(artifact.path)))
-
-    abi_artifact, abi_document = by_kind["classifier_abi"][0]
-    assert abi_document is not None
+    abi_artifact, abi_document = documents_by_kind["classifier_abi"][0]
     _validate_abi(abi_document, abi_artifact)
-    normalization_artifact, normalization_document = by_kind["normalization"][0]
-    assert normalization_document is not None
+    normalization_artifact, normalization_document = documents_by_kind["normalization"][0]
     _validate_normalization(normalization_document, normalization_artifact)
-    taxonomy_artifact, taxonomy_document = by_kind["taxonomy"][0]
-    assert taxonomy_document is not None
+    taxonomy_artifact, taxonomy_document = documents_by_kind["taxonomy"][0]
     category_ids = _validate_taxonomy(taxonomy_document, taxonomy_artifact)
-    ruleset_artifact, ruleset_document = by_kind["ruleset"][0]
-    assert ruleset_document is not None
+    ruleset_artifact, ruleset_document = documents_by_kind["ruleset"][0]
     rules, excluded_values = _validate_ruleset(ruleset_document, ruleset_artifact, category_ids)
     rule_ids = frozenset(rule.rule_id for rule in rules)
     profiles = tuple(
         _validate_profile(document, artifact, category_ids, rule_ids)
-        for artifact, document in by_kind["profile"]
-        if document is not None
+        for artifact, document in documents_by_kind["profile"]
     )
     profile_coordinates = tuple(profile.coordinate.profile_id for profile in profiles)
     if profile_coordinates != tuple(
@@ -1219,8 +1214,6 @@ def _valid_field_bytes(value: object) -> bytes | None:
     try:
         text = value.decode("utf-8")
     except UnicodeDecodeError:
-        return None
-    if not text:
         return None
     if ord(text[0]) in _PINNED_TRIM_CODE_POINTS or ord(text[-1]) in _PINNED_TRIM_CODE_POINTS:
         return None
@@ -1258,7 +1251,7 @@ def _validated_selected_profiles(
         return None
     if len(coordinates) != len(set(coordinates)):
         return None
-    installed = MappingProxyType({profile.coordinate: profile for profile in bundle.profiles})
+    installed = {profile.coordinate: profile for profile in bundle.profiles}
     if any(coordinate not in installed for coordinate in coordinates):
         return None
     return tuple(installed[coordinate] for coordinate in coordinates)
