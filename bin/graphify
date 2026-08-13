@@ -141,6 +141,8 @@ def _editable_direct_url_roots(site_root: str) -> tuple[str, ...]:
         source = unquote(parsed.path)
         if os.name == "nt" and len(source) >= 3 and source[0] == "/" and source[2] == ":":
             source = source[1:]
+        if not source or not os.path.isabs(source):
+            continue
         if os.path.isdir(os.path.join(source, "graphify")):
             roots.append(_real(source))
     return tuple(roots)

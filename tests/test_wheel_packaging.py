@@ -641,6 +641,50 @@ def test_installed_bootstrap_preserves_editable_direct_url_roots_without_startup
     assert not startup_sentinel.exists()
 
 
+def test_installed_bootstrap_rejects_relative_editable_direct_url_roots(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, site_packages = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        "graphify",
+    )
+    relative_source = tmp_path / "relative-source"
+    hostile_package = relative_source / "graphify"
+    hostile_package.mkdir(parents=True)
+    sentinel = tmp_path / "relative-editable-source-executed"
+    (hostile_package / "__init__.py").write_text("", encoding="utf-8")
+    (hostile_package / "__main__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+        "def main():\n"
+        "    print('relative editable executed')\n",
+        encoding="utf-8",
+    )
+    dist_info = site_packages / "graphifyy-0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "direct_url.json").write_text(
+        json.dumps({"dir_info": {"editable": True}, "url": "file:relative-source"}),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("graphify ")
+    assert "relative editable executed" not in proc.stdout
+    assert not sentinel.exists()
+
+
 @pytest.mark.parametrize(
     ("script_name", "target_module", "target_entrypoint"),
     [
