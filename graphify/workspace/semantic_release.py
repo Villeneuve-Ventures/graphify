@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -43,6 +44,7 @@ _ALLOWED_FILE_MODES = frozenset({0o444, 0o644})
 _PLACEHOLDER_EXCLUSION_RULE_IDS = frozenset(
     {"core.assignment.bare.v1", "core.assignment.quoted.v1"}
 )
+_CREDENTIAL_URI_RULE_ID = "core.uri.userinfo_password.v1"
 _ARTIFACT_KINDS = frozenset(
     {"classifier", "classifier_abi", "taxonomy", "normalization", "ruleset", "profile"}
 )
@@ -147,7 +149,7 @@ _RULE_DOCUMENTS = (
         "pattern": (
             r"(?:^|\r?\n)(?ai:api[_-]?key|password|passwd|secret|client[_-]?secret|"
             r"access[_-]?token|auth[_-]?token|token)[ \t]*(?:=|:)[ \t]*"
-            r"(?P<credential>[A-Za-z0-9._~+/@-]{8,256})(?=$|\r?\n)"
+            r"(?P<credential>[A-Za-z0-9._~+/@-]{1,256})(?=$|\r?\n)"
         ),
         "rule_id": "core.assignment.bare.v1",
     },
@@ -159,7 +161,7 @@ _RULE_DOCUMENTS = (
         "pattern": (
             r"(?:^|\r?\n)(?ai:api[_-]?key|password|passwd|secret|client[_-]?secret|"
             r"access[_-]?token|auth[_-]?token|token)[ \t]*(?:=|:)[ \t]*"
-            r"(?P<quote>[\"'])(?P<credential>[^\"'\r\n]{8,256})(?P=quote)(?=$|\r?\n)"
+            r"(?P<quote>[\"'])(?P<credential>[^\"'\r\n]{1,256})(?P=quote)(?=$|\r?\n)"
         ),
         "rule_id": "core.assignment.quoted.v1",
     },
@@ -171,7 +173,7 @@ _RULE_DOCUMENTS = (
         "pattern": (
             r"(?:^|\r?\n)(?ai:Authorization):[ \t]*(?ai:Basic)[ \t]+"
             r"(?P<credential>(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|"
-            r"[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==))(?=$|\r?\n)"
+            r"[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==))(?=[ \t]*(?:$|\r?\n))"
         ),
         "rule_id": "core.authorization.basic.v1",
     },
@@ -184,7 +186,7 @@ _RULE_DOCUMENTS = (
             r"(?:^|\r?\n)(?ai:Authorization):[ \t]*(?ai:Bearer)[ \t]+"
             r"(?P<credential>(?:[A-Za-z0-9._~+/-]{1,256}|"
             r"[A-Za-z0-9._~+/-]{1,255}=|[A-Za-z0-9._~+/-]{1,254}==))"
-            r"(?=$|\r?\n)"
+            r"(?=[ \t]*(?:$|\r?\n))"
         ),
         "rule_id": "core.authorization.bearer.v1",
     },
@@ -229,7 +231,10 @@ _RULE_DOCUMENTS = (
         "category_id": "secret.provider_credential",
         "credential_group": None,
         "matcher": "byte_regex_search_v1",
-        "pattern": r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36,255}(?![A-Za-z0-9])",
+        "pattern": (
+            r"(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{36,255}|"
+            r"github_pat_[A-Za-z0-9_]{82})(?![A-Za-z0-9])"
+        ),
         "rule_id": "core.provider.github_token.v1",
     },
     {
@@ -269,10 +274,10 @@ _RULE_DOCUMENTS = (
         "credential_group": "credential",
         "matcher": "byte_regex_search_v1",
         "pattern": (
-            r"[A-Za-z][A-Za-z0-9+.-]{1,31}://"
+            r"[A-Za-z][A-Za-z0-9+.-]{0,31}://"
             r"[A-Za-z0-9._~!$&'()*+,;=%-]{1,128}:"
             r"(?P<credential>[^\s/@]{1,256})@"
-            r"(?:[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])"
+            r"(?P<host>[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])"
             r"(?::[0-9]{1,5})?(?:[/?#][^\s]*)?"
         ),
         "rule_id": "core.uri.userinfo_password.v1",
@@ -1389,6 +1394,22 @@ def _validated_selected_profiles(
     return tuple(installed[coordinate] for coordinate in coordinates)
 
 
+def _match_has_supported_structure(rule: _Rule, match: re.Match[bytes]) -> bool:
+    if rule.rule_id != _CREDENTIAL_URI_RULE_ID:
+        return True
+    try:
+        host = match.group("host")
+    except IndexError:
+        return False
+    if not host.startswith(b"["):
+        return True
+    try:
+        ipaddress.IPv6Address(host[1:-1].decode("ascii"))
+    except (UnicodeDecodeError, ipaddress.AddressValueError):
+        return False
+    return True
+
+
 def classify_canonical_bytes(
     field_bytes: bytes,
     profile_coordinates: Sequence[ProfileCoordinate],
@@ -1417,6 +1438,8 @@ def classify_canonical_bytes(
             if rule.rule_id not in selected_rule_ids:
                 continue
             for match in rule.pattern.finditer(value):
+                if not _match_has_supported_structure(rule, match):
+                    continue
                 if (
                     rule.rule_id in _PLACEHOLDER_EXCLUSION_RULE_IDS
                     and rule.credential_group is not None
