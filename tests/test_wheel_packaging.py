@@ -532,6 +532,31 @@ def test_installed_bootstrap_rejects_unsupported_generic_python3_fallback(
     assert "Python >= 3.14" in proc.stderr
 
 
+@pytest.mark.parametrize("script_name", ["graphify", "graphify-mcp"])
+def test_installed_bootstrap_rejects_unsupported_sibling_python(
+    script_name: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, _ = _install_wheel_as_user_script_layout(wheel, tmp_path, script_name)
+    sibling_python = script_path.parent / "python"
+    sibling_python.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    sibling_python.chmod(0o755)
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 126
+    assert "Python >= 3.14" in proc.stderr
+
+
 def test_installed_bootstrap_prefers_script_prefix_package_before_interpreter_sites(
     wheel_build: tuple[set[str], str, str, Path],
     tmp_path: Path,
