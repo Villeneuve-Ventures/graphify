@@ -57,6 +57,11 @@ STANDARD_OPENSSH_PRIVATE_KEY_WITH_70_COLUMN_WRAPPING = (
     + b"AAAAAA\n"
     + b"-----END OPENSSH PRIVATE KEY-----"
 )
+ED25519_PKCS8_PRIVATE_KEY_WITH_SINGLE_64_COLUMN = (
+    b"-----BEGIN PRIVATE KEY-----\n"
+    b"MC4CAQAwBQYDK2VwBCIEIBERERERERERERERERERERERERERERERERERERERERER\n"
+    b"-----END PRIVATE KEY-----"
+)
 
 
 def _canonical_load(path: Path) -> dict[str, object]:
@@ -226,6 +231,10 @@ def test_missing_parsed_profile_document_fails_closed(
         ),
         (REALISTIC_RSA_PRIVATE_KEY_WITH_SHORT_FINAL_LINE, "secret.private_key_material"),
         (
+            ED25519_PKCS8_PRIVATE_KEY_WITH_SINGLE_64_COLUMN,
+            "secret.private_key_material",
+        ),
+        (
             STANDARD_OPENSSH_PRIVATE_KEY_WITH_70_COLUMN_WRAPPING,
             "secret.private_key_material",
         ),
@@ -294,6 +303,7 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
             b"-----END PRIVATE KEY-----"
         ),
         (b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 64 + b"\nQU=J\n-----END PRIVATE KEY-----"),
+        (b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 63 + b"\n-----END PRIVATE KEY-----"),
         (b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 68 + b"\nQUJDRA==\n-----END PRIVATE KEY-----"),
         (
             b"-----BEGIN OPENSSH PRIVATE KEY-----\n" + b"A" * 69 + b"\nAAAAAAA=\n"
@@ -825,6 +835,61 @@ def test_final_inventory_revalidation_rejects_an_unlisted_file_race(
     monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
     _select_bundle(monkeypatch, root)
     with pytest.raises(SemanticReleaseBundleError, match="missing or unlisted"):
+        load_installed_semantic_release_bundle()
+    assert raced
+
+
+def test_return_time_artifact_revalidation_rejects_previous_artifact_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    target = _artifact_path(root, _entry(manifest, kind="classifier_abi"))
+    original_read = semantic_release._read_chunks
+    raced = False
+
+    def racing_read(descriptor: int, max_bytes: int) -> bytes:
+        nonlocal raced
+        raw = original_read(descriptor, max_bytes)
+        if not raced and raw.startswith(
+            b'{"contract":"graphify.workspace.semantic_release_ruleset'
+        ):
+            raced = True
+            target.write_bytes(b'{"contract":"tampered.after-read"}\n')
+            target.chmod(0o644)
+        return raw
+
+    monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="artifact size differs from manifest"):
+        load_installed_semantic_release_bundle()
+    assert raced
+
+
+def test_return_time_manifest_revalidation_rejects_manifest_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    original_read = semantic_release._read_chunks
+    raced = False
+
+    def racing_read(descriptor: int, max_bytes: int) -> bytes:
+        nonlocal raced
+        raw = original_read(descriptor, max_bytes)
+        if not raced and raw.startswith(
+            b'{"contract":"graphify.workspace.semantic_release_ruleset'
+        ):
+            raced = True
+            manifest["compatibility_version"] = 2
+            _write_manifest(root, manifest)
+        return raw
+
+    monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="manifest changed during validation"):
         load_installed_semantic_release_bundle()
     assert raced
 

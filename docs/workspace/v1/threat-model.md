@@ -78,11 +78,13 @@ manifest.
 For installed executable operation, the semantic-release trust-root candidate
 also treats package-local bytecode caches as untrusted. The existing
 source-executed `graphify` and `graphify-mcp` scripts are the pre-import
-bootstrap: they re-execute the same interpreter with Python environment
-configuration ignored, user-site imports disabled, and safe-path mode enabled;
-set a fresh private package-external `sys.pycache_prefix`; and disable bytecode
-writes before any Graphify module import. Direct library imports that bypass
-this bootstrap are not semantic-release decision authority.
+bootstrap: their POSIX shell prelude resolves the installed script target and
+executes the installed Python with Python environment configuration ignored,
+user-site imports disabled, safe-path mode enabled, and bytecode writes disabled
+before Python startup hooks can run; then the Python body sets a fresh private
+package-external `sys.pycache_prefix` and keeps bytecode writes disabled before
+any Graphify module import. Direct library imports that bypass this bootstrap
+are not semantic-release decision authority.
 
 This does not make the package its own first-instruction trust anchor. The
 CPython executable and standard library, an installer that verifies the

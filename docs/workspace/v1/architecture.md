@@ -184,8 +184,9 @@ installed executable bootstrap: one canonical manifest inventories and
 digest-binds the deterministic classifier implementation, byte-defined ABI,
 closed taxonomy, normalization contract, ordered ruleset, required
 `core_secrets.v1`, and every selectable profile, while the source-executed
-`graphify` and `graphify-mcp` scripts establish a fresh package-external
-pycache prefix and disable user-site imports before importing Graphify. The
+`graphify` and `graphify-mcp` scripts start installed Python under isolation
+flags before Python startup hooks can run, establish a fresh package-external
+pycache prefix, and disable user-site imports before importing Graphify. The
 installed-root and descriptor-relative no-follow boundary rejects path, link,
 mode, size, digest, identity, version, limit, or ABI ambiguity. The byte ABI
 produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` results over

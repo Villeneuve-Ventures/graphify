@@ -1,4 +1,36 @@
-#!python
+#!/bin/sh
+''':'
+_GRAPHIFY_SCRIPT=$0
+while [ -L "$_GRAPHIFY_SCRIPT" ]; do
+    if [ -x /usr/bin/readlink ]; then
+        _GRAPHIFY_LINK=$(/usr/bin/readlink "$_GRAPHIFY_SCRIPT") || exit 126
+    elif [ -x /bin/readlink ]; then
+        _GRAPHIFY_LINK=$(/bin/readlink "$_GRAPHIFY_SCRIPT") || exit 126
+    else
+        echo "graphify bootstrap cannot resolve the installed script link" >&2
+        exit 126
+    fi
+    if [ -z "$_GRAPHIFY_LINK" ]; then
+        echo "graphify bootstrap cannot resolve the installed script link" >&2
+        exit 126
+    fi
+    case "$_GRAPHIFY_LINK" in
+        /*) _GRAPHIFY_SCRIPT=$_GRAPHIFY_LINK ;;
+        */*) _GRAPHIFY_SCRIPT=${_GRAPHIFY_SCRIPT%/*}/$_GRAPHIFY_LINK ;;
+        *) _GRAPHIFY_SCRIPT=${_GRAPHIFY_SCRIPT%/*}/$_GRAPHIFY_LINK ;;
+    esac
+done
+case "$_GRAPHIFY_SCRIPT" in
+    */*) _GRAPHIFY_SCRIPT_DIR=${_GRAPHIFY_SCRIPT%/*} ;;
+    *) _GRAPHIFY_SCRIPT_DIR=. ;;
+esac
+_GRAPHIFY_PYTHON=$_GRAPHIFY_SCRIPT_DIR/python
+if [ ! -x "$_GRAPHIFY_PYTHON" ]; then
+    echo "graphify bootstrap cannot resolve the installed Python executable" >&2
+    exit 126
+fi
+exec "$_GRAPHIFY_PYTHON" -BEPs "$_GRAPHIFY_SCRIPT" "$@"
+' '''
 from __future__ import annotations
 
 import os

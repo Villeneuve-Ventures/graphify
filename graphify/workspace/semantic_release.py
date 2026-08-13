@@ -192,10 +192,10 @@ _RULE_DOCUMENTS = (
         "matcher": "byte_regex_search_v1",
         "pattern": (
             r"(?:-----BEGIN (?P<label>(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----"
-            r"\r?\n(?:(?:[A-Za-z0-9+/]{4}){16}\r?\n)+"
+            r"\r?\n(?:[A-Za-z0-9+/]{64}|(?:(?:[A-Za-z0-9+/]{4}){16}\r?\n)+"
             r"(?:(?:[A-Za-z0-9+/]{4}){1,16}|"
             r"(?:[A-Za-z0-9+/]{4}){0,15}[A-Za-z0-9+/]{3}=|"
-            r"(?:[A-Za-z0-9+/]{4}){0,15}[A-Za-z0-9+/]{2}==)"
+            r"(?:[A-Za-z0-9+/]{4}){0,15}[A-Za-z0-9+/]{2}==))"
             r"\r?\n-----END (?P=label)-----|"
             r"-----BEGIN OPENSSH PRIVATE KEY-----\r?\n(?:"
             r"(?:(?:[A-Za-z0-9+/]{70}\r?\n){2})+"
@@ -1197,6 +1197,7 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
         raise SemanticReleaseBundleError(
             "semantic-release data inventory contains missing or unlisted artifacts"
         )
+    _revalidate_return_bundle(package_root, manifest_bytes, artifacts)
     return SemanticReleaseBundle(
         manifest_id=_MANIFEST_ID,
         manifest_bytes=manifest_bytes,
@@ -1206,6 +1207,29 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
         rules=rules,
         excluded_credential_values=excluded_values,
     )
+
+
+def _revalidate_return_bundle(
+    package_root: Path,
+    manifest_bytes: bytes,
+    artifacts: Sequence[BundleArtifact],
+) -> None:
+    for artifact in artifacts:
+        _read_package_file(
+            package_root,
+            artifact.path,
+            max_bytes=artifact.byte_count,
+            expected_mode=artifact.mode,
+            expected_byte_count=artifact.byte_count,
+            expected_sha256=artifact.sha256,
+        )
+    current_manifest_bytes = _read_package_file(
+        package_root,
+        _MANIFEST_RELATIVE_PATH,
+        max_bytes=BUNDLE_MANIFEST_MAX_BYTES,
+    )
+    if current_manifest_bytes != manifest_bytes:
+        raise SemanticReleaseBundleError("semantic-release manifest changed during validation")
 
 
 def _valid_field_bytes(value: object) -> bytes | None:

@@ -1187,9 +1187,10 @@ inventing operator policy or decision-store behavior:
   deterministic classifier implementation and byte ABI, closed taxonomy,
   normalization contract, ordered ruleset, required `core_secrets.v1`, and
   selectable coverage-profile artifacts, plus the existing installed
-  `graphify` and `graphify-mcp` source-executed bootstrap scripts that establish
-  a fresh package-external pycache prefix and disable user-site imports before
-  importing Graphify;
+  `graphify` and `graphify-mcp` source-executed bootstrap scripts whose POSIX
+  shell prelude starts installed Python under isolation flags before Python
+  startup hooks can run, then establishes a fresh package-external pycache
+  prefix and disables user-site imports before importing Graphify;
 - the manifest is at most 1 MiB, uses one canonical installed `graphify` package
   root, and binds every unique sorted package-relative inventory entry through
   the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`
@@ -1229,11 +1230,11 @@ inventing operator policy or decision-store behavior:
   ID. No caller or environment can enlarge a cap; and
 - the implementation stop boundary is installed-bundle loading/validation,
   deterministic factual classification over explicit bytes, and the existing
-  executable bootstrap needed to exclude package-local bytecode caches. It must
-  not read promoted-generation or semantic-input state, choose active profiles,
-  provision policy authority, map dispositions, create
-  `SemanticReleaseDecisionStore`, integrate capacity/GC, execute omission,
-  project content, add a new public CLI/schema/receipt, invoke a
+  executable bootstrap needed to exclude package-local bytecode caches and
+  Python startup hooks. It must not read promoted-generation or semantic-input
+  state, choose active profiles, provision policy authority, map dispositions,
+  create `SemanticReleaseDecisionStore`, integrate capacity/GC, execute
+  omission, project content, add a new public CLI/schema/receipt, invoke a
   provider/backend, or publish.
 
 A later acceptance review must prove positive and hostile

@@ -901,17 +901,22 @@ regular file of exact bytes/size/digest and mode `0444` or `0644`, with no
 execute or group/other write bit. Any unknown version, path, file type, mode,
 size, digest, grammar, taxonomy, normalization, ruleset, profile, limit, or ABI
 ambiguity fails closed.
+Bundle loading finishes with a return-time reread of the manifest and every
+manifest-bound artifact, so the returned bundle remains bound to the installed
+bytes present at return rather than only to the initially scanned inventory
+names.
 
 Installed executable operation also requires the existing source-executed
 `graphify` and `graphify-mcp` bootstrap scripts as the pre-import runtime
-boundary. Before importing any Graphify module, the scripts re-execute the same
-interpreter with bytecode writes disabled, Python environment configuration
-ignored, user-site imports disabled, and safe-path mode enabled; then they set
-`sys.pycache_prefix` to a fresh private package-external directory and keep
-`sys.dont_write_bytecode` true. Package-local `__pycache__` contents are
-therefore untrusted and ignored for the installed executable path. Direct
-library imports that bypass this bootstrap are not semantic-release decision
-authority.
+boundary. Before Python startup hooks can run, the POSIX shell prelude resolves
+the installed script target and executes the installed Python with bytecode
+writes disabled, Python environment configuration ignored, user-site imports
+disabled, and safe-path mode enabled; then the Python body sets
+`sys.pycache_prefix` to a fresh private package-external directory and keeps
+`sys.dont_write_bytecode` true before importing any Graphify module.
+Package-local `__pycache__` contents are therefore untrusted and ignored for the
+installed executable path. Direct library imports that bypass this bootstrap are
+not semantic-release decision authority.
 
 That pre-import boundary has an explicit external integrity prerequisite. The
 CPython executable and standard library, an installer that verifies the chosen

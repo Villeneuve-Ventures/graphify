@@ -301,7 +301,11 @@ def test_wheel_ships_pre_import_bootstrap_scripts(
             ]
             assert len(matches) == 1
             raw = archive.read(matches[0]).decode("utf-8")
-            assert raw.startswith("#!python\n")
+            assert raw.startswith("#!/bin/sh\n")
+            assert 'exec "$_GRAPHIFY_PYTHON" -BEPs "$_GRAPHIFY_SCRIPT" "$@"' in raw
+            assert raw.index('exec "$_GRAPHIFY_PYTHON" -BEPs') < raw.index(
+                "from __future__ import annotations"
+            )
             assert "sys.flags.dont_write_bytecode" in raw
             assert "sys.flags.ignore_environment" in raw
             assert "sys.flags.no_user_site" in raw
@@ -312,6 +316,52 @@ def test_wheel_ships_pre_import_bootstrap_scripts(
             assert "_GRAPHIFY_BOOTSTRAP_ISOLATED" not in raw
             assert "sys.pycache_prefix = prefix" in raw
             assert raw.index("sys.pycache_prefix = prefix") < raw.index(target_import)
+
+
+@pytest.mark.parametrize(
+    ("script_name", "args", "must_succeed"),
+    [
+        ("graphify", ["--version"], True),
+        ("graphify-mcp", ["--help"], False),
+    ],
+)
+def test_installed_bootstrap_blocks_pythonpath_sitecustomize_before_startup(
+    script_name: str,
+    args: list[str],
+    must_succeed: bool,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    _, scripts, _ = _install_wheel_without_dependencies(wheel, tmp_path)
+    script_path = scripts / script_name
+    raw = script_path.read_text(encoding="utf-8")
+    assert raw.startswith("#!/bin/sh\n")
+    assert 'exec "$_GRAPHIFY_PYTHON" -BEPs "$_GRAPHIFY_SCRIPT" "$@"' in raw
+
+    hostile_path = tmp_path / "hostile-pythonpath"
+    hostile_path.mkdir()
+    sentinel = tmp_path / f"{script_name}-sitecustomize-executed"
+    (hostile_path / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    hostile_env = _clean_environment()
+    hostile_env["PYTHONPATH"] = str(hostile_path)
+    proc = subprocess.run(
+        [str(script_path), *args],
+        cwd=tmp_path,
+        env=hostile_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert not sentinel.exists(), proc.stderr
+    assert proc.returncode != 126, proc.stderr
+    if must_succeed:
+        assert proc.returncode == 0, proc.stderr
 
 
 @pytest.mark.parametrize(

@@ -665,8 +665,10 @@ manifest-inventoried deterministic classifier implementation and byte-defined AB
 closed taxonomy, normalization contract, ordered ruleset, required
 explicit-evidence-only `core_secrets.v1`, and every selectable coverage-profile
 artifact, plus the existing installed `graphify` and `graphify-mcp`
-source-executed bootstrap scripts that establish a fresh package-external
-pycache prefix and disable user-site imports before importing Graphify. The
+source-executed bootstrap scripts whose POSIX shell prelude starts installed
+Python under isolation flags before Python startup hooks can run, then
+establish a fresh package-external pycache prefix and disable user-site imports
+before importing Graphify. The
 canonical semantic contract already freezes the installed package root,
 package-relative path grammar, descriptor-relative no-follow traversal,
 single-link regular-file modes, byte counts and digests,
@@ -678,12 +680,12 @@ provisioning or decision-store behavior.
 The subchild stops after internal installed-bundle validation, deterministic
 factual classification over explicit already-canonical bounded UTF-8 bytes, and
 the existing executable bootstrap needed to exclude package-local bytecode
-caches. It does not choose active profiles, map categories to policy
-dispositions, compose semantic-generation fields, read or mutate workspace
-authority, install a decision binding, account capacity or GC, execute
-omissions, project content, expose a new public CLI/schema/receipt, invoke a
-provider/backend, or publish. Separate acceptance must prove the frozen
-behavior.
+caches and Python startup hooks. It does not choose active profiles, map
+categories to policy dispositions, compose semantic-generation fields, read or
+mutate workspace authority, install a decision binding, account capacity or GC,
+execute omissions, project content, expose a new public CLI/schema/receipt,
+invoke a provider/backend, or publish. Separate acceptance must prove the
+frozen behavior.
 
 P5 and P5B2 remain `IN_PROGRESS`; the encompassing release/DLP decision,
 operator policy-authority provisioning, `SemanticReleaseDecisionStore`,
