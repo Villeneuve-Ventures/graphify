@@ -170,7 +170,8 @@ _RULE_DOCUMENTS = (
         "matcher": "byte_regex_search_v1",
         "pattern": (
             r"(?:^|\r?\n)(?ai:Authorization):[ \t]*(?ai:Basic)[ \t]+"
-            r"(?P<credential>[A-Za-z0-9+/]{8,}={0,2})(?=$|\r?\n)"
+            r"(?P<credential>(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|"
+            r"[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==))(?=$|\r?\n)"
         ),
         "rule_id": "core.authorization.basic.v1",
     },
@@ -405,6 +406,53 @@ def _stat_identity(details: os.stat_result) -> tuple[int, int, int, int, int, in
     )
 
 
+@dataclass(frozen=True)
+class _RetainedPackageFile:
+    relative_path: str
+    raw: bytes
+    name: str
+    descriptor: int
+    parent_descriptor: int
+    root_descriptor: int
+    root_identity: tuple[int, int, int, int, int, int, int]
+    bindings: tuple[tuple[str, int, int], ...]
+    file_identity: tuple[int, int, int, int, int, int, int]
+    descriptors: tuple[int, ...]
+
+    def revalidate(self, package_root: Path) -> None:
+        try:
+            opened = os.fstat(self.descriptor)
+            rebound = os.stat(
+                self.name,
+                dir_fd=self.parent_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise SemanticReleaseBundleError(
+                f"{self.relative_path}: path binding was lost"
+            ) from exc
+        if (
+            _stat_identity(opened) != self.file_identity
+            or _stat_identity(rebound) != self.file_identity
+        ):
+            raise SemanticReleaseBundleError(
+                f"{self.relative_path}: artifact changed during validation"
+            )
+        _revalidate_directories(
+            package_root,
+            self.root_descriptor,
+            self.bindings,
+            self.root_identity,
+        )
+
+    def close(self) -> None:
+        for descriptor in reversed(self.descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def _require_exact_directory_name(parent_descriptor: int, name: str, label: str) -> None:
     count = 0
     exact = False
@@ -468,7 +516,7 @@ def _read_chunks(descriptor: int, max_bytes: int) -> bytes:
         chunks.append(chunk)
 
 
-def _read_package_file(
+def _open_package_file(
     package_root: Path,
     relative_path: str,
     *,
@@ -476,7 +524,7 @@ def _read_package_file(
     expected_mode: str | None = None,
     expected_byte_count: int | None = None,
     expected_sha256: str | None = None,
-) -> bytes:
+) -> _RetainedPackageFile:
     path = _validated_relative_path(relative_path, "bundle path")
     descriptors: list[int] = []
     try:
@@ -550,19 +598,57 @@ def _read_package_file(
             raise SemanticReleaseBundleError(
                 f"{relative_path}: artifact digest differs from manifest"
             )
-        return raw
+        return _RetainedPackageFile(
+            relative_path=relative_path,
+            raw=raw,
+            name=name,
+            descriptor=descriptor,
+            parent_descriptor=parent,
+            root_descriptor=root_descriptor,
+            root_identity=root_identity,
+            bindings=tuple(bindings),
+            file_identity=_stat_identity(after),
+            descriptors=tuple(descriptors),
+        )
     except SemanticReleaseBundleError:
-        raise
-    except OSError as exc:
-        raise SemanticReleaseBundleError(
-            f"{relative_path}: descriptor-relative traversal failed"
-        ) from exc
-    finally:
         for descriptor in reversed(descriptors):
             try:
                 os.close(descriptor)
             except OSError:
                 pass
+        raise
+    except OSError as exc:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise SemanticReleaseBundleError(
+            f"{relative_path}: descriptor-relative traversal failed"
+        ) from exc
+
+
+def _read_package_file(
+    package_root: Path,
+    relative_path: str,
+    *,
+    max_bytes: int,
+    expected_mode: str | None = None,
+    expected_byte_count: int | None = None,
+    expected_sha256: str | None = None,
+) -> bytes:
+    retained = _open_package_file(
+        package_root,
+        relative_path,
+        max_bytes=max_bytes,
+        expected_mode=expected_mode,
+        expected_byte_count=expected_byte_count,
+        expected_sha256=expected_sha256,
+    )
+    try:
+        return retained.raw
+    finally:
+        retained.close()
 
 
 def _validated_relative_path(value: object, label: str) -> PurePosixPath:
@@ -1058,7 +1144,7 @@ def _validate_ruleset(
             raise SemanticReleaseBundleError(f"{label}: pattern must be ASCII") from exc
         try:
             pattern = re.compile(pattern_bytes, re.ASCII)
-        except re.error as exc:
+        except (re.error, OverflowError) as exc:
             raise SemanticReleaseBundleError(f"{label}: pattern is unexecutable") from exc
         if credential_group is not None and credential_group not in pattern.groupindex:
             raise SemanticReleaseBundleError(f"{label}: credential group is missing")
@@ -1197,7 +1283,7 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
         raise SemanticReleaseBundleError(
             "semantic-release data inventory contains missing or unlisted artifacts"
         )
-    _revalidate_return_bundle(package_root, manifest_bytes, artifacts)
+    _revalidate_return_bundle(package_root, manifest_bytes, artifacts, inventoried_data)
     return SemanticReleaseBundle(
         manifest_id=_MANIFEST_ID,
         manifest_bytes=manifest_bytes,
@@ -1213,23 +1299,38 @@ def _revalidate_return_bundle(
     package_root: Path,
     manifest_bytes: bytes,
     artifacts: Sequence[BundleArtifact],
+    inventoried_data: set[str],
 ) -> None:
-    for artifact in artifacts:
-        _read_package_file(
+    retained: list[_RetainedPackageFile] = []
+    try:
+        for artifact in artifacts:
+            retained.append(
+                _open_package_file(
+                    package_root,
+                    artifact.path,
+                    max_bytes=artifact.byte_count,
+                    expected_mode=artifact.mode,
+                    expected_byte_count=artifact.byte_count,
+                    expected_sha256=artifact.sha256,
+                )
+            )
+        manifest = _open_package_file(
             package_root,
-            artifact.path,
-            max_bytes=artifact.byte_count,
-            expected_mode=artifact.mode,
-            expected_byte_count=artifact.byte_count,
-            expected_sha256=artifact.sha256,
+            _MANIFEST_RELATIVE_PATH,
+            max_bytes=BUNDLE_MANIFEST_MAX_BYTES,
         )
-    current_manifest_bytes = _read_package_file(
-        package_root,
-        _MANIFEST_RELATIVE_PATH,
-        max_bytes=BUNDLE_MANIFEST_MAX_BYTES,
-    )
-    if current_manifest_bytes != manifest_bytes:
-        raise SemanticReleaseBundleError("semantic-release manifest changed during validation")
+        retained.append(manifest)
+        if manifest.raw != manifest_bytes:
+            raise SemanticReleaseBundleError("semantic-release manifest changed during validation")
+        if _scan_data_inventory(package_root) != inventoried_data:
+            raise SemanticReleaseBundleError(
+                "semantic-release data inventory contains missing or unlisted artifacts"
+            )
+        for item in retained:
+            item.revalidate(package_root)
+    finally:
+        for item in reversed(retained):
+            item.close()
 
 
 def _valid_field_bytes(value: object) -> bytes | None:
@@ -1296,7 +1397,7 @@ def classify_canonical_bytes(
         return _indeterminate()
     try:
         bundle = load_installed_semantic_release_bundle()
-    except SemanticReleaseBundleError, OSError, ValueError, re.error:
+    except SemanticReleaseBundleError, OSError, ValueError, OverflowError, re.error:
         return _indeterminate()
     selected_profiles = _validated_selected_profiles(profile_coordinates, bundle)
     if selected_profiles is None:

@@ -185,8 +185,11 @@ digest-binds the deterministic classifier implementation, byte-defined ABI,
 closed taxonomy, normalization contract, ordered ruleset, required
 `core_secrets.v1`, and every selectable profile, while the source-executed
 `graphify` and `graphify-mcp` scripts start installed Python under isolation
-flags before Python startup hooks can run, establish a fresh package-external
-pycache prefix, and disable user-site imports before importing Graphify. The
+flags including `-S` before Python startup hooks can run, establish a fresh
+package-external pycache prefix, and suppress `.pth`, `sitecustomize`, and
+automatic user-site startup imports before importing Graphify. Plain user script
+installs may add the installed script-prefix package root explicitly after that
+startup boundary. The
 installed-root and descriptor-relative no-follow boundary rejects path, link,
 mode, size, digest, identity, version, limit, or ABI ambiguity. The byte ABI
 produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` results over

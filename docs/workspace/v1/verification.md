@@ -1188,9 +1188,11 @@ inventing operator policy or decision-store behavior:
   normalization contract, ordered ruleset, required `core_secrets.v1`, and
   selectable coverage-profile artifacts, plus the existing installed
   `graphify` and `graphify-mcp` source-executed bootstrap scripts whose POSIX
-  shell prelude starts installed Python under isolation flags before Python
+  shell prelude starts installed Python under `-S` isolation before Python
   startup hooks can run, then establishes a fresh package-external pycache
-  prefix and disables user-site imports before importing Graphify;
+  prefix, suppresses `.pth`, `sitecustomize`, and automatic user-site startup
+  imports, and may add the installed script-prefix package root explicitly
+  before importing Graphify;
 - the manifest is at most 1 MiB, uses one canonical installed `graphify` package
   root, and binds every unique sorted package-relative inventory entry through
   the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`

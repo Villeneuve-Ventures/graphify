@@ -245,6 +245,7 @@ def test_missing_parsed_profile_document_fails_closed(
             b"Authorization: Basic dXNlcjpzdXBlcnNlY3JldA==",
             "secret.authorization_credential",
         ),
+        (b"Authorization: Basic dTpw", "secret.authorization_credential"),
         (
             b"authorization: bearer abcdefghijklmnopqrstuvwxyz.0123456789",
             "secret.authorization_credential",
@@ -285,6 +286,8 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
         b"this paragraph contains something secret-looking",
         b"api_key = your_api_key",
         b"password: placeholder",
+        b"Authorization: Basic abc",
+        b"Authorization: Basic dTpw=",
         b"Authorization: Bearer short",
         b"-----BEGIN PRIVATE KEY----- incomplete",
         (
@@ -787,6 +790,30 @@ def test_excessive_json_nesting_fails_closed(
     )
 
 
+def test_unexecutable_regex_overflow_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    entry = _entry(manifest, kind="ruleset")
+    ruleset = _canonical_load(_artifact_path(root, entry))
+    rules = ruleset["rules"]
+    assert isinstance(rules, list)
+    rule = rules[0]
+    assert isinstance(rule, dict)
+    rule["pattern"] = "a{999999999999999999999}"
+    _write_artifact_json(root, entry, ruleset)
+    _write_manifest(root, manifest)
+
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="pattern is unexecutable"):
+        load_installed_semantic_release_bundle()
+    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
+        "INDETERMINATE"
+    )
+
+
 def test_post_read_identity_revalidation_rejects_a_read_race(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -863,6 +890,63 @@ def test_return_time_artifact_revalidation_rejects_previous_artifact_replacement
     monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
     _select_bundle(monkeypatch, root)
     with pytest.raises(SemanticReleaseBundleError, match="artifact size differs from manifest"):
+        load_installed_semantic_release_bundle()
+    assert raced
+
+
+def test_return_time_validation_keeps_artifacts_bound_through_whole_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    target = _artifact_path(root, _entry(manifest, kind="classifier"))
+    original_read = semantic_release._read_chunks
+    abi_reads = 0
+    raced = False
+
+    def racing_read(descriptor: int, max_bytes: int) -> bytes:
+        nonlocal abi_reads, raced
+        raw = original_read(descriptor, max_bytes)
+        if raw.startswith(b'{"abi_id":"graphify.semantic_release.byte_abi.v1"'):
+            abi_reads += 1
+            if abi_reads == 2:
+                raced = True
+                target.write_bytes(b"# replaced after earlier return-time artifact read\n")
+                target.chmod(0o644)
+        return raw
+
+    monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="changed during validation"):
+        load_installed_semantic_release_bundle()
+    assert raced
+
+
+def test_return_time_inventory_scan_runs_after_artifact_rereads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    original_read = semantic_release._read_chunks
+    classifier_reads = 0
+    raced = False
+
+    def racing_read(descriptor: int, max_bytes: int) -> bytes:
+        nonlocal classifier_reads, raced
+        raw = original_read(descriptor, max_bytes)
+        if raw.startswith(b'"""Internal P5B2 semantic-release'):
+            classifier_reads += 1
+            if classifier_reads == 2:
+                raced = True
+                extra = root / DATA_RELATIVE / "foreign-after-return-scan.json"
+                extra.write_bytes(b"{}\n")
+                extra.chmod(0o644)
+        return raw
+
+    monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="missing or unlisted"):
         load_installed_semantic_release_bundle()
     assert raced
 

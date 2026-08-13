@@ -666,9 +666,11 @@ closed taxonomy, normalization contract, ordered ruleset, required
 explicit-evidence-only `core_secrets.v1`, and every selectable coverage-profile
 artifact, plus the existing installed `graphify` and `graphify-mcp`
 source-executed bootstrap scripts whose POSIX shell prelude starts installed
-Python under isolation flags before Python startup hooks can run, then
-establish a fresh package-external pycache prefix and disable user-site imports
-before importing Graphify. The
+Python under `-S` isolation before Python startup hooks can run, then establish
+a fresh package-external pycache prefix and suppress `.pth`, `sitecustomize`,
+and automatic user-site startup imports before importing Graphify. Plain user
+script installs may add the installed script-prefix package root explicitly
+after that startup boundary. The
 canonical semantic contract already freezes the installed package root,
 package-relative path grammar, descriptor-relative no-follow traversal,
 single-link regular-file modes, byte counts and digests,

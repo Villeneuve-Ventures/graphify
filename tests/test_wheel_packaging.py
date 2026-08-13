@@ -173,7 +173,7 @@ def _probe_installed_bootstrap(
         ]
     )
     proc = subprocess.run(
-        [str(python), "-B", "-E", "-P", "-s", "-c", script],
+        [str(python), "-B", "-E", "-P", "-s", "-S", "-c", script],
         cwd=script_path.parent,
         env=_clean_environment(),
         capture_output=True,
@@ -184,6 +184,38 @@ def _probe_installed_bootstrap(
     evidence = json.loads(proc.stdout)
     assert isinstance(evidence, dict)
     return evidence
+
+
+def _install_wheel_as_user_script_layout(
+    wheel: Path,
+    root: Path,
+    script_name: str,
+) -> tuple[Path, Path]:
+    userbase = root / f"{script_name}-userbase"
+    scripts = userbase / "bin"
+    site_packages = (
+        userbase
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    scripts.mkdir(parents=True)
+    site_packages.mkdir(parents=True)
+    script_bytes: bytes | None = None
+    with zipfile.ZipFile(wheel) as archive:
+        for name in archive.namelist():
+            if name.startswith("graphify/") and not name.endswith("/"):
+                target = site_packages / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(name))
+            if name.endswith(f".data/scripts/{script_name}"):
+                script_bytes = archive.read(name)
+    assert script_bytes is not None
+    script_path = scripts / script_name
+    script_path.write_bytes(script_bytes)
+    script_path.chmod(0o755)
+    assert not (scripts / "python").exists()
+    return script_path, site_packages
 
 
 def _hostile_source(length: int, sentinel: Path, *, function_name: str = "main") -> bytes:
@@ -302,16 +334,17 @@ def test_wheel_ships_pre_import_bootstrap_scripts(
             assert len(matches) == 1
             raw = archive.read(matches[0]).decode("utf-8")
             assert raw.startswith("#!/bin/sh\n")
-            assert 'exec "$_GRAPHIFY_PYTHON" -BEPs "$_GRAPHIFY_SCRIPT" "$@"' in raw
-            assert raw.index('exec "$_GRAPHIFY_PYTHON" -BEPs') < raw.index(
+            assert 'exec "$_GRAPHIFY_PYTHON" -BEPsS "$_GRAPHIFY_SCRIPT" "$@"' in raw
+            assert raw.index('exec "$_GRAPHIFY_PYTHON" -BEPsS') < raw.index(
                 "from __future__ import annotations"
             )
             assert "sys.flags.dont_write_bytecode" in raw
             assert "sys.flags.ignore_environment" in raw
+            assert "sys.flags.no_site" in raw
             assert "sys.flags.no_user_site" in raw
             assert "sys.flags.safe_path" in raw
             assert "os.execv(" in raw
-            assert '"-B",\n            "-E",\n            "-P",\n            "-s"' in raw
+            assert '"-B",\n            "-E",\n            "-P",\n            "-s",\n            "-S"' in raw
             assert "getusersitepackages" not in raw
             assert "_GRAPHIFY_BOOTSTRAP_ISOLATED" not in raw
             assert "sys.pycache_prefix = prefix" in raw
@@ -333,11 +366,11 @@ def test_installed_bootstrap_blocks_pythonpath_sitecustomize_before_startup(
     tmp_path: Path,
 ) -> None:
     _, _, _, wheel = wheel_build
-    _, scripts, _ = _install_wheel_without_dependencies(wheel, tmp_path)
+    python, scripts, _ = _install_wheel_without_dependencies(wheel, tmp_path)
     script_path = scripts / script_name
     raw = script_path.read_text(encoding="utf-8")
     assert raw.startswith("#!/bin/sh\n")
-    assert 'exec "$_GRAPHIFY_PYTHON" -BEPs "$_GRAPHIFY_SCRIPT" "$@"' in raw
+    assert 'exec "$_GRAPHIFY_PYTHON" -BEPsS "$_GRAPHIFY_SCRIPT" "$@"' in raw
 
     hostile_path = tmp_path / "hostile-pythonpath"
     hostile_path.mkdir()
@@ -347,12 +380,82 @@ def test_installed_bootstrap_blocks_pythonpath_sitecustomize_before_startup(
         f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n",
         encoding="utf-8",
     )
+    site_packages = subprocess.run(
+        [str(python), "-c", "import site; print(site.getsitepackages()[0])"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    site_sentinel = tmp_path / f"{script_name}-site-startup-executed"
+    Path(site_packages, "graphify_hostile.pth").write_text(
+        "import pathlib; "
+        f"pathlib.Path({str(site_sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    Path(site_packages, "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(site_sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
     hostile_env = _clean_environment()
     hostile_env["PYTHONPATH"] = str(hostile_path)
     proc = subprocess.run(
         [str(script_path), *args],
         cwd=tmp_path,
         env=hostile_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert not sentinel.exists(), proc.stderr
+    assert not site_sentinel.exists(), proc.stderr
+    assert proc.returncode != 126, proc.stderr
+    if must_succeed:
+        assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize(
+    ("script_name", "args", "must_succeed"),
+    [
+        ("graphify", ["--version"], True),
+        ("graphify-mcp", ["--help"], False),
+    ],
+)
+def test_installed_bootstrap_runs_from_plain_user_script_layout_without_startup_hooks(
+    script_name: str,
+    args: list[str],
+    must_succeed: bool,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, site_packages = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        script_name,
+    )
+    raw = script_path.read_text(encoding="utf-8")
+    assert raw.startswith("#!/bin/sh\n")
+    assert 'exec "$_GRAPHIFY_PYTHON" -BEPsS "$_GRAPHIFY_SCRIPT" "$@"' in raw
+
+    sentinel = tmp_path / f"{script_name}-user-site-startup-executed"
+    (site_packages / "graphify_hostile.pth").write_text(
+        "import pathlib; "
+        f"pathlib.Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (site_packages / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [str(script_path), *args],
+        cwd=tmp_path,
+        env=_clean_environment(),
         capture_output=True,
         text=True,
         check=False,

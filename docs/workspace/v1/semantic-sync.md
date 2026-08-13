@@ -1773,10 +1773,11 @@ executable bootstrap needed to establish that root before Graphify imports:
 - every repo-owned selectable coverage-profile artifact and its manifest-bound
   identity, version, bytes, size, mode, and SHA-256; and
 - the source-executed installed `graphify` and `graphify-mcp` bootstrap scripts
-  whose POSIX shell prelude executes installed Python with isolation flags before
+  whose POSIX shell prelude executes installed Python with `-S` isolation before
   Python startup hooks can run, excludes package-local bytecode caches from
-  trusted installed executable imports, and disables user-site imports before any
-  Graphify module is loaded.
+  trusted installed executable imports, suppresses `.pth`, `sitecustomize`, and
+  automatic user-site startup imports, and may then add the installed
+  script-prefix package root explicitly before any Graphify module is loaded.
 
 The manifest and referenced artifacts are never caller, workspace, operator,
 provider, backend, model, credential, network, environment, or policy input.
@@ -1804,7 +1805,8 @@ This subchild may implement only installed-bundle loading and validation, the
 manifest-bound deterministic factual classifier over explicit,
 already-canonical bounded UTF-8 bytes, and the existing installed executable
 bootstrap needed to start Python under isolation flags, set a fresh
-package-external pycache prefix, and disable user-site imports before Graphify
+package-external pycache prefix, suppress Python startup hooks and automatic
+user-site startup imports, and add only installed package roots before Graphify
 imports. It does not select profiles for a
 workspace or release context, interpret `NO_MATCH` as release safety, map
 categories to dispositions, read semantic-generation state, or persist any
@@ -2089,9 +2091,11 @@ inference, or contextual semantic judgment.
 Installed executable evaluation reaches this module only after the existing
 source-executed `graphify`/`graphify-mcp` bootstrap's POSIX shell prelude has
 executed installed Python with Python environment configuration ignored,
-user-site imports disabled, safe-path mode enabled, and bytecode writes disabled
-before Python startup hooks can run; the Python body then sets a fresh private
-package-external `sys.pycache_prefix` and keeps bytecode writes disabled.
+site initialization disabled, user-site startup imports disabled, safe-path mode
+enabled, and bytecode writes disabled before Python startup hooks can run; the
+Python body then sets a fresh private package-external `sys.pycache_prefix`,
+keeps bytecode writes disabled, and may add the installed script-prefix package
+root explicitly.
 Source-tree `__pycache__` entries are ignored in that runtime path. A direct
 library import that bypasses this pre-import bootstrap is not semantic-release
 decision authority.

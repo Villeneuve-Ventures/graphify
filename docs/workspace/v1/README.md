@@ -71,10 +71,12 @@ manifest plus the manifest-bound classifier implementation and byte ABI, closed
 taxonomy, normalization contract, ordered ruleset, required
 explicit-evidence-only `core_secrets.v1`, every selectable coverage-profile
 artifact, and the installed `graphify`/`graphify-mcp` pre-import bootstrap that
-starts installed Python under isolation flags before Python startup hooks can
-run and keeps package-local bytecode caches and user-site imports outside the
-trusted runtime path. The installed-root/no-follow, mode, size, digest, hard-limit,
-deterministic-pattern, fresh-pycache-prefix, no-user-site, and fail-closed rules
+starts installed Python under `-S` isolation before Python startup hooks can run
+and keeps package-local bytecode caches, `.pth`, `sitecustomize`, and automatic
+user-site startup imports outside the trusted runtime path. Plain user script
+installs may add the installed script-prefix package root explicitly after that
+startup boundary. The installed-root/no-follow, mode, size, digest, hard-limit,
+deterministic-pattern, fresh-pycache-prefix, no-startup-site, and fail-closed rules
 are frozen; callers cannot supply, select around, or override those bytes. It
 has no receipt, acceptance, completion, content-release, publication, or
 successor authority.

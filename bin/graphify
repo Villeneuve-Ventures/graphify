@@ -26,10 +26,16 @@ case "$_GRAPHIFY_SCRIPT" in
 esac
 _GRAPHIFY_PYTHON=$_GRAPHIFY_SCRIPT_DIR/python
 if [ ! -x "$_GRAPHIFY_PYTHON" ]; then
-    echo "graphify bootstrap cannot resolve the installed Python executable" >&2
-    exit 126
+    if command -v python3.14 >/dev/null 2>&1; then
+        _GRAPHIFY_PYTHON=$(command -v python3.14) || exit 126
+    elif command -v python3 >/dev/null 2>&1; then
+        _GRAPHIFY_PYTHON=$(command -v python3) || exit 126
+    else
+        echo "graphify bootstrap cannot resolve the installed Python executable" >&2
+        exit 126
+    fi
 fi
-exec "$_GRAPHIFY_PYTHON" -BEPs "$_GRAPHIFY_SCRIPT" "$@"
+exec "$_GRAPHIFY_PYTHON" -BEPsS "$_GRAPHIFY_SCRIPT" "$@"
 ' '''
 from __future__ import annotations
 
@@ -40,6 +46,7 @@ import sys
 if not (
     sys.flags.dont_write_bytecode
     and sys.flags.ignore_environment
+    and sys.flags.no_site
     and sys.flags.no_user_site
     and sys.flags.safe_path
 ):
@@ -53,6 +60,7 @@ if not (
             "-E",
             "-P",
             "-s",
+            "-S",
             os.path.realpath(__file__),
             *sys.argv[1:],
         ],
@@ -69,16 +77,38 @@ def _real(path: str) -> str:
     return os.path.realpath(path or os.getcwd())
 
 
+def _script_prefix_site_roots() -> tuple[str, ...]:
+    script_dir = _real(os.path.dirname(__file__))
+    prefixes: list[str] = []
+    if os.path.basename(script_dir) == "bin":
+        prefixes.append(os.path.dirname(script_dir))
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    roots: list[str] = []
+    for prefix in prefixes:
+        for relative in (
+            ("lib", version, "site-packages"),
+            ("lib", "python", "site-packages"),
+        ):
+            candidate = os.path.join(prefix, *relative)
+            if os.path.isdir(os.path.join(candidate, "graphify")):
+                roots.append(_real(candidate))
+    return tuple(roots)
+
+
 def _allowed_import_roots() -> tuple[str, ...]:
     roots: list[str] = []
     for key in ("purelib", "platlib", "stdlib", "platstdlib"):
         value = sysconfig.get_paths().get(key)
         if value:
             roots.append(_real(value))
+    destination = sysconfig.get_config_var("DESTSHARED")
+    if destination:
+        roots.append(_real(destination))
     getsitepackages = getattr(site, "getsitepackages", None)
     if callable(getsitepackages):
         for value in getsitepackages():
             roots.append(_real(value))
+    roots.extend(_script_prefix_site_roots())
     unique: list[str] = []
     for root in roots:
         if root not in unique:
@@ -93,7 +123,11 @@ def _is_allowed_import_entry(entry: str, roots: tuple[str, ...]) -> bool:
 
 def _prepare_import_boundary() -> str:
     roots = _allowed_import_roots()
-    sys.path[:] = [entry for entry in sys.path if _is_allowed_import_entry(entry, roots)]
+    entries = [entry for entry in sys.path if _is_allowed_import_entry(entry, roots)]
+    for root in roots:
+        if root not in entries:
+            entries.append(root)
+    sys.path[:] = entries
     prefix = tempfile.mkdtemp(prefix="graphify-pycache-")
     os.chmod(prefix, 0o700)
     sys.pycache_prefix = prefix
