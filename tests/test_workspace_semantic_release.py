@@ -62,6 +62,15 @@ ED25519_PKCS8_PRIVATE_KEY_WITH_SINGLE_64_COLUMN = (
     b"MC4CAQAwBQYDK2VwBCIEIBERERERERERERERERERERERERERERERERERERERERER\n"
     b"-----END PRIVATE KEY-----"
 )
+ENCRYPTED_TRADITIONAL_RSA_PRIVATE_KEY_WITH_HEADERS = (
+    b"-----BEGIN RSA PRIVATE KEY-----\n"
+    b"Proc-Type: 4,ENCRYPTED\n"
+    b"DEK-Info: AES-256-CBC,0123456789ABCDEF0123456789ABCDEF\n"
+    b"\n"
+    + b"A" * 64
+    + b"\nQUJDRA==\n"
+    b"-----END RSA PRIVATE KEY-----"
+)
 
 
 def _canonical_load(path: Path) -> dict[str, object]:
@@ -238,7 +247,12 @@ def test_missing_parsed_profile_document_fails_closed(
             STANDARD_OPENSSH_PRIVATE_KEY_WITH_70_COLUMN_WRAPPING,
             "secret.private_key_material",
         ),
+        (
+            ENCRYPTED_TRADITIONAL_RSA_PRIVATE_KEY_WITH_HEADERS,
+            "secret.private_key_material",
+        ),
         (b"postgresql://service:swordfish@example.test/db", "secret.credential_uri"),
+        (b"postgresql://service:sec:ret@example.test/db", "secret.credential_uri"),
         (b"postgresql://service:x@example.test/db", "secret.credential_uri"),
         (b"postgresql://service:changeme@example.test/db", "secret.credential_uri"),
         (
@@ -255,6 +269,7 @@ def test_missing_parsed_profile_document_fails_closed(
         (b"token: 'production-token-42'", "secret.credential_assignment"),
         (b"ghp_abcdefghijklmnopqrstuvwxyz0123456789", "secret.provider_credential"),
         (b"AKIAABCDEFGHIJKLMNOP", "secret.provider_credential"),
+        (b"ASIAABCDEFGHIJKLMNOP", "secret.provider_credential"),
         (b"sk_" + b"live_" + b"abcdefghijklmnop12345678", "secret.provider_credential"),
         (b"postgresql://service:secret@[2001:db8::1]/db", "secret.credential_uri"),
         (
@@ -293,6 +308,8 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
         b"Authorization: Bearer abc=123",
         b"postgresql://service:secret@[2001:db8::1/db",
         b"postgresql://service:secret@[]/db",
+        b"postgresql://service:sec/ret@example.test/db",
+        b"ASIAabcdefghijklmnop",
         b"-----BEGIN PRIVATE KEY----- incomplete",
         (
             b"-----BEGIN PRIVATE KEY-----\n"
@@ -308,6 +325,22 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
             b"-----BEGIN PRIVATE KEY-----\n"
             b"not-valid-base64-material-not-valid\n"
             b"-----END PRIVATE KEY-----"
+        ),
+        (
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            b"Proc-Type: 4,ENCRYPTED\n"
+            b"DEK-Info: AES-256-CBC,not-hex\n\n"
+            + b"A" * 64
+            + b"\nQUJDRA==\n"
+            b"-----END RSA PRIVATE KEY-----"
+        ),
+        (
+            b"-----BEGIN RSA PRIVATE KEY-----\n"
+            b"Proc-Type: 4,ENCRYPTED\n"
+            b"DEK-Info: AES-256-CBC,0123456789ABCDEF0123456789ABCDEF\n"
+            + b"A" * 64
+            + b"\nQUJDRA==\n"
+            b"-----END RSA PRIVATE KEY-----"
         ),
         (b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 64 + b"\nQU=J\n-----END PRIVATE KEY-----"),
         (b"-----BEGIN PRIVATE KEY-----\n" + b"A" * 63 + b"\n-----END PRIVATE KEY-----"),
@@ -978,6 +1011,38 @@ def test_return_time_manifest_revalidation_rejects_manifest_replacement(
     monkeypatch.setattr(semantic_release, "_read_chunks", racing_read)
     _select_bundle(monkeypatch, root)
     with pytest.raises(SemanticReleaseBundleError, match="manifest changed during validation"):
+        load_installed_semantic_release_bundle()
+    assert raced
+
+
+def test_return_time_validation_rechecks_data_paths_after_item_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    target = _artifact_path(root, _entry(manifest, kind="ruleset"))
+    original_revalidate = semantic_release._RetainedPackageFile.revalidate
+    raced = False
+
+    def racing_revalidate(item, package_root: Path) -> None:
+        nonlocal raced
+        original_revalidate(item, package_root)
+        if (
+            not raced
+            and item.relative_path == "workspace/semantic_release_data/taxonomy.v1.json"
+        ):
+            raced = True
+            target.write_bytes(b"{}")
+            target.chmod(0o644)
+
+    monkeypatch.setattr(
+        semantic_release._RetainedPackageFile,
+        "revalidate",
+        racing_revalidate,
+    )
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="artifact changed during validation"):
         load_installed_semantic_release_bundle()
     assert raced
 

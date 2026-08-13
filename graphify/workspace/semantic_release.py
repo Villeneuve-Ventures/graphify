@@ -195,7 +195,9 @@ _RULE_DOCUMENTS = (
         "matcher": "byte_regex_search_v1",
         "pattern": (
             r"(?:-----BEGIN (?P<label>(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY)-----"
-            r"\r?\n(?:[A-Za-z0-9+/]{64}|(?:(?:[A-Za-z0-9+/]{4}){16}\r?\n)+"
+            r"\r?\n(?:Proc-Type: 4,ENCRYPTED\r?\n"
+            r"DEK-Info: [A-Z0-9-]{3,32},[0-9A-Fa-f]{16,128}\r?\n\r?\n)?"
+            r"(?:[A-Za-z0-9+/]{64}|(?:(?:[A-Za-z0-9+/]{4}){16}\r?\n)+"
             r"(?:(?:[A-Za-z0-9+/]{4}){1,16}|"
             r"(?:[A-Za-z0-9+/]{4}){0,15}[A-Za-z0-9+/]{3}=|"
             r"(?:[A-Za-z0-9+/]{4}){0,15}[A-Za-z0-9+/]{2}==))"
@@ -219,7 +221,7 @@ _RULE_DOCUMENTS = (
         "category_id": "secret.provider_credential",
         "credential_group": None,
         "matcher": "byte_regex_search_v1",
-        "pattern": r"(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])",
+        "pattern": r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])",
         "rule_id": "core.provider.aws_access_key.v1",
     },
     {
@@ -269,7 +271,7 @@ _RULE_DOCUMENTS = (
         "pattern": (
             r"[A-Za-z][A-Za-z0-9+.-]{1,31}://"
             r"[A-Za-z0-9._~!$&'()*+,;=%-]{1,128}:"
-            r"(?P<credential>[^\s/@:]{1,256})@"
+            r"(?P<credential>[^\s/@]{1,256})@"
             r"(?:[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])"
             r"(?::[0-9]{1,5})?(?:[/?#][^\s]*)?"
         ),
@@ -1325,6 +1327,8 @@ def _revalidate_return_bundle(
         retained.append(manifest)
         if manifest.raw != manifest_bytes:
             raise SemanticReleaseBundleError("semantic-release manifest changed during validation")
+        for item in retained:
+            item.revalidate(package_root)
         if _scan_data_inventory(package_root) != inventoried_data:
             raise SemanticReleaseBundleError(
                 "semantic-release data inventory contains missing or unlisted artifacts"
