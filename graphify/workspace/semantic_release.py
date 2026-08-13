@@ -182,7 +182,9 @@ _RULE_DOCUMENTS = (
         "matcher": "byte_regex_search_v1",
         "pattern": (
             r"(?:^|\r?\n)(?ai:Authorization):[ \t]*(?ai:Bearer)[ \t]+"
-            r"(?P<credential>[A-Za-z0-9._~+/-]{16,}={0,2})(?=$|\r?\n)"
+            r"(?P<credential>(?:[A-Za-z0-9._~+/-]{1,256}|"
+            r"[A-Za-z0-9._~+/-]{1,255}=|[A-Za-z0-9._~+/-]{1,254}==))"
+            r"(?=$|\r?\n)"
         ),
         "rule_id": "core.authorization.bearer.v1",
     },
@@ -268,7 +270,8 @@ _RULE_DOCUMENTS = (
             r"[A-Za-z][A-Za-z0-9+.-]{1,31}://"
             r"[A-Za-z0-9._~!$&'()*+,;=%-]{1,128}:"
             r"(?P<credential>[^\s/@:]{1,256})@"
-            r"[A-Za-z0-9.-]{1,253}(?::[0-9]{1,5})?(?:[/?#][^\s]*)?"
+            r"(?:[A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])"
+            r"(?::[0-9]{1,5})?(?:[/?#][^\s]*)?"
         ),
         "rule_id": "core.uri.userinfo_password.v1",
     },

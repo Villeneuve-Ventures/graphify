@@ -190,6 +190,8 @@ def _install_wheel_as_user_script_layout(
     wheel: Path,
     root: Path,
     script_name: str,
+    *,
+    include_package: bool = True,
 ) -> tuple[Path, Path]:
     userbase = root / f"{script_name}-userbase"
     scripts = userbase / "bin"
@@ -204,7 +206,7 @@ def _install_wheel_as_user_script_layout(
     script_bytes: bytes | None = None
     with zipfile.ZipFile(wheel) as archive:
         for name in archive.namelist():
-            if name.startswith("graphify/") and not name.endswith("/"):
+            if include_package and name.startswith("graphify/") and not name.endswith("/"):
                 target = site_packages / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(archive.read(name))
@@ -216,6 +218,49 @@ def _install_wheel_as_user_script_layout(
     script_path.chmod(0o755)
     assert not (scripts / "python").exists()
     return script_path, site_packages
+
+
+def _copy_wheel_package_to_source_root(wheel: Path, source_root: Path) -> None:
+    with zipfile.ZipFile(wheel) as archive:
+        for name in archive.namelist():
+            if name.startswith("graphify/") and not name.endswith("/"):
+                target = source_root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(archive.read(name))
+
+
+def _create_python_env(root: Path) -> tuple[Path, Path, Path]:
+    venv_dir = root / "python-env"
+    uv = shutil.which("uv")
+    if uv:
+        proc = subprocess.run(
+            [uv, "venv", "--python", sys.executable, str(venv_dir)],
+            cwd=root,
+            env=_clean_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+    else:
+        venv.EnvBuilder(with_pip=False).create(venv_dir)
+    python, scripts = _venv_paths(venv_dir)
+    site_packages = subprocess.run(
+        [
+            str(python),
+            "-c",
+            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+        ],
+        cwd=root,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    python314 = scripts / "python3.14"
+    if not python314.exists():
+        python314.symlink_to(python.name)
+    return python, scripts, Path(site_packages)
 
 
 def _hostile_source(length: int, sentinel: Path, *, function_name: str = "main") -> bytes:
@@ -465,6 +510,119 @@ def test_installed_bootstrap_runs_from_plain_user_script_layout_without_startup_
     assert proc.returncode != 126, proc.stderr
     if must_succeed:
         assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("script_name", ["graphify", "graphify-mcp"])
+def test_installed_bootstrap_rejects_unsupported_generic_python3_fallback(
+    script_name: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, _ = _install_wheel_as_user_script_layout(wheel, tmp_path, script_name)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_python3 = fake_bin / "python3"
+    fake_python3.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_python3.chmod(0o755)
+    environment = _clean_environment()
+    environment["PATH"] = str(fake_bin)
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 126
+    assert "Python >= 3.14" in proc.stderr
+
+
+def test_installed_bootstrap_prefers_script_prefix_package_before_interpreter_sites(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, _ = _install_wheel_as_user_script_layout(wheel, tmp_path, "graphify")
+    _, foreign_scripts, foreign_site = _create_python_env(tmp_path)
+    sentinel = tmp_path / "foreign-graphify-executed"
+    foreign_package = foreign_site / "graphify"
+    foreign_package.mkdir()
+    (foreign_package / "__init__.py").write_text("", encoding="utf-8")
+    (foreign_package / "__main__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+        "def main():\n"
+        "    print('foreign graphify executed')\n",
+        encoding="utf-8",
+    )
+    environment = _clean_environment()
+    environment["PATH"] = str(foreign_scripts)
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("graphify ")
+    assert "foreign graphify" not in proc.stdout
+    assert not sentinel.exists()
+
+
+def test_installed_bootstrap_preserves_editable_direct_url_roots_without_startup_hooks(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, site_packages = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        "graphify",
+        include_package=False,
+    )
+    source_root = tmp_path / "editable-source"
+    _copy_wheel_package_to_source_root(wheel, source_root)
+    dist_info = site_packages / "graphifyy-0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "direct_url.json").write_text(
+        json.dumps({"dir_info": {"editable": True}, "url": source_root.as_uri()}),
+        encoding="utf-8",
+    )
+    startup_sentinel = tmp_path / "editable-site-startup-executed"
+    (site_packages / "graphify_hostile.pth").write_text(
+        "import pathlib; "
+        f"pathlib.Path({str(startup_sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (site_packages / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(startup_sentinel)!r}).write_text('executed', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    _, scripts, _ = _create_python_env(tmp_path)
+    environment = _clean_environment()
+    environment["PATH"] = str(scripts)
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.startswith("graphify ")
+    assert not startup_sentinel.exists()
 
 
 @pytest.mark.parametrize(

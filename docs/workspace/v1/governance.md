@@ -669,9 +669,10 @@ source-executed bootstrap scripts whose POSIX shell prelude starts installed
 Python under `-S` isolation before Python startup hooks can run, then establish
 a fresh package-external pycache prefix and suppress `.pth`, `sitecustomize`,
 and automatic user-site startup imports before importing Graphify. Plain user
-script installs may add the installed script-prefix package root explicitly
-after that startup boundary. The
-canonical semantic contract already freezes the installed package root,
+script installs may add the installed script-prefix package root, or a PEP 610
+editable source root recorded by a `graphifyy` direct URL in that same script
+prefix, explicitly after that startup boundary. The canonical semantic contract
+already freezes the installed package root,
 package-relative path grammar, descriptor-relative no-follow traversal,
 single-link regular-file modes, byte counts and digests,
 deterministic-pattern-only ABI, `utf8_lex_v1`, taxonomy/profile separation,

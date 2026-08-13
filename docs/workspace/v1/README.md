@@ -74,12 +74,13 @@ artifact, and the installed `graphify`/`graphify-mcp` pre-import bootstrap that
 starts installed Python under `-S` isolation before Python startup hooks can run
 and keeps package-local bytecode caches, `.pth`, `sitecustomize`, and automatic
 user-site startup imports outside the trusted runtime path. Plain user script
-installs may add the installed script-prefix package root explicitly after that
-startup boundary. The installed-root/no-follow, mode, size, digest, hard-limit,
-deterministic-pattern, fresh-pycache-prefix, no-startup-site, and fail-closed rules
-are frozen; callers cannot supply, select around, or override those bytes. It
-has no receipt, acceptance, completion, content-release, publication, or
-successor authority.
+installs may add the installed script-prefix package root, or a PEP 610 editable
+source root recorded by a `graphifyy` direct URL in that same script prefix,
+explicitly after that startup boundary. The installed-root/no-follow, mode, size,
+digest, hard-limit, deterministic-pattern, fresh-pycache-prefix, no-startup-site,
+and fail-closed rules are frozen; callers cannot supply, select around, or
+override those bytes. It has no receipt, acceptance, completion, content-release,
+publication, or successor authority.
 
 The encompassing semantic-content release/DLP decision child remains
 `WAITING`. It additionally requires implemented and accepted trust-root bytes,

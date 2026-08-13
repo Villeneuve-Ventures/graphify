@@ -915,8 +915,9 @@ writes disabled, Python environment configuration ignored, site initialization
 disabled, automatic user-site startup imports disabled, and safe-path mode
 enabled; then the Python body sets `sys.pycache_prefix` to a fresh private
 package-external directory, keeps `sys.dont_write_bytecode` true, and may add
-the installed script-prefix package root explicitly before importing any
-Graphify module.
+the installed script-prefix package root, or a PEP 610 editable source root
+recorded by a `graphifyy` direct URL in that same script prefix, explicitly
+before importing any Graphify module.
 Package-local `__pycache__` contents are therefore untrusted and ignored for the
 installed executable path. Direct library imports that bypass this bootstrap are
 not semantic-release decision authority.

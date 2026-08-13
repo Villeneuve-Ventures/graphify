@@ -1777,7 +1777,9 @@ executable bootstrap needed to establish that root before Graphify imports:
   Python startup hooks can run, excludes package-local bytecode caches from
   trusted installed executable imports, suppresses `.pth`, `sitecustomize`, and
   automatic user-site startup imports, and may then add the installed
-  script-prefix package root explicitly before any Graphify module is loaded.
+  script-prefix package root, or a PEP 610 editable source root recorded by a
+  `graphifyy` direct URL in that same script prefix, explicitly before any
+  Graphify module is loaded.
 
 The manifest and referenced artifacts are never caller, workspace, operator,
 provider, backend, model, credential, network, environment, or policy input.

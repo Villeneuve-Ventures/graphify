@@ -84,9 +84,10 @@ site initialization disabled, automatic user-site startup imports disabled,
 safe-path mode enabled, and bytecode writes disabled before Python startup hooks
 can run; then the Python body sets a fresh private package-external
 `sys.pycache_prefix`, keeps bytecode writes disabled, and may add the installed
-script-prefix package root explicitly before any Graphify module import. Direct
-library imports that bypass this bootstrap are not semantic-release decision
-authority.
+script-prefix package root, or a PEP 610 editable source root recorded by a
+`graphifyy` direct URL in that same script prefix, explicitly before any
+Graphify module import. Direct library imports that bypass this bootstrap are
+not semantic-release decision authority.
 
 This does not make the package its own first-instruction trust anchor. The
 CPython executable and standard library, an installer that verifies the

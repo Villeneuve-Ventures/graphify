@@ -30,6 +30,10 @@ if [ ! -x "$_GRAPHIFY_PYTHON" ]; then
         _GRAPHIFY_PYTHON=$(command -v python3.14) || exit 126
     elif command -v python3 >/dev/null 2>&1; then
         _GRAPHIFY_PYTHON=$(command -v python3) || exit 126
+        if ! "$_GRAPHIFY_PYTHON" -BEsS -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)' >/dev/null 2>&1; then
+            echo "graphify bootstrap cannot resolve a Python >= 3.14 executable" >&2
+            exit 126
+        fi
     else
         echo "graphify bootstrap cannot resolve the installed Python executable" >&2
         exit 126
@@ -67,10 +71,13 @@ if not (
     )
 
 import importlib
+import json
 import shutil
 import site
 import sysconfig
 import tempfile
+from collections.abc import Iterable
+from urllib.parse import unquote, urlparse
 
 
 def _real(path: str) -> str:
@@ -90,13 +97,56 @@ def _script_prefix_site_roots() -> tuple[str, ...]:
             ("lib", "python", "site-packages"),
         ):
             candidate = os.path.join(prefix, *relative)
+            if not os.path.isdir(candidate):
+                continue
+            roots.extend(_editable_direct_url_roots(candidate))
             if os.path.isdir(os.path.join(candidate, "graphify")):
                 roots.append(_real(candidate))
     return tuple(roots)
 
 
-def _allowed_import_roots() -> tuple[str, ...]:
+def _editable_direct_url_roots(site_root: str) -> tuple[str, ...]:
+    try:
+        entries = os.listdir(site_root)
+    except OSError:
+        return ()
     roots: list[str] = []
+    for entry in entries:
+        if not (entry.startswith("graphifyy-") and entry.endswith(".dist-info")):
+            continue
+        direct_url = os.path.join(site_root, entry, "direct_url.json")
+        try:
+            with open(direct_url, "rb") as handle:
+                raw = handle.read(16_385)
+        except OSError:
+            continue
+        if len(raw) > 16_384:
+            continue
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        dir_info = document.get("dir_info")
+        if not (isinstance(dir_info, dict) and dir_info.get("editable") is True):
+            continue
+        url = document.get("url")
+        if not isinstance(url, str):
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+            continue
+        source = unquote(parsed.path)
+        if os.name == "nt" and len(source) >= 3 and source[0] == "/" and source[2] == ":":
+            source = source[1:]
+        if os.path.isdir(os.path.join(source, "graphify")):
+            roots.append(_real(source))
+    return tuple(roots)
+
+
+def _allowed_import_roots() -> tuple[str, ...]:
+    roots: list[str] = list(_script_prefix_site_roots())
     for key in ("purelib", "platlib", "stdlib", "platstdlib"):
         value = sysconfig.get_paths().get(key)
         if value:
@@ -106,9 +156,13 @@ def _allowed_import_roots() -> tuple[str, ...]:
         roots.append(_real(destination))
     getsitepackages = getattr(site, "getsitepackages", None)
     if callable(getsitepackages):
-        for value in getsitepackages():
-            roots.append(_real(value))
-    roots.extend(_script_prefix_site_roots())
+        site_values = getsitepackages()
+        if isinstance(site_values, str):
+            roots.append(_real(site_values))
+        elif isinstance(site_values, Iterable):
+            for value in site_values:
+                if isinstance(value, str):
+                    roots.append(_real(value))
     unique: list[str] = []
     for root in roots:
         if root not in unique:

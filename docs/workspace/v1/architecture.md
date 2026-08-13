@@ -188,10 +188,11 @@ closed taxonomy, normalization contract, ordered ruleset, required
 flags including `-S` before Python startup hooks can run, establish a fresh
 package-external pycache prefix, and suppress `.pth`, `sitecustomize`, and
 automatic user-site startup imports before importing Graphify. Plain user script
-installs may add the installed script-prefix package root explicitly after that
-startup boundary. The
-installed-root and descriptor-relative no-follow boundary rejects path, link,
-mode, size, digest, identity, version, limit, or ABI ambiguity. The byte ABI
+installs may add the installed script-prefix package root, or a PEP 610 editable
+source root recorded by a `graphifyy` direct URL in that same script prefix,
+explicitly after that startup boundary. The installed-root and
+descriptor-relative no-follow boundary rejects path, link, mode, size, digest,
+identity, version, limit, or ABI ambiguity. The byte ABI
 produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` results over
 explicit already-canonical bounded UTF-8 bytes. It owns no workspace policy
 selection, durable state, capacity/GC integration, release disposition,

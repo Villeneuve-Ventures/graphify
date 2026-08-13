@@ -1191,8 +1191,9 @@ inventing operator policy or decision-store behavior:
   shell prelude starts installed Python under `-S` isolation before Python
   startup hooks can run, then establishes a fresh package-external pycache
   prefix, suppresses `.pth`, `sitecustomize`, and automatic user-site startup
-  imports, and may add the installed script-prefix package root explicitly
-  before importing Graphify;
+  imports, and may add the installed script-prefix package root, or a PEP 610
+  editable source root recorded by a `graphifyy` direct URL in that same script
+  prefix, explicitly before importing Graphify;
 - the manifest is at most 1 MiB, uses one canonical installed `graphify` package
   root, and binds every unique sorted package-relative inventory entry through
   the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`

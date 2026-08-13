@@ -250,11 +250,13 @@ def test_missing_parsed_profile_document_fails_closed(
             b"authorization: bearer abcdefghijklmnopqrstuvwxyz.0123456789",
             "secret.authorization_credential",
         ),
+        (b"Authorization: Bearer abc123", "secret.authorization_credential"),
         (b"client_secret = production-secret-42", "secret.credential_assignment"),
         (b"token: 'production-token-42'", "secret.credential_assignment"),
         (b"ghp_abcdefghijklmnopqrstuvwxyz0123456789", "secret.provider_credential"),
         (b"AKIAABCDEFGHIJKLMNOP", "secret.provider_credential"),
         (b"sk_" + b"live_" + b"abcdefghijklmnop12345678", "secret.provider_credential"),
+        (b"postgresql://service:secret@[2001:db8::1]/db", "secret.credential_uri"),
         (
             b"seed phrase: alpha bravo cedar delta ember frost giant harbor "
             b"island jungle kernel lunar",
@@ -288,7 +290,9 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
         b"password: placeholder",
         b"Authorization: Basic abc",
         b"Authorization: Basic dTpw=",
-        b"Authorization: Bearer short",
+        b"Authorization: Bearer abc=123",
+        b"postgresql://service:secret@[2001:db8::1/db",
+        b"postgresql://service:secret@[]/db",
         b"-----BEGIN PRIVATE KEY----- incomplete",
         (
             b"-----BEGIN PRIVATE KEY-----\n"
