@@ -30,7 +30,8 @@ if [ ! -x "$_GRAPHIFY_PYTHON" ]; then
         _GRAPHIFY_PYTHON=$(command -v python3.14) || exit 126
     elif command -v python3 >/dev/null 2>&1; then
         _GRAPHIFY_PYTHON=$(command -v python3) || exit 126
-        if ! "$_GRAPHIFY_PYTHON" -BEsS -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)' >/dev/null 2>&1; then
+        if ! "$_GRAPHIFY_PYTHON" -BEsS -c \
+            'import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)' >/dev/null 2>&1; then
             echo "graphify bootstrap cannot resolve a Python >= 3.14 executable" >&2
             exit 126
         fi

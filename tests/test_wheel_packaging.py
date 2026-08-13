@@ -47,11 +47,8 @@ def _venv_paths(root: Path) -> tuple[Path, Path]:
     return python, scripts
 
 
-def _install_wheel_without_dependencies(
-    wheel: Path,
-    root: Path,
-) -> tuple[Path, Path, Path]:
-    venv_dir = root / "venv"
+def _create_venv(root: Path, name: str, *, with_pip: bool = True) -> tuple[Path, Path]:
+    venv_dir = root / name
     uv = shutil.which("uv")
     if uv:
         proc = subprocess.run(
@@ -64,8 +61,16 @@ def _install_wheel_without_dependencies(
         )
         assert proc.returncode == 0, proc.stderr
     else:
-        venv.EnvBuilder(with_pip=True).create(venv_dir)
-    python, scripts = _venv_paths(venv_dir)
+        venv.EnvBuilder(with_pip=with_pip).create(venv_dir)
+    return _venv_paths(venv_dir)
+
+
+def _install_wheel_without_dependencies(
+    wheel: Path,
+    root: Path,
+) -> tuple[Path, Path, Path]:
+    python, scripts = _create_venv(root, "venv")
+    uv = shutil.which("uv")
     command = (
         [
             uv,
@@ -230,21 +235,7 @@ def _copy_wheel_package_to_source_root(wheel: Path, source_root: Path) -> None:
 
 
 def _create_python_env(root: Path) -> tuple[Path, Path, Path]:
-    venv_dir = root / "python-env"
-    uv = shutil.which("uv")
-    if uv:
-        proc = subprocess.run(
-            [uv, "venv", "--python", sys.executable, str(venv_dir)],
-            cwd=root,
-            env=_clean_environment(),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert proc.returncode == 0, proc.stderr
-    else:
-        venv.EnvBuilder(with_pip=False).create(venv_dir)
-    python, scripts = _venv_paths(venv_dir)
+    python, scripts = _create_venv(root, "python-env", with_pip=False)
     site_packages = subprocess.run(
         [
             str(python),
