@@ -686,6 +686,118 @@ def test_installed_bootstrap_rejects_relative_editable_direct_url_roots(
 
 
 @pytest.mark.parametrize(
+    ("script_name", "hostile_module"),
+    [
+        ("graphify", "__main__.py"),
+        ("graphify-mcp", "serve.py"),
+    ],
+)
+def test_installed_bootstrap_rejects_ambiguous_script_prefix_package_owners(
+    script_name: str,
+    hostile_module: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, site_packages = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        script_name,
+    )
+    stale_source = tmp_path / "stale-editable-source"
+    hostile_package = stale_source / "graphify"
+    hostile_package.mkdir(parents=True)
+    sentinel = tmp_path / f"{script_name}-stale-editable-source-executed"
+    (hostile_package / "__init__.py").write_text("", encoding="utf-8")
+    entrypoint = "main" if hostile_module == "__main__.py" else "_main"
+    (hostile_package / hostile_module).write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+        f"def {entrypoint}():\n"
+        "    print('stale editable executed')\n",
+        encoding="utf-8",
+    )
+    dist_info = site_packages / "graphifyy-0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "direct_url.json").write_text(
+        json.dumps({"dir_info": {"editable": True}, "url": stale_source.as_uri()}),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "ambiguous script-prefix package roots" in proc.stderr
+    assert "stale editable executed" not in proc.stdout
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    ("script_name", "hostile_module"),
+    [
+        ("graphify", "__main__.py"),
+        ("graphify-mcp", "serve.py"),
+    ],
+)
+def test_installed_bootstrap_rejects_multiple_editable_direct_url_owners(
+    script_name: str,
+    hostile_module: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, site_packages = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        script_name,
+        include_package=False,
+    )
+    entrypoint = "main" if hostile_module == "__main__.py" else "_main"
+    sentinels: list[Path] = []
+    for index in range(2):
+        source = tmp_path / f"editable-source-{index}"
+        hostile_package = source / "graphify"
+        hostile_package.mkdir(parents=True)
+        sentinel = tmp_path / f"{script_name}-editable-source-{index}-executed"
+        sentinels.append(sentinel)
+        (hostile_package / "__init__.py").write_text("", encoding="utf-8")
+        (hostile_package / hostile_module).write_text(
+            "from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+            f"def {entrypoint}():\n"
+            "    print('editable owner executed')\n",
+            encoding="utf-8",
+        )
+        dist_info = site_packages / f"graphifyy-{index}.dist-info"
+        dist_info.mkdir()
+        (dist_info / "direct_url.json").write_text(
+            json.dumps({"dir_info": {"editable": True}, "url": source.as_uri()}),
+            encoding="utf-8",
+        )
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "ambiguous script-prefix package roots" in proc.stderr
+    assert "editable owner executed" not in proc.stdout
+    assert all(not sentinel.exists() for sentinel in sentinels)
+
+
+@pytest.mark.parametrize(
     ("script_name", "target_module", "target_entrypoint"),
     [
         ("graphify", "graphify.__main__", "main"),
