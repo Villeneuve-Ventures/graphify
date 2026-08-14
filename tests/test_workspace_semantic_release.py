@@ -872,6 +872,47 @@ def test_manifest_paths_reject_every_noncanonical_form(
 
 
 @pytest.mark.parametrize(
+    ("character", "is_control"),
+    [
+        ("\u0080", True),
+        ("\u0085", True),
+        ("\u009f", True),
+        ("\u00a0", False),
+    ],
+)
+def test_control_path_rejects_c1_but_accepts_non_control_unicode(
+    character: str,
+    is_control: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    entry = _entry(manifest, kind="taxonomy")
+    original_path = _artifact_path(root, entry)
+    renamed_relative = Path("workspace/semantic_release_data") / (
+        f"taxonomy{character}.v1.json"
+    )
+    original_path.rename(root / renamed_relative)
+    entry["path"] = renamed_relative.as_posix()
+    _entries(manifest).sort(key=lambda item: str(item["path"]).encode("utf-8"))
+    _write_manifest(root, manifest)
+    _select_bundle(monkeypatch, root)
+
+    if is_control:
+        with pytest.raises(
+            SemanticReleaseBundleError,
+            match="path contains a control character",
+        ):
+            load_installed_semantic_release_bundle()
+    else:
+        bundle = load_installed_semantic_release_bundle()
+        assert renamed_relative.as_posix() in {
+            artifact.path for artifact in bundle.artifacts
+        }
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "missing",
