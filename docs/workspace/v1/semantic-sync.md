@@ -1754,15 +1754,16 @@ completion, execution authority, and later-successor readiness are explicitly
 excluded. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; this child
 alone transitions from `READY` to `COMPLETE`; remaining P5B2 work and P5C work
 remained `WAITING` and no later successor was `READY` at that acceptance point.
-The separate current trust-root eligibility recorded below does not expand or
-reopen this accepted boundary.
+The separate current trust-root implementation candidate recorded below does
+not expand or reopen this accepted boundary.
 
 ## P5B2 semantic-release bundle and deterministic-classifier trust-root
 
-This proposed separate unnumbered P5B2 prerequisite subchild is `READY` for
-implementation eligibility only. It has no implementation, acceptance receipt,
-completion, execution, content-release, or publication authority. Its entire
-scope is the repo-owned installed package-data trust root:
+This separate unnumbered P5B2 prerequisite subchild is an implementation
+candidate pending acceptance. It has no acceptance receipt, completion,
+content-release, publication, or successor authority. Its entire scope is the
+repo-owned installed package-data trust root plus the existing installed
+executable bootstrap needed to establish that root before Graphify imports:
 
 - `graphify/workspace/semantic_release_manifest.json`;
 - the manifest-inventoried deterministic classifier implementation and
@@ -1770,10 +1771,44 @@ scope is the repo-owned installed package-data trust root:
 - the closed taxonomy, text-normalization contract, and ordered ruleset;
 - the required explicit-evidence-only `core_secrets.v1` profile; and
 - every repo-owned selectable coverage-profile artifact and its manifest-bound
-  identity, version, bytes, size, mode, and SHA-256.
+  identity, version, bytes, size, mode, and SHA-256; and
+- the source-executed installed private `_graphify-semantic-authority` and
+  `_graphify-mcp-semantic-authority` bootstrap scripts
+  whose POSIX shell prelude executes installed Python with `-S` isolation before
+  Python startup hooks can run, excludes package-local bytecode caches from
+  trusted installed executable imports, suppresses `.pth`, `sitecustomize`, and
+  automatic user-site startup imports, and may then add the installed
+  script-prefix package root, or a PEP 610 editable source root recorded by a
+  `graphifyy` direct URL in that same script prefix, explicitly before any
+  Graphify module is loaded. Owner discovery covers every supported
+  script-prefix site-packages layout as one set: after real-path
+  deduplication, exactly one physical or recorded editable Graphify owner must
+  remain. Zero owners and multiple distinct owners fail before import;
+  interpreter site roots never substitute for a missing script-prefix owner.
 
 The manifest and referenced artifacts are never caller, workspace, operator,
 provider, backend, model, credential, network, environment, or policy input.
+This candidate does not self-authenticate the instructions that establish its
+first import boundary. The CPython executable and standard library, an
+installer that verifies the selected wheel and its `RECORD`, the installed
+source-executed bootstrap bytes, and post-install filesystem protection of the
+bootstrap and package source are explicit trusted-computing-base prerequisites.
+The wheel `RECORD` binds both bootstrap scripts and the classifier source; it is
+the external installer and operating environment, not classifier code that has
+already started executing, that must reject source or launcher substitution.
+Package-local bytecode caches remain outside that prerequisite and are ignored
+by the installed executable path.
+
+The public `graphify` and `graphify-mcp` console entry points remain ordinary
+cross-platform package commands and are not semantic-release decision authority.
+On the supported POSIX boundary, an authority-qualified uv installation uses
+`uv tool install --force --reinstall --link-mode copy graphifyy`, including when
+requalifying an existing ordinary installation. Qualification then verifies the
+selected wheel and `RECORD`, exact bootstrap and bundle bytes, exact final modes,
+and single-link regular-file state. A hardlinked or wrong-mode final installation
+remains an ordinary package installation, but it is not authority-qualified and
+bundle loading must fail closed; installer history or umask alone is not an
+authority fact.
 The exact installed-root, path-normal-form, descriptor-relative no-follow,
 single-link regular-file, mode, size, digest, deterministic-pattern-only ABI,
 `utf8_lex_v1`, taxonomy/profile separation, `core_secrets.v1`, hard-limit, and
@@ -1784,30 +1819,35 @@ and
 Those requirements belong to this prerequisite even though the encompassing
 decision child composes their eventual implementation.
 
-This subchild may implement only installed-bundle loading and validation plus
-the manifest-bound deterministic factual classifier over explicit,
-already-canonical bounded UTF-8 bytes. It does not select profiles for a
+This subchild may implement only installed-bundle loading and validation, the
+manifest-bound deterministic factual classifier over explicit,
+already-canonical bounded UTF-8 bytes, and the existing installed executable
+bootstrap needed to start Python under isolation flags, set a fresh
+package-external pycache prefix, suppress Python startup hooks and automatic
+user-site startup imports, and add only installed package roots before Graphify
+imports. It does not select profiles for a
 workspace or release context, interpret `NO_MATCH` as release safety, map
 categories to dispositions, read semantic-generation state, or persist any
 record. Its stop boundary excludes operator policy-authority provisioning,
-`SemanticReleaseDecisionStore`, capacity or GC integration, semantic-input
-field/inventory composition, policy reduction, omission execution, projection,
-public CLI/schema/receipt surfaces, provider/backend behavior, publication,
-and every broader release/DLP decision.
+`SemanticReleaseDecisionStore`,
+capacity or GC integration, semantic-input field/inventory composition, policy
+reduction, omission execution, projection, new public CLI/schema/receipt
+surfaces, provider/backend behavior, publication, and every broader release/DLP
+decision.
 
 P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content
 release/DLP decision child, remaining P5B2 work, and P5C remain `WAITING`; H3
-remains `DEFERRED`; no later successor is `READY`. `READY` here records only
-that this bounded internal prerequisite can be implemented without inventing
-operator-policy provisioning or decision-store behavior.
+remains `DEFERRED`; no later successor is `READY`. This implementation
+candidate records only that the bounded internal prerequisite can be reviewed
+without inventing operator-policy provisioning or decision-store behavior.
 
 ## P5B2 semantic-content release/DLP decision
 
 This encompassing proposed unnumbered P5B2 child is contract-frozen only at the
 private internal decision boundary in this section. It remains `WAITING`, not
 `READY` or `COMPLETE`, and has no implementation or acceptance receipt. It
-depends on separate implementation and acceptance of the `READY` trust-root
-subchild above, stable operator policy-authority provisioning, decision-store
+depends on separate acceptance of the trust-root implementation candidate above,
+stable operator policy-authority provisioning, decision-store
 capacity and GC integration, classification composition, and every other
 prerequisite named below. The freeze grants no execution authority and changes
 no parent phase, accepted receipt, JOS row, or later-successor status.
@@ -1844,9 +1884,9 @@ ambiguous evidence fails closed before classification.
 
 ### Classifier trust root and installed bundle
 
-The classifier trust root owned by the separate `READY` prerequisite is a
-future repo-owned installed package-data file at
-`graphify/workspace/semantic_release_manifest.json`. It is not caller input.
+The classifier trust root owned by the separate prerequisite is a repo-owned
+installed package-data file at `graphify/workspace/semantic_release_manifest.json`.
+It is not caller input.
 The canonical manifest binds its own format and compatibility version plus a
 sorted package-relative inventory of the classifier implementation, classifier
 ABI, taxonomy, normalization contract, ruleset, and every selectable coverage
@@ -2054,7 +2094,7 @@ require release rejection.
 
 ### Closed classification and coverage contracts
 
-The separate `READY` trust-root subchild owns the deterministic classifier ABI,
+The separate trust-root subchild owns the deterministic classifier ABI,
 closed taxonomy, ruleset, normalization, and installed profile artifacts in
 this subsection. The encompassing `WAITING` decision child owns their later
 composition with exact semantic fields and operator-selected policy; this
@@ -2066,10 +2106,32 @@ evaluation order are included in the ruleset digest. It permits no ML,
 embedding, statistical or entropy score, opaque vendor detector, generated
 inference, or contextual semantic judgment.
 
+Installed executable evaluation reaches this module only after a private
+source-executed `_graphify-semantic-authority` /
+`_graphify-mcp-semantic-authority` bootstrap's POSIX shell prelude has
+executed installed Python with Python environment configuration ignored,
+site initialization disabled, user-site startup imports disabled, safe-path mode
+enabled, and bytecode writes disabled before Python startup hooks can run; the
+Python body then sets a fresh private package-external `sys.pycache_prefix`,
+keeps bytecode writes disabled, and may add the installed script-prefix package
+root explicitly.
+Source-tree `__pycache__` entries are ignored in that runtime path. A direct
+library import that bypasses this pre-import bootstrap is not semantic-release
+decision authority.
+
+The bootstrap boundary assumes the CPython executable, frozen import
+machinery, standard library, wheel installer/`RECORD` verification, installed
+bootstrap source, and post-install package-source integrity. It does not claim
+to authenticate those already-executing prerequisites from inside the package.
+If an operator cannot establish them, no installed invocation is
+semantic-release decision authority even when bundle validation later succeeds.
+
 Version 1 also uses one byte-defined classifier ABI. It scans the exact
 captured UTF-8 byte sequence of each already-validated canonical field. The ABI
 does not renormalize text, consult a Unicode database or Unicode category,
 perform locale-sensitive comparison, or depend on host runtime text behavior.
+Internal line separators are either LF or a paired CRLF; a bare carriage return
+and all other frozen control ranges are invalid before matching.
 Only syntax-defined ASCII names may use the ABI's explicitly specified ASCII
 case fold; value bytes remain exact. Pattern grammar, dictionary encoding,
 byte-comparison semantics, match-span ordering, duplicate reduction, rule
@@ -2120,6 +2182,38 @@ Every policy that can produce an allow outcome must select
 - `secret.seed_or_recovery_material` only where the complete deterministic
   phrase or recovery format is defined by the ruleset.
 
+The version-1 credential-assignment grammar is independently frozen here. A
+supported assignment begins at the field start or immediately after LF/CRLF,
+permits zero through 256 ASCII spaces of indentation, then one ASCII-folded key
+from `api_key`, `api-key`, `password`, `passwd`, `secret`, `client_secret`,
+`client-secret`, `access_token`, `access-token`, `auth_token`, `auth-token`, or
+`token`. After optional horizontal separator bytes, `=` or `:` and optional
+horizontal separator bytes, the value is either 1-256 bytes from
+`[A-Za-z0-9._~+/@-]` or 1-256 non-newline bytes enclosed by one matching single
+or double quote. The non-delimiting quote is ordinary value data; an unescaped
+copy of the selected delimiter closes the value. The closing value must be
+followed immediately by field end or LF/CRLF. Placeholder suppression compares
+the captured value byte-for-byte with the pinned dictionary: only the exact
+listed lowercase spellings are excluded, with no case fold, trim, escape, or
+normalization of credential bytes. JSON-style quoted keys, comments, escape
+interpretation, indentation beyond 256 spaces, and syntax outside this grammar
+remain unmatched in version 1.
+
+The version-1 labeled seed/recovery grammar likewise begins at field start or
+immediately after LF/CRLF and permits zero through 256 ASCII spaces before the
+ASCII-folded `seed phrase`, `seed_phrase`, `seed-phrase`, `recovery phrase`,
+`recovery_phrase`, `recovery-phrase`, or `mnemonic` label. After optional
+horizontal separator bytes, `=` or `:` and optional horizontal separator
+bytes, the captured value is exactly 12, 15, 18, 21, or 24 lowercase ASCII
+words of 3-12 letters separated by horizontal separator bytes. The complete
+phrase must end at field end or LF/CRLF; indentation beyond 256 spaces and
+other phrase shapes remain unmatched.
+
+The version-1 Bearer grammar follows the line-anchored `Authorization: Bearer`
+syntax and accepts one or more bytes from `[A-Za-z0-9._~+/-]` followed only by
+zero or more `=` bytes. The complete captured token including padding is at most
+256 bytes; padding-only, internal-padding, and overlong forms remain unmatched.
+
 The core profile has no entropy-only rule and does not classify a bare hash,
 UUID, arbitrary Base64 token, or vague secret-looking prose. It grants no
 automatic exemption for samples, examples, fixtures, or test content. Syntax
@@ -2146,7 +2240,13 @@ taxonomy, ruleset, normalization, profile, and policy artifacts; at most 64
 selected profiles; at most 4,096 taxonomy category IDs; at most 4,096 rules;
 and at most 256 UTF-8 bytes for any classifier, ABI, taxonomy, ruleset,
 normalization, policy, profile, category, or rule ID. These are independent
-hard caps, not values supplied by or derived from the bundle.
+hard caps, not values supplied by or derived from the bundle. Before the host
+JSON decoder materializes any document, a string/escape-aware byte preflight
+also caps nesting at 64 containers, every generic array or object at 8,192
+direct entries, the manifest artifact array at 8,193 entries, and aggregate
+container entries at 65,552. Taxonomy, ruleset, and profile arrays use the
+stricter 4,096 category/rule limits during that same preflight. Duplicate-key
+rejection and exact canonical-byte comparison still run afterward.
 
 ### Exact fields, normalization, and bounds
 
@@ -2404,9 +2504,9 @@ installation, performance/resource qualification, P5C, H3, P6+, parent completio
 implementation of the encompassing child, its readiness, acceptance, execution,
 or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
-trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; only the separate
-trust-root prerequisite is `READY` for implementation eligibility. This
-encompassing child, operator policy-authority provisioning,
+trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root
+prerequisite remains pending acceptance. This encompassing child, operator
+policy-authority provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration, classification
 composition, omission execution, projection, public CLI/schema/receipt,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;

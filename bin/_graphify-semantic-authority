@@ -1,0 +1,222 @@
+#!/bin/sh
+''':'
+_GRAPHIFY_SCRIPT=$0
+while [ -L "$_GRAPHIFY_SCRIPT" ]; do
+    if [ -x /usr/bin/readlink ]; then
+        _GRAPHIFY_LINK=$(/usr/bin/readlink "$_GRAPHIFY_SCRIPT") || exit 126
+    elif [ -x /bin/readlink ]; then
+        _GRAPHIFY_LINK=$(/bin/readlink "$_GRAPHIFY_SCRIPT") || exit 126
+    else
+        echo "graphify semantic-authority bootstrap cannot resolve the installed script link" >&2
+        exit 126
+    fi
+    if [ -z "$_GRAPHIFY_LINK" ]; then
+        echo "graphify bootstrap cannot resolve the installed script link" >&2
+        exit 126
+    fi
+    case "$_GRAPHIFY_LINK" in
+        /*) _GRAPHIFY_SCRIPT=$_GRAPHIFY_LINK ;;
+        */*) _GRAPHIFY_SCRIPT=${_GRAPHIFY_SCRIPT%/*}/$_GRAPHIFY_LINK ;;
+        *) _GRAPHIFY_SCRIPT=${_GRAPHIFY_SCRIPT%/*}/$_GRAPHIFY_LINK ;;
+    esac
+done
+case "$_GRAPHIFY_SCRIPT" in
+    */*) _GRAPHIFY_SCRIPT_DIR=${_GRAPHIFY_SCRIPT%/*} ;;
+    *) _GRAPHIFY_SCRIPT_DIR=. ;;
+esac
+_GRAPHIFY_PYTHON=$_GRAPHIFY_SCRIPT_DIR/python
+if [ ! -x "$_GRAPHIFY_PYTHON" ]; then
+    if command -v python3.14 >/dev/null 2>&1; then
+        _GRAPHIFY_PYTHON=$(command -v python3.14) || exit 126
+    elif command -v python3 >/dev/null 2>&1; then
+        _GRAPHIFY_PYTHON=$(command -v python3) || exit 126
+    else
+        echo "graphify bootstrap cannot resolve the installed Python executable" >&2
+        exit 126
+    fi
+fi
+if ! "$_GRAPHIFY_PYTHON" -BEsS -c \
+    'import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)' >/dev/null 2>&1; then
+    echo "graphify bootstrap cannot resolve a Python >= 3.14 executable" >&2
+    exit 126
+fi
+exec "$_GRAPHIFY_PYTHON" -BEPsS "$_GRAPHIFY_SCRIPT" "$@"
+' '''
+from __future__ import annotations
+
+import os
+import sys
+
+
+if not (
+    sys.flags.dont_write_bytecode
+    and sys.flags.ignore_environment
+    and sys.flags.no_site
+    and sys.flags.no_user_site
+    and sys.flags.safe_path
+):
+    if not sys.executable:
+        raise SystemExit("graphify bootstrap cannot resolve the Python executable")
+    os.execv(
+        sys.executable,
+        [
+            sys.executable,
+            "-B",
+            "-E",
+            "-P",
+            "-s",
+            "-S",
+            os.path.realpath(__file__),
+            *sys.argv[1:],
+        ],
+    )
+
+import importlib
+import json
+import shutil
+import site
+import sysconfig
+import tempfile
+from collections.abc import Iterable
+from urllib.parse import unquote, urlparse
+
+
+def _real(path: str) -> str:
+    return os.path.realpath(path or os.getcwd())
+
+
+def _script_prefix_site_roots() -> tuple[str, ...]:
+    script_dir = _real(os.path.dirname(__file__))
+    prefixes: list[str] = []
+    if os.path.basename(script_dir) == "bin":
+        prefixes.append(os.path.dirname(script_dir))
+    version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    roots: list[str] = []
+    for prefix in prefixes:
+        for relative in (
+            ("lib", version, "site-packages"),
+            ("lib", "python", "site-packages"),
+        ):
+            candidate = os.path.join(prefix, *relative)
+            if not os.path.isdir(candidate):
+                continue
+            owner_roots = list(_editable_direct_url_roots(candidate))
+            if os.path.isdir(os.path.join(candidate, "graphify")):
+                owner_roots.append(_real(candidate))
+            roots.extend(owner_roots)
+    unique_roots = tuple(dict.fromkeys(roots))
+    if not unique_roots:
+        raise SystemExit("graphify bootstrap cannot resolve a script-prefix package root")
+    if len(unique_roots) > 1:
+        raise SystemExit("graphify bootstrap found ambiguous script-prefix package roots")
+    return unique_roots
+
+
+def _editable_direct_url_roots(site_root: str) -> tuple[str, ...]:
+    try:
+        entries = os.listdir(site_root)
+    except OSError:
+        return ()
+    roots: list[str] = []
+    for entry in entries:
+        if not (entry.startswith("graphifyy-") and entry.endswith(".dist-info")):
+            continue
+        direct_url = os.path.join(site_root, entry, "direct_url.json")
+        try:
+            with open(direct_url, "rb") as handle:
+                raw = handle.read(16_385)
+        except OSError:
+            continue
+        if len(raw) > 16_384:
+            continue
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        dir_info = document.get("dir_info")
+        if not (isinstance(dir_info, dict) and dir_info.get("editable") is True):
+            continue
+        url = document.get("url")
+        if not isinstance(url, str):
+            continue
+        parsed = urlparse(url)
+        if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+            continue
+        source = unquote(parsed.path)
+        if os.name == "nt" and len(source) >= 3 and source[0] == "/" and source[2] == ":":
+            source = source[1:]
+        if not source or not os.path.isabs(source):
+            continue
+        if os.path.isdir(os.path.join(source, "graphify")):
+            roots.append(_real(source))
+    return tuple(roots)
+
+
+def _allowed_import_roots() -> tuple[str, ...]:
+    roots: list[str] = list(_script_prefix_site_roots())
+    for key in ("purelib", "platlib", "stdlib", "platstdlib"):
+        value = sysconfig.get_paths().get(key)
+        if value:
+            roots.append(_real(value))
+    destination = sysconfig.get_config_var("DESTSHARED")
+    if destination:
+        roots.append(_real(destination))
+    getsitepackages = getattr(site, "getsitepackages", None)
+    if callable(getsitepackages):
+        site_values = getsitepackages()
+        if isinstance(site_values, str):
+            roots.append(_real(site_values))
+        elif isinstance(site_values, Iterable):
+            for value in site_values:
+                if isinstance(value, str):
+                    roots.append(_real(value))
+    unique: list[str] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return tuple(unique)
+
+
+def _is_allowed_import_entry(entry: str, roots: tuple[str, ...]) -> bool:
+    real = _real(entry)
+    return any(real == root or real.startswith(root + os.sep) for root in roots)
+
+
+def _prepare_import_boundary() -> str:
+    roots = _allowed_import_roots()
+    entries = [entry for entry in sys.path if _is_allowed_import_entry(entry, roots)]
+    for root in roots:
+        if root not in entries:
+            entries.append(root)
+    sys.path[:] = entries
+    prefix = tempfile.mkdtemp(prefix="graphify-pycache-")
+    os.chmod(prefix, 0o700)
+    sys.pycache_prefix = prefix
+    sys.dont_write_bytecode = True
+    return prefix
+
+
+def _main() -> None:
+    prefix = _prepare_import_boundary()
+    try:
+        module = importlib.import_module("graphify.__main__")
+        result = module.main()
+        if isinstance(result, int):
+            raise SystemExit(result)
+    finally:
+        pending = sys.exception()
+        try:
+            shutil.rmtree(prefix)
+        except OSError as exc:
+            if pending is None:
+                raise
+            pending.add_note(f"private bytecode cache cleanup failed: {exc}")
+        finally:
+            if sys.pycache_prefix == prefix:
+                sys.pycache_prefix = None
+
+
+if __name__ == "__main__":
+    _main()

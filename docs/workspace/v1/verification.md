@@ -1163,14 +1163,13 @@ eligibility below does not expand or reopen the accepted promotion boundary.
 
 ## P5B2 semantic-release bundle and deterministic-classifier trust-root readiness gates
 
-This documentation-only reconciliation records exactly one proposed unnumbered
-P5B2 prerequisite as `READY`: the semantic-release bundle and
-deterministic-classifier trust root. `READY` is implementation eligibility only. It proves no
-implementation, package data, test completion, acceptance, receipt, execution,
-release, or publication authority.
+This reconciliation records the current unnumbered P5B2 semantic-release bundle
+and deterministic-classifier trust-root implementation candidate. It proves no
+acceptance, receipt, content-release, publication, successor authority, or
+broader release/DLP decision.
 
-The reconciliation is exact-head-bound to pre-edit `workspace/v1` commit
-`d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
+The prior readiness reconciliation is exact-head-bound to pre-edit
+`workspace/v1` commit `d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
 `904a91047bcdbaae724d9688c586ec88fd3198f7`, clean divergence `0/0`, one
 worktree, and zero open pull requests. PR #66 head
 `772fd8809f6784c9cc859dcc654bfcdf873df40f` and merge/current commit have the
@@ -1187,7 +1186,22 @@ inventing operator policy or decision-store behavior:
   `graphify/workspace/semantic_release_manifest.json`, manifest-inventoried
   deterministic classifier implementation and byte ABI, closed taxonomy,
   normalization contract, ordered ruleset, required `core_secrets.v1`, and
-  selectable coverage-profile artifacts;
+  selectable coverage-profile artifacts, plus the installed private
+  `_graphify-semantic-authority` and `_graphify-mcp-semantic-authority`
+  source-executed bootstrap scripts whose POSIX shell prelude starts installed
+  Python under `-S` isolation before Python
+  startup hooks can run, then establishes a fresh package-external pycache
+  prefix, suppresses `.pth`, `sitecustomize`, and automatic user-site startup
+  imports, and may add the installed script-prefix package root, or a PEP 610
+  editable source root recorded by a `graphifyy` direct URL in that same script
+  prefix, explicitly before importing Graphify. The complete cross-layout
+  physical/editable owner set is real-path deduplicated and must contain
+  exactly one owner; zero or multiple owners fail before interpreter site
+  roots can supply Graphify. The public cross-platform
+  console entry points remain outside semantic-release authority, and the
+  authority-qualified or requalified uv install is `uv tool install --force
+  --reinstall --link-mode copy graphifyy`, followed by exact output-property
+  verification;
 - the manifest is at most 1 MiB, uses one canonical installed `graphify` package
   root, and binds every unique sorted package-relative inventory entry through
   the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`
@@ -1218,27 +1232,38 @@ inventing operator policy or decision-store behavior:
   authorization-credential, credential-assignment, provider-credential, and
   seed/recovery categories; it excludes entropy-only, bare-hash, UUID,
   arbitrary-Base64, vague-prose, and example/test exemptions;
+- the independent version-1 conformance vectors cover zero/256/257-space
+  assignment and labeled-recovery indentation, LF and CRLF recovery labels,
+  single- and double-quoted values containing the non-delimiting quote,
+  malformed or mismatched delimiters, exact case-sensitive placeholder bytes,
+  literal-hyphen Bearer tokens, Bearer padding from zero through the complete
+  256-byte boundary, and malformed internal/overlong padding;
 - optional jurisdictional, domain, and organization profiles are repo-owned
   selectable artifacts only. Workspace/release-context selection and coverage
   sufficiency remain separate operator-policy responsibilities;
 - bundle validation enforces the frozen independent caps before unbounded work:
   4,096 taxonomy categories, 4,096 rules, and 256 UTF-8 bytes for any
   classifier, ABI, taxonomy, ruleset, normalization, profile, category, or rule
-  ID. No caller or environment can enlarge a cap; and
-- the implementation stop boundary is installed-bundle loading/validation and
-  deterministic factual classification over explicit bytes. It must not read
-  promoted-generation or semantic-input state, choose active profiles, provision
-  policy authority, map dispositions, create `SemanticReleaseDecisionStore`,
-  integrate capacity/GC, execute omission, project content, add a public
-  CLI/schema/receipt, invoke a provider/backend, or publish.
+  ID. A pre-decoder lexical pass ignores structural bytes inside JSON strings
+  while bounding depth, per-container entries, the manifest inventory, and
+  aggregate structure before `json.loads`; over-limit vectors prove the host
+  decoder is not called. No caller or environment can enlarge a cap; and
+- the implementation stop boundary is installed-bundle loading/validation,
+  deterministic factual classification over explicit bytes, and the existing
+  executable bootstrap needed to exclude package-local bytecode caches and
+  Python startup hooks. It must not read promoted-generation or semantic-input
+  state, choose active profiles, provision policy authority, map dispositions,
+  create `SemanticReleaseDecisionStore`, integrate capacity/GC, execute
+  omission, project content, add a new public CLI/schema/receipt, invoke a
+  provider/backend, or publish.
 
-A later implementation review must prove positive and hostile
+A later acceptance review must prove positive and hostile
 installed-manifest fixtures, every no-follow/path/mode/size/digest rejection, byte-exact
 cross-run classifier vectors, taxonomy/profile identity separation, duplicate
 or mismatched kind-specific coordinates, profile ID/version/suffix disagreement,
 `core_secrets.v1` category behavior, limit rejection, and absence of ambient or
-workspace authority reads. Those are future implementation/acceptance gates,
-not evidence that this documentation change delivered them.
+workspace authority reads. Those are acceptance gates; delivery of the candidate
+does not itself grant acceptance.
 
 P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP
 decision, policy-authority provisioning, `SemanticReleaseDecisionStore`,
@@ -1251,14 +1276,15 @@ work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
 remains `WAITING`. It consumes the trust-root contract above but cannot become
-`READY` until that prerequisite is implemented and separately accepted and its
-operator-policy, decision-store, capacity/GC, and composition prerequisites
-exist. The freeze is complete only when all seven maintained-current documents
-agree and the diff changes no code, tests, schemas, fixtures, receipts,
-generated Graphify output, JOS row, or runtime artifact:
+`READY` until that prerequisite is separately accepted and its operator-policy,
+decision-store, capacity/GC, and composition prerequisites exist. The freeze is
+complete only when all seven maintained-current documents agree and the diff
+changes no code, tests, schemas, fixtures, receipts, generated Graphify output,
+JOS row, or runtime artifact:
 
-- `README.md` indexes the `READY` trust-root prerequisite separately from the
-  encompassing `WAITING` decision child and preserves parent/successor status;
+- `README.md` indexes the trust-root implementation candidate separately from
+  the encompassing `WAITING` decision child and preserves parent/successor
+  status;
 - `architecture.md` keeps the repo-owned deterministic classifier separate from
   operator policy, semantic-field composition, and private terminal proof;
 - `semantic-sync.md` is the canonical semantic contract and status split;
@@ -1266,8 +1292,8 @@ generated Graphify output, JOS row, or runtime artifact:
   capture/revalidation/install sequence, replay, and commit-unknown behavior;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66 provenance, only the trust-root
-  prerequisite as `READY`, and the encompassing child as `WAITING`; and
+- `governance.md` records exact PR #66 provenance, the trust-root prerequisite
+  as pending acceptance, and the encompassing child as `WAITING`; and
 - this file freezes the evidence and validation gates without creating an
   acceptance receipt.
 
@@ -1442,8 +1468,8 @@ output is not refreshed because no code changes and this batch expressly
 excludes generated artifacts.
 
 Passing those gates establishes only documentation consistency. It leaves P5
-and P5B2 `IN_PROGRESS` and records only the trust-root prerequisite as `READY`
-for implementation eligibility. The encompassing decision child,
+and P5B2 `IN_PROGRESS` and records the trust-root prerequisite as pending
+acceptance. The encompassing decision child,
 operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, and remaining P5B2/P5C work

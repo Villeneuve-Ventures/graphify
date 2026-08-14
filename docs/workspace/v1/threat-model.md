@@ -75,6 +75,41 @@ concurrent processes, untrusted corpus contents, path tricks, secret leakage,
 and artifact mismatch/substitution relative to a locally frozen trusted
 manifest.
 
+For installed executable operation, the semantic-release trust-root candidate
+also treats package-local bytecode caches as untrusted. The private
+source-executed `_graphify-semantic-authority` and
+`_graphify-mcp-semantic-authority` scripts are the pre-import
+bootstrap: their POSIX shell prelude resolves the installed script target and
+executes the installed Python with Python environment configuration ignored,
+site initialization disabled, automatic user-site startup imports disabled,
+safe-path mode enabled, and bytecode writes disabled before Python startup hooks
+can run; then the Python body sets a fresh private package-external
+`sys.pycache_prefix`, keeps bytecode writes disabled, and may add the installed
+script-prefix package root, or a PEP 610 editable source root recorded by a
+`graphifyy` direct URL in that same script prefix, explicitly before any
+Graphify module import. Direct library imports that bypass this bootstrap are
+not semantic-release decision authority. Across every supported script-prefix
+layout, the bootstrap requires exactly one real-path-distinct physical or PEP
+610 editable Graphify owner; a missing owner cannot fall through to an
+interpreter installation, and multiple owners are ambiguous and fail closed.
+
+This does not make the package its own first-instruction trust anchor. The
+CPython executable and standard library, an installer that verifies the
+selected wheel and its `RECORD`, the installed bootstrap source, and
+post-install filesystem protection of bootstrap and package-source bytes are
+explicit trusted-computing-base prerequisites. The wheel `RECORD` binds the
+bootstrap and classifier source. Hostile package-local bytecode is excluded;
+hostile source, launcher, interpreter, or standard-library substitution must be
+rejected by that external installation/runtime integrity boundary.
+
+The public `graphify` and `graphify-mcp` console entry points remain ordinary
+cross-platform commands and are never semantic-release decision authority. On
+the supported POSIX boundary, authority installation or requalification uses
+`uv tool install --force --reinstall --link-mode copy graphifyy` and verifies
+the resulting wheel/`RECORD`, bytes, modes, and link counts. Hardlinked or
+wrong-mode final files fail closed rather than weakening the single-link and
+exact-mode trust root.
+
 State-root policy requires expected ownership, `0700` directories, `0600`
 mutable records, exclusive creation, safe umask/ACL behavior, descriptor-relative
 no-follow traversal, regular-file-only payloads, path containment, and rejection
@@ -423,10 +458,11 @@ query-safety, correctness, or publication claim.
 
 ## Semantic-release bundle and deterministic-classifier trust-root threats
 
-The proposed unnumbered P5B2 semantic-release bundle and
-deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
-only. Its bounded threat surface is installed repo-owned package data, not a
-workspace, operator, provider, network, or release authority.
+The unnumbered P5B2 semantic-release bundle and deterministic-classifier
+trust-root prerequisite is an implementation candidate pending acceptance. Its
+bounded threat surface is installed repo-owned package data plus the existing
+installed executable bootstrap, not a workspace, operator, provider, network, or
+release authority.
 
 The trust root rejects caller or ambient substitution by anchoring one installed
 `graphify/workspace/semantic_release_manifest.json` beneath the canonical
@@ -456,16 +492,16 @@ a profile never activates it. `core_secrets.v1` is present as the required
 explicit-evidence-only base profile, while jurisdictional, domain, and
 organization profiles remain inert until a later operator authority selects
 them. This subchild owns no policy selection, field composition, disposition,
-decision binding, capacity/GC accounting, omission, projection, public
-transport, provider/backend, or publication behavior and has no implementation
-or acceptance receipt.
+decision binding, capacity/GC accounting, omission, projection, new public
+transport, provider/backend, or publication behavior and has no acceptance
+receipt.
 
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
-child is contract-frozen only and remains `WAITING`. The separate trust-root
-prerequisite above is only `READY`, not implemented or accepted; operator
-policy-authority provisioning, decision-store capacity/GC integration,
+child is contract-frozen only and remains `WAITING`. The trust-root prerequisite
+above has an implementation candidate but is not accepted;
+operator policy-authority provisioning, decision-store capacity/GC integration,
 classification composition, and the other decision prerequisites also remain
 absent. The decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
@@ -608,8 +644,8 @@ current promotion terminal, request, current `ACTIVE` policy authority, and
 binding; and revalidates every entry, authority, input, result, and binding
 coordinate before releasing the locks.
 
-P5 and P5B2 remain `IN_PROGRESS`; only the trust-root prerequisite is `READY`
-for implementation eligibility. The encompassing release/DLP decision,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite remains pending
+acceptance. The encompassing release/DLP decision,
 operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C

@@ -868,17 +868,17 @@ fact grants no content release, DLP, graph/query projection, public semantic
 sync, runtime receipt, provider, networking, repair, GC, publication, execution,
 or later-successor readiness. Parent P5 and P5B2 remain `IN_PROGRESS`, and H3
 remains `DEFERRED`. At that acceptance point remaining P5B2 and P5C work were
-`WAITING`; the separate current trust-root eligibility below does not expand
-the accepted promotion boundary.
+`WAITING`; the separate current trust-root implementation candidate below does
+not expand the accepted promotion boundary.
 
 ## Semantic-release bundle and deterministic-classifier trust-root
 
-The proposed unnumbered P5B2 semantic-release bundle and
-deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
-only. It owns no external durable-state path, workspace authority, policy
-selection, decision binding, lifecycle transition, public format, or receipt.
+The unnumbered P5B2 semantic-release bundle and deterministic-classifier
+trust-root prerequisite is an implementation candidate pending acceptance. It
+owns no external durable-state path, workspace authority, policy selection,
+decision binding, lifecycle transition, public format, or receipt.
 
-Its trust root is the future repo-owned installed package-data file
+Its trust root is the repo-owned installed package-data file
 `graphify/workspace/semantic_release_manifest.json`, loaded through
 installed-package authority rather than caller input. It is at most 1 MiB and
 inventories the classifier implementation, byte-defined ABI, taxonomy,
@@ -901,6 +901,44 @@ regular file of exact bytes/size/digest and mode `0444` or `0644`, with no
 execute or group/other write bit. Any unknown version, path, file type, mode,
 size, digest, grammar, taxonomy, normalization, ruleset, profile, limit, or ABI
 ambiguity fails closed.
+Bundle loading finishes with a return-time reread of the manifest and every
+manifest-bound artifact, a post-reread data inventory scan, and retained
+descriptor/path revalidation for those return-time reads, so the returned bundle
+remains bound to the installed bytes present at return rather than only to the
+initially scanned inventory names.
+
+Installed executable operation also requires the private source-executed
+`_graphify-semantic-authority` and `_graphify-mcp-semantic-authority` bootstrap
+scripts as the pre-import runtime
+boundary. Before Python startup hooks can run, the POSIX shell prelude resolves
+the installed script target and executes the installed Python with bytecode
+writes disabled, Python environment configuration ignored, site initialization
+disabled, automatic user-site startup imports disabled, and safe-path mode
+enabled; then the Python body sets `sys.pycache_prefix` to a fresh private
+package-external directory, keeps `sys.dont_write_bytecode` true, and may add
+the installed script-prefix package root, or a PEP 610 editable source root
+recorded by a `graphifyy` direct URL in that same script prefix, explicitly
+before importing any Graphify module.
+Package-local `__pycache__` contents are therefore untrusted and ignored for the
+installed executable path. Direct library imports that bypass this bootstrap are
+not semantic-release decision authority.
+
+That pre-import boundary has an explicit external integrity prerequisite. The
+CPython executable and standard library, an installer that verifies the chosen
+wheel and its `RECORD`, the installed bootstrap source, and post-install
+filesystem protection of bootstrap and package-source bytes are in the trusted
+computing base. The wheel `RECORD` binds both bootstrap scripts and
+`semantic_release.py`; runtime code does not claim to authenticate instructions
+that have already begun executing. Package-local bytecode caches remain
+untrusted and outside this prerequisite.
+
+The public `graphify` and `graphify-mcp` console entry points are ordinary
+cross-platform package commands, not semantic-release decision authority. An
+authority-qualified or requalified uv installation uses `uv tool install
+--force --reinstall --link-mode copy graphifyy`, followed by verification of
+the selected wheel/`RECORD`, exact bytes, exact final modes, and single-link
+state. Hardlinked or wrong-mode final files remain fail-closed non-authority
+installations regardless of installer history.
 
 The manifest-bound classifier is deterministic-pattern-only and operates on
 explicit already-canonical bounded UTF-8 bytes. Its exact grammar, dictionary
@@ -910,8 +948,8 @@ produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` outcomes and never
 maps them to policy dispositions. This internal boundary is independently
 implementable without `SemanticReleasePolicyAuthorityStore`,
 `SemanticReleaseDecisionStore`, capacity/GC integration, semantic-input
-composition, omission, projection, public CLI/schema/receipt, provider/backend,
-or publication behavior. It has no implementation or acceptance receipt yet.
+composition, omission, projection, new public CLI/schema/receipt,
+provider/backend, or publication behavior. It has no acceptance receipt yet.
 
 ## Semantic-content release/DLP decision
 
@@ -938,10 +976,10 @@ One coordinate alone, a historical promoted generation, or drift is never
 decision authority.
 
 The decision child consumes the exact installed bundle contract above; it does
-not own or weaken that trust root. Because the trust-root subchild is only
-`READY`, not implemented or accepted, the encompassing decision child remains
-`WAITING` even before its separate policy and persistence prerequisites are
-considered.
+not own or weaken that trust root. Because the trust-root subchild is only an
+implementation candidate pending acceptance, the encompassing decision child
+remains `WAITING` even before its separate policy and persistence prerequisites
+are considered.
 
 The separate future `SemanticReleasePolicyAuthorityStore` owns these private
 stable paths:
@@ -1008,8 +1046,8 @@ identity and exact value SHA-256 without copying field values. Each field-value
 digest is over the exact captured UTF-8 value bytes, with no JSON quoting,
 newline, salt, domain prefix, renormalization, or case conversion.
 
-The separate `READY` trust-root prerequisite owns the version-1 classifier ABI
-described here. It operates on exact captured UTF-8 bytes and cannot
+The separate trust-root prerequisite owns the version-1 classifier ABI described
+here. It operates on exact captured UTF-8 bytes and cannot
 use runtime Unicode categories, locale, renormalization, or host-dependent text
 behavior. Only syntax-defined ASCII names may use the ABI-defined ASCII fold;
 value bytes remain exact. Its grammar, dictionary encoding, comparison,
@@ -1129,9 +1167,9 @@ selection, networking, public/runtime schemas or receipts, status, repair,
 migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
 implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
-`IN_PROGRESS`; only the separate trust-root prerequisite is `READY` for
-implementation eligibility. This decision child, operator policy-authority
-provisioning, `SemanticReleaseDecisionStore`, capacity/GC integration,
+`IN_PROGRESS`; the separate trust-root prerequisite remains pending acceptance.
+This decision child, operator policy-authority provisioning,
+`SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, omission execution, projection, public
 CLI/schema/receipt, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.

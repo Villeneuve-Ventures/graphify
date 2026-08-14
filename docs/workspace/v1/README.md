@@ -65,15 +65,25 @@ accepted child adds no schema change, runtime receipt, public command, or broade
 execution authority, and its acceptance activates no later successor.
 
 The next separate unnumbered P5B2 semantic-release bundle and
-deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
-only. Its exact internal scope is the repo-owned installed manifest plus the
-manifest-bound classifier implementation and byte ABI, closed taxonomy,
-normalization contract, ordered ruleset, required explicit-evidence-only
-`core_secrets.v1`, and every selectable coverage-profile artifact. The
-installed-root/no-follow, mode, size, digest, hard-limit, deterministic-pattern,
+deterministic-classifier trust-root prerequisite is an implementation candidate
+pending acceptance. Its exact internal scope is the repo-owned installed
+manifest plus the manifest-bound classifier implementation and byte ABI, closed
+taxonomy, normalization contract, ordered ruleset, required
+explicit-evidence-only `core_secrets.v1`, every selectable coverage-profile
+artifact, and the installed private `_graphify-semantic-authority` /
+`_graphify-mcp-semantic-authority` pre-import bootstrap that
+starts installed Python under `-S` isolation before Python startup hooks can run
+and keeps package-local bytecode caches, `.pth`, `sitecustomize`, and automatic
+user-site startup imports outside the trusted runtime path. The public
+`graphify` / `graphify-mcp` console entry points remain ordinary cross-platform
+commands and are not semantic-release decision authority. Plain user script
+installs may add the installed script-prefix package root, or a PEP 610 editable
+source root recorded by a `graphifyy` direct URL in that same script prefix,
+explicitly after that startup boundary. The installed-root/no-follow, mode, size,
+digest, hard-limit, deterministic-pattern, fresh-pycache-prefix, no-startup-site,
 and fail-closed rules are frozen; callers cannot supply, select around, or
-override those bytes. It has no implementation, receipt, acceptance,
-completion, execution, or release authority.
+override those bytes. It has no receipt, acceptance, completion, content-release,
+publication, or successor authority.
 
 The encompassing semantic-content release/DLP decision child remains
 `WAITING`. It additionally requires implemented and accepted trust-root bytes,
@@ -82,8 +92,9 @@ capacity/GC integration, classification composition, and the other frozen
 decision prerequisites before any private request-addressed binding can exist.
 Operator policy provisioning, omission execution, projection, public
 CLI/schema/receipt, provider/backend, publication, and successor activation all
-remain outside the `READY` subchild. P5 and P5B2 remain `IN_PROGRESS`, P5C
-remains `WAITING`, H3 remains `DEFERRED`, and no later successor is `READY`.
+remain outside the trust-root implementation candidate. P5 and P5B2 remain
+`IN_PROGRESS`, P5C remains `WAITING`, H3 remains `DEFERRED`, and no later
+successor is `READY`.
 
 This directory defines the first version of Graphify's workspace control-plane
 contracts. P2 provides a library surface for external durable registry state,
@@ -725,7 +736,7 @@ set.
 | Semantic-result handoff and sealed-input finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal boundary](semantic-sync.md#p5b2-semantic-result-handoff-and-sealed-input-finalization) admits only exact accepted worker sessions or identical carried format-version-1 evidence from the verified current source generation, binds that optional source separately from the new target generation, installs one immutable target-generation/request-bound handoff, copies its exact bytes to target-generation-owned `graphify-out/semantic-inputs.json`, completes the staged payload manifest, and calls `bind_sealed_inputs()`. Accepted receipt: [`P5B2 semantic-result handoff`](receipts/p5b2-semantic-result-handoff.md). It has no public command and stops before content release, certification, promotion, or pointer mutation. |
 | Semantic-generation certification finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal contract](semantic-sync.md#p5b2-semantic-generation-certification-finalization) starts only from the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest, reacquires only the same request-bound `BUILD` recovery authority, and reuses the existing semantic certification view, immutable binding, generation receipt, journal, reservation, and staged-state transitions until the same target is durably verified as `CERTIFIED` and the lease is released. Accepted completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), limited to the corrected PR #56 plus PR #57 delivery chain. It grants no content-release, projection, promotion, pointer, public-command, or successor authority. |
 | Semantic-generation promotion and pointer-finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal boundary](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization) starts only from the accepted certification terminal, moves only the same request's exact certified target through staged `PROMOTE` (including exact already-visible replay) or pending-intent `POINTER_RECOVERY` authority, and requires a staged `PROMOTED` record, exact visible-current and journal proof, no pending pointer intent, unchanged installed semantic evidence, and exact grant release. Accepted completion evidence: [`P5B2 semantic-generation promotion and pointer-finalization`](receipts/p5b2-semantic-generation-promotion-finalization.md), binding the exact PR #59 through PR #64 chain. The accepted child has no public command, grants no content-release, projection, or broader execution authority, and activates no later successor. |
-| Semantic-release bundle and deterministic-classifier trust-root | Unnumbered P5B2 prerequisite (`READY`; implementation eligibility only) | The [frozen internal trust-root boundary](semantic-sync.md#p5b2-semantic-release-bundle-and-deterministic-classifier-trust-root) owns only the installed repo package-data manifest, deterministic classifier implementation/ABI, taxonomy, normalization, ruleset, required `core_secrets.v1`, and selectable profile bundle. It owns no operator policy selection, durable decision store, semantic-field composition, omission, projection, public surface, provider/backend, publication, implementation, or acceptance authority. |
+| Semantic-release bundle and deterministic-classifier trust-root | Unnumbered P5B2 prerequisite (implementation candidate; pending acceptance) | The [internal trust-root boundary](semantic-sync.md#p5b2-semantic-release-bundle-and-deterministic-classifier-trust-root) owns only the installed repo package-data manifest, deterministic classifier implementation/ABI, taxonomy, normalization, ruleset, required `core_secrets.v1`, selectable profile bundle, and existing installed executable bootstrap needed to exclude package-local bytecode caches and Python startup hooks from trusted execution. It owns no operator policy selection, durable decision store, semantic-field composition, omission, projection, new public command/schema/receipt, provider/backend, publication, or acceptance authority. |
 | Semantic-content release/DLP decision | Proposed unnumbered P5B2 child (`WAITING`; contract freeze only) | The [frozen private decision boundary](semantic-sync.md#p5b2-semantic-content-releasedlp-decision) requires the accepted exact promoted visible-current terminal, separately implemented and accepted trust-root, provisioned stable current `ACTIVE` operator policy authority, `SemanticReleaseDecisionStore`, capacity/GC integration, and classification composition. Omission execution, projection, public CLI/schema/receipt, provider/backend, publication, implementation, acceptance, and successor activation remain absent. |
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` and the accepted internal handoff are implemented. The handoff acceptance grants no public semantic-sync route. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and execution contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |

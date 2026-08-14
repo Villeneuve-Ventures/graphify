@@ -177,19 +177,30 @@ The accepted child adds no operator execution authority, public transport,
 schema, runtime receipt, content release, or graph/query projection. Its
 acceptance changes no parent phase and activates no later successor.
 
-The proposed unnumbered P5B2 semantic-release bundle and
-deterministic-classifier trust-root prerequisite is `READY` for implementation eligibility
-only. Its architecture is entirely repo-owned installed package data: one
-canonical manifest inventories and digest-binds the deterministic classifier
-implementation, byte-defined ABI, closed taxonomy, normalization contract,
-ordered ruleset, required `core_secrets.v1`, and every selectable profile. The
-installed-root and descriptor-relative no-follow boundary rejects path, link,
-mode, size, digest, identity, version, limit, or ABI ambiguity. The byte ABI
+The unnumbered P5B2 semantic-release bundle and deterministic-classifier
+trust-root prerequisite is an implementation candidate pending acceptance. Its
+architecture remains repo-owned installed package data plus the existing
+installed executable bootstrap: one canonical manifest inventories and
+digest-binds the deterministic classifier implementation, byte-defined ABI,
+closed taxonomy, normalization contract, ordered ruleset, required
+`core_secrets.v1`, and every selectable profile, while the private source-executed
+`_graphify-semantic-authority` and `_graphify-mcp-semantic-authority` scripts
+start installed Python under isolation
+flags including `-S` before Python startup hooks can run, establish a fresh
+package-external pycache prefix, and suppress `.pth`, `sitecustomize`, and
+automatic user-site startup imports before importing Graphify. The public
+cross-platform console entry points are outside semantic-release authority.
+Plain user script
+installs may add the installed script-prefix package root, or a PEP 610 editable
+source root recorded by a `graphifyy` direct URL in that same script prefix,
+explicitly after that startup boundary. The installed-root and
+descriptor-relative no-follow boundary rejects path, link, mode, size, digest,
+identity, version, limit, or ABI ambiguity. The byte ABI
 produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` results over
 explicit already-canonical bounded UTF-8 bytes. It owns no workspace policy
 selection, durable state, capacity/GC integration, release disposition,
-omission, projection, public surface, provider/backend, or publication behavior
-and has no implementation or acceptance receipt.
+omission, projection, new public command/schema/receipt, provider/backend, or
+publication behavior and has no acceptance receipt.
 
 The encompassing unnumbered P5B2 semantic-content release/DLP decision child is
 contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
@@ -243,8 +254,8 @@ runtime receipts do not become release authority. Nonempty decision state
 protects the generation from GC until a separately accepted integration. The
 freeze stops before omission execution, graph construction, projection, query,
 public semantic sync, publication, implementation or readiness of the
-encompassing child, or acceptance. P5 and P5B2 remain `IN_PROGRESS`; only the
-bounded trust-root prerequisite is `READY`. Operator policy-authority
+encompassing child, or acceptance. P5 and P5B2 remain `IN_PROGRESS`; the bounded
+trust-root prerequisite remains pending acceptance. Operator policy-authority
 provisioning, `SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, the encompassing release/DLP decision, remaining
 P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor

@@ -48,6 +48,10 @@ Homepage = "https://github.com/safishamsi/graphify"
 Repository = "https://github.com/safishamsi/graphify"
 Issues = "https://github.com/safishamsi/graphify/issues"
 
+[project.scripts]
+graphify = "graphify.__main__:main"
+graphify-mcp = "graphify.serve:_main"
+
 [project.optional-dependencies]
 # starlette is pulled in transitively by mcp, but graphify/serve.py imports it
 # directly for the HTTP transport, so declare it here and floor it above the
@@ -82,10 +86,6 @@ dm = ["tree-sitter-dm"]
 terraform = ["tree-sitter-hcl"]
 all = ["mcp>=1.28.1", "starlette>=1.3.1", "neo4j", "falkordb", "pypdf>=6.15.0", "markdownify", "watchdog", "python-docx", "openpyxl", "faster-whisper", "yt-dlp>=2026.7.4", "matplotlib", "numpy>=2.0", "openai", "tiktoken", "boto3", "anthropic", "tree-sitter-sql", "jieba", "tree-sitter-dm", "tree-sitter-hcl", "tree-sitter-pascal"]
 
-[project.scripts]
-graphify = "graphify.__main__:main"
-graphify-mcp = "graphify.serve:_main"
-
 [dependency-groups]
 dev = [
     "bandit>=1.9.4",
@@ -113,6 +113,7 @@ package = true
 [tool.setuptools]
 packages = ["graphify", "graphify.extractors", "graphify.exporters", "graphify.workspace", "graphify.workspace.adapters"]
 include-package-data = false
+script-files = ["bin/_graphify-semantic-authority", "bin/_graphify-mcp-semantic-authority"]
 
 [tool.setuptools.package-data]
 # The skill bodies ship as graphify/skill*.md (the SKILL.md a host installs is
@@ -120,7 +121,7 @@ include-package-data = false
 # under graphify/skills/<host>/references/, and the always-on injection blocks
 # under graphify/always_on/. There is no graphify/skills/<host>/SKILL.md in the
 # repo, so no SKILL.md glob is needed here.
-graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-kilo.md", "command-kilo.md", "skill-aider.md", "skill-amp.md", "skill-agents.md", "skill-copilot.md", "skill-claw.md", "skill-windows.md", "skill-droid.md", "skill-trae.md", "skill-kiro.md", "skill-vscode.md", "skill-pi.md", "skill-devin.md", "skills/*/references/*.md", "always_on/*.md", "workspace/schemas/v1/*.json", "workspace/schemas/cli/v1/*.json", "workspace/schemas/cli/v2/*.json"]
+graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-kilo.md", "command-kilo.md", "skill-aider.md", "skill-amp.md", "skill-agents.md", "skill-copilot.md", "skill-claw.md", "skill-windows.md", "skill-droid.md", "skill-trae.md", "skill-kiro.md", "skill-vscode.md", "skill-pi.md", "skill-devin.md", "skills/*/references/*.md", "always_on/*.md", "workspace/schemas/v1/*.json", "workspace/schemas/cli/v1/*.json", "workspace/schemas/cli/v2/*.json", "workspace/semantic_release_manifest.json", "workspace/semantic_release_data/*.json", "workspace/semantic_release_data/profiles/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
