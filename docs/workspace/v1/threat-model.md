@@ -75,8 +75,8 @@ concurrent processes, untrusted corpus contents, path tricks, secret leakage,
 and artifact mismatch/substitution relative to a locally frozen trusted
 manifest.
 
-For installed executable operation, the semantic-release trust-root candidate
-also treats package-local bytecode caches as untrusted. The private
+For installed executable operation, the accepted semantic-release trust-root
+prerequisite also treats package-local bytecode caches as untrusted. The private
 source-executed `_graphify-semantic-authority` and
 `_graphify-mcp-semantic-authority` scripts are the pre-import
 bootstrap: their POSIX shell prelude resolves the installed script target and
@@ -459,10 +459,12 @@ query-safety, correctness, or publication claim.
 ## Semantic-release bundle and deterministic-classifier trust-root threats
 
 The unnumbered P5B2 semantic-release bundle and deterministic-classifier
-trust-root prerequisite is an implementation candidate pending acceptance. Its
-bounded threat surface is installed repo-owned package data plus the existing
-installed executable bootstrap, not a workspace, operator, provider, network, or
-release authority.
+trust-root prerequisite is implemented and accepted only at the frozen boundary
+recorded in the
+[acceptance receipt](receipts/p5b2-semantic-release-trust-root.md). Its bounded
+threat surface is installed repo-owned package data plus the existing installed
+executable bootstrap, not a workspace, operator, provider, network, or release
+authority.
 
 The trust root rejects caller or ambient substitution by anchoring one installed
 `graphify/workspace/semantic_release_manifest.json` beneath the canonical
@@ -493,15 +495,15 @@ explicit-evidence-only base profile, while jurisdictional, domain, and
 organization profiles remain inert until a later operator authority selects
 them. This subchild owns no policy selection, field composition, disposition,
 decision binding, capacity/GC accounting, omission, projection, new public
-transport, provider/backend, or publication behavior and has no acceptance
-receipt.
+transport, provider/backend, or publication behavior. Acceptance adds none of
+those excluded behaviors and activates no successor.
 
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is contract-frozen only and remains `WAITING`. The trust-root prerequisite
-above has an implementation candidate but is not accepted;
-operator policy-authority provisioning, decision-store capacity/GC integration,
+above is accepted, but operator policy-authority provisioning, decision-store
+capacity/GC integration,
 classification composition, and the other decision prerequisites also remain
 absent. The decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
@@ -644,8 +646,8 @@ current promotion terminal, request, current `ACTIVE` policy authority, and
 binding; and revalidates every entry, authority, input, result, and binding
 coordinate before releasing the locks.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite remains pending
-acceptance. The encompassing release/DLP decision,
+P5 and P5B2 remain `IN_PROGRESS`; only the trust-root prerequisite is accepted
+`COMPLETE`. The encompassing release/DLP decision,
 operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
@@ -705,6 +707,15 @@ publication, P5C, H3, P6+, parent completion, or later-successor authority. The
 terminal pointer may make only the exact promoted current generation eligible
 to be considered as carried semantic-result evidence by a later separately
 authorized handoff; it does not run or accept that handoff.
+
+The accepted semantic-release trust-root implementation and
+[receipt](receipts/p5b2-semantic-release-trust-root.md) are authority only for
+the exact installed manifest, inventory, deterministic classifier, and private
+installed executable bootstrap boundary. They do not claim policy selection,
+release safety from `NO_MATCH`, field composition, decision persistence,
+capacity/GC integration, omission, projection, a new public surface,
+provider/backend behavior, publication, parent completion, execution, or
+successor readiness.
 
 Release channels are `dev`, `shadow`, `candidate`, `stable`, and `rollback` and
 must promote identical digests. Later P5 work implements candidate publication
