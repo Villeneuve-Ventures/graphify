@@ -1112,7 +1112,7 @@ def _validate_ruleset(
         raise SemanticReleaseBundleError("ruleset rules must be an array")
     if len(raw_rules) > MAX_RULES:
         raise SemanticReleaseBundleError("ruleset limit exceeded")
-    rules: list[_Rule] = []
+    pending_rules: list[tuple[str, str, str | None, bytes]] = []
     normalized: list[dict[str, object]] = []
     seen_ids: set[str] = set()
     for index, value in enumerate(raw_rules):
@@ -1152,16 +1152,23 @@ def _validate_ruleset(
             pattern_bytes = pattern_text.encode("ascii")
         except UnicodeEncodeError as exc:
             raise SemanticReleaseBundleError(f"{label}: pattern must be ASCII") from exc
+        normalized.append(dict(value))
+        pending_rules.append((rule_id, category_id, credential_group, pattern_bytes))
+    if tuple(normalized) != _RULE_DOCUMENTS:
+        raise SemanticReleaseBundleError("ruleset version contains unsupported rules")
+
+    rules: list[_Rule] = []
+    for index, (rule_id, category_id, credential_group, pattern_bytes) in enumerate(
+        pending_rules
+    ):
+        label = f"ruleset.rules[{index}]"
         try:
             pattern = re.compile(pattern_bytes, re.ASCII)
         except (re.error, OverflowError, RecursionError) as exc:
             raise SemanticReleaseBundleError(f"{label}: pattern is unexecutable") from exc
         if credential_group is not None and credential_group not in pattern.groupindex:
             raise SemanticReleaseBundleError(f"{label}: credential group is missing")
-        normalized.append(dict(value))
         rules.append(_Rule(rule_id, category_id, credential_group, pattern))
-    if tuple(normalized) != _RULE_DOCUMENTS:
-        raise SemanticReleaseBundleError("ruleset version contains unsupported rules")
     excluded_bytes = frozenset(value.encode("ascii") for value in _EXCLUDED_CREDENTIAL_VALUES)
     return tuple(rules), excluded_bytes
 

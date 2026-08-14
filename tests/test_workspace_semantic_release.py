@@ -852,7 +852,19 @@ def test_excessive_json_nesting_fails_closed(
     )
 
 
-def test_unexecutable_regex_overflow_is_indeterminate(
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        pytest.param("a{999999999999999999999}", id="overflow"),
+        pytest.param(
+            "(" * sys.getrecursionlimit() + "a" + ")" * sys.getrecursionlimit(),
+            id="recursion",
+        ),
+        pytest.param("a?" * 4096, id="large-valid"),
+    ],
+)
+def test_unsupported_regex_is_rejected_before_compilation(
+    pattern: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -864,37 +876,21 @@ def test_unexecutable_regex_overflow_is_indeterminate(
     assert isinstance(rules, list)
     rule = rules[0]
     assert isinstance(rule, dict)
-    rule["pattern"] = "a{999999999999999999999}"
+    rule["pattern"] = pattern
     _write_artifact_json(root, entry, ruleset)
     _write_manifest(root, manifest)
 
+    original_compile = semantic_release.re.compile
+    unsupported_pattern = pattern.encode("ascii")
+
+    def reject_unsupported_compile(candidate: bytes, flags: int = 0):
+        if candidate == unsupported_pattern:
+            raise AssertionError("unsupported rule reached re.compile")
+        return original_compile(candidate, flags)
+
+    monkeypatch.setattr(semantic_release.re, "compile", reject_unsupported_compile)
     _select_bundle(monkeypatch, root)
-    with pytest.raises(SemanticReleaseBundleError, match="pattern is unexecutable"):
-        load_installed_semantic_release_bundle()
-    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
-        "INDETERMINATE"
-    )
-
-
-def test_unexecutable_regex_recursion_is_indeterminate(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    root = _copy_bundle(tmp_path)
-    manifest = _manifest(root)
-    entry = _entry(manifest, kind="ruleset")
-    ruleset = _canonical_load(_artifact_path(root, entry))
-    rules = ruleset["rules"]
-    assert isinstance(rules, list)
-    rule = rules[0]
-    assert isinstance(rule, dict)
-    depth = sys.getrecursionlimit()
-    rule["pattern"] = "(" * depth + "a" + ")" * depth
-    _write_artifact_json(root, entry, ruleset)
-    _write_manifest(root, manifest)
-
-    _select_bundle(monkeypatch, root)
-    with pytest.raises(SemanticReleaseBundleError, match="pattern is unexecutable"):
+    with pytest.raises(SemanticReleaseBundleError, match="unsupported rules"):
         load_installed_semantic_release_bundle()
     assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
         "INDETERMINATE"
