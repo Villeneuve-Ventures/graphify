@@ -1154,7 +1154,7 @@ def _validate_ruleset(
             raise SemanticReleaseBundleError(f"{label}: pattern must be ASCII") from exc
         try:
             pattern = re.compile(pattern_bytes, re.ASCII)
-        except (re.error, OverflowError) as exc:
+        except (re.error, OverflowError, RecursionError) as exc:
             raise SemanticReleaseBundleError(f"{label}: pattern is unexecutable") from exc
         if credential_group is not None and credential_group not in pattern.groupindex:
             raise SemanticReleaseBundleError(f"{label}: credential group is missing")
@@ -1380,7 +1380,7 @@ def _validated_selected_profiles(
                 coordinate.profile_version,
                 "selected profile",
             )
-        except SemanticReleaseBundleError:
+        except (SemanticReleaseBundleError, ValueError):
             return None
         coordinates.append(validated)
     profile_ids = tuple(coordinate.profile_id for coordinate in coordinates)

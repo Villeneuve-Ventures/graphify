@@ -408,6 +408,22 @@ def test_profiles_are_explicit_validated_input_and_never_ambient(
     assert classify_canonical_bytes(field, too_many).outcome == "INDETERMINATE"
 
 
+def test_oversized_selected_profile_version_is_indeterminate() -> None:
+    previous_limit = sys.get_int_max_str_digits()
+    minimum_limit = sys.int_info.str_digits_check_threshold
+    sys.set_int_max_str_digits(minimum_limit)
+    try:
+        oversized_version = 10**minimum_limit
+        result = classify_canonical_bytes(
+            b"ordinary",
+            (ProfileCoordinate("core_secrets.v1", oversized_version),),
+        )
+    finally:
+        sys.set_int_max_str_digits(previous_limit)
+
+    assert result.outcome == "INDETERMINATE"
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -849,6 +865,31 @@ def test_unexecutable_regex_overflow_is_indeterminate(
     rule = rules[0]
     assert isinstance(rule, dict)
     rule["pattern"] = "a{999999999999999999999}"
+    _write_artifact_json(root, entry, ruleset)
+    _write_manifest(root, manifest)
+
+    _select_bundle(monkeypatch, root)
+    with pytest.raises(SemanticReleaseBundleError, match="pattern is unexecutable"):
+        load_installed_semantic_release_bundle()
+    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
+        "INDETERMINATE"
+    )
+
+
+def test_unexecutable_regex_recursion_is_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = _copy_bundle(tmp_path)
+    manifest = _manifest(root)
+    entry = _entry(manifest, kind="ruleset")
+    ruleset = _canonical_load(_artifact_path(root, entry))
+    rules = ruleset["rules"]
+    assert isinstance(rules, list)
+    rule = rules[0]
+    assert isinstance(rule, dict)
+    depth = sys.getrecursionlimit()
+    rule["pattern"] = "(" * depth + "a" + ")" * depth
     _write_artifact_json(root, entry, ruleset)
     _write_manifest(root, manifest)
 
