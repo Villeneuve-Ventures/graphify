@@ -907,8 +907,9 @@ descriptor/path revalidation for those return-time reads, so the returned bundle
 remains bound to the installed bytes present at return rather than only to the
 initially scanned inventory names.
 
-Installed executable operation also requires the existing source-executed
-`graphify` and `graphify-mcp` bootstrap scripts as the pre-import runtime
+Installed executable operation also requires the private source-executed
+`_graphify-semantic-authority` and `_graphify-mcp-semantic-authority` bootstrap
+scripts as the pre-import runtime
 boundary. Before Python startup hooks can run, the POSIX shell prelude resolves
 the installed script target and executes the installed Python with bytecode
 writes disabled, Python environment configuration ignored, site initialization
@@ -930,6 +931,14 @@ computing base. The wheel `RECORD` binds both bootstrap scripts and
 `semantic_release.py`; runtime code does not claim to authenticate instructions
 that have already begun executing. Package-local bytecode caches remain
 untrusted and outside this prerequisite.
+
+The public `graphify` and `graphify-mcp` console entry points are ordinary
+cross-platform package commands, not semantic-release decision authority. An
+authority-qualified or requalified uv installation uses `uv tool install
+--force --reinstall --link-mode copy graphifyy`, followed by verification of
+the selected wheel/`RECORD`, exact bytes, exact final modes, and single-link
+state. Hardlinked or wrong-mode final files remain fail-closed non-authority
+installations regardless of installer history.
 
 The manifest-bound classifier is deterministic-pattern-only and operates on
 explicit already-canonical bounded UTF-8 bytes. Its exact grammar, dictionary

@@ -7,7 +7,7 @@ while [ -L "$_GRAPHIFY_SCRIPT" ]; do
     elif [ -x /bin/readlink ]; then
         _GRAPHIFY_LINK=$(/bin/readlink "$_GRAPHIFY_SCRIPT") || exit 126
     else
-        echo "graphify bootstrap cannot resolve the installed script link" >&2
+        echo "graphify semantic-authority bootstrap cannot resolve the installed script link" >&2
         exit 126
     fi
     if [ -z "$_GRAPHIFY_LINK" ]; then
@@ -198,8 +198,8 @@ def _prepare_import_boundary() -> str:
 def _main() -> None:
     prefix = _prepare_import_boundary()
     try:
-        module = importlib.import_module("graphify.__main__")
-        result = module.main()
+        module = importlib.import_module("graphify.serve")
+        result = module._main()
         if isinstance(result, int):
             raise SystemExit(result)
     finally:

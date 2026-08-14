@@ -183,11 +183,14 @@ architecture remains repo-owned installed package data plus the existing
 installed executable bootstrap: one canonical manifest inventories and
 digest-binds the deterministic classifier implementation, byte-defined ABI,
 closed taxonomy, normalization contract, ordered ruleset, required
-`core_secrets.v1`, and every selectable profile, while the source-executed
-`graphify` and `graphify-mcp` scripts start installed Python under isolation
+`core_secrets.v1`, and every selectable profile, while the private source-executed
+`_graphify-semantic-authority` and `_graphify-mcp-semantic-authority` scripts
+start installed Python under isolation
 flags including `-S` before Python startup hooks can run, establish a fresh
 package-external pycache prefix, and suppress `.pth`, `sitecustomize`, and
-automatic user-site startup imports before importing Graphify. Plain user script
+automatic user-site startup imports before importing Graphify. The public
+cross-platform console entry points are outside semantic-release authority.
+Plain user script
 installs may add the installed script-prefix package root, or a PEP 610 editable
 source root recorded by a `graphifyy` direct URL in that same script prefix,
 explicitly after that startup boundary. The installed-root and

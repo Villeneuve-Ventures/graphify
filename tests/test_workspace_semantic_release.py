@@ -17,6 +17,7 @@ import graphify.workspace.semantic_release as semantic_release
 from graphify.workspace.semantic_release import (
     BUNDLE_ARTIFACT_MAX_BYTES,
     BUNDLE_MANIFEST_MAX_BYTES,
+    ClassificationResult,
     CORE_SECRETS_PROFILE,
     FIELD_MAX_BYTES,
     MAX_CATEGORIES,
@@ -272,6 +273,17 @@ def test_missing_parsed_profile_document_fails_closed(
         (b"token: 'p'", "secret.credential_assignment"),
         (b"client_secret = production-secret-42", "secret.credential_assignment"),
         (b"token: 'production-token-42'", "secret.credential_assignment"),
+        (b"config:\n  password: hunter2", "secret.credential_assignment"),
+        (b"config:\n" + b" " * 256 + b"password: hunter2", "secret.credential_assignment"),
+        (b'password="abc\'def"', "secret.credential_assignment"),
+        (b'token=\'abc"def\'', "secret.credential_assignment"),
+        (b"password: ChangeMe", "secret.credential_assignment"),
+        (b"password: CHANGEME", "secret.credential_assignment"),
+        (b"Authorization: Bearer abc===", "secret.authorization_credential"),
+        (
+            b"Authorization: Bearer " + b"a" + b"=" * 255,
+            "secret.authorization_credential",
+        ),
         (b"ghp_abcdefghijklmnopqrstuvwxyz0123456789", "secret.provider_credential"),
         (b"github_pat_" + b"A" * 82, "secret.provider_credential"),
         (b"AKIAABCDEFGHIJKLMNOP", "secret.provider_credential"),
@@ -309,7 +321,16 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
         b"dXNlcjpzdXBlcnNlY3JldA==",
         b"this paragraph contains something secret-looking",
         b"api_key = your_api_key",
+        b"password: changeme",
         b"password: placeholder",
+        b"config:\n" + b" " * 257 + b"password: hunter2",
+        b'password="abc\'def\'',
+        b'password="abc"def"',
+        b'password=""',
+        b"Authorization: Bearer ===",
+        b"Authorization: Bearer abc=def",
+        b"Authorization: Bearer " + b"a" + b"=" * 256,
+        b"Authorization: Bearer " + b"a" * 256 + b"=",
         b"Authorization: Basic abc",
         b"Authorization: Basic dTpw=",
         b"Authorization: Bearer abc=123",
@@ -381,6 +402,39 @@ def test_examples_and_test_context_do_not_exempt_complete_credentials() -> None:
     result = classify_canonical_bytes(field, (CORE_SECRETS_PROFILE,))
     assert result.outcome == "MATCH"
     assert result.category_ids == ("secret.provider_credential",)
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        b"<redacted>",
+        b"changeme",
+        b"dummy_value",
+        b"example_value",
+        b"placeholder",
+        b"redacted",
+        b"your_api_key",
+        b"your_password",
+        b"your_secret",
+        b"your_token",
+    ],
+)
+def test_assignment_placeholder_suppression_uses_exact_value_bytes(placeholder: bytes) -> None:
+    exact = classify_canonical_bytes(
+        b"PASSWORD: '" + placeholder + b"'",
+        (CORE_SECRETS_PROFILE,),
+    )
+    changed_case = classify_canonical_bytes(
+        b"PASSWORD: '" + placeholder.upper() + b"'",
+        (CORE_SECRETS_PROFILE,),
+    )
+
+    assert exact == ClassificationResult("NO_MATCH")
+    assert changed_case == ClassificationResult(
+        "MATCH",
+        ("secret.credential_assignment",),
+        ("core.assignment.quoted.v1",),
+    )
 
 
 def test_profiles_are_explicit_validated_input_and_never_ambient(
@@ -1104,6 +1158,25 @@ def test_installed_package_root_symlink_fails_closed(
     alias_root.symlink_to(real_root, target_is_directory=True)
     _select_bundle(monkeypatch, alias_root)
     with pytest.raises(SemanticReleaseBundleError):
+        load_installed_semantic_release_bundle()
+    assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
+        "INDETERMINATE"
+    )
+
+
+def test_installed_package_root_symlinked_ancestor_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path.resolve() / "real"
+    real_root = _copy_bundle(real_parent)
+    alias_parent = tmp_path.resolve() / "alias"
+    alias_parent.mkdir()
+    linked_ancestor = alias_parent / "current"
+    linked_ancestor.symlink_to(real_parent, target_is_directory=True)
+    _select_bundle(monkeypatch, linked_ancestor / real_root.name)
+
+    with pytest.raises(SemanticReleaseBundleError, match="linked or unsafe component"):
         load_installed_semantic_release_bundle()
     assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
         "INDETERMINATE"

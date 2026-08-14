@@ -48,6 +48,10 @@ Homepage = "https://github.com/safishamsi/graphify"
 Repository = "https://github.com/safishamsi/graphify"
 Issues = "https://github.com/safishamsi/graphify/issues"
 
+[project.scripts]
+graphify = "graphify.__main__:main"
+graphify-mcp = "graphify.serve:_main"
+
 [project.optional-dependencies]
 # starlette is pulled in transitively by mcp, but graphify/serve.py imports it
 # directly for the HTTP transport, so declare it here and floor it above the
@@ -109,7 +113,7 @@ package = true
 [tool.setuptools]
 packages = ["graphify", "graphify.extractors", "graphify.exporters", "graphify.workspace", "graphify.workspace.adapters"]
 include-package-data = false
-script-files = ["bin/graphify", "bin/graphify-mcp"]
+script-files = ["bin/_graphify-semantic-authority", "bin/_graphify-mcp-semantic-authority"]
 
 [tool.setuptools.package-data]
 # The skill bodies ship as graphify/skill*.md (the SKILL.md a host installs is

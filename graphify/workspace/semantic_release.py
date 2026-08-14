@@ -97,11 +97,6 @@ _PINNED_TRIM_CODE_POINTS = frozenset(
         0x3000,
     }
 )
-_ASCII_LOWER = bytes.maketrans(
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    b"abcdefghijklmnopqrstuvwxyz",
-)
-
 _TAXONOMY_ID = "graphify.semantic_release.core_taxonomy.v1"
 _TAXONOMY_VERSION = 1
 _RULESET_ID = "graphify.semantic_release.core_ruleset.v1"
@@ -147,7 +142,8 @@ _RULE_DOCUMENTS = (
         "credential_group": "credential",
         "matcher": "byte_regex_search_v1",
         "pattern": (
-            r"(?:^|\r?\n)(?ai:api[_-]?key|password|passwd|secret|client[_-]?secret|"
+            r"(?:^|\r?\n)[ ]{0,256}(?ai:api[_-]?key|password|passwd|secret|"
+            r"client[_-]?secret|"
             r"access[_-]?token|auth[_-]?token|token)[ \t]*(?:=|:)[ \t]*"
             r"(?P<credential>[A-Za-z0-9._~+/@-]{1,256})(?=$|\r?\n)"
         ),
@@ -159,9 +155,11 @@ _RULE_DOCUMENTS = (
         "credential_group": "credential",
         "matcher": "byte_regex_search_v1",
         "pattern": (
-            r"(?:^|\r?\n)(?ai:api[_-]?key|password|passwd|secret|client[_-]?secret|"
+            r"(?:^|\r?\n)[ ]{0,256}(?ai:api[_-]?key|password|passwd|secret|"
+            r"client[_-]?secret|"
             r"access[_-]?token|auth[_-]?token|token)[ \t]*(?:=|:)[ \t]*"
-            r"(?P<quote>[\"'])(?P<credential>[^\"'\r\n]{1,256})(?P=quote)(?=$|\r?\n)"
+            r"(?P<quote>[\"'])(?P<credential>(?:(?!(?P=quote))[^\r\n]){1,256})"
+            r"(?P=quote)(?=$|\r?\n)"
         ),
         "rule_id": "core.assignment.quoted.v1",
     },
@@ -184,8 +182,8 @@ _RULE_DOCUMENTS = (
         "matcher": "byte_regex_search_v1",
         "pattern": (
             r"(?:^|\r?\n)(?ai:Authorization):[ \t]*(?ai:Bearer)[ \t]+"
-            r"(?P<credential>(?:[A-Za-z0-9._~+/-]{1,256}|"
-            r"[A-Za-z0-9._~+/-]{1,255}=|[A-Za-z0-9._~+/-]{1,254}==))"
+            r"(?P<credential>(?=[A-Za-z0-9._~+/-=]{1,256}"
+            r"(?=[ \t]*(?:$|\r?\n)))[A-Za-z0-9._~+/-]+={0,255})"
             r"(?=[ \t]*(?:$|\r?\n))"
         ),
         "rule_id": "core.authorization.bearer.v1",
@@ -404,6 +402,64 @@ def _file_flags() -> int:
     )
 
 
+def _directory_binding_identity(details: os.stat_result) -> tuple[int, int, int]:
+    return details.st_dev, details.st_ino, stat.S_IFMT(details.st_mode)
+
+
+def _open_installed_package_root(package_root: Path) -> int:
+    if (
+        not package_root.is_absolute()
+        or package_root.anchor != os.path.sep
+        or any(component in {"", ".", ".."} for component in package_root.parts[1:])
+    ):
+        raise SemanticReleaseBundleError("installed graphify package root is not canonical")
+    try:
+        parent = os.open(package_root.anchor, _directory_flags())
+    except OSError as exc:
+        raise SemanticReleaseBundleError(
+            "installed graphify package root cannot be opened safely"
+        ) from exc
+    try:
+        for component in package_root.parts[1:]:
+            child: int | None = None
+            try:
+                before = os.stat(component, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISDIR(before.st_mode):
+                    raise SemanticReleaseBundleError(
+                        "installed graphify package root contains a linked or unsafe component"
+                    )
+                child = os.open(component, _directory_flags(), dir_fd=parent)
+                opened = os.fstat(child)
+                after = os.stat(component, dir_fd=parent, follow_symlinks=False)
+                identity = _directory_binding_identity(opened)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or _directory_binding_identity(before) != identity
+                    or _directory_binding_identity(after) != identity
+                ):
+                    raise SemanticReleaseBundleError(
+                        "installed graphify package root changed during traversal"
+                    )
+            except SemanticReleaseBundleError:
+                if child is not None:
+                    os.close(child)
+                raise
+            except OSError as exc:
+                if child is not None:
+                    os.close(child)
+                raise SemanticReleaseBundleError(
+                    "installed graphify package root contains a linked or unsafe component"
+                ) from exc
+            assert child is not None
+            previous = parent
+            parent = child
+            os.close(previous)
+        return parent
+    except BaseException:
+        os.close(parent)
+        raise
+
+
 def _stat_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
     return (
         details.st_dev,
@@ -486,11 +542,16 @@ def _revalidate_directories(
     bindings: Sequence[tuple[str, int, int]],
     root_identity: tuple[int, int, int, int, int, int, int],
 ) -> None:
+    rebound_descriptor: int | None = None
     try:
-        rebound_root = os.stat(package_root, follow_symlinks=False)
+        rebound_descriptor = _open_installed_package_root(package_root)
+        rebound_root = os.fstat(rebound_descriptor)
         opened_root = os.fstat(root_descriptor)
-    except OSError as exc:
+    except (OSError, SemanticReleaseBundleError) as exc:
         raise SemanticReleaseBundleError("installed package root could not be revalidated") from exc
+    finally:
+        if rebound_descriptor is not None:
+            os.close(rebound_descriptor)
     if (
         not stat.S_ISDIR(rebound_root.st_mode)
         or _stat_identity(opened_root) != root_identity
@@ -538,7 +599,7 @@ def _open_package_file(
     path = _validated_relative_path(relative_path, "bundle path")
     descriptors: list[int] = []
     try:
-        root_descriptor = os.open(package_root, _directory_flags())
+        root_descriptor = _open_installed_package_root(package_root)
         descriptors.append(root_descriptor)
         root_details = os.fstat(root_descriptor)
         if not stat.S_ISDIR(root_details.st_mode):
@@ -865,7 +926,7 @@ def _scan_data_inventory(package_root: Path) -> set[str]:
     files: set[str] = set()
     total_entries = 0
     try:
-        root_descriptor = os.open(package_root, _directory_flags())
+        root_descriptor = _open_installed_package_root(package_root)
         descriptors.append(root_descriptor)
         root_identity = _stat_identity(os.fstat(root_descriptor))
         bindings: list[tuple[str, int, int]] = []
@@ -1452,7 +1513,7 @@ def classify_canonical_bytes(
                     and rule.credential_group is not None
                 ):
                     credential = match.group(rule.credential_group)
-                    if credential.translate(_ASCII_LOWER) in bundle.excluded_credential_values:
+                    if credential in bundle.excluded_credential_values:
                         continue
                 matched_categories.add(rule.category_id)
                 matched_rules.add(rule.rule_id)

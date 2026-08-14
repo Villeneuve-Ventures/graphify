@@ -664,11 +664,13 @@ Its exact bounded scope is the repo-owned installed
 manifest-inventoried deterministic classifier implementation and byte-defined ABI,
 closed taxonomy, normalization contract, ordered ruleset, required
 explicit-evidence-only `core_secrets.v1`, and every selectable coverage-profile
-artifact, plus the existing installed `graphify` and `graphify-mcp`
-source-executed bootstrap scripts whose POSIX shell prelude starts installed
+artifact, plus the installed private `_graphify-semantic-authority` and
+`_graphify-mcp-semantic-authority` source-executed bootstrap scripts whose POSIX
+shell prelude starts installed
 Python under `-S` isolation before Python startup hooks can run, then establish
 a fresh package-external pycache prefix and suppress `.pth`, `sitecustomize`,
-and automatic user-site startup imports before importing Graphify. Plain user
+and automatic user-site startup imports before importing Graphify. The public
+cross-platform console entry points are not semantic-release authority. Plain user
 script installs may add the installed script-prefix package root, or a PEP 610
 editable source root recorded by a `graphifyy` direct URL in that same script
 prefix, explicitly after that startup boundary. The canonical semantic contract

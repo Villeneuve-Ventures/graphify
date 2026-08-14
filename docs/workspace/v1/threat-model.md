@@ -76,8 +76,9 @@ and artifact mismatch/substitution relative to a locally frozen trusted
 manifest.
 
 For installed executable operation, the semantic-release trust-root candidate
-also treats package-local bytecode caches as untrusted. The existing
-source-executed `graphify` and `graphify-mcp` scripts are the pre-import
+also treats package-local bytecode caches as untrusted. The private
+source-executed `_graphify-semantic-authority` and
+`_graphify-mcp-semantic-authority` scripts are the pre-import
 bootstrap: their POSIX shell prelude resolves the installed script target and
 executes the installed Python with Python environment configuration ignored,
 site initialization disabled, automatic user-site startup imports disabled,
@@ -97,6 +98,14 @@ explicit trusted-computing-base prerequisites. The wheel `RECORD` binds the
 bootstrap and classifier source. Hostile package-local bytecode is excluded;
 hostile source, launcher, interpreter, or standard-library substitution must be
 rejected by that external installation/runtime integrity boundary.
+
+The public `graphify` and `graphify-mcp` console entry points remain ordinary
+cross-platform commands and are never semantic-release decision authority. On
+the supported POSIX boundary, authority installation or requalification uses
+`uv tool install --force --reinstall --link-mode copy graphifyy` and verifies
+the resulting wheel/`RECORD`, bytes, modes, and link counts. Hardlinked or
+wrong-mode final files fail closed rather than weakening the single-link and
+exact-mode trust root.
 
 State-root policy requires expected ownership, `0700` directories, `0600`
 mutable records, exclusive creation, safe umask/ACL behavior, descriptor-relative

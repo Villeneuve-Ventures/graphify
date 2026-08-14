@@ -29,6 +29,14 @@ from graphify.workspace.contracts import canonical_json_bytes
 
 REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "graphify"
+PUBLIC_ENTRY_POINTS = {
+    "graphify": "graphify.__main__:main",
+    "graphify-mcp": "graphify.serve:_main",
+}
+AUTHORITY_SCRIPTS = {
+    "_graphify-semantic-authority": 'importlib.import_module("graphify.__main__")',
+    "_graphify-mcp-semantic-authority": 'importlib.import_module("graphify.serve")',
+}
 
 
 def _has_build() -> bool:
@@ -68,9 +76,14 @@ def _create_venv(root: Path, name: str, *, with_pip: bool = True) -> tuple[Path,
 def _install_wheel_without_dependencies(
     wheel: Path,
     root: Path,
+    *,
+    link_mode: str = "copy",
+    install_umask: int = 0o022,
 ) -> tuple[Path, Path, Path]:
     python, scripts = _create_venv(root, "venv")
     uv = shutil.which("uv")
+    if uv is None and link_mode != "copy":
+        pytest.skip("uv is required to exercise non-copy wheel installation")
     command = (
         [
             uv,
@@ -80,14 +93,50 @@ def _install_wheel_without_dependencies(
             str(python),
             "--no-deps",
             "--link-mode",
-            "copy",
+            link_mode,
             str(wheel),
         ]
         if uv
         else [str(python), "-m", "pip", "install", "--no-deps", str(wheel)]
     )
+    environment = _clean_environment()
+    if uv:
+        environment["UV_CACHE_DIR"] = str(root / "uv-cache")
     proc = subprocess.run(
         command,
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        preexec_fn=(lambda: os.umask(install_umask)) if os.name != "nt" else None,
+    )
+    assert proc.returncode == 0, proc.stderr
+    authority_script = scripts / "_graphify-semantic-authority"
+    assert authority_script.exists()
+    return python, scripts, authority_script
+
+
+def _installed_bundle_paths(python: Path, root: Path) -> list[Path]:
+    module_source, _ = _module_paths(python, "graphify.workspace.semantic_release", root)
+    package_root = module_source.parents[1]
+    manifest_path = package_root / "workspace" / "semantic_release_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return [
+        manifest_path,
+        *(package_root / entry["path"] for entry in manifest["artifacts"]),
+    ]
+
+
+def _installed_classification_outcome(python: Path, root: Path) -> str:
+    script = (
+        "from graphify.workspace.semantic_release import ("
+        "CORE_SECRETS_PROFILE, classify_canonical_bytes)\n"
+        "result = classify_canonical_bytes(b'password: hunter2', (CORE_SECRETS_PROFILE,))\n"
+        "print(result.outcome)\n"
+    )
+    proc = subprocess.run(
+        [str(python), "-I", "-c", script],
         cwd=root,
         env=_clean_environment(),
         capture_output=True,
@@ -95,11 +144,56 @@ def _install_wheel_without_dependencies(
         check=False,
     )
     assert proc.returncode == 0, proc.stderr
-    graphify_script = scripts / ("graphify.exe" if os.name == "nt" else "graphify")
-    if not graphify_script.exists():
-        graphify_script = scripts / "graphify"
-    assert graphify_script.exists()
-    return python, scripts, graphify_script
+    return proc.stdout.strip()
+
+
+def _uv_tool_install(
+    wheel: Path,
+    root: Path,
+    *,
+    link_mode: str,
+    reinstall: bool = False,
+    install_umask: int = 0o022,
+) -> Path:
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is required to exercise the authority tool-install route")
+    tool_dir = root / "tools"
+    bin_dir = root / "bin"
+    cache_dir = root / "cache"
+    environment = _clean_environment()
+    environment.update(
+        {
+            "UV_CACHE_DIR": str(cache_dir),
+            "UV_TOOL_BIN_DIR": str(bin_dir),
+            "UV_TOOL_DIR": str(tool_dir),
+        }
+    )
+    command = [
+        uv,
+        "tool",
+        "install",
+        "--from",
+        str(wheel),
+        "--link-mode",
+        link_mode,
+    ]
+    if reinstall:
+        command.extend(["--force", "--reinstall"])
+    command.append("graphifyy")
+    proc = subprocess.run(
+        command,
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        preexec_fn=(lambda: os.umask(install_umask)) if os.name != "nt" else None,
+    )
+    assert proc.returncode == 0, proc.stderr
+    python = tool_dir / "graphifyy" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    assert python.exists()
+    return python
 
 
 def _module_paths(
@@ -318,10 +412,37 @@ def wheel_build(tmp_path_factory) -> tuple[set[str], str, str, Path]:
     if not _has_build():
         pytest.skip("`python -m build` unavailable (dev extra not installed)")
     out = tmp_path_factory.mktemp("wheel")
+    source = out / "source"
+    shutil.copytree(
+        REPO,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".hypothesis",
+            ".pytest_cache",
+            ".venv",
+            "__pycache__",
+            "*.pyc",
+            "build",
+            "dist",
+            "graphify-out",
+            "graphifyy.egg-info",
+            "node_modules",
+        ),
+    )
     proc = subprocess.run(
-        [sys.executable, "-m", "build", "--wheel", "--no-isolation",
-         "--outdir", str(out), str(REPO)],
-        capture_output=True, text=True,
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--wheel",
+            "--no-isolation",
+            "--outdir",
+            str(out),
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
     )
     assert proc.returncode == 0, f"wheel build failed:\n{proc.stderr[-800:]}"
     wheels = list(out.glob("graphifyy-*.whl"))
@@ -351,17 +472,22 @@ def test_wheel_build_uses_current_packaging_metadata_without_tool_warnings(
     assert "Requires-Python: >=3.14\n" in metadata
 
 
-def test_wheel_ships_pre_import_bootstrap_scripts(
+def test_wheel_separates_public_entry_points_from_private_authority_scripts(
     wheel_build: tuple[set[str], str, str, Path],
 ) -> None:
     names, _, _, wheel = wheel_build
-    assert not any(name.endswith(".dist-info/entry_points.txt") for name in names)
-    scripts = {
-        "graphify": 'importlib.import_module("graphify.__main__")',
-        "graphify-mcp": 'importlib.import_module("graphify.serve")',
-    }
+    entry_point_names = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
+    assert len(entry_point_names) == 1
     with zipfile.ZipFile(wheel) as archive:
-        for script_name, target_import in scripts.items():
+        entry_points = archive.read(entry_point_names[0]).decode("utf-8")
+        assert entry_points == (
+            "[console_scripts]\n"
+            "graphify = graphify.__main__:main\n"
+            "graphify-mcp = graphify.serve:_main\n"
+        )
+        for public_name in PUBLIC_ENTRY_POINTS:
+            assert not any(name.endswith(f".data/scripts/{public_name}") for name in names)
+        for script_name, target_import in AUTHORITY_SCRIPTS.items():
             matches = [
                 name
                 for name in names
@@ -387,11 +513,119 @@ def test_wheel_ships_pre_import_bootstrap_scripts(
             assert raw.index("sys.pycache_prefix = prefix") < raw.index(target_import)
 
 
+def test_installed_wheel_provides_public_console_commands(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    _, scripts, _ = _install_wheel_without_dependencies(wheel, tmp_path)
+    suffix = ".exe" if os.name == "nt" else ""
+    public_scripts = {name: scripts / f"{name}{suffix}" for name in PUBLIC_ENTRY_POINTS}
+    assert all(path.exists() for path in public_scripts.values())
+
+    proc = subprocess.run(
+        [str(public_scripts["graphify"]), "--version"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "graphify 0.9.16+workspace.1\n"
+
+
+def test_authority_copy_install_satisfies_frozen_file_invariants(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    python, _, _ = _install_wheel_without_dependencies(wheel, tmp_path)
+
+    for path in _installed_bundle_paths(python, tmp_path):
+        details = path.stat(follow_symlinks=False)
+        assert stat.S_ISREG(details.st_mode)
+        assert details.st_nlink == 1
+        assert stat.S_IMODE(details.st_mode) == 0o644
+
+
+def test_documented_authority_reinstall_requalifies_hardlink_tool_install(
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    root = tmp_path.resolve()
+    python = _uv_tool_install(wheel, root, link_mode="hardlink")
+    hardlinked_paths = _installed_bundle_paths(python, root)
+    assert any(path.stat(follow_symlinks=False).st_nlink > 1 for path in hardlinked_paths)
+    assert _installed_classification_outcome(python, root) == "INDETERMINATE"
+
+    python = _uv_tool_install(
+        wheel,
+        root,
+        link_mode="copy",
+        reinstall=True,
+        install_umask=0o077,
+    )
+    for path in _installed_bundle_paths(python, root):
+        details = path.stat(follow_symlinks=False)
+        assert stat.S_ISREG(details.st_mode)
+        assert details.st_nlink == 1
+        assert stat.S_IMODE(details.st_mode) == 0o644
+    assert _installed_classification_outcome(python, root) == "MATCH"
+
+
+@pytest.mark.parametrize(
+    ("link_mode", "install_umask", "expected_failure"),
+    [
+        ("hardlink", 0o022, "single-link"),
+        ("copy", 0o077, "file mode"),
+    ],
+)
+def test_non_authority_installs_fail_closed(
+    link_mode: str,
+    install_umask: int,
+    expected_failure: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    python, _, _ = _install_wheel_without_dependencies(
+        wheel,
+        tmp_path,
+        link_mode=link_mode,
+        install_umask=install_umask,
+    )
+    paths = _installed_bundle_paths(python, tmp_path)
+    if link_mode == "hardlink":
+        assert any(path.stat(follow_symlinks=False).st_nlink > 1 for path in paths)
+    else:
+        assert any(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in paths)
+
+    assert _installed_classification_outcome(python, tmp_path) == "INDETERMINATE"
+
+    module_source, _ = _module_paths(python, "graphify.workspace.semantic_release", tmp_path)
+    loader_script = (
+        "from graphify.workspace.semantic_release import load_installed_semantic_release_bundle\n"
+        "load_installed_semantic_release_bundle()\n"
+    )
+    failed = subprocess.run(
+        [str(python), "-I", "-c", loader_script],
+        cwd=module_source.parent,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert failed.returncode != 0
+    assert expected_failure in failed.stderr
+
+
 @pytest.mark.parametrize(
     ("script_name", "args", "must_succeed"),
     [
-        ("graphify", ["--version"], True),
-        ("graphify-mcp", ["--help"], False),
+        ("_graphify-semantic-authority", ["--version"], True),
+        ("_graphify-mcp-semantic-authority", ["--help"], False),
     ],
 )
 def test_installed_bootstrap_blocks_pythonpath_sitecustomize_before_startup(
@@ -456,8 +690,8 @@ def test_installed_bootstrap_blocks_pythonpath_sitecustomize_before_startup(
 @pytest.mark.parametrize(
     ("script_name", "args", "must_succeed"),
     [
-        ("graphify", ["--version"], True),
-        ("graphify-mcp", ["--help"], False),
+        ("_graphify-semantic-authority", ["--version"], True),
+        ("_graphify-mcp-semantic-authority", ["--help"], False),
     ],
 )
 def test_installed_bootstrap_runs_from_plain_user_script_layout_without_startup_hooks(
@@ -503,7 +737,9 @@ def test_installed_bootstrap_runs_from_plain_user_script_layout_without_startup_
         assert proc.returncode == 0, proc.stderr
 
 
-@pytest.mark.parametrize("script_name", ["graphify", "graphify-mcp"])
+@pytest.mark.parametrize(
+    "script_name", ["_graphify-semantic-authority", "_graphify-mcp-semantic-authority"]
+)
 def test_installed_bootstrap_rejects_unsupported_generic_python3_fallback(
     script_name: str,
     wheel_build: tuple[set[str], str, str, Path],
@@ -532,7 +768,9 @@ def test_installed_bootstrap_rejects_unsupported_generic_python3_fallback(
     assert "Python >= 3.14" in proc.stderr
 
 
-@pytest.mark.parametrize("script_name", ["graphify", "graphify-mcp"])
+@pytest.mark.parametrize(
+    "script_name", ["_graphify-semantic-authority", "_graphify-mcp-semantic-authority"]
+)
 def test_installed_bootstrap_rejects_unsupported_sibling_python(
     script_name: str,
     wheel_build: tuple[set[str], str, str, Path],
@@ -562,7 +800,9 @@ def test_installed_bootstrap_prefers_script_prefix_package_before_interpreter_si
     tmp_path: Path,
 ) -> None:
     _, _, _, wheel = wheel_build
-    script_path, _ = _install_wheel_as_user_script_layout(wheel, tmp_path, "graphify")
+    script_path, _ = _install_wheel_as_user_script_layout(
+        wheel, tmp_path, "_graphify-semantic-authority"
+    )
     _, foreign_scripts, foreign_site = _create_python_env(tmp_path)
     sentinel = tmp_path / "foreign-graphify-executed"
     foreign_package = foreign_site / "graphify"
@@ -601,7 +841,7 @@ def test_installed_bootstrap_preserves_editable_direct_url_roots_without_startup
     script_path, site_packages = _install_wheel_as_user_script_layout(
         wheel,
         tmp_path,
-        "graphify",
+        "_graphify-semantic-authority",
         include_package=False,
     )
     source_root = tmp_path / "editable-source"
@@ -649,7 +889,7 @@ def test_installed_bootstrap_rejects_relative_editable_direct_url_roots(
     script_path, site_packages = _install_wheel_as_user_script_layout(
         wheel,
         tmp_path,
-        "graphify",
+        "_graphify-semantic-authority",
     )
     relative_source = tmp_path / "relative-source"
     hostile_package = relative_source / "graphify"
@@ -688,8 +928,8 @@ def test_installed_bootstrap_rejects_relative_editable_direct_url_roots(
 @pytest.mark.parametrize(
     ("script_name", "hostile_module"),
     [
-        ("graphify", "__main__.py"),
-        ("graphify-mcp", "serve.py"),
+        ("_graphify-semantic-authority", "__main__.py"),
+        ("_graphify-mcp-semantic-authority", "serve.py"),
     ],
 )
 def test_installed_bootstrap_rejects_ambiguous_script_prefix_package_owners(
@@ -742,8 +982,8 @@ def test_installed_bootstrap_rejects_ambiguous_script_prefix_package_owners(
 @pytest.mark.parametrize(
     ("script_name", "hostile_module"),
     [
-        ("graphify", "__main__.py"),
-        ("graphify-mcp", "serve.py"),
+        ("_graphify-semantic-authority", "__main__.py"),
+        ("_graphify-mcp-semantic-authority", "serve.py"),
     ],
 )
 def test_installed_bootstrap_rejects_multiple_editable_direct_url_owners(
@@ -800,8 +1040,8 @@ def test_installed_bootstrap_rejects_multiple_editable_direct_url_owners(
 @pytest.mark.parametrize(
     ("script_name", "target_module", "target_entrypoint"),
     [
-        ("graphify", "graphify.__main__", "main"),
-        ("graphify-mcp", "graphify.serve", "_main"),
+        ("_graphify-semantic-authority", "graphify.__main__", "main"),
+        ("_graphify-mcp-semantic-authority", "graphify.serve", "_main"),
     ],
 )
 def test_installed_bootstrap_dispatches_the_expected_target(
@@ -834,8 +1074,8 @@ def test_installed_bootstrap_dispatches_the_expected_target(
 @pytest.mark.parametrize(
     ("script_name", "target_module", "target_entrypoint"),
     [
-        ("graphify", "graphify.__main__", "main"),
-        ("graphify-mcp", "graphify.serve", "_main"),
+        ("_graphify-semantic-authority", "graphify.__main__", "main"),
+        ("_graphify-mcp-semantic-authority", "graphify.serve", "_main"),
     ],
 )
 @pytest.mark.parametrize("target_outcome", ["success", "exception", "exit"])
@@ -900,8 +1140,7 @@ def test_wheel_record_binds_bootstrap_and_classifier_source(
             *{
                 name
                 for name in names
-                if name.endswith(".data/scripts/graphify")
-                or name.endswith(".data/scripts/graphify-mcp")
+                if any(name.endswith(f".data/scripts/{script}") for script in AUTHORITY_SCRIPTS)
             },
         }
         assert len(protected) == 3
@@ -911,12 +1150,12 @@ def test_wheel_record_binds_bootstrap_and_classifier_source(
             assert rows[name] == (f"sha256={digest.decode('ascii')}", str(len(raw)))
 
 
-def test_installed_graphify_script_ignores_package_local_bytecode_cache(
+def test_installed_authority_script_ignores_package_local_bytecode_cache(
     wheel_build: tuple[set[str], str, str, Path],
     tmp_path: Path,
 ) -> None:
     _, _, _, wheel = wheel_build
-    python, _, graphify_script = _install_wheel_without_dependencies(wheel, tmp_path)
+    python, _, authority_script = _install_wheel_without_dependencies(wheel, tmp_path)
     module_source, module_cache = _module_paths(python, "graphify.__main__", tmp_path)
     sentinel = tmp_path / "hostile-main-executed"
     genuine, source_stat = _compile_hostile_timestamp_pyc(
@@ -937,7 +1176,7 @@ def test_installed_graphify_script_ignores_package_local_bytecode_cache(
     sentinel.unlink()
 
     proc = subprocess.run(
-        [str(graphify_script), "--version"],
+        [str(authority_script), "--version"],
         cwd=tmp_path,
         env=_clean_environment(),
         capture_output=True,
@@ -974,7 +1213,7 @@ def test_installed_graphify_script_ignores_package_local_bytecode_cache(
     hostile_env["PYTHONPATH"] = str(hostile_path)
     hostile_env["_GRAPHIFY_BOOTSTRAP_ISOLATED"] = "1"
     proc = subprocess.run(
-        [str(graphify_script), "--version"],
+        [str(authority_script), "--version"],
         cwd=tmp_path,
         env=hostile_env,
         capture_output=True,

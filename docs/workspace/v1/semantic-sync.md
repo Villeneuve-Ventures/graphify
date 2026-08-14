@@ -1772,7 +1772,8 @@ executable bootstrap needed to establish that root before Graphify imports:
 - the required explicit-evidence-only `core_secrets.v1` profile; and
 - every repo-owned selectable coverage-profile artifact and its manifest-bound
   identity, version, bytes, size, mode, and SHA-256; and
-- the source-executed installed `graphify` and `graphify-mcp` bootstrap scripts
+- the source-executed installed private `_graphify-semantic-authority` and
+  `_graphify-mcp-semantic-authority` bootstrap scripts
   whose POSIX shell prelude executes installed Python with `-S` isolation before
   Python startup hooks can run, excludes package-local bytecode caches from
   trusted installed executable imports, suppresses `.pth`, `sitecustomize`, and
@@ -1793,6 +1794,17 @@ the external installer and operating environment, not classifier code that has
 already started executing, that must reject source or launcher substitution.
 Package-local bytecode caches remain outside that prerequisite and are ignored
 by the installed executable path.
+
+The public `graphify` and `graphify-mcp` console entry points remain ordinary
+cross-platform package commands and are not semantic-release decision authority.
+On the supported POSIX boundary, an authority-qualified uv installation uses
+`uv tool install --force --reinstall --link-mode copy graphifyy`, including when
+requalifying an existing ordinary installation. Qualification then verifies the
+selected wheel and `RECORD`, exact bootstrap and bundle bytes, exact final modes,
+and single-link regular-file state. A hardlinked or wrong-mode final installation
+remains an ordinary package installation, but it is not authority-qualified and
+bundle loading must fail closed; installer history or umask alone is not an
+authority fact.
 The exact installed-root, path-normal-form, descriptor-relative no-follow,
 single-link regular-file, mode, size, digest, deterministic-pattern-only ABI,
 `utf8_lex_v1`, taxonomy/profile separation, `core_secrets.v1`, hard-limit, and
@@ -2090,8 +2102,9 @@ evaluation order are included in the ruleset digest. It permits no ML,
 embedding, statistical or entropy score, opaque vendor detector, generated
 inference, or contextual semantic judgment.
 
-Installed executable evaluation reaches this module only after the existing
-source-executed `graphify`/`graphify-mcp` bootstrap's POSIX shell prelude has
+Installed executable evaluation reaches this module only after a private
+source-executed `_graphify-semantic-authority` /
+`_graphify-mcp-semantic-authority` bootstrap's POSIX shell prelude has
 executed installed Python with Python environment configuration ignored,
 site initialization disabled, user-site startup imports disabled, safe-path mode
 enabled, and bytecode writes disabled before Python startup hooks can run; the
@@ -2162,6 +2175,28 @@ Every policy that can produce an allow outcome must select
   provider-credential pattern registry; and
 - `secret.seed_or_recovery_material` only where the complete deterministic
   phrase or recovery format is defined by the ruleset.
+
+The version-1 credential-assignment grammar is independently frozen here. A
+supported assignment begins at the field start or immediately after LF/CRLF,
+permits zero through 256 ASCII spaces of indentation, then one ASCII-folded key
+from `api_key`, `api-key`, `password`, `passwd`, `secret`, `client_secret`,
+`client-secret`, `access_token`, `access-token`, `auth_token`, `auth-token`, or
+`token`. After optional horizontal separator bytes, `=` or `:` and optional
+horizontal separator bytes, the value is either 1-256 bytes from
+`[A-Za-z0-9._~+/@-]` or 1-256 non-newline bytes enclosed by one matching single
+or double quote. The non-delimiting quote is ordinary value data; an unescaped
+copy of the selected delimiter closes the value. The closing value must be
+followed immediately by field end or LF/CRLF. Placeholder suppression compares
+the captured value byte-for-byte with the pinned dictionary: only the exact
+listed lowercase spellings are excluded, with no case fold, trim, escape, or
+normalization of credential bytes. JSON-style quoted keys, comments, escape
+interpretation, indentation beyond 256 spaces, and syntax outside this grammar
+remain unmatched in version 1.
+
+The version-1 Bearer grammar follows the line-anchored `Authorization: Bearer`
+syntax and accepts one or more bytes from `[A-Za-z0-9._~+/-]` followed only by
+zero or more `=` bytes. The complete captured token including padding is at most
+256 bytes; padding-only, internal-padding, and overlong forms remain unmatched.
 
 The core profile has no entropy-only rule and does not classify a bare hash,
 UUID, arbitrary Base64 token, or vague secret-looking prose. It grants no

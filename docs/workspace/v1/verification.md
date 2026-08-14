@@ -1186,14 +1186,19 @@ inventing operator policy or decision-store behavior:
   `graphify/workspace/semantic_release_manifest.json`, manifest-inventoried
   deterministic classifier implementation and byte ABI, closed taxonomy,
   normalization contract, ordered ruleset, required `core_secrets.v1`, and
-  selectable coverage-profile artifacts, plus the existing installed
-  `graphify` and `graphify-mcp` source-executed bootstrap scripts whose POSIX
-  shell prelude starts installed Python under `-S` isolation before Python
+  selectable coverage-profile artifacts, plus the installed private
+  `_graphify-semantic-authority` and `_graphify-mcp-semantic-authority`
+  source-executed bootstrap scripts whose POSIX shell prelude starts installed
+  Python under `-S` isolation before Python
   startup hooks can run, then establishes a fresh package-external pycache
   prefix, suppresses `.pth`, `sitecustomize`, and automatic user-site startup
   imports, and may add the installed script-prefix package root, or a PEP 610
   editable source root recorded by a `graphifyy` direct URL in that same script
-  prefix, explicitly before importing Graphify;
+  prefix, explicitly before importing Graphify. The public cross-platform
+  console entry points remain outside semantic-release authority, and the
+  authority-qualified or requalified uv install is `uv tool install --force
+  --reinstall --link-mode copy graphifyy`, followed by exact output-property
+  verification;
 - the manifest is at most 1 MiB, uses one canonical installed `graphify` package
   root, and binds every unique sorted package-relative inventory entry through
   the exact common `artifact_kind`, `path`, `mode`, `byte_count`, and `sha256`
@@ -1224,6 +1229,11 @@ inventing operator policy or decision-store behavior:
   authorization-credential, credential-assignment, provider-credential, and
   seed/recovery categories; it excludes entropy-only, bare-hash, UUID,
   arbitrary-Base64, vague-prose, and example/test exemptions;
+- the independent version-1 conformance vectors cover zero/256/257-space
+  assignment indentation, single- and double-quoted values containing the
+  non-delimiting quote, malformed or mismatched delimiters, exact case-sensitive
+  placeholder bytes, Bearer padding from zero through the complete 256-byte
+  boundary, and malformed internal/overlong padding;
 - optional jurisdictional, domain, and organization profiles are repo-owned
   selectable artifacts only. Workspace/release-context selection and coverage
   sufficiency remain separate operator-policy responsibilities;

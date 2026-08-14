@@ -70,10 +70,13 @@ pending acceptance. Its exact internal scope is the repo-owned installed
 manifest plus the manifest-bound classifier implementation and byte ABI, closed
 taxonomy, normalization contract, ordered ruleset, required
 explicit-evidence-only `core_secrets.v1`, every selectable coverage-profile
-artifact, and the installed `graphify`/`graphify-mcp` pre-import bootstrap that
+artifact, and the installed private `_graphify-semantic-authority` /
+`_graphify-mcp-semantic-authority` pre-import bootstrap that
 starts installed Python under `-S` isolation before Python startup hooks can run
 and keeps package-local bytecode caches, `.pth`, `sitecustomize`, and automatic
-user-site startup imports outside the trusted runtime path. Plain user script
+user-site startup imports outside the trusted runtime path. The public
+`graphify` / `graphify-mcp` console entry points remain ordinary cross-platform
+commands and are not semantic-release decision authority. Plain user script
 installs may add the installed script-prefix package root, or a PEP 610 editable
 source root recorded by a `graphifyy` direct URL in that same script prefix,
 explicitly after that startup boundary. The installed-root/no-follow, mode, size,
