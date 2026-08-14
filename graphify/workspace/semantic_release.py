@@ -739,7 +739,10 @@ def _validated_relative_path(value: object, label: str) -> PurePosixPath:
         raise SemanticReleaseBundleError(f"{label}: path is not NFC")
     if "\\" in value or value.startswith("/") or value.endswith("/") or "//" in value:
         raise SemanticReleaseBundleError(f"{label}: path is not POSIX relative normal form")
-    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+    if any(
+        ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F
+        for character in value
+    ):
         raise SemanticReleaseBundleError(f"{label}: path contains a control character")
     path = PurePosixPath(value)
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
