@@ -1194,7 +1194,10 @@ inventing operator policy or decision-store behavior:
   prefix, suppresses `.pth`, `sitecustomize`, and automatic user-site startup
   imports, and may add the installed script-prefix package root, or a PEP 610
   editable source root recorded by a `graphifyy` direct URL in that same script
-  prefix, explicitly before importing Graphify. The public cross-platform
+  prefix, explicitly before importing Graphify. The complete cross-layout
+  physical/editable owner set is real-path deduplicated and must contain
+  exactly one owner; zero or multiple owners fail before interpreter site
+  roots can supply Graphify. The public cross-platform
   console entry points remain outside semantic-release authority, and the
   authority-qualified or requalified uv install is `uv tool install --force
   --reinstall --link-mode copy graphifyy`, followed by exact output-property
@@ -1230,17 +1233,21 @@ inventing operator policy or decision-store behavior:
   seed/recovery categories; it excludes entropy-only, bare-hash, UUID,
   arbitrary-Base64, vague-prose, and example/test exemptions;
 - the independent version-1 conformance vectors cover zero/256/257-space
-  assignment indentation, single- and double-quoted values containing the
-  non-delimiting quote, malformed or mismatched delimiters, exact case-sensitive
-  placeholder bytes, Bearer padding from zero through the complete 256-byte
-  boundary, and malformed internal/overlong padding;
+  assignment and labeled-recovery indentation, LF and CRLF recovery labels,
+  single- and double-quoted values containing the non-delimiting quote,
+  malformed or mismatched delimiters, exact case-sensitive placeholder bytes,
+  literal-hyphen Bearer tokens, Bearer padding from zero through the complete
+  256-byte boundary, and malformed internal/overlong padding;
 - optional jurisdictional, domain, and organization profiles are repo-owned
   selectable artifacts only. Workspace/release-context selection and coverage
   sufficiency remain separate operator-policy responsibilities;
 - bundle validation enforces the frozen independent caps before unbounded work:
   4,096 taxonomy categories, 4,096 rules, and 256 UTF-8 bytes for any
   classifier, ABI, taxonomy, ruleset, normalization, profile, category, or rule
-  ID. No caller or environment can enlarge a cap; and
+  ID. A pre-decoder lexical pass ignores structural bytes inside JSON strings
+  while bounding depth, per-container entries, the manifest inventory, and
+  aggregate structure before `json.loads`; over-limit vectors prove the host
+  decoder is not called. No caller or environment can enlarge a cap; and
 - the implementation stop boundary is installed-bundle loading/validation,
   deterministic factual classification over explicit bytes, and the existing
   executable bootstrap needed to exclude package-local bytecode caches and

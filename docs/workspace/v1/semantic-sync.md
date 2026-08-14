@@ -1780,7 +1780,11 @@ executable bootstrap needed to establish that root before Graphify imports:
   automatic user-site startup imports, and may then add the installed
   script-prefix package root, or a PEP 610 editable source root recorded by a
   `graphifyy` direct URL in that same script prefix, explicitly before any
-  Graphify module is loaded.
+  Graphify module is loaded. Owner discovery covers every supported
+  script-prefix site-packages layout as one set: after real-path
+  deduplication, exactly one physical or recorded editable Graphify owner must
+  remain. Zero owners and multiple distinct owners fail before import;
+  interpreter site roots never substitute for a missing script-prefix owner.
 
 The manifest and referenced artifacts are never caller, workspace, operator,
 provider, backend, model, credential, network, environment, or policy input.
@@ -2126,6 +2130,8 @@ Version 1 also uses one byte-defined classifier ABI. It scans the exact
 captured UTF-8 byte sequence of each already-validated canonical field. The ABI
 does not renormalize text, consult a Unicode database or Unicode category,
 perform locale-sensitive comparison, or depend on host runtime text behavior.
+Internal line separators are either LF or a paired CRLF; a bare carriage return
+and all other frozen control ranges are invalid before matching.
 Only syntax-defined ASCII names may use the ABI's explicitly specified ASCII
 case fold; value bytes remain exact. Pattern grammar, dictionary encoding,
 byte-comparison semantics, match-span ordering, duplicate reduction, rule
@@ -2193,6 +2199,16 @@ normalization of credential bytes. JSON-style quoted keys, comments, escape
 interpretation, indentation beyond 256 spaces, and syntax outside this grammar
 remain unmatched in version 1.
 
+The version-1 labeled seed/recovery grammar likewise begins at field start or
+immediately after LF/CRLF and permits zero through 256 ASCII spaces before the
+ASCII-folded `seed phrase`, `seed_phrase`, `seed-phrase`, `recovery phrase`,
+`recovery_phrase`, `recovery-phrase`, or `mnemonic` label. After optional
+horizontal separator bytes, `=` or `:` and optional horizontal separator
+bytes, the captured value is exactly 12, 15, 18, 21, or 24 lowercase ASCII
+words of 3-12 letters separated by horizontal separator bytes. The complete
+phrase must end at field end or LF/CRLF; indentation beyond 256 spaces and
+other phrase shapes remain unmatched.
+
 The version-1 Bearer grammar follows the line-anchored `Authorization: Bearer`
 syntax and accepts one or more bytes from `[A-Za-z0-9._~+/-]` followed only by
 zero or more `=` bytes. The complete captured token including padding is at most
@@ -2224,7 +2240,13 @@ taxonomy, ruleset, normalization, profile, and policy artifacts; at most 64
 selected profiles; at most 4,096 taxonomy category IDs; at most 4,096 rules;
 and at most 256 UTF-8 bytes for any classifier, ABI, taxonomy, ruleset,
 normalization, policy, profile, category, or rule ID. These are independent
-hard caps, not values supplied by or derived from the bundle.
+hard caps, not values supplied by or derived from the bundle. Before the host
+JSON decoder materializes any document, a string/escape-aware byte preflight
+also caps nesting at 64 containers, every generic array or object at 8,192
+direct entries, the manifest artifact array at 8,193 entries, and aggregate
+container entries at 65,552. Taxonomy, ruleset, and profile arrays use the
+stricter 4,096 category/rule limits during that same preflight. Duplicate-key
+rejection and exact canonical-byte comparison still run afterward.
 
 ### Exact fields, normalization, and bounds
 

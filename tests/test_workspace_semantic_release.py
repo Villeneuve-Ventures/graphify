@@ -218,10 +218,15 @@ def test_missing_parsed_profile_document_fails_closed(
 ) -> None:
     original = semantic_release._canonical_json_document
 
-    def missing_profile(raw: bytes, label: str) -> dict[str, object] | None:
+    def missing_profile(
+        raw: bytes,
+        label: str,
+        max_array_items: int = semantic_release._MAX_JSON_CONTAINER_ENTRIES,
+        array_limit_error: str | None = None,
+    ) -> dict[str, object] | None:
         if label.endswith("profiles/provider_credentials.v1.json"):
             return None
-        return original(raw, label)
+        return original(raw, label, max_array_items, array_limit_error)
 
     monkeypatch.setattr(semantic_release, "_canonical_json_document", missing_profile)
 
@@ -280,6 +285,7 @@ def test_missing_parsed_profile_document_fails_closed(
         (b"password: ChangeMe", "secret.credential_assignment"),
         (b"password: CHANGEME", "secret.credential_assignment"),
         (b"Authorization: Bearer abc===", "secret.authorization_credential"),
+        (b"Authorization: Bearer A-A===", "secret.authorization_credential"),
         (
             b"Authorization: Bearer " + b"a" + b"=" * 255,
             "secret.authorization_credential",
@@ -293,6 +299,23 @@ def test_missing_parsed_profile_document_fails_closed(
         (b"postgresql://service:secret@[2001:db8::1]/db", "secret.credential_uri"),
         (
             b"seed phrase: alpha bravo cedar delta ember frost giant harbor "
+            b"island jungle kernel lunar",
+            "secret.seed_or_recovery_material",
+        ),
+        (
+            b"wallet:\n  mnemonic: alpha bravo cedar delta ember frost giant harbor "
+            b"island jungle kernel lunar",
+            "secret.seed_or_recovery_material",
+        ),
+        (
+            b"wallet:\r\n  recovery_phrase: alpha bravo cedar delta ember frost giant "
+            b"harbor island jungle kernel lunar",
+            "secret.seed_or_recovery_material",
+        ),
+        (
+            b"wallet:\n"
+            + b" " * 256
+            + b"mnemonic: alpha bravo cedar delta ember frost giant harbor "
             b"island jungle kernel lunar",
             "secret.seed_or_recovery_material",
         ),
@@ -388,6 +411,12 @@ def test_core_profile_matches_only_complete_explicit_credential_formats(
             b"-----END PRIVATE KEY-----"
         ),
         b"seed words might appear in this ordinary sentence",
+        (
+            b"wallet:\n"
+            + b" " * 257
+            + b"mnemonic: alpha bravo cedar delta ember frost giant harbor "
+            b"island jungle kernel lunar"
+        ),
     ],
 )
 def test_core_profile_does_not_broaden_to_heuristics_or_vague_evidence(field: bytes) -> None:
@@ -485,6 +514,7 @@ def test_oversized_selected_profile_version_is_indeterminate() -> None:
         b" leading",
         b"trailing ",
         b"line\x00break",
+        b"line\rbreak",
         b"line\xc2\x85break",
         b"\xff",
         b"x" * (FIELD_MAX_BYTES + 1),
@@ -495,6 +525,72 @@ def test_invalid_or_out_of_contract_field_bytes_are_indeterminate(field: bytes) 
     assert result.outcome == "INDETERMINATE"
     assert result.category_ids == ()
     assert result.rule_ids == ()
+
+
+def test_normalization_artifact_freezes_lf_and_paired_crlf_only() -> None:
+    document = _canonical_load(PACKAGE_ROOT / DATA_RELATIVE / "normalization.v1.json")
+
+    assert document["control_code_points"] == [
+        "U+0000-U+0009",
+        "U+000B-U+000C",
+        "U+000E-U+001F",
+        "U+007F-U+009F",
+    ]
+    assert document["preconditions"] == [
+        "nonempty",
+        "trimmed_pinned_whitespace_v1",
+        "nfc_prevalidated",
+        "forbidden_controls_absent",
+        "carriage_return_only_in_crlf",
+    ]
+    assert document["protocol_separator"] == "LF_or_CRLF_prevalidated_rationale_only"
+    assert semantic_release._valid_field_bytes(b"first\r\nsecond") == b"first\r\nsecond"
+    assert semantic_release._valid_field_bytes(b"first\rsecond") is None
+
+
+def test_hostile_public_input_subclasses_are_indeterminate() -> None:
+    class HostileBytes(bytes):
+        def __len__(self) -> int:
+            raise RuntimeError("hostile bytes length executed")
+
+    class HostileDecode(bytes):
+        def decode(self, *_args: object, **_kwargs: object) -> str:
+            raise RuntimeError("hostile bytes decode executed")
+
+    class HostileProfiles(tuple[ProfileCoordinate, ...]):
+        def __len__(self) -> int:
+            raise RuntimeError("hostile profile length executed")
+
+    class HostileIteration(tuple[ProfileCoordinate, ...]):
+        def __iter__(self):
+            raise RuntimeError("hostile profile iteration executed")
+
+    class HostileCoordinate(ProfileCoordinate):
+        def __getattribute__(self, name: str) -> object:
+            if name == "profile_id":
+                raise RuntimeError("hostile profile coordinate executed")
+            return super().__getattribute__(name)
+
+    assert classify_canonical_bytes(
+        HostileBytes(b"password: hunter2"),
+        (CORE_SECRETS_PROFILE,),
+    ).outcome == "INDETERMINATE"
+    assert classify_canonical_bytes(
+        HostileDecode(b"password: hunter2"),
+        (CORE_SECRETS_PROFILE,),
+    ).outcome == "INDETERMINATE"
+    assert classify_canonical_bytes(
+        b"password: hunter2",
+        HostileProfiles((CORE_SECRETS_PROFILE,)),
+    ).outcome == "INDETERMINATE"
+    assert classify_canonical_bytes(
+        b"password: hunter2",
+        HostileIteration((CORE_SECRETS_PROFILE,)),
+    ).outcome == "INDETERMINATE"
+    assert classify_canonical_bytes(
+        b"password: hunter2",
+        (HostileCoordinate("core_secrets.v1", 1),),
+    ).outcome == "INDETERMINATE"
 
 
 def test_field_validation_does_not_consult_host_unicode_normalization(
@@ -895,15 +991,81 @@ def test_excessive_json_nesting_fails_closed(
     path = _artifact_path(root, entry)
     path.write_bytes(b'{"a":' * depth + b"0" + b"}" * depth + b"\n")
     path.chmod(0o644)
+    hostile_raw = path.read_bytes()
     _refresh_entry(root, entry)
     _write_manifest(root, manifest)
 
     _select_bundle(monkeypatch, root)
+    original_loads = semantic_release.json.loads
+
+    def guarded_loads(raw: bytes, **_kwargs: object) -> object:
+        if raw == hostile_raw:
+            raise AssertionError("host decoder reached over-depth JSON")
+        return original_loads(raw, object_pairs_hook=semantic_release._duplicate_pairs)
+
+    monkeypatch.setattr(semantic_release.json, "loads", guarded_loads)
     with pytest.raises(SemanticReleaseBundleError, match="JSON nesting exceeds supported depth"):
         load_installed_semantic_release_bundle()
     assert classify_canonical_bytes(b"ordinary", (CORE_SECRETS_PROFILE,)).outcome == (
         "INDETERMINATE"
     )
+
+
+@pytest.mark.parametrize(
+    ("limit", "error"),
+    [
+        (MAX_CATEGORIES, "taxonomy limit exceeded"),
+        (MAX_RULES, "ruleset limit exceeded"),
+    ],
+)
+def test_json_array_limits_apply_before_host_decoder_materialization(
+    limit: int,
+    error: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    at_limit = b'{"items":[' + b",".join([b"0"] * limit) + b"]}\n"
+    over_limit = b'{"items":[' + b",".join([b"0"] * (limit + 1)) + b"]}\n"
+    original_loads = semantic_release.json.loads
+    decoded: list[bytes] = []
+
+    def tracked_loads(raw: bytes, **_kwargs: object) -> object:
+        decoded.append(raw)
+        return original_loads(raw, object_pairs_hook=semantic_release._duplicate_pairs)
+
+    monkeypatch.setattr(semantic_release.json, "loads", tracked_loads)
+
+    assert semantic_release._canonical_json_document(at_limit, "probe", limit, error) == {
+        "items": [0] * limit
+    }
+    with pytest.raises(SemanticReleaseBundleError, match=error):
+        semantic_release._canonical_json_document(over_limit, "probe", limit, error)
+    assert decoded == [at_limit]
+
+
+def test_json_preflight_ignores_structural_bytes_inside_strings() -> None:
+    raw = canonical_json_bytes({"items": ['"},][,\\']})
+    semantic_release._preflight_json_structure(raw, "probe", 1)
+    assert semantic_release._canonical_json_document(raw, "probe", 1) == {
+        "items": ['"},][,\\']
+    }
+
+
+def test_json_preflight_rejects_distributed_structure_before_host_decoder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = b'{"a":0,"b":0,"c":0,"d":0,"e":0,"f":0,"g":0,"h":0}'
+    raw = b'{"items":[' + b",".join([item] * semantic_release._MAX_DIRECTORY_ENTRIES) + b"]}"
+
+    def unexpected_loads(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("host JSON decoder materialized over-limit structure")
+
+    monkeypatch.setattr(semantic_release.json, "loads", unexpected_loads)
+    with pytest.raises(SemanticReleaseBundleError, match="JSON structure limit exceeded"):
+        semantic_release._canonical_json_document(
+            raw,
+            "probe",
+            semantic_release._MAX_DIRECTORY_ENTRIES,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1231,8 +1393,17 @@ def test_taxonomy_and_rule_count_limits_are_independent_and_fail_closed(
             for index in range(MAX_RULES + 1)
         ]
     _write_artifact_json(root, entry, artifact)
+    hostile_raw = _artifact_path(root, entry).read_bytes()
     _write_manifest(root, manifest)
     _select_bundle(monkeypatch, root)
+    original_loads = semantic_release.json.loads
+
+    def guarded_loads(raw: bytes, **_kwargs: object) -> object:
+        if raw == hostile_raw:
+            raise AssertionError("host decoder reached an over-limit artifact")
+        return original_loads(raw, object_pairs_hook=semantic_release._duplicate_pairs)
+
+    monkeypatch.setattr(semantic_release.json, "loads", guarded_loads)
     with pytest.raises(SemanticReleaseBundleError, match=f"{kind} limit"):
         load_installed_semantic_release_bundle()
 

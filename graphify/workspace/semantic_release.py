@@ -15,7 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
-from typing import Mapping, Sequence
+from typing import cast, Mapping, Sequence
 import unicodedata
 
 from graphify.workspace.contracts import ContractError, canonical_json_bytes
@@ -51,6 +51,15 @@ _ARTIFACT_KINDS = frozenset(
 _SINGLETON_KINDS = frozenset(
     {"classifier", "classifier_abi", "taxonomy", "normalization", "ruleset"}
 )
+_MAX_MANIFEST_ARTIFACTS = _MAX_DIRECTORY_ENTRIES + 1
+_MAX_JSON_DEPTH = 64
+_MAX_JSON_CONTAINER_ENTRIES = _MAX_DIRECTORY_ENTRIES
+_MAX_JSON_TOTAL_ENTRIES = (_MAX_DIRECTORY_ENTRIES * 8) + 16
+_ARTIFACT_JSON_ARRAY_LIMITS = {
+    "profile": (max(MAX_CATEGORIES, MAX_RULES), "profile array limit exceeded"),
+    "ruleset": (MAX_RULES, "ruleset limit exceeded"),
+    "taxonomy": (MAX_CATEGORIES, "taxonomy limit exceeded"),
+}
 _COORDINATE_FIELDS = {
     "classifier": ("classifier_id", "classifier_version"),
     "classifier_abi": ("abi_id", "abi_version"),
@@ -182,7 +191,7 @@ _RULE_DOCUMENTS = (
         "matcher": "byte_regex_search_v1",
         "pattern": (
             r"(?:^|\r?\n)(?ai:Authorization):[ \t]*(?ai:Bearer)[ \t]+"
-            r"(?P<credential>(?=[A-Za-z0-9._~+/-=]{1,256}"
+            r"(?P<credential>(?=[A-Za-z0-9._~+/=-]{1,256}"
             r"(?=[ \t]*(?:$|\r?\n)))[A-Za-z0-9._~+/-]+={0,255})"
             r"(?=[ \t]*(?:$|\r?\n))"
         ),
@@ -257,7 +266,8 @@ _RULE_DOCUMENTS = (
         "credential_group": "credential",
         "matcher": "byte_regex_search_v1",
         "pattern": (
-            r"(?:^|\r?\n)(?ai:seed[ _-]?phrase|recovery[ _-]?phrase|mnemonic)"
+            r"(?:^|\r?\n)[ ]{0,256}"
+            r"(?ai:seed[ _-]?phrase|recovery[ _-]?phrase|mnemonic)"
             r"[ \t]*(?:=|:)[ \t]*(?P<credential>(?:(?:[a-z]{3,12}[ \t]+){11}"
             r"[a-z]{3,12}|(?:[a-z]{3,12}[ \t]+){14}[a-z]{3,12}|"
             r"(?:[a-z]{3,12}[ \t]+){17}[a-z]{3,12}|"
@@ -748,7 +758,85 @@ def _duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _canonical_json_document(raw: bytes, label: str) -> dict[str, object]:
+@dataclass
+class _JsonContainer:
+    opening: int
+    limit: int
+    limit_error: str
+    commas: int = 0
+    has_content: bool = False
+
+
+def _preflight_json_structure(
+    raw: bytes,
+    label: str,
+    max_array_items: int = _MAX_JSON_CONTAINER_ENTRIES,
+    array_limit_error: str | None = None,
+) -> None:
+    """Bound JSON structure before the host decoder materializes containers."""
+
+    stack: list[_JsonContainer] = []
+    total_entries = 0
+    in_string = False
+    escaped = False
+    for byte in raw:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+            if stack:
+                stack[-1].has_content = True
+            continue
+        if byte in b" \t\r\n":
+            continue
+        if byte in (0x5B, 0x7B):
+            if stack:
+                stack[-1].has_content = True
+            if len(stack) >= _MAX_JSON_DEPTH:
+                raise SemanticReleaseBundleError(
+                    f"{label}: JSON nesting exceeds supported depth"
+                )
+            if byte == 0x5B:
+                limit = max_array_items
+                limit_error = array_limit_error or f"{label}: JSON array item limit exceeded"
+            else:
+                limit = _MAX_JSON_CONTAINER_ENTRIES
+                limit_error = f"{label}: JSON object member limit exceeded"
+            stack.append(_JsonContainer(byte, limit, limit_error))
+        elif byte in (0x5D, 0x7D):
+            expected = 0x5B if byte == 0x5D else 0x7B
+            if not stack or stack[-1].opening != expected:
+                continue
+            container = stack.pop()
+            entries = container.commas + int(container.has_content)
+            if entries > container.limit:
+                raise SemanticReleaseBundleError(container.limit_error)
+            total_entries += entries
+            if total_entries > _MAX_JSON_TOTAL_ENTRIES:
+                raise SemanticReleaseBundleError(f"{label}: JSON structure limit exceeded")
+        elif byte == 0x2C:
+            if stack:
+                container = stack[-1]
+                container.commas += 1
+                if container.commas >= container.limit:
+                    raise SemanticReleaseBundleError(container.limit_error)
+        elif stack:
+            stack[-1].has_content = True
+
+
+def _canonical_json_document(
+    raw: bytes,
+    label: str,
+    max_array_items: int = _MAX_JSON_CONTAINER_ENTRIES,
+    array_limit_error: str | None = None,
+) -> dict[str, object]:
+    _preflight_json_structure(raw, label, max_array_items, array_limit_error)
     try:
         value = json.loads(raw, object_pairs_hook=_duplicate_pairs)
     except SemanticReleaseBundleError:
@@ -865,7 +953,12 @@ def _artifact_entry(value: object, index: int) -> BundleArtifact:
 
 
 def _validated_manifest_artifacts(raw: bytes) -> tuple[BundleArtifact, ...]:
-    manifest = _canonical_json_document(raw, "semantic-release manifest")
+    manifest = _canonical_json_document(
+        raw,
+        "semantic-release manifest",
+        _MAX_MANIFEST_ARTIFACTS,
+        "semantic-release manifest artifact limit exceeded",
+    )
     _exact_members(
         manifest,
         {"artifacts", "compatibility_version", "contract", "format_version", "manifest_id"},
@@ -893,6 +986,8 @@ def _validated_manifest_artifacts(raw: bytes) -> tuple[BundleArtifact, ...]:
     raw_artifacts = manifest["artifacts"]
     if not isinstance(raw_artifacts, list) or not raw_artifacts:
         raise SemanticReleaseBundleError("semantic-release manifest artifacts must be nonempty")
+    if len(raw_artifacts) > _MAX_MANIFEST_ARTIFACTS:
+        raise SemanticReleaseBundleError("semantic-release manifest artifact limit exceeded")
     artifacts = tuple(_artifact_entry(value, index) for index, value in enumerate(raw_artifacts))
     paths = tuple(artifact.path for artifact in artifacts)
     if paths != tuple(sorted(paths, key=lambda value: value.encode("utf-8"))):
@@ -1062,7 +1157,8 @@ def _validate_normalization(document: dict[str, object], artifact: BundleArtifac
         "contract": "graphify.workspace.semantic_release_normalization.internal",
         "control_code_points": [
             "U+0000-U+0009",
-            "U+000B-U+001F",
+            "U+000B-U+000C",
+            "U+000E-U+001F",
             "U+007F-U+009F",
         ],
         "format_version": 1,
@@ -1075,8 +1171,9 @@ def _validate_normalization(document: dict[str, object], artifact: BundleArtifac
             "trimmed_pinned_whitespace_v1",
             "nfc_prevalidated",
             "forbidden_controls_absent",
+            "carriage_return_only_in_crlf",
         ],
-        "protocol_separator": "LF_prevalidated_rationale_only",
+        "protocol_separator": "LF_or_CRLF_prevalidated_rationale_only",
         "runtime_transforms": [],
         "trim_code_points": sorted(_PINNED_TRIM_CODE_POINTS),
     }
@@ -1332,7 +1429,16 @@ def load_installed_semantic_release_bundle() -> SemanticReleaseBundle:
         if artifact.artifact_kind == "classifier":
             _validate_classifier_artifact(artifact)
         else:
-            document = _canonical_json_document(raw, artifact.path)
+            array_limit, array_limit_error = _ARTIFACT_JSON_ARRAY_LIMITS.get(
+                artifact.artifact_kind,
+                (_MAX_JSON_CONTAINER_ENTRIES, None),
+            )
+            document = _canonical_json_document(
+                raw,
+                artifact.path,
+                array_limit,
+                array_limit_error,
+            )
             if not isinstance(document, dict):
                 raise SemanticReleaseBundleError(
                     f"{artifact.artifact_kind} document is unavailable"
@@ -1414,7 +1520,7 @@ def _revalidate_return_bundle(
 
 
 def _valid_field_bytes(value: object) -> bytes | None:
-    if not isinstance(value, bytes) or not value or len(value) > FIELD_MAX_BYTES:
+    if type(value) is not bytes or not value or len(value) > FIELD_MAX_BYTES:
         return None
     try:
         text = value.decode("utf-8")
@@ -1423,8 +1529,14 @@ def _valid_field_bytes(value: object) -> bytes | None:
     if ord(text[0]) in _PINNED_TRIM_CODE_POINTS or ord(text[-1]) in _PINNED_TRIM_CODE_POINTS:
         return None
     if any(
-        (ord(character) <= 0x001F and character != "\n") or 0x007F <= ord(character) <= 0x009F
+        (ord(character) <= 0x001F and character not in "\r\n")
+        or 0x007F <= ord(character) <= 0x009F
         for character in text
+    ):
+        return None
+    if any(
+        character == "\r" and (index + 1 == len(text) or text[index + 1] != "\n")
+        for index, character in enumerate(text)
     ):
         return None
     return value
@@ -1434,13 +1546,14 @@ def _validated_selected_profiles(
     value: object,
     bundle: SemanticReleaseBundle,
 ) -> tuple[CoverageProfile, ...] | None:
-    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+    if type(value) not in (list, tuple):
         return None
-    if len(value) > MAX_PROFILES:
+    coordinates_input = cast(list[object] | tuple[object, ...], value)
+    if len(coordinates_input) > MAX_PROFILES:
         return None
     coordinates: list[ProfileCoordinate] = []
-    for coordinate in value:
-        if not isinstance(coordinate, ProfileCoordinate):
+    for coordinate in coordinates_input:
+        if type(coordinate) is not ProfileCoordinate:
             return None
         try:
             validated = _profile_coordinate(

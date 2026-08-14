@@ -833,6 +833,58 @@ def test_installed_bootstrap_prefers_script_prefix_package_before_interpreter_si
     assert not sentinel.exists()
 
 
+@pytest.mark.parametrize(
+    ("script_name", "hostile_module", "args"),
+    [
+        ("_graphify-semantic-authority", "__main__.py", ["--version"]),
+        ("_graphify-mcp-semantic-authority", "serve.py", ["--help"]),
+    ],
+)
+def test_installed_bootstrap_requires_a_script_prefix_package_owner(
+    script_name: str,
+    hostile_module: str,
+    args: list[str],
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, _ = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        script_name,
+        include_package=False,
+    )
+    _, foreign_scripts, foreign_site = _create_python_env(tmp_path)
+    sentinel = tmp_path / f"{script_name}-foreign-owner-executed"
+    foreign_package = foreign_site / "graphify"
+    foreign_package.mkdir()
+    (foreign_package / "__init__.py").write_text("", encoding="utf-8")
+    entrypoint = "main" if hostile_module == "__main__.py" else "_main"
+    (foreign_package / hostile_module).write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+        f"def {entrypoint}():\n"
+        "    print('foreign graphify executed')\n",
+        encoding="utf-8",
+    )
+    environment = _clean_environment()
+    environment["PATH"] = str(foreign_scripts)
+
+    proc = subprocess.run(
+        [str(script_path), *args],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "cannot resolve a script-prefix package root" in proc.stderr
+    assert "foreign graphify executed" not in proc.stdout
+    assert not sentinel.exists()
+
+
 def test_installed_bootstrap_preserves_editable_direct_url_roots_without_startup_hooks(
     wheel_build: tuple[set[str], str, str, Path],
     tmp_path: Path,
@@ -977,6 +1029,96 @@ def test_installed_bootstrap_rejects_ambiguous_script_prefix_package_owners(
     assert "ambiguous script-prefix package roots" in proc.stderr
     assert "stale editable executed" not in proc.stdout
     assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    ("script_name", "hostile_module"),
+    [
+        ("_graphify-semantic-authority", "__main__.py"),
+        ("_graphify-mcp-semantic-authority", "serve.py"),
+    ],
+)
+def test_installed_bootstrap_rejects_owners_across_script_prefix_layouts(
+    script_name: str,
+    hostile_module: str,
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, versioned_site_packages = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        script_name,
+    )
+    generic_site_packages = (
+        versioned_site_packages.parent.parent / "python" / "site-packages"
+    )
+    hostile_package = generic_site_packages / "graphify"
+    hostile_package.mkdir(parents=True)
+    sentinel = tmp_path / f"{script_name}-generic-layout-executed"
+    (hostile_package / "__init__.py").write_text("", encoding="utf-8")
+    entrypoint = "main" if hostile_module == "__main__.py" else "_main"
+    (hostile_package / hostile_module).write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed', encoding='utf-8')\n"
+        f"def {entrypoint}():\n"
+        "    print('generic layout executed')\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [str(script_path), "--version"],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert proc.returncode != 0
+    assert "ambiguous script-prefix package roots" in proc.stderr
+    assert "generic layout executed" not in proc.stdout
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    ("script_name", "args"),
+    [
+        ("_graphify-semantic-authority", ["--version"]),
+        ("_graphify-mcp-semantic-authority", ["--help"]),
+    ],
+)
+def test_installed_bootstrap_deduplicates_one_owner_across_prefix_layouts(
+    script_name: str,
+    args: list[str],
+    wheel_build: tuple[set[str], str, str, Path],
+    tmp_path: Path,
+) -> None:
+    _, _, _, wheel = wheel_build
+    script_path, versioned_site_packages = _install_wheel_as_user_script_layout(
+        wheel,
+        tmp_path,
+        script_name,
+    )
+    generic_site_packages = (
+        versioned_site_packages.parent.parent / "python" / "site-packages"
+    )
+    generic_site_packages.parent.mkdir(parents=True)
+    generic_site_packages.symlink_to(versioned_site_packages, target_is_directory=True)
+
+    proc = subprocess.run(
+        [str(script_path), *args],
+        cwd=tmp_path,
+        env=_clean_environment(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert "ambiguous script-prefix package roots" not in proc.stderr
+    assert "cannot resolve a script-prefix package root" not in proc.stderr
+    if script_name == "_graphify-semantic-authority":
+        assert proc.returncode == 0, proc.stderr
 
 
 @pytest.mark.parametrize(

@@ -88,7 +88,10 @@ can run; then the Python body sets a fresh private package-external
 script-prefix package root, or a PEP 610 editable source root recorded by a
 `graphifyy` direct URL in that same script prefix, explicitly before any
 Graphify module import. Direct library imports that bypass this bootstrap are
-not semantic-release decision authority.
+not semantic-release decision authority. Across every supported script-prefix
+layout, the bootstrap requires exactly one real-path-distinct physical or PEP
+610 editable Graphify owner; a missing owner cannot fall through to an
+interpreter installation, and multiple owners are ambiguous and fail closed.
 
 This does not make the package its own first-instruction trust anchor. The
 CPython executable and standard library, an installer that verifies the

@@ -103,10 +103,13 @@ def _script_prefix_site_roots() -> tuple[str, ...]:
             owner_roots = list(_editable_direct_url_roots(candidate))
             if os.path.isdir(os.path.join(candidate, "graphify")):
                 owner_roots.append(_real(candidate))
-            if len(owner_roots) > 1:
-                raise SystemExit("graphify bootstrap found ambiguous script-prefix package roots")
             roots.extend(owner_roots)
-    return tuple(roots)
+    unique_roots = tuple(dict.fromkeys(roots))
+    if not unique_roots:
+        raise SystemExit("graphify bootstrap cannot resolve a script-prefix package root")
+    if len(unique_roots) > 1:
+        raise SystemExit("graphify bootstrap found ambiguous script-prefix package roots")
+    return unique_roots
 
 
 def _editable_direct_url_roots(site_root: str) -> tuple[str, ...]:
