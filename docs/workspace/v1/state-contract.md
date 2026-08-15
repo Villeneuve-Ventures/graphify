@@ -957,8 +957,9 @@ excluded authorities and activates no successor.
 
 ## Semantic-release policy-authority provisioning prerequisite
 
-This separate unnumbered P5B2 prerequisite is documentation-only and remains
-`WAITING`. Future `SemanticReleasePolicyAuthorityStore` alone owns these
+This separate unnumbered P5B2 prerequisite has one private implementation
+candidate and remains `IN_PROGRESS`, not `READY` or `COMPLETE`.
+`SemanticReleasePolicyAuthorityStore` alone owns these
 external private stable records:
 
 ```text
@@ -1032,7 +1033,7 @@ monotonic `ACTIVE` advancement, recovery projection, exact recovery,
 byte-identical replay, exact pending clear, and bounded orphan-temporary
 cleanup. Revocation, reactivation, rollback,
 downgrade, arbitrary repair, deletion, GC, decision binding, composition,
-omission, graph/query projection, publication, implementation, readiness,
+omission, graph/query projection, publication, readiness,
 acceptance, and successor activation remain unauthorized and `WAITING` where
 applicable.
 
@@ -1065,7 +1066,7 @@ not own or weaken that trust root. The trust-root subchild is accepted, but the
 encompassing decision child remains `WAITING` because its separate policy,
 persistence, capacity/GC, and composition prerequisites are absent.
 
-The separately contract-frozen but still `WAITING`
+The separately implemented but still `IN_PROGRESS` and unaccepted
 `SemanticReleasePolicyAuthorityStore` provisioning prerequisite above owns
 these private stable paths:
 
@@ -1256,8 +1257,9 @@ migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
 implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
 `IN_PROGRESS`; only the separate trust-root prerequisite is accepted
-`COMPLETE`.
-This decision child, operator policy-authority provisioning,
+`COMPLETE`. The policy-authority implementation candidate remains
+`IN_PROGRESS`.
+This decision child, live operator policy selection/provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, omission execution, projection, public
 CLI/schema/receipt, provider/backend, publication, remaining P5B2 work, and P5C

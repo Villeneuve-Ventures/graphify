@@ -83,6 +83,7 @@ branch.
 | Semantic-release trust-root C1 repair | PR [#69](https://github.com/Villeneuve-Ventures/graphify/pull/69) exact base `3f96e361a09b098e15ded0f6c71ad11f28970549`; head `4e2510309f5563e512dbc562328fe98909185c17`; merge/current canonical commit `01bc19cbb5e275fe0a63e5af278cbee663f218f5`; head/merge/current tree `9e3cae64d53165145bbeab0cb6a1402509f041e3`; merged at `2026-08-14T20:55:19Z`. Exact-head CI [31814026195](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31814026195) and post-merge CI [31840122100](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31840122100) each passed `skillgen-check`, `test (3.14)`, and `security-scan`; PR #69 has no review thread. It repairs both duplicated PR #68 C1 findings, rebinds the classifier manifest digest, and adds exact C0/C1 boundary vectors. |
 | Semantic-release trust-root governance acceptance preflight | At `2026-08-14T22:39:49Z`, the canonical repository, exact HEAD/tree, clean `0/0` divergence, one-worktree inventory, zero open-PR inventory, PR #66-#69 identities/checks, authority-file fingerprints, and all thread states were revalidated. All 34 unresolved PR #68 threads received exact-current-tree dispositions; the required focused, combined, full-suite, lock, lint, type, security, generator, pre-commit, and disposable two-candidate build/audit gates passed. `graphify-out/GRAPH_REPORT.md` remained stale orientation from `91a34b4b2b83f54fa5f94b8f3c09f62c3f631603` and was neither authority nor modified. This governance-only acceptance receipt remains `STAGED` until separately published and merged; no GitHub, branch, worktree, commit, publication, or external workflow state was mutated. |
 | Semantic-release trust-root governance acceptance | PR [#70](https://github.com/Villeneuve-Ventures/graphify/pull/70) exact base `01bc19cbb5e275fe0a63e5af278cbee663f218f5`; head `3b171d264b7048c0b597c569985bc407701d751f`; merge/current canonical commit `17505a5c03e8945c2d3be932ce85cc09b93883fe`; head/merge/current tree `ce7bcbb95d0fe0535445d01a5a368c8e36b2e914`; merged at `2026-08-15T02:38:22Z`. Exact-merge CI [31859714756](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31859714756) passed. PR #70 accepts only the semantic-release bundle and deterministic-classifier trust-root prerequisite as `COMPLETE`; policy-authority provisioning and the encompassing release/DLP decision remain `WAITING`, and no successor becomes `READY`. |
+| Semantic-release policy-authority contract delivery | PR [#71](https://github.com/Villeneuve-Ventures/graphify/pull/71) exact base `17505a5c03e8945c2d3be932ce85cc09b93883fe`; head `0e8ee7457089c7f58c1bf98c8fe89eb263c7b73b`; merge/current canonical commit `5d534d0b769f1217ed0a1574fb54915504892b4c`; head/merge/current tree `bad5348abaa1a59f01f3eaa48a3126b58d1bbeb0`; merged at `2026-08-15T13:43:21Z`. Exact-head CI [31885426041](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31885426041) and exact-merge CI [31887969988](https://github.com/Villeneuve-Ventures/graphify/actions/runs/31887969988) passed. PR #71 froze documentation only and left the prerequisite `WAITING`; it granted no implementation, readiness, acceptance, live provisioning, or successor authority. |
 | Support baseline | Observed host CPython `3.14.6`; project CPython `3.14.3`; uv `0.11.30` |
 
 Every later status transition must refresh this snapshot. A stale snapshot is
@@ -100,10 +101,10 @@ orientation only and cannot justify execution.
 | H1 | P4F | COMPLETE | Inherited labeling-order test stabilization closed. |
 | H2 | H1 | COMPLETE | Candidate packaging, dependency, and blocking security hygiene closed. |
 | H3 | H2 | DEFERRED | Full-repository Pyright and medium-severity Bandit debt remains non-blocking. |
-| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, semantic-generation promotion and pointer-finalization, and semantic-release trust-root prerequisite, are complete. The separately frozen policy-authority provisioning prerequisite, encompassing semantic-content release/DLP decision, and remaining P5B2/P5C work remain `WAITING`. |
+| P5 | P4, H1, H2 | IN_PROGRESS | P5A and delivered P5B children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, semantic-generation promotion and pointer-finalization, and semantic-release trust-root prerequisite, are complete. The policy-authority provisioning implementation candidate remains `IN_PROGRESS`; the encompassing semantic-content release/DLP decision and remaining P5B2/P5C work remain `WAITING`. |
 | P5A | P4, H1, H2 | COMPLETE | Durable semantic queue and stable certification watermark closed. |
 | P5B1 | P5A | COMPLETE | Production composition, versioned read-only status, and read-only doctor closed. |
-| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, semantic-generation promotion and pointer-finalization, and semantic-release trust-root prerequisite, are complete. The policy-authority provisioning prerequisite, encompassing semantic-content release/DLP decision, full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and every other undelivered command remain `WAITING`. |
+| P5B2 | P5B1 | IN_PROGRESS | Delivered children, including the accepted host-agent semantic-worker transport, semantic-result handoff, corrected semantic-generation certification finalization, semantic-generation promotion and pointer-finalization, and semantic-release trust-root prerequisite, are complete. The policy-authority provisioning implementation candidate remains `IN_PROGRESS`; the encompassing semantic-content release/DLP decision, full semantic sync, explicit backend integration, migrate, broader repair, broader mutation/query authority, and every other undelivered command remain `WAITING`. |
 | P5B2a | P5B1 | COMPLETE | Initial operator-authorized enrollment and explicit verified adoption remain closed. Accepted corrective receipt: [`P5B2a ADOPT pre-write correction`](receipts/p5b2a-adopt-prewrite-correction.md). |
 | P5B2 identity maintenance | P5B2a | COMPLETE | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). Rebind and rotation only. |
 | P5B2 active-source activation | P5B2a | COMPLETE | Accepted receipt: [`P5B2 active-source activation`](receipts/p5b2-active-source-activation.md). Standalone fenced `workspace activate` only. |
@@ -120,8 +121,8 @@ orientation only and cannot justify execution.
 | P5B2 semantic-generation certification finalization | P5B2 semantic-result handoff and sealed-input finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-certification-finalization). Entry requires the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest; the only mutating lane is same-request `BUILD` recovery through the existing semantic certification view, immutable binding, generation receipt/journal, reservation, and staged-state authorities until exact `CERTIFIED` proof and lease release. Completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), accepting PR #56 only together with PR #57's corrective delivery. PR #58 made that acceptance canonical and promoted no parent phase or successor. |
 | P5B2 semantic-generation promotion and pointer-finalization | P5B2 semantic-generation certification finalization | COMPLETE | Accepted only at the frozen boundary in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization). Entry remains the accepted exact staged `CERTIFIED` terminal with verified installed target/receipt/binding and journal, absent reservation and certification `BUILD` grant, and unchanged request pointer CAS. Forward authority remains limited to same-request staged `PROMOTE`, including exact already-visible replay, or exact pending-intent `POINTER_RECOVERY`; terminal proof requires staged `PROMOTED`, exact visible-current and journal evidence, no pending intent, unchanged semantic evidence, and exact grant release. Completion evidence: [`P5B2 semantic-generation promotion and pointer-finalization`](receipts/p5b2-semantic-generation-promotion-finalization.md), binding the exact PR #59 through PR #64 chain and made canonical by PR #65. It grants no execution or later-successor authority. |
 | P5B2 semantic-release bundle and deterministic-classifier trust-root | P5B2 | COMPLETE | Accepted only at the [internal trust-root boundary](semantic-sync.md#p5b2-semantic-release-bundle-and-deterministic-classifier-trust-root): repo-owned installed manifest, deterministic classifier implementation/ABI, closed taxonomy, normalization, ruleset, required `core_secrets.v1`, selectable profile bundle, and existing installed executable bootstrap that excludes package-local bytecode caches and Python startup hooks from trusted execution. Completion evidence: [`P5B2 semantic-release trust root`](receipts/p5b2-semantic-release-trust-root.md), binding the exact PR #66 through PR #69 chain. It grants no policy selection, durable decision store, semantic-field composition, omission, projection, new public command/schema/runtime receipt, provider/backend, publication, release, execution, parent completion, or successor authority. |
-| P5B2 semantic-release policy-authority provisioning | P5B2 semantic-release bundle and deterministic-classifier trust-root | WAITING | Contract freeze only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-release-policy-authority-provisioning-prerequisite). It freezes sole store ownership, exact `ACTIVE` selection input and digest preimages, revision-plus-one/predecessor CAS, registry-then-workspace locking, fixed 256 KiB peak, durable commit/recovery, idempotency, and commit uncertainty. It provisions no live record; `SELECT_SEMANTIC_RELEASE_POLICY` cannot revoke or reactivate, and `REVOKED` is consumer-side fail-closed vocabulary. Implementation, readiness, acceptance, decision binding, public surfaces, publication, and successor authority remain absent. |
-| P5B2 semantic-content release/DLP decision | P5B2 semantic-generation promotion and pointer-finalization, P5B2 semantic-release bundle and deterministic-classifier trust-root, P5B2 semantic-release policy-authority provisioning | WAITING | Contract freeze only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-content-releasedlp-decision). Entry requires the exact accepted staged `PROMOTED` and visible-current terminal, implemented and accepted trusted bundle, and stable current `ACTIVE` operator policy-authority revision. Policy-authority provisioning remains unimplemented and `WAITING`; `SemanticReleaseDecisionStore`, capacity/GC integration, classification composition, omission execution, graph/query projection, public CLI/schema/receipt, provider/backend, publication, implementation, acceptance, and successor authority remain absent. |
+| P5B2 semantic-release policy-authority provisioning | P5B2 semantic-release bundle and deterministic-classifier trust-root | IN_PROGRESS | One private implementation candidate under the frozen [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-release-policy-authority-provisioning-prerequisite) boundary owns exact `ACTIVE` selection input and digest preimages, revision-plus-one/predecessor CAS, registry-then-workspace locking, fixed 256 KiB peak, durable commit/recovery, idempotency, and commit uncertainty. It provisions no live record; `SELECT_SEMANTIC_RELEASE_POLICY` cannot revoke or reactivate, and `REVOKED` is consumer-side fail-closed vocabulary. Readiness, acceptance, decision binding, public surfaces, publication, and successor authority remain absent. |
+| P5B2 semantic-content release/DLP decision | P5B2 semantic-generation promotion and pointer-finalization, P5B2 semantic-release bundle and deterministic-classifier trust-root, P5B2 semantic-release policy-authority provisioning | WAITING | Contract freeze only in [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-content-releasedlp-decision). Entry requires the exact accepted staged `PROMOTED` and visible-current terminal, implemented and accepted trusted bundle, a separately accepted policy-authority prerequisite, and a provisioned stable current `ACTIVE` operator policy-authority revision. Policy-authority provisioning remains `IN_PROGRESS` and unaccepted; `SemanticReleaseDecisionStore`, capacity/GC integration, classification composition, omission execution, graph/query projection, public CLI/schema/receipt, provider/backend, publication, implementation, acceptance, and successor authority remain absent. |
 | Remaining P5B2 commands | P5B2 | WAITING | Full semantic sync, named/headless backend integration, migrate, every repair mode beyond the accepted public fenced pointer-repair lifecycle, every mutation beyond the accepted explicit GC and pointer-repair lifecycles, every query authority beyond P5B2c's one-shot transport, and every other command remain waiting. The accepted internal handoff, certification-finalization, promotion/pointer-finalization, and trust-root children and the release/DLP contract freeze grant no broader or public command authority. |
 | P5C | P5B2 | WAITING | The broad service, installation, performance/resource, and publication parent is unchanged and is not promoted by the child split below. |
 | P5C1 | P5B2b | COMPLETE | Accepted receipt: [`P5C1`](receipts/p5c1.md). Candidate-bound canonical runtime authority generation and isolated atomic installation/compensation proof only. |
@@ -146,11 +147,12 @@ ready. PR #67 reconciled only the separate semantic-release bundle and
 deterministic-classifier trust-root prerequisite as `READY`; PR #68 implemented
 that frozen boundary; and PR #69 supplied the required C1-control repair. This
 PR #70 governance acceptance transitioned only that trust-root prerequisite to
-`COMPLETE`. This PR #71 proposal freezes the separate policy-authority
-provisioning prerequisite as `WAITING`; the encompassing release/DLP decision
-also remains `WAITING`. Parent P5 and P5B2 remain `IN_PROGRESS`, and no later
-successor is activated. Until PR #71 is reviewed and merged, the published
-canonical branch produced by PR #70 remains authoritative.
+`COMPLETE`. PR #71 then froze the separate policy-authority provisioning
+prerequisite without making it ready. The current private implementation
+candidate advances only that prerequisite to `IN_PROGRESS`; the encompassing
+release/DLP decision and every downstream dependency remain `WAITING`. Parent
+P5 and P5B2 remain `IN_PROGRESS`, H3 remains `DEFERRED`, and no later successor
+is activated.
 
 ## Justified out-of-scope follow-up register
 
@@ -703,18 +705,19 @@ execute omissions, project content, expose a new public CLI/schema/runtime
 receipt, invoke a provider/backend, or publish. The acceptance receipt proves
 only this frozen behavior.
 
-P5 and P5B2 remain `IN_PROGRESS`; the encompassing release/DLP decision,
-operator policy-authority provisioning, `SemanticReleaseDecisionStore`,
+P5 and P5B2 remain `IN_PROGRESS`; the policy-authority implementation candidate
+also remains `IN_PROGRESS`. The encompassing release/DLP decision, live operator
+policy selection/provisioning, `SemanticReleaseDecisionStore`,
 capacity/GC integration, classification composition, omission execution,
 projection, public surfaces, provider/backend, publication, remaining P5B2
 work, and P5C remain `WAITING`; only this trust-root prerequisite is
 `COMPLETE`; H3 remains `DEFERRED`; no later successor is `READY`.
 
-## P5B2 semantic-release policy-authority provisioning boundary freeze
+## P5B2 semantic-release policy-authority provisioning implementation candidate
 
-This separate internal unnumbered P5B2 prerequisite is documentation-only and
-remains `WAITING`, not `READY` or `COMPLETE`. It owns only the future
-`SemanticReleasePolicyAuthorityStore` mechanism and the three private
+This separate internal unnumbered P5B2 prerequisite has one bounded private
+implementation candidate and remains `IN_PROGRESS`, not `READY` or `COMPLETE`.
+It owns only the `SemanticReleasePolicyAuthorityStore` mechanism and the three private
 current/previous/pending policy-authority paths frozen in the canonical
 [semantic contract](semantic-sync.md#p5b2-semantic-release-policy-authority-provisioning-prerequisite).
 It provisions no live authority record and selects no release context, profile
@@ -752,12 +755,12 @@ clear, and bounded orphan-temporary cleanup. It grants no revocation,
 reactivation, rollback, downgrade, arbitrary repair, current/previous deletion,
 policy-authority GC, public CLI/schema/receipt, decision-store mutation,
 classification composition, omission, projection, provider/backend,
-publication, implementation, readiness, acceptance, parent completion, or
+publication, readiness, acceptance, parent completion, or
 successor authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the accepted trust-root prerequisite remains
-`COMPLETE`. This provisioning prerequisite, the encompassing release/DLP
-decision, `SemanticReleaseDecisionStore`, decision-store capacity/GC,
+`COMPLETE`, and this provisioning prerequisite remains `IN_PROGRESS`. The
+encompassing release/DLP decision, `SemanticReleaseDecisionStore`, decision-store capacity/GC,
 classification composition, omission, projection, public surfaces,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
 H3 remains `DEFERRED`; no later successor is `READY`.
@@ -797,7 +800,8 @@ One canonical `decision_request_sha256` binds that entry plus the exact private
 semantic-input byte count and digest, the eligible-field inventory, the trusted
 repo-owned installed bundle manifest owned by the trust-root prerequisite, and
 the stable current `ACTIVE` operator policy-authority revision produced only by
-the separately frozen but still `WAITING` provisioning prerequisite. The decision child
+the separately implemented but still `IN_PROGRESS` and unaccepted provisioning
+prerequisite. The decision child
 consumes but cannot supply, select around, override, or weaken that installed
 bundle. The separately owned policy-authority record binds the named release context, exact selected
 profiles and policy, the closed version-1 coverage-sufficiency declaration and
@@ -915,8 +919,9 @@ production/runtime installation, performance/resource qualification, P5C, H3,
 P6+, parent completion, implementation, readiness, acceptance, execution, or
 later-successor authority. `JOS-SEMANTIC-RATIONALE-PROJECTION` remains
 `OPPORTUNISTIC` with its trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`;
-only the separate trust-root prerequisite is accepted `COMPLETE`. This
-encompassing child, operator policy-authority provisioning,
+only the separate trust-root prerequisite is accepted `COMPLETE`. The
+policy-authority implementation candidate remains `IN_PROGRESS`. This
+encompassing child, live operator policy selection/provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration, classification
 composition, omission execution, projection, public surfaces, provider/backend,
 publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
