@@ -56,6 +56,7 @@ POLICY_SELECTION_AUTHORIZATION_MAX_BYTES = 16 * 1024
 POLICY_AUTHORITY_TRANSACTION_PEAK_BYTES = 256 * 1024
 POLICY_AUTHORITY_MAX_IDENTIFIER_BYTES = 256
 POLICY_AUTHORITY_NAMESPACE_MAX_ENTRIES = 4_096
+_POLICY_AUTHORITY_JSON_MAX_DEPTH = 64
 
 POLICY_AUTHORITY_CURRENT = "semantic-release-policy-authority.json"
 POLICY_AUTHORITY_PREVIOUS = "semantic-release-policy-authority.previous.json"
@@ -194,24 +195,70 @@ def _reject_json_constant(value: str) -> object:
     raise SemanticReleasePolicyAuthorityInvalid(f"non-finite JSON number is forbidden: {value}")
 
 
+def _parse_json_integer(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SemanticReleasePolicyAuthorityInvalid(
+            "JSON integer exceeds supported conversion limit"
+        ) from exc
+
+
+def _preflight_json_depth(payload: bytes, label: str) -> None:
+    """Reject excessive JSON nesting before the host decoder materializes it."""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for byte in payload:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                in_string = False
+            continue
+        if byte == 0x22:
+            in_string = True
+        elif byte in (0x5B, 0x7B):
+            if depth >= _POLICY_AUTHORITY_JSON_MAX_DEPTH:
+                raise SemanticReleasePolicyAuthorityInvalid(
+                    f"{label} JSON nesting exceeds supported depth"
+                )
+            depth += 1
+        elif byte in (0x5D, 0x7D) and depth:
+            depth -= 1
+
+
 def _canonical_object(payload: bytes, *, label: str, max_bytes: int) -> dict[str, object]:
     if type(payload) is not bytes or not payload or len(payload) > max_bytes:
         raise SemanticReleasePolicyAuthorityInvalid(
             f"{label} must be between 1 and {max_bytes} canonical bytes"
         )
+    _preflight_json_depth(payload, label)
     try:
         value = json.loads(
             payload,
             object_pairs_hook=_reject_duplicate_pairs,
             parse_constant=_reject_json_constant,
+            parse_int=_parse_json_integer,
         )
     except SemanticReleasePolicyAuthorityInvalid:
         raise
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except RecursionError as exc:
+        raise SemanticReleasePolicyAuthorityInvalid(
+            f"{label} JSON nesting exceeds supported depth"
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} is invalid JSON: {exc}") from exc
     document = _mapping(value, label)
     try:
         canonical = canonical_json_bytes(document)
+    except RecursionError as exc:
+        raise SemanticReleasePolicyAuthorityInvalid(
+            f"{label} JSON nesting exceeds supported depth"
+        ) from exc
     except ContractError as exc:
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} is not canonical: {exc}") from exc
     if canonical != payload:
@@ -1092,25 +1139,28 @@ class SemanticReleasePolicyAuthorityStore:
         store_names: list[str] = []
         with self.state.existing_private_directory(directory) as descriptor:
             try:
-                for index, entry in enumerate(os.scandir(descriptor), start=1):
-                    if index > POLICY_AUTHORITY_NAMESPACE_MAX_ENTRIES:
-                        raise StatePathError(
-                            "workspace directory exceeds the bounded authority namespace scan"
-                        )
-                    name = entry.name
-                    if name in _POLICY_AUTHORITY_NAMES:
-                        store_names.append(name)
-                        continue
-                    match = _ATOMIC_TEMP_RE.fullmatch(name)
-                    if match is not None and match.group("destination") in (
-                        _POLICY_AUTHORITY_NAMES
-                    ):
-                        store_names.append(name)
-                        continue
-                    if name.startswith("semantic-release-policy-authority") or name.startswith(
-                        ".semantic-release-policy-authority"
-                    ):
-                        raise StatePathError(f"unexpected policy-authority namespace entry: {name}")
+                with os.scandir(descriptor) as entries:
+                    for index, entry in enumerate(entries, start=1):
+                        if index > POLICY_AUTHORITY_NAMESPACE_MAX_ENTRIES:
+                            raise StatePathError(
+                                "workspace directory exceeds the bounded authority namespace scan"
+                            )
+                        name = entry.name
+                        if name in _POLICY_AUTHORITY_NAMES:
+                            store_names.append(name)
+                            continue
+                        match = _ATOMIC_TEMP_RE.fullmatch(name)
+                        if match is not None and match.group("destination") in (
+                            _POLICY_AUTHORITY_NAMES
+                        ):
+                            store_names.append(name)
+                            continue
+                        if name.startswith("semantic-release-policy-authority") or name.startswith(
+                            ".semantic-release-policy-authority"
+                        ):
+                            raise StatePathError(
+                                f"unexpected policy-authority namespace entry: {name}"
+                            )
                 if require_reserve:
                     try:
                         filesystem = os.fstatvfs(descriptor)

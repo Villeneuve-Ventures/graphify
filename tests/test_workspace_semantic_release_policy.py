@@ -858,6 +858,91 @@ def test_multiple_or_unsafe_authority_temporaries_fail_closed(tmp_path: Path) ->
         store.project_recovery(REPO_UUID)
 
 
+def test_bounded_namespace_scan_closes_iterator_on_early_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    directory = _authority_directory(harness)
+    (directory / "unrelated-one").write_bytes(b"one")
+    (directory / "unrelated-two").write_bytes(b"two")
+    real_scandir = os.scandir
+    authority_directory_inode = directory.stat().st_ino
+
+    class TrackingScandir:
+        def __init__(self, descriptor: int | str | bytes | os.PathLike[str]) -> None:
+            self.iterator: Any = real_scandir(descriptor)
+            self.closed = False
+            self.is_authority_directory = (
+                type(descriptor) is int
+                and os.fstat(cast(int, descriptor)).st_ino == authority_directory_inode
+            )
+
+        def __iter__(self) -> TrackingScandir:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            return next(self.iterator)
+
+        def __enter__(self) -> TrackingScandir:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            self.closed = True
+            self.iterator.close()
+
+    opened: list[TrackingScandir] = []
+
+    def tracking_scandir(
+        descriptor: int | str | bytes | os.PathLike[str],
+    ) -> TrackingScandir:
+        iterator = TrackingScandir(descriptor)
+        opened.append(iterator)
+        return iterator
+
+    monkeypatch.setattr(policy_module, "POLICY_AUTHORITY_NAMESPACE_MAX_ENTRIES", 1)
+    monkeypatch.setattr(policy_module.os, "scandir", tracking_scandir)
+
+    with pytest.raises(StatePathError, match="bounded authority namespace scan"):
+        _store(harness).project_recovery(REPO_UUID)
+
+    authority_iterators = [item for item in opened if item.is_authority_directory]
+    assert len(authority_iterators) == 1
+    assert authority_iterators[0].closed
+
+
+def test_deep_authority_json_fails_closed_as_state_corrupt(tmp_path: Path) -> None:
+    harness = create_harness(tmp_path)
+    store = _store(harness)
+    store.select(_selection())
+    current = _authority_paths(harness)[0]
+    nested = b'{"nested":' + (b"[" * 2_000) + b"0" + (b"]" * 2_000) + b"}"
+    assert len(nested) < POLICY_AUTHORITY_RECORD_MAX_BYTES
+    current.write_bytes(nested)
+
+    with pytest.raises(StateCorrupt, match="JSON nesting exceeds supported depth"):
+        store.read(REPO_UUID)
+
+
+def test_oversized_integer_authority_json_fails_closed_as_state_corrupt(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    store = _store(harness)
+    store.select(_selection())
+    current = _authority_paths(harness)[0]
+    oversized_integer = b'{"format_version":' + (b"9" * 5_000) + b"}"
+    assert len(oversized_integer) < POLICY_AUTHORITY_RECORD_MAX_BYTES
+    current.write_bytes(oversized_integer)
+
+    with pytest.raises(
+        StateCorrupt, match="JSON integer exceeds supported conversion limit"
+    ) as failure:
+        store.read(REPO_UUID)
+
+    assert isinstance(failure.value.__cause__, SemanticReleasePolicyAuthorityInvalid)
+
+
 @pytest.mark.parametrize("mode", [0o644, 0o400])
 def test_authority_record_mode_drift_fails_closed(tmp_path: Path, mode: int) -> None:
     harness = create_harness(tmp_path)
