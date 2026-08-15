@@ -176,8 +176,8 @@ canonical PR #69 tree.
 
 ## Exact-current-tree disposition of every unresolved PR #68 thread
 
-Twenty-one threads are corrected in the current tree or inapplicable to the
-frozen authority boundary. Thirteen material-defect classifications are
+Twenty-two threads are corrected in the current tree or inapplicable to the
+frozen authority boundary. Twelve material-defect classifications are
 rejected under an explicit frozen invariant; their useful precision,
 portability, or future-composition suggestions remain non-authoritative
 follow-ups that require separate scope and review.
