@@ -1845,6 +1845,168 @@ remaining P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later
 successor is `READY`. Acceptance is limited to the bounded internal prerequisite
 and invents no operator-policy provisioning or decision-store behavior.
 
+## P5B2 semantic-release policy-authority provisioning prerequisite
+
+This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
+remains `WAITING`, not `READY` or `COMPLETE`. It owns the future provisioning
+mechanism for the policy-authority record consumed by the encompassing decision
+child; it does not provision a live record in this freeze. No release context,
+profile set, coverage-sufficiency value, category-disposition mapping, policy
+bytes, or operator record is selected here.
+
+### Store ownership and canonical selection input
+
+Future `SemanticReleasePolicyAuthorityStore` is the sole owner of these three
+private mode-`0600` stable files beneath the existing mode-`0700` workspace
+directory:
+
+- `workspaces/<repository_uuid>/semantic-release-policy-authority.json`;
+- `workspaces/<repository_uuid>/semantic-release-policy-authority.previous.json`;
+  and
+- `workspaces/<repository_uuid>/semantic-release-policy-authority.pending.json`.
+
+The store uses the existing descriptor-relative no-follow `DurableStateRoot`
+current/previous/pending protocol. No caller chooses a path, supplies encoded
+record bytes, or writes one of these files directly. Its one selection call
+accepts exactly the repository UUID; expected current authority revision and
+complete-record SHA-256, using revision `0` and digest JSON `null` only for
+genesis; named release context; exact installed bundle-manifest SHA-256;
+ordered selected-profile coordinates; complete coverage-sufficiency
+declaration; canonical policy ID, version, and object; and the existing five
+operator fields `action`, `issued_at`, `nonce`, `operator_id`, and `reason`.
+The action is exactly `SELECT_SEMANTIC_RELEASE_POLICY`.
+
+The store validates the installed trust-root bundle and derives every record
+field and digest itself. The selected profiles must be unique, canonically
+ordered, and byte-equal to manifest entries; the coverage declaration must
+equal the supplied release context and profile set; the policy must bind that
+declaration and its exact pair-disposition mapping. The future caller chooses
+those values under separate operator authority; this contract chooses none.
+Unknown, additional, omitted, duplicated, incompatible, or noncanonical input,
+or reordering of an order-sensitive normative array, including
+selected-profile coordinates, fails before durable mutation. Equivalent JSON
+object-key presentation order is canonicalized and does not change acceptance.
+
+Every record created or advanced by this prerequisite has state exactly
+`ACTIVE`. The closed record decoder continues to recognize `REVOKED` so the
+decision consumer can fail closed on a future record created under separate
+authority, but `SELECT_SEMANTIC_RELEASE_POLICY` does not authorize revocation,
+reactivation, or any transition whose result or predecessor is `REVOKED`.
+There is no `REVOKE_SEMANTIC_RELEASE_POLICY` action in this prerequisite.
+
+The store constructs the exact format-version-1 authority body frozen below.
+`authority_body_sha256` hashes the completed authority-body projection with
+both `selection_authorization` and `selection_authorization_sha256` absent. The
+completed selection envelope contains that body digest plus the nested five
+operator fields; `selection_authorization_sha256` hashes those complete
+envelope bytes and is stored only in the surrounding record. The complete
+authority-record SHA-256 hashes the final record bytes and is returned by the
+store but never stored inside those bytes. No digest preimage contains itself.
+
+### Monotonic CAS and durable transaction
+
+Genesis is admissible only when current, previous, and pending are all absent,
+the expected revision is `0`, the expected digest is JSON `null`, the new
+revision is `1`, and `previous_authority_sha256` is JSON `null`. Advancement is
+admissible only from one stable current `ACTIVE` record whose revision and
+complete-record digest equal both caller CAS values. The new revision is
+exactly current plus one, and `previous_authority_sha256` is exactly the digest
+of those reopened current bytes. At revision greater than `1`, the retained
+previous file must be the exact revision-minus-one record named by the current
+record's predecessor digest. Revision skips, rollback, a digest-only match,
+same-revision different bytes, an absent or substituted predecessor, or a
+`REVOKED` current record fails closed.
+
+A stable revision `1` has previous absent. A stable revision greater than `1`
+has the exact revision-minus-one previous record described above. The only
+recoverable pending states are exact prefixes of the durable order below. For
+pending genesis revision `1`, current and previous are absent, or current is
+already byte-identical to pending and previous is absent. For pending
+advancement from revision `k` to `k + 1`, the exact `ACTIVE` predecessor is
+current and previous is its stable predecessor (absent when `k == 1`), current
+and previous are both byte-identical copies of that predecessor after
+retention, or current is byte-identical to pending and previous is the exact
+predecessor. No other three-record combination is a transaction prefix.
+
+Mutation acquires the existing exclusive registry lock and then the existing
+exclusive workspace lock. While both remain held, it reopens the registered
+repository UUID, stable authority state, installed bundle, complete candidate,
+and CAS; validates the canonical record and predecessor chain; and revalidates
+them immediately before the first durable write. No generation, lease,
+pointer, journal, staged-build, semantic-queue, or decision-store lock or state
+participates.
+
+The exact durable order delegates to `DurableStateRoot.commit_record()`:
+
+1. atomically install and sync the complete candidate bytes as pending;
+2. if current exists, atomically copy and sync its exact bytes as previous;
+3. atomically install and sync the same candidate bytes as current; and
+4. unlink pending and sync the containing directory.
+
+Each current, previous, or pending read and write is capped at 64 KiB. The
+selection envelope remains capped at 16 KiB. The namespace has exactly three
+stable record names and at most one same-directory atomic-replacement temporary
+at a time, so provisioning must preflight and preserve a hard 256 KiB peak for
+these record bytes. Unsafe or unexpected entries, inability to enumerate the
+store-owned authority names, inadequate filesystem reserve, or inability to
+prove the peak fails before pending becomes visible. This fixed provisioning
+bound does not implement or satisfy `SemanticReleaseDecisionStore` capacity/GC
+integration.
+
+### Recovery, idempotency, and stop boundary
+
+Stable reads and read-only recovery projection acquire the existing shared
+registry lock and then the existing shared workspace lock. While both remain
+held, they may inspect all three records but mutate nothing. Both revalidate the
+applicable current/previous/pending snapshot immediately before returning;
+stable read also requires pending absent plus the complete current/previous
+chain. Exact recovery is authorized only while holding
+the same exclusive registry-then-workspace locks and only for the original
+embedded `SELECT_SEMANTIC_RELEASE_POLICY` authorization whose candidate state
+is `ACTIVE` and whose revision/predecessor/body/envelope/record digests remain
+valid against the installed bundle and registered repository.
+
+Recovery may install an exact valid pending genesis only from exact genesis
+absence, install an advancement only from its exact predecessor transaction
+prefix, retain that predecessor as previous, adopt an already-installed
+byte-identical current, and clear pending only after current and previous
+revalidate as the one stable monotonic chain. It validates the original CAS
+against that predecessor and never rebases it onto the candidate current. A
+corrupt, `REVOKED`, foreign, stale, lower-revision, skipped-revision,
+same-revision-different-byte, or otherwise divergent pending record is not
+cleanup authority and remains a blocking recovery condition. Orphan atomic
+temporaries may be removed only by the existing bounded `DurableStateRoot`
+temporary cleanup while the same locks are held and before recovery projection;
+current and previous are never deleted or rewritten as repair.
+
+A replay of the original request and original predecessor CAS whose completed
+current bytes equal the fully reconstructed candidate, whose previous chain is
+exact, and whose pending path is absent returns the same revision and digest
+without a write. This exact completed-outcome check precedes ordinary current
+CAS rejection. Equal semantic choices with different canonical bytes or
+authorization are not idempotent. A failure is an acknowledged no-commit only
+when proven to precede pending visibility. Any fault once pending may be
+visible is `CommitUnknown`; callers must enter exact recovery and must not
+retry from assumed absence or rebase onto newer authority.
+
+The only authorized lifecycle operations are stable read, genesis `ACTIVE`
+selection, monotonic `ACTIVE`-to-`ACTIVE` advancement, read-only recovery
+projection, exact transaction recovery, byte-identical replay, exact pending
+clear after recovery, and bounded orphan-temporary cleanup. Revocation,
+reactivation, rollback, downgrade, arbitrary repair, deletion of current or
+previous, policy-authority GC, public CLI/schema/receipt exposure, ambient or
+automatic policy choice, decision binding, classification composition,
+omission, graph/query projection, provider/backend use, publication,
+implementation, readiness, acceptance, and successor activation are not
+authorized.
+
+P5 and P5B2 remain `IN_PROGRESS`; the accepted trust-root prerequisite remains
+`COMPLETE`. This policy-authority provisioning prerequisite, the encompassing
+release/DLP decision, `SemanticReleaseDecisionStore`, decision-store
+capacity/GC integration, classification composition, omission, projection,
+public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
+remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+
 ## P5B2 semantic-content release/DLP decision
 
 This encompassing proposed unnumbered P5B2 child is contract-frozen only at the
@@ -1934,9 +2096,10 @@ to prove containment rejects release.
 
 ### Operator policy-authority prerequisite
 
-Operator selection is a separate prerequisite owned by a future
-`SemanticReleasePolicyAuthorityStore`, not by this decision child. Its private
-stable paths are:
+Operator selection is the separate
+[policy-authority provisioning prerequisite](#p5b2-semantic-release-policy-authority-provisioning-prerequisite)
+owned by future `SemanticReleasePolicyAuthorityStore`, not by this decision
+child. Its private stable paths are:
 
 - `workspaces/<repository_uuid>/semantic-release-policy-authority.json`;
 - `workspaces/<repository_uuid>/semantic-release-policy-authority.previous.json`;
@@ -1968,14 +2131,17 @@ record bytes and is not stored inside those bytes. No preimage depends on its
 own digest. Reusing the nested five-field authorization with a different body
 therefore cannot reproduce the selected envelope or authority-record digest.
 
-This child only consumes a stable `ACTIVE` current record. It never creates,
-advances, repairs, recovers, revokes, or cleans policy authority. Missing
+This child only consumes a stable `ACTIVE` current record. The separate
+provisioning contract may create or monotonically advance `ACTIVE` records and
+recover only the original exact selection transaction. Neither contract
+authorizes revocation; `REVOKED` remains recognized consumer-side fail-closed
+vocabulary only. This decision child never creates, advances, repairs,
+recovers, revokes, or cleans policy authority. Missing
 current, present pending, divergent current/previous chaining, rollback,
 unknown state or action, invalid authorization, or manifest/policy/profile
 disagreement rejects release. A higher current revision supersedes every older
 record and makes bindings under the older revision historical candidates only.
-Provisioning this prerequisite remains outside this contract freeze, so this
-child remains `WAITING`.
+Provisioning remains separately `WAITING`, so this child remains `WAITING`.
 
 All release-decision objects in this section use the hashed-JSON base encoding
 defined at the top of [`state-contract.md`](state-contract.md): UTF-8 JSON,

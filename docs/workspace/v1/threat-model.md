@@ -498,11 +498,69 @@ decision binding, capacity/GC accounting, omission, projection, new public
 transport, provider/backend, or publication behavior. Acceptance adds none of
 those excluded behaviors and activates no successor.
 
+## Semantic-release policy-authority provisioning threats
+
+This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
+remains `WAITING`. It provisions no live policy authority. The threat boundary
+is the future `SemanticReleasePolicyAuthorityStore`, the exact operator-selected
+structured input, and the three fixed private current/previous/pending records;
+it is not release, decision, projection, provider, or publication authority.
+
+Caller path or byte substitution is excluded because the store alone derives
+canonical record bytes and owns three fixed descriptor-relative no-follow
+mode-`0600` paths beneath the private workspace directory. Each stable record
+is capped at 64 KiB, the authorization envelope at 16 KiB, and the fixed three
+records plus one atomic temporary at a 256 KiB transaction peak. Unexpected
+entries, unsafe links or modes, ambiguous enumeration, insufficient reserve,
+oversized input, or inability to prove the peak fails before pending becomes
+visible.
+
+Policy substitution is contained by independent digest preimages. The body
+digest excludes the authorization envelope and sibling envelope digest; the
+completed envelope binds that body digest to the exact five operator fields and
+sole `SELECT_SEMANTIC_RELEASE_POLICY` action; the sibling hashes the completed
+envelope; and the complete-record digest remains external. Reusing operator
+fields for different policy, coverage, profile, context, revision, predecessor,
+or bundle bytes cannot preserve the same envelope or record digest.
+
+Rollback and fork attacks fail through exact revision/digest CAS,
+revision-plus-one advancement, predecessor-digest chaining, and the retained
+exact revision-minus-one previous record. Genesis is possible only from
+three-path absence.
+Advancement is possible only from stable current `ACTIVE`; same-revision
+different bytes, skips, missing or substituted previous, historical selection,
+and `REVOKED` current all block. `REVOKED` remains recognized so consumers fail
+closed, but selection authority cannot create revocation or reactivation and no
+revocation token exists in this prerequisite.
+
+Read races are contained by shared registry-then-workspace locks and final
+current/previous/pending snapshot revalidation before stable read or read-only
+recovery projection returns; stable read additionally requires pending absent.
+Transaction tearing is contained by the exclusive forms of the same lock pair
+and the existing durable order: pending, previous, current, pending clear.
+Failure after pending may be visible is `CommitUnknown`; exact recovery must
+revalidate the original authorization, installed bundle, candidate, CAS, and
+one monotonic chain. A stale, corrupt, lower, skipped, divergent, foreign, or
+`REVOKED` pending record is not cleanup authority. Only an exact pending
+successor or byte-identical already-current candidate may be adopted and
+cleared. Bounded orphan-temporary cleanup occurs under the same locks before
+recovery projection; current and previous are never deleted or rewritten as
+repair.
+
+Byte-identical completed replay converges without a write; apparently equal
+policy meaning with different canonical bytes or authorization conflicts. No
+ambient default, environment, provider, model, credential, network, live
+catalogue, newest-record enumeration, rollback, repair, GC, or caller-supplied
+path may choose authority. The prerequisite stops before implementation,
+readiness, acceptance, decision binding, classification composition, omission,
+projection, public surfaces, publication, or successor activation.
+
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is contract-frozen only and remains `WAITING`. The trust-root prerequisite
-above is accepted, but operator policy-authority provisioning, decision-store
+above is accepted, but the separately contract-frozen policy-authority
+provisioning prerequisite also remains `WAITING`; decision-store
 capacity/GC integration,
 classification composition, and the other decision prerequisites also remain
 absent. The decision child begins only from the complete
@@ -529,7 +587,9 @@ whose release context and selected-profile coordinates must equal the
 surrounding record exactly. Its digest is bound into both the policy and
 decision request; duplicate, mismatched, unknown, invalid, or `INSUFFICIENT`
 coverage therefore rejects rather than selecting a second interpretation.
-Missing, pending, revoked, rolled-back, or invalid authority rejects. Older
+Missing, pending, revoked, rolled-back, or invalid authority rejects. Neither
+the decision child nor the provisioning prerequisite authorizes revocation or
+reactivation; `REVOKED` is consumer-side fail-closed vocabulary only. Older
 bindings are historical candidates only, and future consumers must name an
 exact generation/request/binding-digest tuple and revalidate the same current
 authority. Enumeration, newest-file selection, and policy shopping cannot

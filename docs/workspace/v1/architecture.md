@@ -205,6 +205,34 @@ omission, projection, new public command/schema/receipt, provider/backend, or
 publication behavior. Its acceptance grants none of those excluded behaviors
 and activates no successor.
 
+The separate internal unnumbered P5B2 semantic-release policy-authority
+provisioning prerequisite is contract-frozen only and remains `WAITING`.
+Future `SemanticReleasePolicyAuthorityStore` owns one per-workspace private
+current/previous/pending record set and reuses the existing canonical durable
+state-record protocol. A closed structured selection call supplies exact
+current revision/digest CAS and policy material; the store validates the
+installed bundle, derives canonical bytes and nonrecursive body/envelope/record digests,
+and may create or advance only state `ACTIVE` under the sole internal action
+`SELECT_SEMANTIC_RELEASE_POLICY`. `REVOKED` remains decodable consumer-side
+fail-closed vocabulary; the prerequisite has no revocation or reactivation
+operation. Stable reads and read-only recovery projections hold the existing
+shared registry lock and then shared workspace lock. Both revalidate the
+applicable current/previous/pending snapshot before returning; stable read also
+requires pending absent and an exact current/previous chain.
+
+Mutation holds exclusive registry then exclusive workspace locks. Genesis is
+revision `1` from three-path absence and revision `0`/digest-null CAS;
+advancement is exactly current plus one and binds the reopened current digest
+as predecessor while retaining exact revision-minus-one previous. The store
+then delegates exact candidate bytes to `DurableStateRoot`: pending, previous,
+current, pending clear. The three capped 64 KiB records plus one atomic
+temporary have a fixed 256 KiB peak. Any uncertainty after pending visibility
+is `CommitUnknown` and permits only exact original-transaction recovery under
+the same locks. Byte-identical completed replay is no-write; divergent or
+`REVOKED` state blocks. The architecture adds no lease, generation, pointer,
+journal, queue, decision-store, public transport, live policy choice, GC,
+implementation, readiness, acceptance, or successor authority.
+
 The encompassing unnumbered P5B2 semantic-content release/DLP decision child is
 contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
 promoted visible-current terminal plus separate implemented and accepted
@@ -217,9 +245,11 @@ The decision request stores only the locked semantic-input byte count and
 SHA-256; it never embeds semantic-input content. Classification uses the exact
 captured bytes, and final locked reread must reproduce both values.
 
-Classification and release policy remain separate authorities. The decision
+Classification, policy provisioning, and the release decision remain separate
+authorities. The decision
 composition consumes but cannot alter or override the repo-owned installed
-trust root above. A separate durable operator policy-authority store selects
+trust root above. The separately contract-frozen but still `WAITING` durable
+operator policy-authority store selects
 one stable current `ACTIVE` revision; older-revision bindings are
 historical candidates only. The authority embeds a closed version-1
 coverage-sufficiency declaration whose release context and exact selected-profile set
@@ -410,6 +440,27 @@ reconciliation before retained desired work is eligible again.
 Each certification file is a separate immutable, store-owned internal record
 binding one generation and certification request to the revalidated queue view
 and exact sealed staged-input manifest.
+
+The contract-frozen but still `WAITING` policy-authority provisioning
+prerequisite reserves only this fixed external workspace namespace:
+
+```text
+<external_state_root>/workspaces/<repo_uuid>/
+  semantic-release-policy-authority.json
+  semantic-release-policy-authority.previous.json
+  semantic-release-policy-authority.pending.json
+```
+
+All three names contain the same canonical internal authority-record format;
+pending is the exact candidate, not a separate intent schema. The future store
+alone constructs those bytes from closed structured input and owns recovery.
+Existing shared registry-before-workspace locking stabilizes reads and
+read-only recovery projection; the exclusive pair serializes mutation and the
+fixed 256 KiB peak. Stable read never recovers; exact recovery may finish
+only the original `ACTIVE` selection transaction. This namespace does not
+create a public record, receipt, lifecycle journal, decision binding, or live
+policy and does not authorize revocation, reactivation, rollback, arbitrary
+repair, deletion, or GC.
 
 The accepted host-agent worker uses this private staging
 layout relative to the configured external state root:
