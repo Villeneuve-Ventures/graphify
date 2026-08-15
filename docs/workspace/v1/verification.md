@@ -1183,8 +1183,8 @@ exact-tree-bound to pre-edit commit
 worktree, and zero open pull requests. PR #66 has nine resolved threads; PR #67
 has one resolved thread; PR #68 has 75 threads, of which 41 are resolved and 34
 remain UI-unresolved (27 current and seven outdated); PR #69 has no thread. All
-34 unresolved PR #68 threads were independently dispositioned against the PR
-#69 repaired canonical tree without mutating GitHub. Exact-head and post-merge
+34 unresolved PR #68 threads were independently dispositioned against the
+PR #69 repaired canonical tree without mutating GitHub. Exact-head and post-merge
 CI runs for PRs #66-#69 passed `skillgen-check`, `test (3.14)`, and
 `security-scan`, as bound in the receipt. The generated Graphify report remains
 stale orientation from `91a34b4b2b83f54fa5f94b8f3c09f62c3f631603` and is
@@ -1286,8 +1286,8 @@ selects exactly one physical or PEP 610 editable owner, uses a fresh package-ext
 pycache prefix, and ignores package-local timestamp-valid hostile bytecode.
 Ordinary public console entry points remain cross-platform and outside this
 authority. The receipt binds the complete command results, deterministic
-two-candidate artifact proof, all 34 unresolved-thread dispositions, and the PR
-#69 C1 repair. Delivery alone did not grant acceptance; this separate staged
+two-candidate artifact proof, all 34 unresolved-thread dispositions, and the
+PR #69 C1 repair. Delivery alone did not grant acceptance; this separate staged
 governance closeout proposes it.
 
 P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP
