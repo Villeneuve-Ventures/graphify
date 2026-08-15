@@ -1158,25 +1158,37 @@ networking, migrate, repair, GC, service/watch, publication, P5C, H3, P6+,
 parent completion, execution, or later-successor readiness. P5 and P5B2 remain
 `IN_PROGRESS`; H3 remains `DEFERRED`; this child alone transitions from `READY`
 to `COMPLETE`; remaining P5B2 and P5C work remained `WAITING` and no later
-successor was `READY` at that acceptance point. The separate current trust-root
-eligibility below does not expand or reopen the accepted promotion boundary.
+successor was `READY` at that acceptance point. The separately accepted current
+trust-root boundary below does not expand or reopen the accepted promotion
+boundary.
 
-## P5B2 semantic-release bundle and deterministic-classifier trust-root readiness gates
+## P5B2 semantic-release bundle and deterministic-classifier trust-root acceptance gates
 
-This reconciliation records the current unnumbered P5B2 semantic-release bundle
-and deterministic-classifier trust-root implementation candidate. It proves no
-acceptance, receipt, content-release, publication, successor authority, or
-broader release/DLP decision.
+This reconciliation accepts the unnumbered P5B2 semantic-release bundle and
+deterministic-classifier trust-root only at the frozen boundary below.
+Completion evidence is the
+[P5B2 semantic-release trust-root acceptance receipt](receipts/p5b2-semantic-release-trust-root.md).
+Acceptance proves no content-release, publication, execution, parent completion,
+successor authority, or broader release/DLP decision.
 
-The prior readiness reconciliation is exact-head-bound to pre-edit
-`workspace/v1` commit `d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
-`904a91047bcdbaae724d9688c586ec88fd3198f7`, clean divergence `0/0`, one
-worktree, and zero open pull requests. PR #66 head
-`772fd8809f6784c9cc859dcc654bfcdf873df40f` and merge/current commit have the
-same tree; all nine review threads are resolved; exact-head CI run `31519403573`
-and post-merge CI run `31521042681` passed `skillgen-check`, `test (3.14)`, and
-`security-scan`. The generated Graphify report remains stale orientation from
-`2ab6a4060a2c132b89e79dcd21a12292b69f2b89` and is not readiness authority.
+The readiness reconciliation was staged against `workspace/v1` commit
+`d2839bb3c2c155cd707694819ae06538d4ec9dd3`, tree
+`904a91047bcdbaae724d9688c586ec88fd3198f7`, and published as PR #67 head
+`5542c97ed0c69a53ea540968fae1725e34e9663a`, merge
+`daa3b695db24022f2fbefd1dbee2cdbc46777286`, tree
+`1acb80abbdae531304362e2c918ade657c9a3e45`. The acceptance preflight is
+exact-tree-bound to pre-edit commit
+`01bc19cbb5e275fe0a63e5af278cbee663f218f5`, tree
+`9e3cae64d53165145bbeab0cb6a1402509f041e3`, clean divergence `0/0`, one
+worktree, and zero open pull requests. PR #66 has nine resolved threads; PR #67
+has one resolved thread; PR #68 has 75 threads, of which 41 are resolved and 34
+remain UI-unresolved (27 current and seven outdated); PR #69 has no thread. All
+34 unresolved PR #68 threads were independently dispositioned against the
+PR #69 repaired canonical tree without mutating GitHub. Exact-head and post-merge
+CI runs for PRs #66-#69 passed `skillgen-check`, `test (3.14)`, and
+`security-scan`, as bound in the receipt. The generated Graphify report remains
+stale orientation from `91a34b4b2b83f54fa5f94b8f3c09f62c3f631603` and is
+not acceptance authority.
 
 The trust-root subchild is independently implementable only because the
 canonical semantic contract freezes all of these gates without consulting or
@@ -1257,32 +1269,45 @@ inventing operator policy or decision-store behavior:
   omission, project content, add a new public CLI/schema/receipt, invoke a
   provider/backend, or publish.
 
-A later acceptance review must prove positive and hostile
-installed-manifest fixtures, every no-follow/path/mode/size/digest rejection, byte-exact
-cross-run classifier vectors, taxonomy/profile identity separation, duplicate
-or mismatched kind-specific coordinates, profile ID/version/suffix disagreement,
+The exact-tree acceptance audit proved positive and hostile installed-manifest
+fixtures, every no-follow/path/mode/size/digest rejection, byte-exact cross-run
+classifier vectors, taxonomy/profile identity separation, duplicate or
+mismatched kind-specific coordinates, profile ID/version/suffix disagreement,
 `core_secrets.v1` category behavior, limit rejection, and absence of ambient or
-workspace authority reads. Those are acceptance gates; delivery of the candidate
-does not itself grant acceptance.
+workspace authority reads. It additionally proved that the installed manifest
+inventories exactly seven artifacts, binds the current classifier source bytes,
+and returns only after manifest, artifact, inventory, descriptor, and path
+revalidation; that structural caps apply before `json.loads`; and that pinned
+rule documents are rejected before unsupported regex compilation.
+
+Installed-executable coverage proves the private POSIX shell/Python bootstrap
+executes `-BEPsS` before Python startup hooks, real-path deduplicates all owners,
+selects exactly one physical or PEP 610 editable owner, uses a fresh package-external
+pycache prefix, and ignores package-local timestamp-valid hostile bytecode.
+Ordinary public console entry points remain cross-platform and outside this
+authority. The receipt binds the complete command results, deterministic
+two-candidate artifact proof, all 34 unresolved-thread dispositions, and the
+PR #69 C1 repair. Delivery alone did not grant acceptance; this separate staged
+governance closeout proposes it.
 
 P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP
 decision, policy-authority provisioning, `SemanticReleaseDecisionStore`,
 capacity/GC integration, classification composition, omission execution,
 projection, public surfaces, provider/backend, publication, remaining P5B2
 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
-`READY`.
+`READY`. Only the trust-root prerequisite transitions to `COMPLETE`.
 
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
-remains `WAITING`. It consumes the trust-root contract above but cannot become
-`READY` until that prerequisite is separately accepted and its operator-policy,
-decision-store, capacity/GC, and composition prerequisites exist. The freeze is
+remains `WAITING`. It consumes the accepted trust-root contract above but cannot
+become `READY` until its operator-policy, decision-store, capacity/GC, and
+composition prerequisites exist. The freeze is
 complete only when all seven maintained-current documents agree and the diff
 changes no code, tests, schemas, fixtures, receipts, generated Graphify output,
 JOS row, or runtime artifact:
 
-- `README.md` indexes the trust-root implementation candidate separately from
+- `README.md` indexes the accepted trust-root prerequisite separately from
   the encompassing `WAITING` decision child and preserves parent/successor
   status;
 - `architecture.md` keeps the repo-owned deterministic classifier separate from
@@ -1292,10 +1317,10 @@ JOS row, or runtime artifact:
   capture/revalidation/install sequence, replay, and commit-unknown behavior;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66 provenance, the trust-root prerequisite
-  as pending acceptance, and the encompassing child as `WAITING`; and
-- this file freezes the evidence and validation gates without creating an
-  acceptance receipt.
+- `governance.md` records exact PR #66-#69 provenance, the trust-root
+  prerequisite as `COMPLETE`, and the encompassing child as `WAITING`; and
+- this file freezes the evidence and validation gates while the separate receipt
+  remains `STAGED` pending publication and merge.
 
 Contract review must prove each of the following:
 
@@ -1468,8 +1493,8 @@ output is not refreshed because no code changes and this batch expressly
 excludes generated artifacts.
 
 Passing those gates establishes only documentation consistency. It leaves P5
-and P5B2 `IN_PROGRESS` and records the trust-root prerequisite as pending
-acceptance. The encompassing decision child,
+and P5B2 `IN_PROGRESS`; the separately accepted trust-root prerequisite remains
+`COMPLETE`. The encompassing decision child,
 operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, and remaining P5B2/P5C work

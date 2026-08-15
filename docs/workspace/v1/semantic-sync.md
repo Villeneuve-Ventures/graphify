@@ -1754,16 +1754,20 @@ completion, execution authority, and later-successor readiness are explicitly
 excluded. P5 and P5B2 remain `IN_PROGRESS`; H3 remains `DEFERRED`; this child
 alone transitions from `READY` to `COMPLETE`; remaining P5B2 work and P5C work
 remained `WAITING` and no later successor was `READY` at that acceptance point.
-The separate current trust-root implementation candidate recorded below does
-not expand or reopen this accepted boundary.
+The separately accepted trust-root prerequisite recorded below does not expand
+or reopen this accepted boundary.
 
 ## P5B2 semantic-release bundle and deterministic-classifier trust-root
 
-This separate unnumbered P5B2 prerequisite subchild is an implementation
-candidate pending acceptance. It has no acceptance receipt, completion,
-content-release, publication, or successor authority. Its entire scope is the
-repo-owned installed package-data trust root plus the existing installed
-executable bootstrap needed to establish that root before Graphify imports:
+This separate unnumbered P5B2 prerequisite subchild is implemented and accepted
+only at this frozen boundary. Its
+[acceptance receipt](receipts/p5b2-semantic-release-trust-root.md) binds the
+exact PR #66 contract freeze, PR #67 readiness reconciliation, PR #68
+implementation, and PR #69 C1-control repair. It has no content-release,
+publication, execution, parent-completion, or successor authority. Its entire
+scope is the repo-owned installed package-data trust root plus the existing
+installed executable bootstrap needed to establish that root before Graphify
+imports:
 
 - `graphify/workspace/semantic_release_manifest.json`;
 - the manifest-inventoried deterministic classifier implementation and
@@ -1788,7 +1792,7 @@ executable bootstrap needed to establish that root before Graphify imports:
 
 The manifest and referenced artifacts are never caller, workspace, operator,
 provider, backend, model, credential, network, environment, or policy input.
-This candidate does not self-authenticate the instructions that establish its
+This accepted subchild does not self-authenticate the instructions that establish its
 first import boundary. The CPython executable and standard library, an
 installer that verifies the selected wheel and its `RECORD`, the installed
 source-executed bootstrap bytes, and post-install filesystem protection of the
@@ -1819,7 +1823,7 @@ and
 Those requirements belong to this prerequisite even though the encompassing
 decision child composes their eventual implementation.
 
-This subchild may implement only installed-bundle loading and validation, the
+This subchild implements only installed-bundle loading and validation, the
 manifest-bound deterministic factual classifier over explicit,
 already-canonical bounded UTF-8 bytes, and the existing installed executable
 bootstrap needed to start Python under isolation flags, set a fresh
@@ -1835,19 +1839,19 @@ reduction, omission execution, projection, new public CLI/schema/receipt
 surfaces, provider/backend behavior, publication, and every broader release/DLP
 decision.
 
-P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content
-release/DLP decision child, remaining P5B2 work, and P5C remain `WAITING`; H3
-remains `DEFERRED`; no later successor is `READY`. This implementation
-candidate records only that the bounded internal prerequisite can be reviewed
-without inventing operator-policy provisioning or decision-store behavior.
+P5 and P5B2 remain `IN_PROGRESS`; only this trust-root prerequisite is
+`COMPLETE`. The encompassing semantic-content release/DLP decision child,
+remaining P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later
+successor is `READY`. Acceptance is limited to the bounded internal prerequisite
+and invents no operator-policy provisioning or decision-store behavior.
 
 ## P5B2 semantic-content release/DLP decision
 
 This encompassing proposed unnumbered P5B2 child is contract-frozen only at the
 private internal decision boundary in this section. It remains `WAITING`, not
 `READY` or `COMPLETE`, and has no implementation or acceptance receipt. It
-depends on separate acceptance of the trust-root implementation candidate above,
-stable operator policy-authority provisioning, decision-store
+consumes the accepted trust-root prerequisite above but still depends on stable
+operator policy-authority provisioning, decision-store
 capacity and GC integration, classification composition, and every other
 prerequisite named below. The freeze grants no execution authority and changes
 no parent phase, accepted receipt, JOS row, or later-successor status.
@@ -2504,8 +2508,8 @@ installation, performance/resource qualification, P5C, H3, P6+, parent completio
 implementation of the encompassing child, its readiness, acceptance, execution,
 or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
-trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root
-prerequisite remains pending acceptance. This encompassing child, operator
+trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; only the separate
+trust-root prerequisite is accepted `COMPLETE`. This encompassing child, operator
 policy-authority provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration, classification
 composition, omission execution, projection, public CLI/schema/receipt,

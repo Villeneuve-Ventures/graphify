@@ -178,7 +178,9 @@ schema, runtime receipt, content release, or graph/query projection. Its
 acceptance changes no parent phase and activates no later successor.
 
 The unnumbered P5B2 semantic-release bundle and deterministic-classifier
-trust-root prerequisite is an implementation candidate pending acceptance. Its
+trust-root prerequisite is implemented and accepted only at the frozen
+boundary recorded in the
+[acceptance receipt](receipts/p5b2-semantic-release-trust-root.md). Its
 architecture remains repo-owned installed package data plus the existing
 installed executable bootstrap: one canonical manifest inventories and
 digest-binds the deterministic classifier implementation, byte-defined ABI,
@@ -200,7 +202,8 @@ produces only factual `NO_MATCH`, `MATCH`, or `INDETERMINATE` results over
 explicit already-canonical bounded UTF-8 bytes. It owns no workspace policy
 selection, durable state, capacity/GC integration, release disposition,
 omission, projection, new public command/schema/receipt, provider/backend, or
-publication behavior and has no acceptance receipt.
+publication behavior. Its acceptance grants none of those excluded behaviors
+and activates no successor.
 
 The encompassing unnumbered P5B2 semantic-content release/DLP decision child is
 contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
@@ -254,8 +257,8 @@ runtime receipts do not become release authority. Nonempty decision state
 protects the generation from GC until a separately accepted integration. The
 freeze stops before omission execution, graph construction, projection, query,
 public semantic sync, publication, implementation or readiness of the
-encompassing child, or acceptance. P5 and P5B2 remain `IN_PROGRESS`; the bounded
-trust-root prerequisite remains pending acceptance. Operator policy-authority
+encompassing child, or acceptance. P5 and P5B2 remain `IN_PROGRESS`; only the
+bounded trust-root prerequisite is accepted `COMPLETE`. Operator policy-authority
 provisioning, `SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, the encompassing release/DLP decision, remaining
 P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor

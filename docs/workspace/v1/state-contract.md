@@ -868,15 +868,18 @@ fact grants no content release, DLP, graph/query projection, public semantic
 sync, runtime receipt, provider, networking, repair, GC, publication, execution,
 or later-successor readiness. Parent P5 and P5B2 remain `IN_PROGRESS`, and H3
 remains `DEFERRED`. At that acceptance point remaining P5B2 and P5C work were
-`WAITING`; the separate current trust-root implementation candidate below does
-not expand the accepted promotion boundary.
+`WAITING`; the separately accepted trust-root prerequisite below does not
+expand the accepted promotion boundary.
 
 ## Semantic-release bundle and deterministic-classifier trust-root
 
 The unnumbered P5B2 semantic-release bundle and deterministic-classifier
-trust-root prerequisite is an implementation candidate pending acceptance. It
-owns no external durable-state path, workspace authority, policy selection,
-decision binding, lifecycle transition, public format, or receipt.
+trust-root prerequisite is implemented and accepted only at this frozen
+boundary. Its
+[acceptance receipt](receipts/p5b2-semantic-release-trust-root.md) binds the
+exact PR #66 through PR #69 chain. It owns no external durable-state path,
+workspace authority, policy selection, decision binding, lifecycle transition,
+public format, or runtime receipt.
 
 Its trust root is the repo-owned installed package-data file
 `graphify/workspace/semantic_release_manifest.json`, loaded through
@@ -949,7 +952,8 @@ maps them to policy dispositions. This internal boundary is independently
 implementable without `SemanticReleasePolicyAuthorityStore`,
 `SemanticReleaseDecisionStore`, capacity/GC integration, semantic-input
 composition, omission, projection, new public CLI/schema/receipt,
-provider/backend, or publication behavior. It has no acceptance receipt yet.
+provider/backend, or publication behavior. Acceptance adds none of those
+excluded authorities and activates no successor.
 
 ## Semantic-content release/DLP decision
 
@@ -976,10 +980,9 @@ One coordinate alone, a historical promoted generation, or drift is never
 decision authority.
 
 The decision child consumes the exact installed bundle contract above; it does
-not own or weaken that trust root. Because the trust-root subchild is only an
-implementation candidate pending acceptance, the encompassing decision child
-remains `WAITING` even before its separate policy and persistence prerequisites
-are considered.
+not own or weaken that trust root. The trust-root subchild is accepted, but the
+encompassing decision child remains `WAITING` because its separate policy,
+persistence, capacity/GC, and composition prerequisites are absent.
 
 The separate future `SemanticReleasePolicyAuthorityStore` owns these private
 stable paths:
@@ -1167,7 +1170,8 @@ selection, networking, public/runtime schemas or receipts, status, repair,
 migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
 implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
-`IN_PROGRESS`; the separate trust-root prerequisite remains pending acceptance.
+`IN_PROGRESS`; only the separate trust-root prerequisite is accepted
+`COMPLETE`.
 This decision child, operator policy-authority provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, omission execution, projection, public
