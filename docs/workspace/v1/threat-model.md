@@ -500,9 +500,10 @@ those excluded behaviors and activates no successor.
 
 ## Semantic-release policy-authority provisioning threats
 
-This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
-remains `WAITING`. It provisions no live policy authority. The threat boundary
-is the future `SemanticReleasePolicyAuthorityStore`, the exact operator-selected
+This separate internal unnumbered P5B2 prerequisite has one private
+implementation candidate and remains `IN_PROGRESS`, not `READY` or `COMPLETE`.
+It provisions no live policy authority. The threat boundary is
+`SemanticReleasePolicyAuthorityStore`, the exact operator-selected
 structured input, and the three fixed private current/previous/pending records;
 it is not release, decision, projection, provider, or publication authority.
 
@@ -551,16 +552,16 @@ Byte-identical completed replay converges without a write; apparently equal
 policy meaning with different canonical bytes or authorization conflicts. No
 ambient default, environment, provider, model, credential, network, live
 catalogue, newest-record enumeration, rollback, repair, GC, or caller-supplied
-path may choose authority. The prerequisite stops before implementation,
-readiness, acceptance, decision binding, classification composition, omission,
+path may choose authority. The prerequisite stops before readiness, acceptance,
+decision binding, classification composition, omission,
 projection, public surfaces, publication, or successor activation.
 
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is contract-frozen only and remains `WAITING`. The trust-root prerequisite
-above is accepted, but the separately contract-frozen policy-authority
-provisioning prerequisite also remains `WAITING`; decision-store
+above is accepted, but the separately implemented policy-authority provisioning
+prerequisite remains `IN_PROGRESS` and unaccepted; decision-store
 capacity/GC integration,
 classification composition, and the other decision prerequisites also remain
 absent. The decision child begins only from the complete
@@ -707,8 +708,9 @@ binding; and revalidates every entry, authority, input, result, and binding
 coordinate before releasing the locks.
 
 P5 and P5B2 remain `IN_PROGRESS`; only the trust-root prerequisite is accepted
-`COMPLETE`. The encompassing release/DLP decision,
-operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
+`COMPLETE`, and the policy-authority implementation candidate remains
+`IN_PROGRESS`. The encompassing release/DLP decision, live operator-policy
+selection/provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.

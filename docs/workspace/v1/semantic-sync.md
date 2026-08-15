@@ -1847,16 +1847,16 @@ and invents no operator-policy provisioning or decision-store behavior.
 
 ## P5B2 semantic-release policy-authority provisioning prerequisite
 
-This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
-remains `WAITING`, not `READY` or `COMPLETE`. It owns the future provisioning
-mechanism for the policy-authority record consumed by the encompassing decision
-child; it does not provision a live record in this freeze. No release context,
-profile set, coverage-sufficiency value, category-disposition mapping, policy
-bytes, or operator record is selected here.
+This separate internal unnumbered P5B2 prerequisite has one bounded private
+implementation candidate and remains `IN_PROGRESS`, not `READY` or `COMPLETE`.
+It owns the provisioning mechanism for the policy-authority record consumed by
+the encompassing decision child; this candidate does not provision a live
+record. No release context, profile set, coverage-sufficiency value,
+category-disposition mapping, policy bytes, or operator record is selected here.
 
 ### Store ownership and canonical selection input
 
-Future `SemanticReleasePolicyAuthorityStore` is the sole owner of these three
+`SemanticReleasePolicyAuthorityStore` is the sole owner of these three
 private mode-`0600` stable files beneath the existing mode-`0700` workspace
 directory:
 
@@ -1880,7 +1880,7 @@ The store validates the installed trust-root bundle and derives every record
 field and digest itself. The selected profiles must be unique, canonically
 ordered, and byte-equal to manifest entries; the coverage declaration must
 equal the supplied release context and profile set; the policy must bind that
-declaration and its exact pair-disposition mapping. The future caller chooses
+declaration and its exact pair-disposition mapping. The caller chooses
 those values under separate operator authority; this contract chooses none.
 Unknown, additional, omitted, duplicated, incompatible, or noncanonical input,
 or reordering of an order-sensitive normative array, including
@@ -1997,12 +1997,13 @@ reactivation, rollback, downgrade, arbitrary repair, deletion of current or
 previous, policy-authority GC, public CLI/schema/receipt exposure, ambient or
 automatic policy choice, decision binding, classification composition,
 omission, graph/query projection, provider/backend use, publication,
-implementation, readiness, acceptance, and successor activation are not
+readiness, acceptance, and successor activation are not
 authorized.
 
 P5 and P5B2 remain `IN_PROGRESS`; the accepted trust-root prerequisite remains
-`COMPLETE`. This policy-authority provisioning prerequisite, the encompassing
-release/DLP decision, `SemanticReleaseDecisionStore`, decision-store
+`COMPLETE`, and this policy-authority provisioning prerequisite remains
+`IN_PROGRESS`. The encompassing release/DLP decision,
+`SemanticReleaseDecisionStore`, decision-store
 capacity/GC integration, classification composition, omission, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
@@ -2098,7 +2099,7 @@ to prove containment rejects release.
 
 Operator selection is the separate
 [policy-authority provisioning prerequisite](#p5b2-semantic-release-policy-authority-provisioning-prerequisite)
-owned by future `SemanticReleasePolicyAuthorityStore`, not by this decision
+owned by `SemanticReleasePolicyAuthorityStore`, not by this decision
 child. Its private stable paths are:
 
 - `workspaces/<repository_uuid>/semantic-release-policy-authority.json`;
@@ -2141,7 +2142,8 @@ current, present pending, divergent current/previous chaining, rollback,
 unknown state or action, invalid authorization, or manifest/policy/profile
 disagreement rejects release. A higher current revision supersedes every older
 record and makes bindings under the older revision historical candidates only.
-Provisioning remains separately `WAITING`, so this child remains `WAITING`.
+The provisioning implementation candidate remains separately `IN_PROGRESS`
+and unaccepted, while this decision child remains `WAITING`.
 
 All release-decision objects in this section use the hashed-JSON base encoding
 defined at the top of [`state-contract.md`](state-contract.md): UTF-8 JSON,
@@ -2675,8 +2677,9 @@ implementation of the encompassing child, its readiness, acceptance, execution,
 or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
 trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; only the separate
-trust-root prerequisite is accepted `COMPLETE`. This encompassing child, operator
-policy-authority provisioning,
+trust-root prerequisite is accepted `COMPLETE`. The policy-authority
+implementation candidate remains `IN_PROGRESS`. This encompassing child, live
+operator policy selection/provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration, classification
 composition, omission execution, projection, public CLI/schema/receipt,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;

@@ -1290,22 +1290,24 @@ two-candidate artifact proof, all 34 unresolved-thread dispositions, and the
 PR #69 C1 repair. Delivery alone did not grant acceptance; this separate staged
 governance closeout proposes it.
 
-P5 and P5B2 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP
-decision, policy-authority provisioning, `SemanticReleaseDecisionStore`,
+P5 and P5B2 remain `IN_PROGRESS`; the policy-authority provisioning candidate
+also remains `IN_PROGRESS`. The encompassing semantic-content release/DLP
+decision, `SemanticReleaseDecisionStore`,
 capacity/GC integration, classification composition, omission execution,
 projection, public surfaces, provider/backend, publication, remaining P5B2
 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
 `READY`. Only the trust-root prerequisite transitions to `COMPLETE`.
 
-## P5B2 semantic-release policy-authority provisioning contract-freeze gates
+## P5B2 semantic-release policy-authority provisioning implementation gates
 
-This separate internal unnumbered P5B2 prerequisite is documentation-only and
-remains `WAITING`, not `READY` or `COMPLETE`. The freeze is valid only when all
-seven maintained-current documents agree that no live policy authority is
-selected or provisioned and no implementation, schema, test, receipt, package,
-generated, GitHub, branch, or publication state changes.
+This separate internal unnumbered P5B2 prerequisite has one bounded private
+implementation candidate and remains `IN_PROGRESS`, not `READY` or `COMPLETE`.
+The candidate is valid only when all seven maintained-current documents agree
+that no live policy authority is selected or provisioned and no public schema,
+receipt, package-data record, generated Graphify output, live state, or
+publication surface is added.
 
-The frozen provisioning contract requires future direct tests to prove:
+The frozen provisioning contract requires direct tests to prove:
 
 - only `SemanticReleasePolicyAuthorityStore` owns the exact private current,
   previous, and pending paths; callers cannot choose paths or supply encoded
@@ -1315,7 +1317,7 @@ The frozen provisioning contract requires future direct tests to prove:
   and complete-record digest, release context, installed bundle digest,
   selected profile coordinates, coverage declaration, policy ID/version/object,
   and the five existing operator fields. No live value is chosen by this
-  freeze;
+  candidate;
 - ambient defaults, environment variables, provider/model/credential input,
   network input, live catalogues, newest-record enumeration, newest-file
   selection, and policy shopping cannot source or select authority and must
@@ -1373,9 +1375,13 @@ The frozen provisioning contract requires future direct tests to prove:
   graph/query projection, public transport, provider/backend, publication,
   readiness, acceptance, and successor activation remain absent.
 
-Because this is a contract freeze, existing tests prove predecessor and
-trust-root non-regression only; they are not implementation or readiness
-evidence for `SemanticReleasePolicyAuthorityStore`. The focused commands are:
+The candidate's focused store tests are:
+
+```bash
+uv run --frozen pytest tests/test_workspace_semantic_release_policy.py -q --tb=short
+```
+
+The predecessor and trust-root non-regression commands are:
 
 ```bash
 uv run --frozen --all-extras pytest -q \
@@ -1391,18 +1397,20 @@ uv run --frozen --all-extras pytest -q \
   tests/test_workspace_semantic_release.py
 ```
 
-The freeze additionally requires `uv lock --check`,
+The implementation candidate additionally requires `uv lock --check`,
 `uv run --frozen python -m tools.skillgen --check`,
 `uv run --frozen pre-commit run --all-files`,
 `uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, an audit of
 relative links and heading anchors across all seven changed documents, the
-documentation-diff advisory audit, an exact seven-file Markdown manifest, and
-an independent exact-diff documentation review. Generated Graphify output is
-not refreshed because the batch changes no code and expressly excludes it.
+documentation-diff advisory audit, an exact changed-file manifest, and an
+independent exact-diff code, security, persistence, and documentation review.
+`graphify update .` refreshes the working graph after code changes, but generated
+Graphify output remains outside the implementation commit.
 
-Passing these gates establishes documentation consistency only. P5 and P5B2
-remain `IN_PROGRESS`; the trust-root prerequisite remains `COMPLETE`. This
-provisioning prerequisite, the encompassing release/DLP decision,
+Passing these gates establishes an implementation candidate only, not readiness
+or acceptance. P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite
+remains `COMPLETE`, and this provisioning prerequisite remains `IN_PROGRESS`.
+The encompassing release/DLP decision,
 `SemanticReleaseDecisionStore`, decision-store capacity/GC, classification
 composition, omission, projection, public surfaces, provider/backend,
 publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
@@ -1412,8 +1420,8 @@ publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
 remains `WAITING`. It consumes the accepted trust-root contract above; the
-separately frozen policy-authority provisioning prerequisite also remains
-`WAITING`. This child cannot become `READY` until its operator-policy,
+separately implemented policy-authority provisioning prerequisite remains
+`IN_PROGRESS` and unaccepted. This child cannot become `READY` until its operator-policy,
 decision-store, capacity/GC, and
 composition prerequisites exist. The freeze is
 complete only when all seven maintained-current documents agree and the diff
@@ -1607,8 +1615,9 @@ excludes generated artifacts.
 
 Passing those gates establishes only documentation consistency. It leaves P5
 and P5B2 `IN_PROGRESS`; the separately accepted trust-root prerequisite remains
-`COMPLETE`. The encompassing decision child,
-operator-policy provisioning, `SemanticReleaseDecisionStore`, capacity/GC
+`COMPLETE`; the policy-authority implementation candidate remains
+`IN_PROGRESS`. The encompassing decision child, live operator-policy
+selection/provisioning, `SemanticReleaseDecisionStore`, capacity/GC
 integration, classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, and remaining P5B2/P5C work
 remain `WAITING`; H3 remains `DEFERRED`,
