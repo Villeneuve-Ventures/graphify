@@ -107,6 +107,20 @@ class SemanticReleasePolicyAuthorityRecoveryRequired(StateRecoveryRequired):
 
 
 def _plain_string(value: object, label: str, *, trimmed: bool = True) -> str:
+    """
+    Validate and return a non-empty Unicode string.
+    
+    Parameters:
+        value (object): Value to validate.
+        label (str): Label used in validation errors.
+        trimmed (bool): Whether leading and trailing whitespace are rejected.
+    
+    Returns:
+        str: The validated string.
+    
+    Raises:
+        SemanticReleasePolicyAuthorityInvalid: If the value is not a valid non-empty string, is not trimmed when required, is not NFC-normalized, or contains a Unicode surrogate.
+    """
     if type(value) is not str or not value:
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} must be a non-empty string")
     text = cast(str, value)
@@ -120,6 +134,16 @@ def _plain_string(value: object, label: str, *, trimmed: bool = True) -> str:
 
 
 def _identifier(value: object, label: str) -> str:
+    """
+    Validate and return an identifier string within the authority namespace limits.
+    
+    Parameters:
+    	value (object): Value to validate as an identifier.
+    	label (str): Label used in validation error messages.
+    
+    Returns:
+    	str: The validated identifier.
+    """
     text = _plain_string(value, label)
     if len(text.encode("utf-8")) > POLICY_AUTHORITY_MAX_IDENTIFIER_BYTES:
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} exceeds 256 UTF-8 bytes")
@@ -131,18 +155,58 @@ def _identifier(value: object, label: str) -> str:
 
 
 def _positive_integer(value: object, label: str) -> int:
+    """
+    Validate and return a positive integer.
+    
+    Parameters:
+    	value (object): The value to validate.
+    	label (str): The field label used in the validation error.
+    
+    Returns:
+    	int: The validated positive integer.
+    
+    Raises:
+    	SemanticReleasePolicyAuthorityInvalid: If the value is not an integer greater than zero.
+    """
     if type(value) is not int or cast(int, value) < 1:
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} must be a positive integer")
     return cast(int, value)
 
 
 def _nonnegative_integer(value: object, label: str) -> int:
+    """
+    Validate and return a nonnegative integer value.
+    
+    Parameters:
+    	value (object): The value to validate.
+    	label (str): The label used in the validation error message.
+    
+    Returns:
+    	int: The validated nonnegative integer.
+    
+    Raises:
+    	SemanticReleasePolicyAuthorityInvalid: If the value is not an integer greater than or equal to zero.
+    """
     if type(value) is not int or cast(int, value) < 0:
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} must be a nonnegative integer")
     return cast(int, value)
 
 
 def _sha256(value: object, label: str, *, allow_none: bool = False) -> str | None:
+    """
+    Validate a SHA-256 digest string.
+    
+    Parameters:
+    	value (object): Value to validate.
+    	label (str): Field name used in validation errors.
+    	allow_none (bool): Whether `None` is accepted.
+    
+    Returns:
+    	str | None: The validated digest, or `None` when allowed and provided.
+    
+    Raises:
+    	SemanticReleasePolicyAuthorityInvalid: If the value is not a lowercase 64-character hexadecimal digest or an allowed `None`.
+    """
     if value is None and allow_none:
         return None
     if type(value) is not str or _SHA256_RE.fullmatch(cast(str, value)) is None:
@@ -153,6 +217,15 @@ def _sha256(value: object, label: str, *, allow_none: bool = False) -> str | Non
 
 
 def _repo_uuid(value: object) -> str:
+    """
+    Validate and return a canonical repository UUID.
+    
+    Parameters:
+        value (object): Value to validate as a repository UUID.
+    
+    Returns:
+        str: The canonical repository UUID.
+    """
     text = _plain_string(value, "repo_uuid")
     try:
         canonical = str(UUID(text))
@@ -164,6 +237,16 @@ def _repo_uuid(value: object) -> str:
 
 
 def _exact_members(value: Mapping[str, object], expected: set[str], label: str) -> None:
+    """Validate that a mapping contains exactly the expected member names.
+    
+    Parameters:
+    	value (Mapping[str, object]): Mapping whose keys are checked.
+    	expected (set[str]): Required set of member names.
+    	label (str): Label used in the validation error message.
+    
+    Raises:
+    	SemanticReleasePolicyAuthorityInvalid: If the mapping keys differ from the expected set.
+    """
     if set(value) != expected:
         raise SemanticReleasePolicyAuthorityInvalid(
             f"{label} members must be exactly {', '.join(sorted(expected))}"
@@ -171,18 +254,55 @@ def _exact_members(value: Mapping[str, object], expected: set[str], label: str) 
 
 
 def _mapping(value: object, label: str) -> dict[str, object]:
+    """
+    Validate and return a plain string-keyed mapping.
+    
+    Parameters:
+        value (object): Value to validate.
+        label (str): Name used in the validation error.
+    
+    Returns:
+        dict[str, object]: The validated mapping.
+    
+    Raises:
+        SemanticReleasePolicyAuthorityInvalid: If the value is not a dictionary with string keys.
+    """
     if type(value) is not dict or any(type(key) is not str for key in cast(dict[Any, Any], value)):
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} must be a plain object")
     return cast(dict[str, object], value)
 
 
 def _array(value: object, label: str) -> list[object]:
+    """Validate and return a value as a list.
+    
+    Parameters:
+        value (object): The value to validate.
+        label (str): The field label used in the validation error.
+    
+    Returns:
+        list[object]: The validated list.
+    
+    Raises:
+        SemanticReleasePolicyAuthorityInvalid: If `value` is not a list.
+    """
     if type(value) is not list:
         raise SemanticReleasePolicyAuthorityInvalid(f"{label} must be an array")
     return cast(list[object], value)
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """
+    Builds a mapping from JSON object pairs while rejecting duplicate keys.
+    
+    Parameters:
+    	pairs (list[tuple[str, object]]): Key-value pairs to combine.
+    
+    Returns:
+    	dict[str, object]: A mapping containing each key and its associated value.
+    
+    Raises:
+    	SemanticReleasePolicyAuthorityInvalid: If a key appears more than once.
+    """
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -196,6 +316,18 @@ def _reject_json_constant(value: str) -> object:
 
 
 def _parse_json_integer(value: str) -> int:
+    """
+    Convert a JSON integer string to an integer.
+    
+    Parameters:
+    	value (str): The JSON integer representation to convert.
+    
+    Returns:
+    	int: The converted integer.
+    
+    Raises:
+    	SemanticReleasePolicyAuthorityInvalid: If the value exceeds the supported conversion limit.
+    """
     try:
         return int(value)
     except ValueError as exc:
@@ -232,6 +364,20 @@ def _preflight_json_depth(payload: bytes, label: str) -> None:
 
 
 def _canonical_object(payload: bytes, *, label: str, max_bytes: int) -> dict[str, object]:
+    """
+    Parse and validate canonical JSON object bytes.
+    
+    Parameters:
+    	payload (bytes): JSON bytes to validate.
+    	label (str): Label used in validation error messages.
+    	max_bytes (int): Maximum permitted payload size.
+    
+    Returns:
+    	dict[str, object]: The decoded canonical JSON object.
+    
+    Raises:
+    	SemanticReleasePolicyAuthorityInvalid: If the payload is invalid, exceeds the size limit, is not an object, or is not canonical.
+    """
     if type(payload) is not bytes or not payload or len(payload) > max_bytes:
         raise SemanticReleasePolicyAuthorityInvalid(
             f"{label} must be between 1 and {max_bytes} canonical bytes"
@@ -267,10 +413,26 @@ def _canonical_object(payload: bytes, *, label: str, max_bytes: int) -> dict[str
 
 
 def _digest_bytes(payload: bytes) -> str:
+    """Return the lowercase hexadecimal SHA-256 digest of a byte sequence.
+    
+    Parameters:
+    	payload (bytes): The bytes to hash.
+    
+    Returns:
+    	str: The lowercase hexadecimal SHA-256 digest.
+    """
     return hashlib.sha256(payload).hexdigest()
 
 
 def _digest_object(value: object) -> str:
+    """Return the SHA-256 digest of a value's canonical JSON representation.
+    
+    Parameters:
+    	value (object): The value to serialize canonically.
+    
+    Returns:
+    	str: The lowercase SHA-256 digest of the canonical JSON bytes.
+    """
     return _digest_bytes(canonical_json_bytes(value))
 
 
@@ -281,11 +443,18 @@ class SemanticReleasePolicyProfile:
     profile_sha256: str
 
     def __post_init__(self) -> None:
+        """Validate the profile identifier, version, and SHA-256 digest."""
         _identifier(self.profile_id, "profile_id")
         _positive_integer(self.profile_version, "profile_version")
         _sha256(self.profile_sha256, "profile_sha256")
 
     def to_dict(self) -> dict[str, object]:
+        """
+        Serialize the policy profile to a dictionary.
+        
+        Returns:
+        	dict[str, object]: The profile identifier, version, and SHA-256 digest.
+        """
         return {
             "profile_id": self.profile_id,
             "profile_version": self.profile_version,
@@ -294,6 +463,15 @@ class SemanticReleasePolicyProfile:
 
     @classmethod
     def from_mapping(cls, value: object) -> SemanticReleasePolicyProfile:
+        """
+        Create a policy profile from a validated mapping.
+        
+        Parameters:
+            value (object): Mapping containing the profile identifier, positive version, and SHA-256 digest.
+        
+        Returns:
+            SemanticReleasePolicyProfile: The reconstructed policy profile.
+        """
         data = _mapping(value, "selected profile")
         _exact_members(data, {"profile_id", "profile_version", "profile_sha256"}, "profile")
         return cls(
@@ -304,6 +482,12 @@ class SemanticReleasePolicyProfile:
 
 
 def _validate_profile_order(profiles: tuple[SemanticReleasePolicyProfile, ...]) -> None:
+    """
+    Validate that selected profile coordinates are closed, unique, and ordered by UTF-8 lexical profile identifier.
+    
+    Parameters:
+    	profiles (tuple[SemanticReleasePolicyProfile, ...]): Profile coordinates to validate.
+    """
     if type(profiles) is not tuple:
         raise SemanticReleasePolicyAuthorityInvalid("selected_profiles must be a tuple")
     if any(type(profile) is not SemanticReleasePolicyProfile for profile in profiles):
@@ -332,6 +516,11 @@ class SemanticReleaseCoverageSufficiency:
             )
 
     def to_dict(self) -> dict[str, object]:
+        """Serialize the coverage sufficiency declaration to its contract mapping.
+        
+        Returns:
+        	dict[str, object]: A mapping containing the contract, format version, release context, selected profiles, and coverage state.
+        """
         return {
             "contract": COVERAGE_SUFFICIENCY_CONTRACT,
             "format_version": POLICY_AUTHORITY_FORMAT_VERSION,
@@ -342,14 +531,35 @@ class SemanticReleaseCoverageSufficiency:
 
     @property
     def canonical(self) -> bytes:
+        """Serialize the object to canonical JSON bytes.
+        
+        Returns:
+        	bytes: The canonical JSON representation of the object.
+        """
         return canonical_json_bytes(self.to_dict())
 
     @property
     def sha256(self) -> str:
+        """
+        Compute the SHA-256 digest of the canonical representation.
+        
+        Returns:
+        	str: The lowercase hexadecimal SHA-256 digest.
+        """
         return _digest_bytes(self.canonical)
 
     @classmethod
     def from_mapping(cls, value: object) -> SemanticReleaseCoverageSufficiency:
+        """
+        Reconstruct coverage sufficiency data from a validated mapping.
+        
+        Parameters:
+            value (object): Mapping containing the coverage contract, release context,
+                selected profiles, and coverage state.
+        
+        Returns:
+            SemanticReleaseCoverageSufficiency: The reconstructed coverage sufficiency.
+        """
         data = _mapping(value, "coverage_sufficiency")
         _exact_members(
             data,
@@ -399,6 +609,11 @@ class SemanticReleasePairDisposition:
             )
 
     def to_dict(self) -> dict[str, str]:
+        """Serialize the pair disposition as a dictionary.
+        
+        Returns:
+        	dict[str, str]: The field type, category identifier, and disposition.
+        """
         return {
             "field_type": self.field_type,
             "category_id": self.category_id,
@@ -407,6 +622,15 @@ class SemanticReleasePairDisposition:
 
     @classmethod
     def from_mapping(cls, value: object) -> SemanticReleasePairDisposition:
+        """
+        Create a semantic-release policy pair disposition from a validated mapping.
+        
+        Parameters:
+        	value (object): Mapping containing the field type, category identifier, and disposition.
+        
+        Returns:
+        	SemanticReleasePairDisposition: The reconstructed pair disposition.
+        """
         data = _mapping(value, "pair_disposition")
         _exact_members(data, {"field_type", "category_id", "disposition"}, "pair_disposition")
         return cls(
@@ -417,6 +641,9 @@ class SemanticReleasePairDisposition:
 
 
 def _validate_pair_order(pairs: tuple[SemanticReleasePairDisposition, ...]) -> None:
+    """
+    Validate that pair dispositions are closed records in canonical field and category order without duplicates.
+    """
     if type(pairs) is not tuple:
         raise SemanticReleasePolicyAuthorityInvalid("pair_dispositions must be a tuple")
     if any(type(pair) is not SemanticReleasePairDisposition for pair in pairs):
@@ -459,6 +686,12 @@ class SemanticReleasePolicy:
             )
 
     def to_dict(self) -> dict[str, object]:
+        """
+        Serialize the semantic-release policy as its canonical contract mapping.
+        
+        Returns:
+        	dict[str, object]: The policy data, including its identity, release context, coverage digest, pair dispositions, and reduction precedence.
+        """
         return {
             "contract": SEMANTIC_RELEASE_POLICY_CONTRACT,
             "format_version": POLICY_AUTHORITY_FORMAT_VERSION,
@@ -472,14 +705,33 @@ class SemanticReleasePolicy:
 
     @property
     def canonical(self) -> bytes:
+        """Serialize the object to canonical JSON bytes.
+        
+        Returns:
+        	bytes: The canonical JSON representation of the object.
+        """
         return canonical_json_bytes(self.to_dict())
 
     @property
     def sha256(self) -> str:
+        """
+        Compute the SHA-256 digest of the canonical representation.
+        
+        Returns:
+        	str: The lowercase hexadecimal SHA-256 digest.
+        """
         return _digest_bytes(self.canonical)
 
     @classmethod
     def from_mapping(cls, value: object) -> SemanticReleasePolicy:
+        """Reconstruct a semantic-release policy from its validated mapping representation.
+        
+        Parameters:
+            value (object): Mapping containing the policy contract data.
+        
+        Returns:
+            SemanticReleasePolicy: The reconstructed policy.
+        """
         data = _mapping(value, "policy")
         _exact_members(
             data,
@@ -536,6 +788,13 @@ class SemanticReleasePolicySelectionAuthorization:
     reason: str
 
     def __post_init__(self) -> None:
+        """
+        Validate the policy selection authorization metadata.
+        
+        Raises:
+            SemanticReleasePolicyAuthorityInvalid: If the action, metadata strings, or
+                issued timestamp is invalid.
+        """
         if type(self.action) is not str or self.action != SELECT_SEMANTIC_RELEASE_POLICY:
             raise SemanticReleasePolicyAuthorityInvalid(
                 f"action must be {SELECT_SEMANTIC_RELEASE_POLICY}"
@@ -555,6 +814,11 @@ class SemanticReleasePolicySelectionAuthorization:
             ) from exc
 
     def to_dict(self) -> dict[str, str]:
+        """Serialize the policy selection authorization to a dictionary.
+        
+        Returns:
+        	dict[str, str]: The authorization fields and their values.
+        """
         return {
             "action": self.action,
             "issued_at": self.issued_at,
@@ -565,6 +829,14 @@ class SemanticReleasePolicySelectionAuthorization:
 
     @classmethod
     def from_mapping(cls, value: object) -> SemanticReleasePolicySelectionAuthorization:
+        """Create a selection authorization from a validated mapping.
+        
+        Parameters:
+        	value (object): Mapping containing the authorization action, timestamp, nonce, operator identifier, and reason.
+        
+        Returns:
+        	SemanticReleasePolicySelectionAuthorization: The reconstructed selection authorization.
+        """
         data = _mapping(value, "authorization")
         _exact_members(
             data,
@@ -595,6 +867,12 @@ class SemanticReleasePolicySelection:
     authorization: SemanticReleasePolicySelectionAuthorization
 
     def __post_init__(self) -> None:
+        """Validate selection fields and ensure the policy and coverage bind to the selected context.
+        
+        Raises:
+            SemanticReleasePolicyAuthorityInvalid: If any field is invalid or the
+                compare-and-swap, coverage, or policy bindings are inconsistent.
+        """
         _repo_uuid(self.repo_uuid)
         revision = _nonnegative_integer(
             self.expected_authority_revision,
@@ -649,6 +927,7 @@ class SemanticReleasePolicySelectionEnvelope:
     authorization: SemanticReleasePolicySelectionAuthorization
 
     def __post_init__(self) -> None:
+        """Validate the selection envelope's authority-body digest and authorization object."""
         _sha256(self.authority_body_sha256, "authority_body_sha256")
         if type(self.authorization) is not SemanticReleasePolicySelectionAuthorization:
             raise SemanticReleasePolicyAuthorityInvalid(
@@ -656,6 +935,12 @@ class SemanticReleasePolicySelectionEnvelope:
             )
 
     def to_dict(self) -> dict[str, object]:
+        """
+        Serialize the policy selection authorization envelope to a contract mapping.
+        
+        Returns:
+        	dict[str, object]: The envelope's contract identifier, format version, authorized authority-body digest, and authorization data.
+        """
         return {
             "contract": POLICY_SELECTION_AUTHORIZATION_CONTRACT,
             "format_version": POLICY_AUTHORITY_FORMAT_VERSION,
@@ -665,14 +950,37 @@ class SemanticReleasePolicySelectionEnvelope:
 
     @property
     def canonical(self) -> bytes:
+        """Serialize the object to canonical JSON bytes.
+        
+        Returns:
+        	bytes: The canonical JSON representation of the object.
+        """
         return canonical_json_bytes(self.to_dict())
 
     @property
     def sha256(self) -> str:
+        """
+        Compute the SHA-256 digest of the canonical representation.
+        
+        Returns:
+        	str: The lowercase hexadecimal SHA-256 digest.
+        """
         return _digest_bytes(self.canonical)
 
     @classmethod
     def from_mapping(cls, value: object) -> SemanticReleasePolicySelectionEnvelope:
+        """
+        Construct a selection authorization envelope from a validated mapping.
+        
+        Parameters:
+            value (object): Mapping containing the envelope contract, format version, authority body digest, and authorization data.
+        
+        Returns:
+            SemanticReleasePolicySelectionEnvelope: The reconstructed selection authorization envelope.
+        
+        Raises:
+            SemanticReleasePolicyAuthorityInvalid: If the mapping is invalid or uses an unsupported contract or format version.
+        """
         data = _mapping(value, "selection_authorization")
         _exact_members(
             data,
@@ -717,6 +1025,13 @@ class SemanticReleasePolicyAuthorityRecord:
     selection_authorization_sha256: str
 
     def __post_init__(self) -> None:
+        """
+        Validate the authority record's identity, revision chain, bindings, digests, and size limits.
+        
+        Raises:
+            SemanticReleasePolicyAuthorityInvalid: If any field is invalid or any nested
+                record, digest, authorization binding, or size limit is inconsistent.
+        """
         _repo_uuid(self.repo_uuid)
         _identifier(self.release_context, "release_context")
         revision = _positive_integer(self.authority_revision, "authority_revision")
@@ -782,6 +1097,12 @@ class SemanticReleasePolicyAuthorityRecord:
             raise SemanticReleasePolicyAuthorityInvalid("authority record exceeds 64 KiB")
 
     def authority_body(self) -> dict[str, object]:
+        """
+        Serialize the authority record body into its canonical contract mapping.
+        
+        Returns:
+        	dict[str, object]: The authority body containing repository, revision, state, bundle, coverage, profile, policy, and digest data.
+        """
         return {
             "contract": POLICY_AUTHORITY_CONTRACT,
             "format_version": POLICY_AUTHORITY_FORMAT_VERSION,
@@ -801,6 +1122,12 @@ class SemanticReleasePolicyAuthorityRecord:
         }
 
     def to_dict(self) -> dict[str, object]:
+        """
+        Serialize the authority record to its complete contract mapping.
+        
+        Returns:
+        	dict[str, object]: The authority body with its selection authorization and authorization digest.
+        """
         return {
             **self.authority_body(),
             "selection_authorization": self.selection_authorization.to_dict(),
@@ -809,14 +1136,37 @@ class SemanticReleasePolicyAuthorityRecord:
 
     @property
     def canonical(self) -> bytes:
+        """Serialize the object to canonical JSON bytes.
+        
+        Returns:
+        	bytes: The canonical JSON representation of the object.
+        """
         return canonical_json_bytes(self.to_dict())
 
     @property
     def sha256(self) -> str:
+        """
+        Compute the SHA-256 digest of the canonical representation.
+        
+        Returns:
+        	str: The lowercase hexadecimal SHA-256 digest.
+        """
         return _digest_bytes(self.canonical)
 
     @classmethod
     def from_json(cls, payload: bytes) -> SemanticReleasePolicyAuthorityRecord:
+        """
+        Parse a canonical JSON payload into a validated policy authority record.
+        
+        Parameters:
+            payload (bytes): Canonical JSON representation of the authority record.
+        
+        Returns:
+            SemanticReleasePolicyAuthorityRecord: The validated authority record.
+        
+        Raises:
+            SemanticReleasePolicyAuthorityInvalid: If the payload is invalid, unsupported, or does not round-trip byte-identically.
+        """
         data = _canonical_object(
             payload,
             label="semantic-release policy authority record",
@@ -907,6 +1257,15 @@ class SemanticReleasePolicyAuthorityRecord:
 def _build_record(
     request: SemanticReleasePolicySelection,
 ) -> SemanticReleasePolicyAuthorityRecord:
+    """
+    Build the next active authority record from a validated policy selection request.
+    
+    Parameters:
+    	request (SemanticReleasePolicySelection): Selection request containing the expected predecessor, bundle, profiles, coverage, policy, and authorization.
+    
+    Returns:
+    	SemanticReleasePolicyAuthorityRecord: The authority record with incremented revision and authorization bound to its canonical authority body.
+    """
     revision = request.expected_authority_revision + 1
     body = {
         "contract": POLICY_AUTHORITY_CONTRACT,
@@ -959,6 +1318,12 @@ class _AuthoritySnapshot:
 
     @property
     def byte_tuple(self) -> tuple[bytes | None, bytes | None, bytes | None]:
+        """Provide the raw bytes for the current, previous, and pending records.
+        
+        Returns:
+            tuple[bytes | None, bytes | None, bytes | None]: Record bytes in current,
+                previous, and pending order.
+        """
         return (self.current_bytes, self.previous_bytes, self.pending_bytes)
 
 
@@ -973,6 +1338,11 @@ class _RecoveryPlan:
 
     @property
     def requires_recovery(self) -> bool:
+        """Determine whether recovery requires any state mutation.
+        
+        Returns:
+        	bool: `True` if recovery must retain a predecessor, install the current record, or clear pending state; `False` otherwise.
+        """
         return self.retain_predecessor or self.install_current or self.clear_pending
 
 
@@ -1005,6 +1375,18 @@ class SemanticReleasePolicyAuthorityStore:
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
     ) -> None:
+        """Initialize a policy-authority store rooted at the registry's external state directory.
+        
+        Parameters:
+        	state_root (Path): External state directory for policy-authority persistence.
+        	registry (RegistryStore): Registry store that must use the same state root.
+        	capabilities (RuntimeCapabilities | None): Optional runtime capability configuration.
+        	fault_hook (FaultHook | None): Optional fault-injection hook.
+        	syscalls (Syscalls | None): Optional system-call implementation.
+        
+        Raises:
+        	SemanticReleasePolicyAuthorityInvalid: If the policy-authority and registry stores use different state roots.
+        """
         self.registry = registry
         self.state = DurableStateRoot(
             state_root,
@@ -1019,10 +1401,12 @@ class SemanticReleasePolicyAuthorityStore:
 
     @staticmethod
     def _directory(repo_uuid: str) -> Path:
+        """Build the workspace directory path for a repository UUID."""
         return Path("workspaces") / _repo_uuid(repo_uuid)
 
     @classmethod
     def _record_paths(cls, repo_uuid: str) -> tuple[Path, Path, Path]:
+        """Return the paths for the current, previous, and pending authority records."""
         directory = cls._directory(repo_uuid)
         return (
             directory / POLICY_AUTHORITY_CURRENT,
@@ -1038,6 +1422,16 @@ class SemanticReleasePolicyAuthorityStore:
         exclusive: bool,
         deadline_ns: int | None,
     ) -> Iterator[None]:
+        """Acquire the workspace lock for a repository while the context is active.
+        
+        Parameters:
+            repo_uuid (str): Canonical repository identifier.
+            exclusive (bool): Whether to acquire an exclusive lock.
+            deadline_ns (int | None): Optional monotonic deadline for lock acquisition.
+        
+        Yields:
+            None: Control while the workspace lock is held.
+        """
         lock_path = self._directory(repo_uuid) / "workspace.lock"
         if exclusive:
             with self.state.lock(
@@ -1060,6 +1454,7 @@ class SemanticReleasePolicyAuthorityStore:
 
     @staticmethod
     def _require_registered(document: Registry, repo_uuid: str) -> None:
+        """Ensure the registry contains exactly one workspace entry for the repository."""
         matches = [
             entry for entry in document.to_dict()["workspaces"] if entry["repo_uuid"] == repo_uuid
         ]
@@ -1073,6 +1468,18 @@ class SemanticReleasePolicyAuthorityStore:
         *,
         deadline_ns: int | None,
     ) -> Registry:
+        """
+        Load and return the registry while the registry lock is held.
+        
+        Parameters:
+        	deadline_ns (int | None): Optional monotonic deadline for the registry load.
+        
+        Returns:
+        	Registry: The current registry document.
+        
+        Raises:
+        	StateCorrupt: If the current registry document is missing.
+        """
         document = self.registry._load_locked(
             recover=False,
             deadline_ns=deadline_ns,
@@ -1083,6 +1490,15 @@ class SemanticReleasePolicyAuthorityStore:
 
     @staticmethod
     def _decode_record(payload: bytes, label: str) -> SemanticReleasePolicyAuthorityRecord:
+        """Decode a persisted authority record and convert validation failures into corruption errors.
+        
+        Parameters:
+            payload (bytes): Serialized authority record data.
+            label (str): Name used to identify the record in error messages.
+        
+        Returns:
+            SemanticReleasePolicyAuthorityRecord: The decoded authority record.
+        """
         try:
             return SemanticReleasePolicyAuthorityRecord.from_json(payload)
         except SemanticReleasePolicyAuthorityInvalid as exc:
@@ -1094,9 +1510,27 @@ class SemanticReleasePolicyAuthorityStore:
         *,
         deadline_ns: int | None,
     ) -> _AuthoritySnapshot:
+        """Read and decode the current, previous, and pending authority records for a repository.
+        
+        Parameters:
+        	repo_uuid (str): Canonical repository identifier.
+        	deadline_ns (int | None): Optional deadline for bounded state reads.
+        
+        Returns:
+        	_AuthoritySnapshot: Raw bytes and decoded records for each authority-record file.
+        """
         current_path, previous_path, pending_path = self._record_paths(repo_uuid)
 
         def read(path: Path) -> bytes | None:
+            """
+            Read the contents of an existing path within the configured size limit.
+            
+            Parameters:
+                path (Path): Path to the file to read.
+            
+            Returns:
+                bytes | None: File contents, or `None` if the path does not exist.
+            """
             return self.state.read_optional_existing_bytes(
                 path,
                 max_bytes=POLICY_AUTHORITY_RECORD_MAX_BYTES,
@@ -1135,6 +1569,23 @@ class SemanticReleasePolicyAuthorityStore:
         require_reserve: bool,
         deadline_ns: int | None,
     ) -> tuple[Path, ...]:
+        """
+        Validate the policy-authority namespace and identify any atomic temporary files.
+        
+        Parameters:
+            repo_uuid (str): Canonical repository identifier.
+            require_no_temporary (bool): Whether orphan atomic temporary files should cause recovery to be required.
+            require_reserve (bool): Whether sufficient filesystem reserve capacity must be available.
+            deadline_ns (int | None): Optional deadline for temporary-file inspection.
+        
+        Returns:
+            tuple[Path, ...]: The detected atomic temporary file paths.
+        
+        Raises:
+            StatePathError: If the namespace cannot be safely enumerated, contains unexpected entries, or has multiple temporary files.
+            SemanticReleasePolicyAuthorityInvalid: If the filesystem reserve is below the transaction requirement.
+            SemanticReleasePolicyAuthorityRecoveryRequired: If temporary files are present when prohibited.
+        """
         directory = self._directory(repo_uuid)
         store_names: list[str] = []
         with self.state.existing_private_directory(directory) as descriptor:
@@ -1202,6 +1653,14 @@ class SemanticReleasePolicyAuthorityStore:
 
     @staticmethod
     def _profile_artifacts(bundle: SemanticReleaseBundle) -> dict[str, BundleArtifact]:
+        """Index profile artifacts from a semantic-release bundle by artifact identifier.
+        
+        Parameters:
+        	bundle (SemanticReleaseBundle): Bundle whose profile artifacts are indexed.
+        
+        Returns:
+        	dict[str, BundleArtifact]: Mapping of profile artifact identifiers to their artifacts.
+        """
         return {
             artifact.artifact_id: artifact
             for artifact in bundle.artifacts
@@ -1214,6 +1673,12 @@ class SemanticReleasePolicyAuthorityStore:
         record: SemanticReleasePolicyAuthorityRecord,
         bundle: SemanticReleaseBundle,
     ) -> None:
+        """Validate that an authority record matches the installed bundle and selected profile coverage.
+        
+        Parameters:
+        	record (SemanticReleasePolicyAuthorityRecord): Authority record to validate.
+        	bundle (SemanticReleaseBundle): Installed semantic-release bundle used for validation.
+        """
         if record.bundle_manifest_sha256 != bundle.manifest_sha256:
             raise StateCorrupt("policy authority does not bind the installed bundle manifest")
         artifacts = cls._profile_artifacts(bundle)
@@ -1262,6 +1727,7 @@ class SemanticReleasePolicyAuthorityStore:
         bundle: SemanticReleaseBundle,
         repo_uuid: str,
     ) -> None:
+        """Validate all present authority records against the repository and installed bundle."""
         for record in (snapshot.current, snapshot.previous, snapshot.pending):
             if record is None:
                 continue
@@ -1273,6 +1739,19 @@ class SemanticReleasePolicyAuthorityStore:
     def _validate_stable_snapshot(
         snapshot: _AuthoritySnapshot,
     ) -> SemanticReleasePolicyAuthorityRecord | None:
+        """
+        Validate the stable authority-record snapshot and return its current record.
+        
+        Parameters:
+        	snapshot (_AuthoritySnapshot): Snapshot containing the current, previous, and pending authority records.
+        
+        Returns:
+        	SemanticReleasePolicyAuthorityRecord | None: The validated current record, or `None` when no authority record exists.
+        
+        Raises:
+        	SemanticReleasePolicyAuthorityRecoveryRequired: If a pending transaction exists.
+        	StateCorrupt: If the current and previous records violate the required revision, digest, or state chain.
+        """
         if snapshot.pending is not None:
             raise SemanticReleasePolicyAuthorityRecoveryRequired(
                 "policy authority has an unresolved pending transaction"
@@ -1304,6 +1783,18 @@ class SemanticReleasePolicyAuthorityStore:
         cls,
         snapshot: _AuthoritySnapshot,
     ) -> _RecoveryPlan:
+        """
+        Determine the transaction phase and mutations required to recover the authority namespace.
+        
+        Parameters:
+            snapshot (_AuthoritySnapshot): Current, previous, and pending authority records with their raw bytes.
+        
+        Returns:
+            _RecoveryPlan: Recovery phase, resulting record, and required namespace mutations.
+        
+        Raises:
+            StateCorrupt: If the pending transaction or stable record chain is inconsistent.
+        """
         pending = snapshot.pending
         if pending is None:
             current = cls._validate_stable_snapshot(snapshot)
@@ -1394,6 +1885,20 @@ class SemanticReleasePolicyAuthorityStore:
         request: SemanticReleasePolicySelection,
         candidate: SemanticReleasePolicyAuthorityRecord,
     ) -> str:
+        """
+        Determine whether a policy selection is a replay or a new commit.
+        
+        Parameters:
+            snapshot (_AuthoritySnapshot): Current authority-record snapshot.
+            request (SemanticReleasePolicySelection): Requested selection and expected authority state.
+            candidate (SemanticReleasePolicyAuthorityRecord): Candidate authority record.
+        
+        Returns:
+            str: ``"REPLAY"`` when the candidate matches the current record, or ``"COMMIT"`` when it is a valid new selection.
+        
+        Raises:
+            SemanticReleasePolicyAuthorityConflict: If the stable snapshot or expected authority state does not permit the selection.
+        """
         current = cls._validate_stable_snapshot(snapshot)
         if snapshot.current_bytes == candidate.canonical:
             return "REPLAY"
@@ -1427,6 +1932,7 @@ class SemanticReleasePolicyAuthorityStore:
         candidate: SemanticReleasePolicyAuthorityRecord,
         bundle: SemanticReleaseBundle,
     ) -> None:
+        """Validate that a policy selection request and candidate authority record match the installed bundle."""
         if request.bundle_manifest_sha256 != bundle.manifest_sha256:
             raise SemanticReleasePolicyAuthorityInvalid(
                 "selection bundle_manifest_sha256 does not name the installed bundle"
@@ -1442,6 +1948,16 @@ class SemanticReleasePolicyAuthorityStore:
         *,
         deadline_ns: int | None = None,
     ) -> SemanticReleasePolicyAuthorityRecord | None:
+        """
+        Read the current policy-authority record for a registered repository.
+        
+        Parameters:
+        	repo_uuid (str): Canonical UUID identifying the repository.
+        	deadline_ns (int | None): Optional monotonic deadline for lock and I/O operations.
+        
+        Returns:
+        	SemanticReleasePolicyAuthorityRecord | None: The validated current authority record, or `None` when no current record exists.
+        """
         canonical_uuid = _repo_uuid(repo_uuid)
         with self.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
             self._require_registered(registry, canonical_uuid)
@@ -1484,6 +2000,18 @@ class SemanticReleasePolicyAuthorityStore:
         *,
         deadline_ns: int | None = None,
     ) -> SemanticReleasePolicyAuthorityRecovery:
+        """
+        Project the recovery state of a registered repository's policy-authority records.
+        
+        Parameters:
+            repo_uuid (str): Canonical UUID of the registered repository.
+            deadline_ns (int | None): Optional monotonic deadline for the operation.
+        
+        Returns:
+            SemanticReleasePolicyAuthorityRecovery: Read-only recovery information, including
+                the transaction phase, persisted records, orphan temporary status, and whether
+                recovery is required.
+        """
         canonical_uuid = _repo_uuid(repo_uuid)
         with self.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
             self._require_registered(registry, canonical_uuid)
@@ -1534,6 +2062,20 @@ class SemanticReleasePolicyAuthorityStore:
         *,
         deadline_ns: int | None = None,
     ) -> SemanticReleasePolicyAuthorityRecord:
+        """
+        Select and durably persist the requested semantic-release policy authority.
+        
+        Parameters:
+        	request (SemanticReleasePolicySelection): Closed selection request to validate and commit.
+        	deadline_ns (int | None): Optional monotonic deadline for the selection operation.
+        
+        Returns:
+        	SemanticReleasePolicyAuthorityRecord: The resulting current authority record.
+        
+        Raises:
+        	SemanticReleasePolicyAuthorityInvalid: If the request is not a closed selection object.
+        	CommitUnknown: If the transaction outcome cannot be established after pending data may have become visible.
+        """
         if type(request) is not SemanticReleasePolicySelection:
             raise SemanticReleasePolicyAuthorityInvalid(
                 "selection must be a closed SemanticReleasePolicySelection"
@@ -1570,6 +2112,23 @@ class SemanticReleasePolicyAuthorityStore:
         deadline_ns: int | None,
     ) -> SemanticReleasePolicyAuthorityRecord:
 
+        """
+        Finalize a policy selection while holding the registry and workspace locks.
+        
+        Parameters:
+            request: The policy selection to validate and apply.
+            initial_bundle: The installed bundle observed before acquiring exclusive locks.
+            initial_candidate: The candidate authority record observed before acquiring exclusive locks.
+            visibility: Tracks whether pending transaction data may have become visible.
+            deadline_ns: Optional lock-acquisition deadline in nanoseconds.
+        
+        Returns:
+            The existing current record for a replay or the newly committed authority record.
+        
+        Raises:
+            SemanticReleasePolicyAuthorityConflict: If selection inputs or the expected outcome change before commit.
+            CommitUnknown: If the commit becomes potentially visible but its exact final outcome cannot be established.
+        """
         with self.registry.exclusive_lock(deadline_ns=deadline_ns):
             registry = self._registry_locked(deadline_ns=deadline_ns)
             self._require_registered(registry, request.repo_uuid)
@@ -1680,6 +2239,16 @@ class SemanticReleasePolicyAuthorityStore:
         *,
         deadline_ns: int | None = None,
     ) -> SemanticReleasePolicyAuthorityRecord | None:
+        """
+        Recover an interrupted policy-authority transaction for a registered repository.
+        
+        Parameters:
+        	repo_uuid (str): Canonical UUID identifying the repository.
+        	deadline_ns (int | None): Optional monotonic deadline for the recovery operation.
+        
+        Returns:
+        	SemanticReleasePolicyAuthorityRecord | None: The resulting current authority record, or `None` when no current record exists.
+        """
         canonical_uuid = _repo_uuid(repo_uuid)
         visibility = _CommitVisibility()
         try:
@@ -1704,6 +2273,17 @@ class SemanticReleasePolicyAuthorityStore:
         visibility: _CommitVisibility,
         deadline_ns: int | None,
     ) -> SemanticReleasePolicyAuthorityRecord | None:
+        """
+        Recover an interrupted authority-record transaction while holding exclusive registry and workspace locks.
+        
+        Parameters:
+            canonical_uuid (str): Canonical UUID identifying the registered workspace.
+            visibility (_CommitVisibility): Tracks whether pending transaction data may have become externally visible.
+            deadline_ns (int | None): Optional monotonic deadline for lock and filesystem operations.
+        
+        Returns:
+            SemanticReleasePolicyAuthorityRecord | None: The recovered current authority record, or None when no active record remains.
+        """
         with self.registry.exclusive_lock(deadline_ns=deadline_ns):
             registry = self._registry_locked(deadline_ns=deadline_ns)
             self._require_registered(registry, canonical_uuid)

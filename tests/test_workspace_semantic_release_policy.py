@@ -58,6 +58,17 @@ def _store(
     fault_hook=None,
     syscalls=None,
 ) -> SemanticReleasePolicyAuthorityStore:
+    """
+    Construct a policy-authority store configured with the test harness state and registry.
+    
+    Parameters:
+    	harness (RuntimeHarness): Test harness providing the state root and registry.
+    	fault_hook: Optional fault-injection hook.
+    	syscalls: Optional system-call interface override.
+    
+    Returns:
+    	SemanticReleasePolicyAuthorityStore: The configured policy-authority store.
+    """
     return SemanticReleasePolicyAuthorityStore(
         harness.state_root,
         harness.registry,
@@ -68,6 +79,15 @@ def _store(
 
 
 def _profile(profile_id: str = CORE_SECRETS_PROFILE.profile_id) -> SemanticReleasePolicyProfile:
+    """
+    Create a semantic-release policy profile descriptor from an installed bundle artifact.
+    
+    Parameters:
+    	profile_id (str): Identifier of the installed profile artifact to load.
+    
+    Returns:
+    	SemanticReleasePolicyProfile: A descriptor containing the profile's identifier, version, and SHA-256 digest.
+    """
     bundle = load_installed_semantic_release_bundle()
     artifact = next(
         item
@@ -91,6 +111,21 @@ def _selection(
     coverage_state: str = "SUFFICIENT",
     policy_id: str = "graphify.semantic_release.test_policy.v1",
 ) -> SemanticReleasePolicySelection:
+    """
+    Build a complete semantic-release policy-selection request for test scenarios.
+    
+    Parameters:
+    	expected_revision (int): Expected current authority revision.
+    	expected_sha256 (str | None): Expected current authority digest.
+    	nonce (str): Authorization nonce.
+    	release_context (str): Release context associated with the selection.
+    	profiles (tuple[SemanticReleasePolicyProfile, ...] | None): Profiles to select, or the default profile when omitted.
+    	coverage_state (str): Coverage sufficiency state.
+    	policy_id (str): Policy identifier.
+    
+    Returns:
+    	SemanticReleasePolicySelection: The constructed policy-selection request.
+    """
     bundle = load_installed_semantic_release_bundle()
     selected = (_profile(),) if profiles is None else profiles
     coverage = SemanticReleaseCoverageSufficiency(
@@ -147,6 +182,15 @@ def _authority_directory(harness: RuntimeHarness) -> Path:
 
 
 def _authority_paths(harness: RuntimeHarness) -> tuple[Path, Path, Path]:
+    """
+    Derive the fixed paths for the current, previous, and pending policy-authority records.
+    
+    Parameters:
+    	harness (RuntimeHarness): Test harness containing the state root.
+    
+    Returns:
+    	tuple[Path, Path, Path]: Paths for the current, previous, and pending authority records, in that order.
+    """
     directory = _authority_directory(harness)
     return (
         directory / POLICY_AUTHORITY_CURRENT,
@@ -156,6 +200,15 @@ def _authority_paths(harness: RuntimeHarness) -> tuple[Path, Path, Path]:
 
 
 def _authority_metadata(harness: RuntimeHarness) -> dict[str, tuple[int, int, int, str]]:
+    """
+    Capture metadata and content digests for existing authority files.
+    
+    Parameters:
+    	harness (RuntimeHarness): Test harness providing the authority file paths.
+    
+    Returns:
+    	dict[str, tuple[int, int, int, str]]: Mapping of authority file names to inode, size, modification time in nanoseconds, and SHA-256 content digest.
+    """
     result: dict[str, tuple[int, int, int, str]] = {}
     for path in _authority_paths(harness):
         if path.exists():
@@ -173,6 +226,16 @@ def _rewrite_record(
     record: SemanticReleasePolicyAuthorityRecord,
     **changes: object,
 ) -> bytes:
+    """
+    Rewrites an authority record with the supplied field changes and recalculates its derived digests.
+    
+    Parameters:
+        record (SemanticReleasePolicyAuthorityRecord): The authority record to modify.
+        changes (object): Field values to update before serialization.
+    
+    Returns:
+        bytes: The canonical JSON representation of the updated record.
+    """
     value = record.to_dict()
     value.update(changes)
     body = {
@@ -555,6 +618,14 @@ def test_fixed_namespace_and_filesystem_reserve_fail_before_pending_visibility(
     real_fstatvfs = os.fstatvfs
 
     def no_reserve(descriptor: int):
+        """Simulate a filesystem with no available reserve space.
+        
+        Parameters:
+        	descriptor (int): File descriptor for the filesystem to inspect.
+        
+        Returns:
+        	SimpleNamespace: Filesystem statistics with zero available blocks and the actual fragment size.
+        """
         actual = real_fstatvfs(descriptor)
         return SimpleNamespace(f_bavail=0, f_frsize=actual.f_frsize)
 
@@ -617,6 +688,15 @@ def test_commit_unknown_advancement_recovers_only_exact_durable_prefix(
     )
 
     def failpoint(actual: str) -> None:
+        """
+        Raise an injected fault when the observed event matches the configured failpoint.
+        
+        Parameters:
+            actual (str): The event currently being processed.
+        
+        Raises:
+            InjectedFault: If the event matches the configured failpoint.
+        """
         if actual == event:
             raise InjectedFault(actual)
 
@@ -655,6 +735,7 @@ def test_failure_before_pending_visibility_is_definite_no_commit(tmp_path: Path)
             source_dir_fd: int,
             destination_dir_fd: int,
         ) -> None:
+            """Injects an I/O failure on the first replacement attempt, then delegates subsequent replacements."""
             if not self.failed:
                 self.failed = True
                 raise OSError(errno.EIO, "injected replace before visibility")
@@ -702,6 +783,7 @@ def test_post_commit_workspace_lock_release_failure_is_commit_unknown(tmp_path: 
     harness = create_harness(tmp_path)
 
     def failpoint(event: str) -> None:
+        """Raise an injected fault when the workspace lock release event occurs."""
         if event == "lock:workspace:released":
             raise InjectedFault(event)
 
@@ -718,6 +800,7 @@ def test_genesis_commit_unknown_projects_recovers_and_clears_pending(tmp_path: P
     harness = create_harness(tmp_path)
 
     def failpoint(event: str) -> None:
+        """Raise an injected fault when the pending-record durability event occurs."""
         if event == "semantic-release-policy-authority:pending_durable":
             raise InjectedFault(event)
 
@@ -742,6 +825,7 @@ def test_post_recovery_proof_failure_is_commit_unknown(
     harness = create_harness(tmp_path)
 
     def failpoint(event: str) -> None:
+        """Raise an injected fault when the pending-record durability event occurs."""
         if event == "semantic-release-policy-authority:pending_durable":
             raise InjectedFault(event)
 
@@ -871,6 +955,12 @@ def test_bounded_namespace_scan_closes_iterator_on_early_failure(
 
     class TrackingScandir:
         def __init__(self, descriptor: int | str | bytes | os.PathLike[str]) -> None:
+            """
+            Initialize a directory iterator and identify whether it targets the authority directory.
+            
+            Parameters:
+            	descriptor (int | str | bytes | os.PathLike[str]): Directory descriptor or path to scan.
+            """
             self.iterator: Any = real_scandir(descriptor)
             self.closed = False
             self.is_authority_directory = (
@@ -879,15 +969,35 @@ def test_bounded_namespace_scan_closes_iterator_on_early_failure(
             )
 
         def __iter__(self) -> TrackingScandir:
+            """Iterate over the directory-entry tracker itself.
+            
+            Returns:
+                TrackingScandir: This tracker instance.
+            """
             return self
 
         def __next__(self) -> os.DirEntry[str]:
+            """
+            Advance the directory-entry iterator by one item.
+            
+            Returns:
+                os.DirEntry[str]: The next directory entry.
+            """
             return next(self.iterator)
 
         def __enter__(self) -> TrackingScandir:
+            """
+            Enter the tracked directory-scanning context.
+            
+            Returns:
+                TrackingScandir: This directory-scanning context.
+            """
             return self
 
         def __exit__(self, *_exc: object) -> None:
+            """
+            Close the iterator and mark the resource as closed.
+            """
             self.closed = True
             self.iterator.close()
 
@@ -896,6 +1006,15 @@ def test_bounded_namespace_scan_closes_iterator_on_early_failure(
     def tracking_scandir(
         descriptor: int | str | bytes | os.PathLike[str],
     ) -> TrackingScandir:
+        """
+        Create and track a directory iterator for the specified descriptor.
+        
+        Parameters:
+        	descriptor (int | str | bytes | os.PathLike[str]): Directory file descriptor or path to scan.
+        
+        Returns:
+        	TrackingScandir: The tracked directory iterator.
+        """
         iterator = TrackingScandir(descriptor)
         opened.append(iterator)
         return iterator
@@ -978,6 +1097,16 @@ def test_stable_read_revalidates_exact_snapshot_before_return(
     calls = 0
 
     def racing_snapshot(repo_uuid: str, *, deadline_ns: int | None):
+        """
+        Captures an authority snapshot and changes the current record after the first call to simulate a concurrent filesystem update.
+        
+        Parameters:
+            repo_uuid (str): Repository identifier for the authority snapshot.
+            deadline_ns (int | None): Optional deadline for the snapshot operation.
+        
+        Returns:
+            The authority snapshot produced by the original snapshot operation.
+        """
         nonlocal calls
         calls += 1
         snapshot = original(repo_uuid, deadline_ns=deadline_ns)
