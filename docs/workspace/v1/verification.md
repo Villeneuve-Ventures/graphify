@@ -1297,11 +1297,117 @@ projection, public surfaces, provider/backend, publication, remaining P5B2
 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
 `READY`. Only the trust-root prerequisite transitions to `COMPLETE`.
 
+## P5B2 semantic-release policy-authority provisioning contract-freeze gates
+
+This separate internal unnumbered P5B2 prerequisite is documentation-only and
+remains `WAITING`, not `READY` or `COMPLETE`. The freeze is valid only when all
+seven maintained-current documents agree that no live policy authority is
+selected or provisioned and no implementation, schema, test, receipt, package,
+generated, GitHub, branch, or publication state changes.
+
+The frozen provisioning contract requires future direct tests to prove:
+
+- only `SemanticReleasePolicyAuthorityStore` owns the exact private current,
+  previous, and pending paths; callers cannot choose paths or supply encoded
+  record bytes, and descriptor-relative no-follow access rejects unsafe type,
+  link, mode, containment, or unexpected-entry state;
+- structured input is closed and canonical: repository UUID, expected revision
+  and complete-record digest, release context, installed bundle digest,
+  selected profile coordinates, coverage declaration, policy ID/version/object,
+  and the five existing operator fields. No live value is chosen by this
+  freeze;
+- the sole action is `SELECT_SEMANTIC_RELEASE_POLICY`, and every created record
+  is `ACTIVE`. `REVOKED` decodes only so consumers reject it; selection cannot
+  revoke or reactivate, and no revocation action is inferred;
+- body, envelope, envelope-digest, and complete-record preimages are exact and
+  nonrecursive. Mutation of any repository, context, bundle, profile, coverage,
+  policy, revision, predecessor, or operator field changes the appropriate
+  digest and cannot reuse authority across bodies;
+- genesis requires all three records absent, revision `0`/digest JSON `null`
+  CAS, revision `1`, and predecessor JSON `null`. Advancement requires stable
+  current `ACTIVE`, exact revision and record-digest CAS, revision plus one, and
+  current's exact digest as predecessor; stable revision `1` has previous absent
+  and every higher stable revision has exact revision-minus-one previous;
+- exclusive registry then exclusive workspace locking covers final repository,
+  installed-bundle, candidate, CAS, predecessor, namespace, and capacity
+  revalidation before any write. No generation, lease, pointer, journal,
+  staged, queue, or decision-store lock participates;
+- `DurableStateRoot.commit_record()` writes and syncs exact candidate pending,
+  retains exact current as previous, installs the same candidate as current,
+  and clears pending. Each stable record is at most 64 KiB, the envelope at
+  most 16 KiB, and three records plus one atomic temporary never exceed the
+  hard 256 KiB transaction peak;
+- stable reads and read-only recovery projection hold shared registry then
+  shared workspace locks, write nothing, and revalidate the applicable
+  current/previous/pending snapshot before returning. Stable read additionally
+  requires pending absent and the exact current/previous chain. Exact recovery
+  under the exclusive forms of the same locks may
+  finish only exact durable-order prefixes: pending genesis from absence, or
+  pending advancement with current/previous before predecessor retention, both
+  holding the predecessor after retention, or candidate current with exact
+  predecessor previous. It may adopt byte-identical already-current bytes and
+  clear pending only after the stable chain revalidates;
+- corrupt, `REVOKED`, foreign, stale, lower, skipped, divergent, or
+  same-revision-different-byte pending remains blocking and cannot authorize
+  cleanup. Orphan atomic temporaries may be cleaned only by the bounded existing
+  primitive under the same locks before projection; current and previous are
+  never deleted or repaired;
+- byte-identical completed replay of the original request and predecessor CAS
+  performs no write and is checked before ordinary current CAS rejection.
+  Different canonical bytes or authorization conflict. Failure is definite
+  no-commit only when proven to precede pending visibility; any later
+  uncertainty is `CommitUnknown` and requires exact recovery without
+  assumed-absence retry or rebase; and
+- lifecycle scope stops at stable read, genesis `ACTIVE` selection, monotonic
+  `ACTIVE` advancement, recovery projection, exact recovery, byte-identical
+  replay, exact recovered-pending clear, and bounded orphan-temporary cleanup.
+  Revocation, reactivation, rollback, downgrade, arbitrary repair, deletion,
+  policy-authority GC, decision binding, classification composition, omission,
+  graph/query projection, public transport, provider/backend, publication,
+  readiness, acceptance, and successor activation remain absent.
+
+Because this is a contract freeze, existing tests prove predecessor and
+trust-root non-regression only; they are not implementation or readiness
+evidence for `SemanticReleasePolicyAuthorityStore`. The focused commands are:
+
+```bash
+uv run --frozen --all-extras pytest -q \
+  tests/test_semantic_cleanup.py \
+  tests/test_workspace_semantic_worker.py \
+  tests/test_workspace_semantic_result_handoff.py \
+  tests/test_workspace_semantic_generation_certification_finalization.py \
+  tests/test_workspace_semantic_generation_promotion_finalization.py \
+  tests/test_workspace_query_cli.py
+
+uv run --frozen --all-extras pytest -q \
+  tests/test_wheel_packaging.py \
+  tests/test_workspace_semantic_release.py
+```
+
+The freeze additionally requires `uv lock --check`,
+`uv run --frozen python -m tools.skillgen --check`,
+`uv run --frozen pre-commit run --all-files`,
+`uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, an audit of
+relative links and heading anchors across all seven changed documents, the
+documentation-diff advisory audit, an exact seven-file Markdown manifest, and
+an independent exact-diff documentation review. Generated Graphify output is
+not refreshed because the batch changes no code and expressly excludes it.
+
+Passing these gates establishes documentation consistency only. P5 and P5B2
+remain `IN_PROGRESS`; the trust-root prerequisite remains `COMPLETE`. This
+provisioning prerequisite, the encompassing release/DLP decision,
+`SemanticReleaseDecisionStore`, decision-store capacity/GC, classification
+composition, omission, projection, public surfaces, provider/backend,
+publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
+`DEFERRED`; no later successor is `READY`.
+
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
-remains `WAITING`. It consumes the accepted trust-root contract above but cannot
-become `READY` until its operator-policy, decision-store, capacity/GC, and
+remains `WAITING`. It consumes the accepted trust-root contract above; the
+separately frozen policy-authority provisioning prerequisite also remains
+`WAITING`. This child cannot become `READY` until its operator-policy,
+decision-store, capacity/GC, and
 composition prerequisites exist. The freeze is
 complete only when all seven maintained-current documents agree and the diff
 changes no code, tests, schemas, fixtures, receipts, generated Graphify output,

@@ -955,6 +955,87 @@ composition, omission, projection, new public CLI/schema/receipt,
 provider/backend, or publication behavior. Acceptance adds none of those
 excluded authorities and activates no successor.
 
+## Semantic-release policy-authority provisioning prerequisite
+
+This separate unnumbered P5B2 prerequisite is documentation-only and remains
+`WAITING`. Future `SemanticReleasePolicyAuthorityStore` alone owns these
+external private stable records:
+
+```text
+workspaces/<repository_uuid>/semantic-release-policy-authority.json
+workspaces/<repository_uuid>/semantic-release-policy-authority.previous.json
+workspaces/<repository_uuid>/semantic-release-policy-authority.pending.json
+```
+
+Each path is a single-link mode-`0600` regular file beneath the existing
+mode-`0700` workspace directory, reached through descriptor-relative no-follow
+access. Each complete record is at most 64 KiB. The store admits only the fixed
+three names and at most one same-directory atomic-replacement temporary, for a
+hard 256 KiB transaction peak. It chooses no live authority values and adds no
+public schema, receipt, journal event, lease, or source-checkout artifact.
+
+The current, previous, and pending files contain the same canonical
+`graphify.workspace.semantic_release_policy_authority.internal`
+format-version-1 record shape consumed below; pending is not a second intent
+schema. The caller supplies structured selection values and CAS, never encoded
+record bytes. The store derives the authority body, selection envelope, every
+digest, and the final canonical record. The action is exactly
+`SELECT_SEMANTIC_RELEASE_POLICY`, and every record this prerequisite creates has
+state exactly `ACTIVE`. `REVOKED` remains a decodable consumer-side rejection
+state only. This prerequisite has no revocation or reactivation action.
+
+Genesis requires revision `0`/digest JSON `null` CAS, all three records absent,
+new revision `1`, and predecessor JSON `null`. Advancement requires pending
+absent, exact current revision and complete-record digest CAS, current state
+`ACTIVE`, new revision exactly current plus one, and the reopened current digest
+as `previous_authority_sha256`. For revision greater than `1`, previous must be
+the exact revision-minus-one canonical record named by current. Revision skips,
+rollback, a `REVOKED` predecessor, missing predecessor, or divergent
+same-revision bytes are corrupt authority, not alternate history.
+
+Stable revision `1` requires previous absent. Recoverable pending state is only
+an exact commit prefix: pending genesis with current/previous absent or exact
+genesis already current; or pending revision `k + 1` with current at exact
+predecessor `k` and its stable previous, current/previous both copied from that
+predecessor, or candidate already current with its exact predecessor previous.
+Recovery checks the original CAS against the predecessor and never rebases.
+
+Mutation holds the existing exclusive registry lock and then the existing
+exclusive workspace lock. It revalidates repository UUID, installed bundle,
+candidate, CAS, predecessor chain, fixed namespace, and 256 KiB peak immediately
+before delegating the exact bytes to `DurableStateRoot.commit_record()`. That
+protocol durably installs pending, retains existing current as previous,
+installs the same candidate as current, then clears pending, syncing each
+replacement and directory transition.
+
+Stable read and read-only recovery projection hold shared registry then shared
+workspace locks, mutate nothing, and revalidate the applicable
+current/previous/pending snapshot before returning. Stable read also requires
+pending absent and the exact current/previous chain. Exact recovery under the
+exclusive forms of the same locks may finish only the original canonical
+`ACTIVE` selection: install a
+valid pending genesis or exact current successor, retain its exact predecessor,
+adopt byte-identical already-current bytes, and clear pending only after the
+stable chain revalidates. Corrupt, stale, lower, skipped, divergent, foreign, or
+`REVOKED` pending bytes remain blocking. Existing bounded atomic-temporary
+cleanup is authorized only under those locks before recovery projection;
+current and previous are never deleted or rewritten as repair.
+
+Byte-identical completed replay of the original request and predecessor CAS is
+a no-write success checked before ordinary current CAS rejection. Different
+canonical bytes or authorization conflict even when their policy meaning
+appears equal. A failure is definite no-commit only when proven to precede
+pending visibility; once pending may be visible, failure is `CommitUnknown` and
+requires exact recovery, never assumed-absence retry or rebase. The
+prerequisite authorizes only stable read, genesis `ACTIVE` selection,
+monotonic `ACTIVE` advancement, recovery projection, exact recovery,
+byte-identical replay, exact pending clear, and bounded orphan-temporary
+cleanup. Revocation, reactivation, rollback,
+downgrade, arbitrary repair, deletion, GC, decision binding, composition,
+omission, graph/query projection, publication, implementation, readiness,
+acceptance, and successor activation remain unauthorized and `WAITING` where
+applicable.
+
 ## Semantic-content release/DLP decision
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
@@ -984,8 +1065,9 @@ not own or weaken that trust root. The trust-root subchild is accepted, but the
 encompassing decision child remains `WAITING` because its separate policy,
 persistence, capacity/GC, and composition prerequisites are absent.
 
-The separate future `SemanticReleasePolicyAuthorityStore` owns these private
-stable paths:
+The separately contract-frozen but still `WAITING`
+`SemanticReleasePolicyAuthorityStore` provisioning prerequisite above owns
+these private stable paths:
 
 - `workspaces/<repository_uuid>/semantic-release-policy-authority.json`;
 - `workspaces/<repository_uuid>/semantic-release-policy-authority.previous.json`;
@@ -1008,8 +1090,11 @@ complete-record digest is computed externally over completed record bytes. The
 exact top-level and nested member sets, array orders, and digest projections are
 the closed canonical sets in
 [`semantic-sync.md`](semantic-sync.md#p5b2-semantic-content-releasedlp-decision).
-No digest preimage contains its own digest. Missing or
-pending state, bad predecessor chain, rollback, revocation, invalid
+No digest preimage contains its own digest. The provisioning prerequisite may
+create or monotonically advance only `ACTIVE` records under
+`SELECT_SEMANTIC_RELEASE_POLICY`; it does not authorize revocation or
+reactivation. Missing or pending state, bad predecessor chain, rollback,
+revocation, invalid
 authorization, or bundle/policy/profile disagreement fails closed. This child
 consumes but never provisions, advances, repairs, revokes, or cleans that state.
 
