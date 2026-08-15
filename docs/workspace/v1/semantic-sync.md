@@ -1882,8 +1882,10 @@ ordered, and byte-equal to manifest entries; the coverage declaration must
 equal the supplied release context and profile set; the policy must bind that
 declaration and its exact pair-disposition mapping. The future caller chooses
 those values under separate operator authority; this contract chooses none.
-Unknown, additional, omitted, duplicated, reordered, incompatible, or
-noncanonical input fails before durable mutation.
+Unknown, additional, omitted, duplicated, incompatible, or noncanonical input,
+or reordering of an order-sensitive normative array, including
+selected-profile coordinates, fails before durable mutation. Equivalent JSON
+object-key presentation order is canonicalized and does not change acceptance.
 
 Every record created or advanced by this prerequisite has state exactly
 `ACTIVE`. The closed record decoder continues to recognize `REVOKED` so the

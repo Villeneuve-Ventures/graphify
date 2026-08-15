@@ -1316,6 +1316,10 @@ The frozen provisioning contract requires future direct tests to prove:
   selected profile coordinates, coverage declaration, policy ID/version/object,
   and the five existing operator fields. No live value is chosen by this
   freeze;
+- ambient defaults, environment variables, provider/model/credential input,
+  network input, live catalogues, newest-record enumeration, newest-file
+  selection, and policy shopping cannot source or select authority and must
+  each have direct rejection coverage;
 - the sole action is `SELECT_SEMANTIC_RELEASE_POLICY`, and every created record
   is `ACTIVE`. `REVOKED` decodes only so consumers reject it; selection cannot
   revoke or reactivate, and no revocation action is inferred;
@@ -1329,9 +1333,12 @@ The frozen provisioning contract requires future direct tests to prove:
   current's exact digest as predecessor; stable revision `1` has previous absent
   and every higher stable revision has exact revision-minus-one previous;
 - exclusive registry then exclusive workspace locking covers final repository,
-  installed-bundle, candidate, CAS, predecessor, namespace, and capacity
-  revalidation before any write. No generation, lease, pointer, journal,
-  staged, queue, or decision-store lock participates;
+  installed-bundle, candidate, CAS, and predecessor revalidation. Fixed
+  namespace-shape validation, filesystem-reserve validation, and proof of the
+  hard 256 KiB transaction peak are mandatory acceptance gates completed before
+  pending can become visible; failure rejects without pending mutation. No
+  generation, lease, pointer, journal, staged, queue, or decision-store lock
+  participates;
 - `DurableStateRoot.commit_record()` writes and syncs exact candidate pending,
   retains exact current as previous, installs the same candidate as current,
   and clears pending. Each stable record is at most 64 KiB, the envelope at

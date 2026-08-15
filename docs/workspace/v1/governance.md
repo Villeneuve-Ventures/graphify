@@ -145,11 +145,12 @@ the encompassing semantic-content release/DLP decision without making it
 ready. PR #67 reconciled only the separate semantic-release bundle and
 deterministic-classifier trust-root prerequisite as `READY`; PR #68 implemented
 that frozen boundary; and PR #69 supplied the required C1-control repair. This
-governance-only proposal transitions only that trust-root prerequisite to
-`COMPLETE`. Parent P5 and P5B2 remain `IN_PROGRESS`, and no later successor is
-activated. Until this staged acceptance proposal is separately published,
-reviewed, and merged, the published canonical branch at PR #69 remains
-authoritative.
+PR #70 governance acceptance transitioned only that trust-root prerequisite to
+`COMPLETE`. This PR #71 proposal freezes the separate policy-authority
+provisioning prerequisite as `WAITING`; the encompassing release/DLP decision
+also remains `WAITING`. Parent P5 and P5B2 remain `IN_PROGRESS`, and no later
+successor is activated. Until PR #71 is reviewed and merged, the published
+canonical branch produced by PR #70 remains authoritative.
 
 ## Justified out-of-scope follow-up register
 
