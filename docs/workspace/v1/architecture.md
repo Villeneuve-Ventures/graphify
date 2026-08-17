@@ -498,7 +498,7 @@ The contract-frozen decision-store and capacity/GC prerequisite reserves only
 this additional external workspace namespace:
 
 ```text
-<external_state_root>/workspaces/<repo_uuid>/semantic-release-decisions/
+<external_state_root>/workspaces/<repository_uuid>/semantic-release-decisions/
   <generation_id>/<decision_request_sha256>.json
 ```
 
@@ -787,9 +787,10 @@ than replay the old execute request.
 
 The contract-frozen decision-store prerequisite adds no lease domain. Its
 pre-classification capacity snapshot uses shared registry, exclusive workspace,
-then shared target-generation locks. Its install boundary upgrades only the
-registry lock to exclusive, retains exclusive workspace and shared generation
-locking in that order, revalidates global/workspace counts and bytes, durable
-reservations, filesystem reserve, GC protection, request-derived identity, and
-candidate bytes, and retains the locks through install-once reopen. Classification
-itself remains outside those locks and outside the store prerequisite.
+then shared target-generation locks. After classification, the caller releases
+the snapshot locks. Its install boundary reacquires exclusive registry,
+exclusive workspace, then shared target-generation locks in that order,
+revalidates global/workspace counts and bytes, durable reservations, filesystem
+reserve, GC protection, request-derived identity, and candidate bytes, and
+retains that lock composition through install-once reopen. Classification itself
+remains outside those locks and outside the store prerequisite.
