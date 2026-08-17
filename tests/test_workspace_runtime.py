@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import ctypes
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, cast
+from typing import Any, cast, Iterator
 
 import pytest
 
@@ -2671,7 +2672,7 @@ def test_steady_state_lock_removal_cannot_split_serialization(
         else leases.read_only_workspace_lock(REPO_UUID)
     )
     contender_acquired = threading.Event()
-    contender_failures: list[BaseException] = []
+    contender_failures: list[Exception] = []
 
     def contend() -> None:
         try:
@@ -2682,7 +2683,7 @@ def test_steady_state_lock_removal_cannot_split_serialization(
             )
             with contender:
                 contender_acquired.set()
-        except BaseException as exc:
+        except Exception as exc:
             contender_failures.append(exc)
 
     with holder:
@@ -2698,7 +2699,7 @@ def test_steady_state_lock_removal_cannot_split_serialization(
         assert not lock_path.exists()
 
 
-@pytest.mark.parametrize("case", ["missing", "wrong_mode"])
+@pytest.mark.parametrize("case", ["missing", "wrong_mode", "root_wrong_mode"])
 def test_subsequent_enrollment_requires_existing_registry_lock_without_mutation(
     tmp_path: Path,
     case: str,
@@ -2715,8 +2716,10 @@ def test_subsequent_enrollment_requires_existing_registry_lock_without_mutation(
     registry_lock = state_root / "registry.lock"
     if case == "missing":
         registry_lock.unlink()
-    else:
+    elif case == "wrong_mode":
         registry_lock.chmod(0o644)
+    else:
+        state_root.chmod(0o755)
     before = _tree_snapshot(state_root)
 
     with pytest.raises(StatePathError):
@@ -2726,6 +2729,101 @@ def test_subsequent_enrollment_requires_existing_registry_lock_without_mutation(
             expected_revision=1,
         )
 
+    assert _tree_snapshot(state_root) == before
+
+
+def test_concurrent_initialization_cannot_recreate_removed_registry_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_repo = _create_repo(tmp_path / "first", REPO_UUID)
+    second_repo = _create_repo(tmp_path / "second", SECOND_UUID)
+    state_root = tmp_path / "state"
+    first_acquired = threading.Event()
+    allow_first_commit = threading.Event()
+
+    def first_fault(event: str) -> None:
+        if event == "lock:registry:acquired":
+            first_acquired.set()
+            assert allow_first_commit.wait(timeout=5)
+
+    first = RegistryStore(
+        state_root,
+        capabilities=SUPPORTED,
+        fault_hook=first_fault,
+    )
+    first_failures: list[Exception] = []
+
+    def enroll_first() -> None:
+        try:
+            first.enroll(
+                discover_source(first_repo),
+                _authorization(IdentityAction.ENROLL, "first"),
+                expected_revision=0,
+            )
+        except Exception as exc:
+            first_failures.append(exc)
+
+    first_thread = threading.Thread(target=enroll_first, name="first-enrollment")
+    first_thread.start()
+    assert first_acquired.wait(timeout=5)
+    registry_lock = state_root / "registry.lock"
+    registry_lock.unlink()
+
+    second = RegistryStore(state_root, capabilities=SUPPORTED)
+    second_attempted_initialization = threading.Event()
+    second_inspected = threading.Event()
+    allow_second_inspection = threading.Event()
+    second_failures: list[Exception] = []
+    original_probe = second.state.private_file_exists
+    original_initialization_lock = second.state.initialization_lock
+
+    @contextmanager
+    def track_initialization_attempt(*, rank: int, name: str) -> Iterator[None]:
+        second_attempted_initialization.set()
+        with original_initialization_lock(rank=rank, name=name):
+            yield
+
+    def pause_at_first_probe(relative: str | Path) -> bool:
+        second_inspected.set()
+        assert allow_second_inspection.wait(timeout=5)
+        return original_probe(relative)
+
+    monkeypatch.setattr(second.state, "private_file_exists", pause_at_first_probe)
+    monkeypatch.setattr(
+        second.state,
+        "initialization_lock",
+        track_initialization_attempt,
+    )
+
+    def enroll_second() -> None:
+        try:
+            second.enroll(
+                discover_source(second_repo),
+                _authorization(IdentityAction.ENROLL, "second"),
+                expected_revision=1,
+            )
+        except Exception as exc:
+            second_failures.append(exc)
+
+    second_thread = threading.Thread(target=enroll_second, name="second-enrollment")
+    second_thread.start()
+    assert second_attempted_initialization.wait(timeout=5)
+    assert not second_inspected.is_set()
+
+    allow_first_commit.set()
+    first_thread.join(timeout=5)
+    assert not first_thread.is_alive()
+    assert first_failures == []
+    assert second_inspected.wait(timeout=5)
+    before = _tree_snapshot(state_root)
+    allow_second_inspection.set()
+    second_thread.join(timeout=5)
+
+    assert not second_thread.is_alive()
+    assert len(second_failures) == 1
+    assert isinstance(second_failures[0], StatePathError)
+    assert not registry_lock.exists()
     assert _tree_snapshot(state_root) == before
 
 

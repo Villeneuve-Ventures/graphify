@@ -28,6 +28,7 @@ from graphify.workspace.identity import (
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
+    REGISTRY_INITIALIZATION_LOCK_RANK,
     REGISTRY_LOCK_RANK,
     RuntimeCapabilities,
     StateCorrupt,
@@ -138,20 +139,24 @@ class RegistryStore:
 
     @contextmanager
     def _enrollment_lock(self) -> Iterator[None]:
-        initialized = any(
-            self.state.private_file_exists(path)
-            for path in (self.LOCK, self.CURRENT, self.PREVIOUS, self.PENDING)
-        )
-        if initialized:
-            with self.existing_exclusive_lock():
-                yield
-            return
-        with self.state.lock(
-            self.LOCK,
-            rank=REGISTRY_LOCK_RANK,
-            name="registry",
+        with self.state.initialization_lock(
+            rank=REGISTRY_INITIALIZATION_LOCK_RANK,
+            name="registry-initialization",
         ):
-            yield
+            initialized = any(
+                self.state.private_file_exists(path)
+                for path in (self.LOCK, self.CURRENT, self.PREVIOUS, self.PENDING)
+            )
+            if initialized:
+                with self.existing_exclusive_lock():
+                    yield
+                return
+            with self.state.lock(
+                self.LOCK,
+                rank=REGISTRY_LOCK_RANK,
+                name="registry",
+            ):
+                yield
 
     def _load_locked(
         self,
