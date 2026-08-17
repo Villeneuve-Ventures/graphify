@@ -100,7 +100,7 @@ tests/test_workspace_semantic_release_policy.py
 
 ## Exact-current-tree review disposition
 
-The required bundled comment and thread read was performed for all three pull
+The required bundled comment and thread review was performed for all three pull
 requests. GitHub review state was inspected read-only and was not treated as a
 substitute for exact-tree disposition:
 

@@ -1304,7 +1304,7 @@ This separate internal unnumbered P5B2 prerequisite is implemented and accepted
 as `COMPLETE` at the frozen private boundary. Completion evidence is the
 [`P5B2 semantic-release policy-authority` receipt](receipts/p5b2-semantic-release-policy-authority.md),
 binding PR #71's contract freeze, PR #72's implementation, and PR #74's
-lock-discipline correction. Acceptance is valid only when all seven
+lock-discipline correction. Acceptance is valid only when all eight
 maintained-current documents agree
 that no live policy authority is selected or provisioned and no public schema,
 runtime receipt, package-data record, generated Graphify output, live state, or

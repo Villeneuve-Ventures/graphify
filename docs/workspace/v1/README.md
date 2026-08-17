@@ -96,8 +96,8 @@ provisioning prerequisite is implemented and accepted as `COMPLETE` only at the
 [frozen private boundary](semantic-sync.md#p5b2-semantic-release-policy-authority-provisioning-prerequisite).
 Its completion evidence is the
 [P5B2 semantic-release policy-authority acceptance receipt](receipts/p5b2-semantic-release-policy-authority.md),
-which binds PR #71's contract freeze, PR #72's implementation delivery, and PR
-#74's lock-discipline correction. Its private store owns the exact
+which binds PR #71's contract freeze, PR #72's implementation delivery, and
+PR #74's lock-discipline correction. Its private store owns the exact
 current/previous/pending authority paths, closed structured selection input,
 body/envelope/record digest binding, revision-plus-one and predecessor CAS,
 shared-read/exclusive-write registry-then-workspace locking, fixed 256 KiB
