@@ -558,15 +558,88 @@ path may choose authority. The accepted prerequisite stops before live policy
 provisioning, decision binding, classification composition, omission,
 projection, public surfaces, publication, or successor activation.
 
+## Semantic-release decision-store and capacity/GC threats
+
+This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
+remains `WAITING`. It has no implementation or acceptance receipt. Its threat
+boundary is limited to the future private `SemanticReleaseDecisionStore`, bounded
+capacity and filesystem-reserve integration, install-once/replay behavior,
+commit-uncertainty handling, and nonempty-state generation protection. It is not
+operator policy, classification, terminal release-decision, omission,
+projection, public, provider/backend, network, or publication authority.
+
+Caller path and alias substitution are excluded because the store alone derives
+the path from validated repository, generation, and complete canonical
+decision-request-digest identity. Descriptor-relative no-follow traversal beneath
+mode-`0700` directories admits only one single-link mode-`0600` canonical binding
+at the terminal path. Absolute, empty, dot/dotdot, repeated-separator, backslash,
+alternate, symlink, hard-link, special-file, unsafe-mode, foreign, duplicated,
+or unexpected entries and unprovable containment or ambiguous enumeration fail
+closed. Request addressing rather than generation-only or newest-file selection
+prevents one authority revision or request from overwriting or masquerading as
+another.
+
+Canonical substitution is contained by the closed binding and nested member
+sets, fixed `utf8_lex_v1` and field-result order, and nonrecursive digest
+preimages. `full_result_sha256` excludes both digest members; the binding carries
+that completed result digest but never its own digest; and external
+`binding_sha256` hashes the completed canonical binding bytes. A field-value
+digest covers only the exact captured UTF-8 field bytes. Alternate JSON quoting,
+newline, salt, prefix, normalization, case conversion, member shape, or ordering
+cannot preserve the same canonical identity. Raw semantic prose, matched
+substrings, generated explanations, confidence scores, public source locations,
+provider responses, and credentials are forbidden. Private entity/field
+locators and unkeyed field-value digests remain an offline oracle risk if
+same-UID mode-`0600` confidentiality is lost; private placement and no-follow
+access reduce exposure but do not claim cryptographic secrecy against that actor.
+
+Capacity amplification is bounded at 25 MiB per binding, 64 bindings per
+generation, and 4,096 per workspace. Bounded no-follow enumeration stops at the
+applicable maximum plus one and runs before classification and immediately before
+install. Decision-store bytes and binding counts participate in existing
+global/workspace capacity ceilings, durable reservation accounting, and the
+filesystem-reserve calculation. Unsafe or unstable usage, an exceeded cap, or
+inability to prove namespace shape, counts, bytes, reservations, or reserve
+fails closed rather than falling back to partial accounting.
+
+The pre-classification snapshot uses shared registry, exclusive workspace, then
+shared generation locks. Final install uses exclusive registry, exclusive
+workspace, then the same shared generation lock so global accounting cannot race
+across workspaces. Under that retained composition every request-path,
+candidate-byte/digest, namespace, global/workspace count and byte total,
+capacity, reservation, reserve, and GC-protection input is revalidated before
+install-once and exact reopen. Identical requests converge; same-path different
+bytes conflict; distinct requests use distinct paths. Byte-identical completed
+replay is no-write success. After a possible install fault, only exact existing
+bytes adopt the commit. Proven absence is retryable only while request, bytes,
+authority, and capacity proof remain exact; partial, unsafe, unreadable,
+different, or ambiguous state is commit-unknown and fails closed.
+
+Nonempty decision state contributes an exact GC protection reason and blocks
+quarantine or purge of that generation until separately accepted atomic store
+integration exists. Missing, unreadable, unsafe, or ambiguous state cannot be
+treated as empty. This retention rule prevents orphaned audit/projection evidence
+but grants no deletion, cleanup, quarantine, repair, rollback, compaction, or GC
+mutation authority. No failure or replay path may mutate a binding or any
+semantic input, handoff, generation, receipt, journal, staged record, pointer,
+policy, or other durable state.
+
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
+provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
+prerequisite, live operator policy selection/provisioning, the encompassing
+release/DLP decision, classification composition, omission execution,
+projection, public surfaces, provider/backend, publication, remaining P5B2 work,
+and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is contract-frozen only and remains `WAITING`. The trust-root and
 policy-authority provisioning prerequisites above are accepted, but no stable
 current `ACTIVE` operator record is provisioned; decision-store
-capacity/GC integration,
-classification composition, and the other decision prerequisites also remain
-absent. The decision child begins only from the complete
+and capacity/GC implementation and separate acceptance, classification
+composition, and the other decision prerequisites also remain absent. The
+decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
 promoted generation, visible pointer, staged marker, receipt, handoff, semantic
 input, certification binding, or historical release-decision binding is not
@@ -650,7 +723,8 @@ projection, or publication. A later projection must independently reopen the
 complete proof and may consume only the exact private omitted-rationale
 locators under separate authority.
 
-The immutable private decision binding is addressed by the complete
+The encompassing child consumes only the separate prerequisite's immutable
+private decision binding addressed by the complete
 decision-request digest, not generation alone, in an external workspace
 namespace outside the sealed generation. Descriptor-relative no-follow access,
 mode-`0700` directories, a single-link mode-`0600` file, bounded enumeration,
@@ -668,9 +742,11 @@ oracle risk; private placement, no-follow access, capacity limits, and retention
 reduce exposure but do not claim cryptographic secrecy against same-UID
 compromise. A separately authorized projection consumer must reopen the binding.
 
-Concrete request, manifest, artifact, profile, category, rule, ID, field,
-per-field match, binding, per-generation binding, and per-workspace binding caps
-reject oversized inputs before unbounded parsing or classification. Binding
+The separate prerequisite enforces the binding, per-generation binding, and
+per-workspace binding caps. The encompassing child retains the concrete request,
+manifest, artifact, profile, category, rule, ID, field, and per-field match
+caps. Together those independent limits reject oversized inputs before unbounded
+parsing or classification. Binding
 bytes are charged to the existing global/workspace capacity policy and reserve.
 The binding excludes its own digest; the external digest is over completed
 canonical bytes, preventing recursive or divergent digest preimages.
@@ -694,8 +770,9 @@ exact; partial, unreadable, different, unsafe, or ambiguous state is
 commit-unknown and fails closed. No new lease, lifecycle state, journal transition,
 cleanup, deletion, rollback, or destructive recovery is introduced.
 
-Nonempty decision state protects its generation from GC until separately
-accepted store integration exists. This prevents orphaning the audit/projection
+The separate prerequisite's nonempty decision state protects its generation
+from GC until separately accepted store integration exists. This prevents
+orphaning the audit/projection
 evidence and does not grant the decision child cleanup authority.
 
 A later pointer or authority change makes an exact binding historical evidence
@@ -711,9 +788,9 @@ coordinate before releasing the locks.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites are accepted `COMPLETE`. The encompassing
-release/DLP decision, live operator-policy
-selection/provisioning, `SemanticReleaseDecisionStore`, capacity/GC
-integration, classification composition, omission execution, projection,
+release/DLP decision, the decision-store and capacity/GC prerequisite, live
+operator-policy selection/provisioning, classification composition, omission
+execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 

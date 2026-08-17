@@ -1292,8 +1292,8 @@ governance closeout proposes it.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites are accepted `COMPLETE`. The encompassing
-semantic-content release/DLP decision, `SemanticReleaseDecisionStore`,
-capacity/GC integration, classification composition, omission execution,
+semantic-content release/DLP decision, the decision-store and capacity/GC
+prerequisite, classification composition, omission execution,
 projection, public surfaces, provider/backend, publication, remaining P5B2
 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
 `READY`.
@@ -1414,19 +1414,114 @@ Passing these gates accepts only this provisioning prerequisite as `COMPLETE`.
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite remains
 `COMPLETE`.
 The encompassing release/DLP decision,
-`SemanticReleaseDecisionStore`, decision-store capacity/GC, classification
+the decision-store and capacity/GC prerequisite, classification
 composition, omission, projection, public surfaces, provider/backend,
 publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
 `DEFERRED`; no later successor is `READY`.
+
+## P5B2 semantic-release decision-store and capacity/GC contract-freeze gates
+
+This separate internal unnumbered P5B2 prerequisite is documentation-only and
+remains `WAITING`, not `READY`, `IN_PROGRESS`, or `COMPLETE`. It has no
+implementation or acceptance receipt. The freeze is complete only when all seven
+maintained-current documents agree and the exact diff changes no code, test,
+schema, fixture, dependency, workflow, receipt, generated Graphify output,
+runtime state, or JOS disposition.
+
+Contract review must prove each of the following:
+
+- only the future `SemanticReleaseDecisionStore` owns the exact external private
+  `workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
+  namespace. Generation and complete canonical request digest are validated
+  identity, never caller path components. Mode-`0700` directories, one
+  single-link mode-`0600` canonical binding, descriptor-relative no-follow
+  traversal, and fail-closed unexpected-entry handling reject absolute, empty,
+  dot/dotdot, repeated-separator, backslash, alternate, symlink, hard-link,
+  special-file, unsafe-mode, foreign, duplicate, uncontained, or ambiguous
+  state;
+- decision request, full result, binding, counts, and field-result records use
+  the canonical contract's exact closed member sets and normative ordering.
+  Each field-value digest covers only exact captured UTF-8 value bytes without
+  JSON quoting, newline, salt, prefix, renormalization, or case conversion.
+  `full_result_sha256` hashes exactly the inventory/counts/field-results/outcome
+  projection without either digest member; the binding carries that digest but
+  never its own digest; and external `binding_sha256` hashes the completed
+  canonical binding bytes. Unknown, missing, duplicate, additional, reordered,
+  or alternate-preimage state fails closed;
+- bindings exclude raw prose, matched substrings, generated explanations,
+  confidence scores, public source locations, provider responses, and
+  credentials. Private entity/field locators and unkeyed value digests remain
+  only in the private binding and never enter a public schema or runtime receipt;
+- hard bounds are 25 MiB per binding, 64 bindings per generation, and 4,096 per
+  workspace. Bounded no-follow enumeration stops at maximum plus one, closes on
+  every early exit, and runs before classification and immediately before
+  install. Decision-store bytes and binding counts are included in existing
+  global/workspace capacity ceilings, durable reservation accounting, and
+  filesystem-reserve calculations. Unsafe or unstable usage, exceeded limits,
+  or inability to prove namespace shape, counts, bytes, reservations, or reserve
+  fails closed;
+- pre-classification capacity proof uses shared registry, exclusive workspace,
+  then target-generation shared locks. Final revalidation uses exclusive
+  registry, exclusive workspace, then the same generation shared lock and holds
+  all three through install-once and reopen. It revalidates the registered
+  workspace and generation, request-derived path, exact candidate canonical
+  bytes/digest, namespace shape, global/workspace counts and bytes, capacity
+  ceilings, durable reservations, filesystem reserve, and GC-protection input.
+  No new lease, lifecycle record, staged state, journal transition, or durable
+  in-progress record participates;
+- identical concurrent requests converge on one canonical binding;
+  byte-identical completed replay is no-write; same-path different bytes
+  conflict; distinct requests use distinct paths without substitution. Failure
+  is definite no-commit only before possible visibility. Exact reopened bytes
+  adopt a possibly committed install, while proven absence retries only under
+  unchanged request, candidate bytes, authority, and capacity proof. Partial,
+  unsafe, unreadable, different, or ambiguous state is commit-unknown and fails
+  closed; and
+- nonempty decision state contributes an exact protected-generation reason and
+  blocks quarantine or purge. Missing, unreadable, unsafe, or ambiguous state is
+  not treated as empty. No deletion, cleanup, quarantine, repair, rollback,
+  compaction, GC mutation, live policy provisioning, decision composition,
+  classification, omission, projection, public CLI/schema/runtime receipt,
+  provider/backend, network, publication, release, implementation, acceptance,
+  parent completion, or successor authority is granted.
+
+The focused predecessor checks for the already-existing policy, trust-root,
+generation-capacity, and GC behavior are:
+
+```bash
+uv run --frozen --all-extras pytest -q \
+  tests/test_workspace_semantic_release_policy.py \
+  tests/test_workspace_semantic_release.py \
+  tests/test_workspace_generations.py \
+  tests/test_workspace_gc.py
+```
+
+Those tests prove only that the predecessor surfaces needed by the contract
+remain intact; they are not implementation, readiness, or acceptance evidence
+for this prerequisite. The documentation freeze additionally requires
+`uv lock --check`, `uv run --frozen python -m tools.skillgen --check`,
+`uv run --frozen pre-commit run --all-files`,
+`uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, exact
+changed-file manifest verification, a relative Markdown link and heading-anchor
+audit across all seven documents, and the documentation-diff advisory audit.
+Generated Graphify output is not refreshed.
+
+Passing these gates establishes only the separate frozen contract at `WAITING`.
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
+provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
+prerequisite, the encompassing release/DLP decision, live operator policy
+selection/provisioning, classification composition, omission, projection,
+public surfaces, provider/backend, publication, remaining P5B2/P5C work remain
+`WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
 remains `WAITING`. It consumes the accepted trust-root and policy-authority
 provisioning prerequisites above. This child cannot become `READY` until a
-stable current `ACTIVE` operator policy-authority record, decision-store,
-capacity/GC, and
-composition prerequisites exist. The freeze is
+stable current `ACTIVE` operator policy-authority record, implementation and
+separate acceptance of the decision-store and capacity/GC prerequisite above,
+and composition prerequisites exist. The freeze is
 complete only when all seven maintained-current documents agree and the diff
 changes no code, tests, schemas, fixtures, receipts, generated Graphify output,
 JOS row, or runtime artifact:
@@ -1437,14 +1532,17 @@ JOS row, or runtime artifact:
 - `architecture.md` keeps the repo-owned deterministic classifier separate from
   operator policy, semantic-field composition, and private terminal proof;
 - `semantic-sync.md` is the canonical semantic contract and status split;
-- `state-contract.md` freezes the immutable request-addressed binding,
-  capture/revalidation/install sequence, replay, and commit-unknown behavior;
+- `state-contract.md` separates the immutable request-addressed binding,
+  capacity/GC integration, install/replay, and commit-unknown prerequisite from
+  the encompassing decision composition;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66-#69 provenance, the trust-root
-  prerequisite as `COMPLETE`, and the encompassing child as `WAITING`; and
-- this file freezes the evidence and validation gates while the separate receipt
-  remains `STAGED` pending publication and merge.
+- `governance.md` records exact PR #66-#75 provenance, the trust-root and
+  policy-authority provisioning prerequisites as `COMPLETE`, and both the
+  decision-store/capacity/GC prerequisite and encompassing child as `WAITING`;
+  and
+- this file freezes the evidence and validation gates without creating or
+  accepting a receipt.
 
 Contract review must prove each of the following:
 
@@ -1533,11 +1631,13 @@ Contract review must prove each of the following:
   bound and accepted NFC contract; global NFKC, whitespace rewriting,
   transliteration, and case fold are forbidden, with ASCII case-insensitive
   comparison allowed only for syntax-defined names;
-- exact hard caps are enforced before unbounded work: 64 KiB each for request
+- exact decision-composition hard caps are enforced before unbounded work:
+  64 KiB each for request
   and policy-authority record, 1 MiB manifest, 25 MiB referenced bundle bytes,
   64 profiles, 4,096 categories, 4,096 rules, 256 UTF-8 bytes per
-  classifier-related ID, 30,000 fields, 256 category and rule IDs per field, 25 MiB per
-  binding, 64 bindings per generation, and 4,096 per workspace. None is
+  classifier-related ID, 30,000 fields, and 256 category and rule IDs per field.
+  The separate store prerequisite owns the 25 MiB-per-binding,
+  64-bindings-per-generation, and 4,096-bindings-per-workspace caps. None is
   caller-expandable;
 - field actions are exactly `ALLOW_FIELD`, `OMIT_RATIONALE`, and
   `REJECT_RELEASE`; terminal outcomes are separately `ALLOW_UNCHANGED`,
@@ -1547,7 +1647,8 @@ Contract review must prove each of the following:
   under the exact coverage-sufficiency declaration; and `MATCH` maps every
   `(field_type, category_id)` pair, with ambiguity, unknown or unmapped pairs,
   drift, and classifier/policy failure rejecting;
-- the private immutable binding path is exactly the external
+- the encompassing child can consume only the separate prerequisite's private
+  immutable binding at the exact external
   `workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
   workspace namespace, outside the sealed generation, with no-follow mode-
   `0700` directories and one single-link mode-`0600` file. It commits authority,
@@ -1562,11 +1663,13 @@ Contract review must prove each of the following:
   private rule IDs, and disposition. Raw prose, substrings, explanations,
   confidence, public source locations, provider responses, and credentials are
   absent;
-- decision-store bytes are included in existing global/workspace capacity and
-  reserve accounting; inability to prove bounded enumeration, usage, or
-  capacity rejects. Nonempty decision state protects its generation from GC
+- the separate prerequisite includes decision-store bytes and counts in existing
+  global/workspace capacity ceilings, durable reservation accounting, and
+  filesystem-reserve calculations; inability to prove bounded enumeration,
+  usage, or capacity rejects. Nonempty decision state protects its generation from GC
   until separately accepted integration exists;
-- bounded private bytes are captured under shared registry, exclusive workspace,
+- composition with the separate prerequisite captures bounded private bytes
+  under shared registry, exclusive workspace,
   then shared target-generation locks and classified outside coordination locks
   without durable write; only their exact count and digest enter the request.
   Final locked semantic-input reread, revalidation, install, and exact reopen
@@ -1618,10 +1721,10 @@ excludes generated artifacts.
 
 Passing those gates establishes only documentation consistency. It leaves P5
 and P5B2 `IN_PROGRESS`; the separately accepted trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. The encompassing decision child,
-live operator-policy
-selection/provisioning, `SemanticReleaseDecisionStore`, capacity/GC
-integration, classification composition, omission execution, projection,
+provisioning prerequisites remain `COMPLETE`. The decision-store and capacity/GC
+prerequisite, the encompassing decision child, live operator-policy
+selection/provisioning, classification composition, omission execution,
+projection,
 public surfaces, provider/backend, publication, and remaining P5B2/P5C work
 remain `WAITING`; H3 remains `DEFERRED`,
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC`, and no later

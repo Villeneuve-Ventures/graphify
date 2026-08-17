@@ -1040,15 +1040,96 @@ omission, graph/query projection, publication, and successor activation remain
 unauthorized and `WAITING` where applicable. Acceptance provisions no live
 record and adds no runtime receipt or public schema.
 
+## Semantic-release decision-store and capacity/GC prerequisite
+
+This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
+remains `WAITING`, not `READY`, `IN_PROGRESS`, or `COMPLETE`. It has no
+implementation or acceptance receipt. A future `SemanticReleaseDecisionStore`
+alone owns this external private namespace:
+
+```text
+workspaces/<repository_uuid>/semantic-release-decisions/
+  <generation_id>/<decision_request_sha256>.json
+```
+
+All directories are mode `0700`; the terminal binding is one single-link regular
+mode-`0600` file. Traversal is descriptor-relative and no-follow beneath the
+validated workspace root. Components are canonical validated generation and
+complete decision-request-digest identities, never caller paths. Absolute,
+empty, dot/dotdot, repeated-separator, backslash, alternate, symlink, hard-link,
+special-file, unsafe-mode, foreign, duplicated, or unexpected entries and any
+unprovable containment or ambiguous enumeration fail closed. The namespace is
+outside the sealed generation.
+
+The binding is canonical
+`graphify.workspace.semantic_release_decision.internal` format version 1. Its
+exact top-level and nested member sets, normative array order, and digest
+preimages are frozen in the
+[canonical semantic contract](semantic-sync.md#sole-namespace-and-canonical-binding-ownership).
+The filename is derived from `decision_request_sha256`; `full_result_sha256`
+hashes the exact inventory/counts/field-results/outcome projection without either
+digest member; the completed binding contains that result digest but never its
+own digest; and external `binding_sha256` hashes the completed canonical binding
+bytes. Exact request addressing permits distinct complete requests for one
+generation without overwrite or substitution. The binding contains no raw
+semantic prose, matched substring, generated explanation, confidence score,
+public source location, provider response, or credential.
+
+One binding is at most 25 MiB. Bounded no-follow enumeration permits at most 64
+bindings per generation and 4,096 per workspace and stops at maximum plus one.
+The store proves namespace shape, counts, and bytes before classification may
+begin and again immediately before install. Decision-store bytes and binding
+counts participate in the existing `CapacityPolicy` global/workspace ceilings,
+durable capacity reservations, and filesystem-reserve calculation. Insufficient
+capacity, an exceeded bound, unsafe or unstable state, or inability to prove any
+count, byte total, reservation, or reserve fails closed.
+
+The pre-classification proof uses the existing shared registry lock, exclusive
+workspace lock, then target-generation shared lock. Classification occurs outside
+those locks and is not owned by this prerequisite. Final revalidation uses the
+exclusive registry lock, exclusive workspace lock, then the same shared
+generation lock. While holding all three, the store revalidates repository and
+generation identity, the request-derived path, exact candidate canonical bytes
+and digest, namespace shape, global/workspace counts and bytes, capacity
+ceilings, durable reservations, filesystem reserve, and GC-protection input; it
+then installs once and reopens the file to prove exact path, type, link count,
+mode, size, bytes, and digest. The exclusive registry lock serializes global
+capacity and reserve accounting across workspaces. No new lease, lifecycle
+record, staged state, journal transition, or durable in-progress record exists.
+
+Concurrent identical requests converge on identical canonical bytes at one path.
+Byte-identical completed replay is no-write success. Same-path different bytes
+conflict; distinct requests use distinct paths and grant no substitution
+authority. Failure is definite no-commit only before binding visibility is
+possible. After possible visibility, exact reopened bytes adopt the commit;
+proven absence may retry only while request identity, candidate bytes, authority,
+and capacity proof remain exact. Partial, unsafe, unreadable, different, or
+ambiguous state is commit-unknown and fails closed without deletion, cleanup,
+quarantine, repair, rollback, or rewrite.
+
+Any nonempty decision state contributes an exact protected-generation reason to
+existing GC reachability and blocks quarantine or purge. It remains protected
+until separately accepted atomic GC integration owns both the generation and its
+decision state. Missing, unreadable, unsafe, or ambiguous state is not empty.
+This prerequisite grants no GC mutation or binding removal authority.
+
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
+provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
+prerequisite, the encompassing release/DLP decision, live operator policy
+selection/provisioning, classification composition, omission, projection,
+public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
+remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+
 ## Semantic-content release/DLP decision
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is a contract freeze at `WAITING`. Besides the implemented and accepted
 trust-root and policy-authority provisioning mechanisms, it still requires a
 provisioned stable current `ACTIVE` operator policy-authority record,
-`SemanticReleaseDecisionStore`, capacity/GC integration, classification
-composition, and every other frozen prerequisite. It may later add one private
-internal decision binding but no lifecycle transition, staged-build state,
+implementation and separate acceptance of the decision-store and capacity/GC
+prerequisite above, classification composition, and every other frozen
+prerequisite. It may later add one private internal decision binding but no
+lifecycle transition, staged-build state,
 journal event, generation receipt, public schema, runtime receipt, or public
 result.
 
@@ -1169,7 +1250,8 @@ with rejection over omission over allow. A label cannot receive
 `ALLOW_WITH_OMISSIONS`, or `REJECTED`. `NO_MATCH` alone never proves sufficient
 coverage or release safety.
 
-The future `SemanticReleaseDecisionStore` owns the private canonical
+The encompassing child may consume only the separate prerequisite's future
+`SemanticReleaseDecisionStore` private canonical
 `graphify.workspace.semantic_release_decision.internal` format-version-1
 binding at
 `workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`.
@@ -1203,7 +1285,8 @@ The binding is at most 25 MiB. Bounded no-follow enumeration permits at most 64
 bindings per generation and 4,096 per workspace. All decision-store bytes are
 charged against existing `CapacityPolicy` global/workspace byte ceilings and
 reserve, and the authoritative usage scanner must include this namespace before
-the child can be `READY`. Limit, enumeration, or capacity uncertainty rejects.
+the prerequisite can be `READY`. Limit, enumeration, or capacity uncertainty
+rejects.
 
 The write boundary uses capture-classify-revalidate-install. Under the existing
 shared registry lock, exclusive workspace lock, then target-generation shared
@@ -1229,8 +1312,9 @@ binding, semantic input, handoff, generation, receipt, journal, staged record,
 pointer, or policy. A later pointer or authority change makes a prior binding
 historical evidence only.
 
-This child never deletes decision state. Until separately accepted GC
-integration exists, a nonempty decision directory is a protected reason that
+Neither prerequisite nor decision child deletes decision state. Until
+separately accepted GC integration exists, a nonempty decision directory is a
+protected reason that
 blocks purge of its generation. Any later removal or quarantine must be
 authorized and coordinated with the same generation; no such authority is
 granted here.
@@ -1262,8 +1346,8 @@ implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
 `IN_PROGRESS`; the separate trust-root and policy-authority provisioning
 prerequisites are accepted `COMPLETE`.
-This decision child, live operator policy selection/provisioning,
-`SemanticReleaseDecisionStore`, capacity/GC integration,
+This decision-store and capacity/GC prerequisite, this decision child, live
+operator policy selection/provisioning,
 classification composition, omission execution, projection, public
 CLI/schema/receipt, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
