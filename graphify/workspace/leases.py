@@ -335,11 +335,13 @@ class LeaseStore:
         deadline_ns: int | None = None,
     ) -> Iterator[None]:
         directory = self._directory(repo_uuid)
-        with self.state.lock(
+        with self.state.existing_lock(
             directory / "workspace.lock",
             rank=WORKSPACE_LOCK_RANK,
             name="workspace",
+            exclusive=True,
             deadline_ns=deadline_ns,
+            kind="workspace",
         ):
             yield
 

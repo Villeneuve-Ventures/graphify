@@ -2647,6 +2647,89 @@ def test_registry_before_workspace_lock_order_is_enforced_and_observable(tmp_pat
 
 
 @pytest.mark.parametrize("lock_name", ["registry", "workspace"])
+def test_steady_state_lock_removal_cannot_split_serialization(
+    tmp_path: Path,
+    lock_name: str,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    lock_path = (
+        state_root / "registry.lock"
+        if lock_name == "registry"
+        else state_root / "workspaces" / REPO_UUID / "workspace.lock"
+    )
+    holder = (
+        registry.existing_exclusive_lock()
+        if lock_name == "registry"
+        else leases.read_only_workspace_lock(REPO_UUID)
+    )
+    contender_acquired = threading.Event()
+    contender_failures: list[BaseException] = []
+
+    def contend() -> None:
+        try:
+            contender = (
+                registry.exclusive_lock()
+                if lock_name == "registry"
+                else leases.workspace_lock(REPO_UUID)
+            )
+            with contender:
+                contender_acquired.set()
+        except BaseException as exc:
+            contender_failures.append(exc)
+
+    with holder:
+        lock_path.unlink()
+        thread = threading.Thread(target=contend)
+        thread.start()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        assert not contender_acquired.is_set()
+        assert len(contender_failures) == 1
+        assert isinstance(contender_failures[0], StatePathError)
+        assert not lock_path.exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "wrong_mode"])
+def test_subsequent_enrollment_requires_existing_registry_lock_without_mutation(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    first_repo = _create_repo(tmp_path / "first", REPO_UUID)
+    second_repo = _create_repo(tmp_path / "second", SECOND_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(first_repo),
+        _authorization(IdentityAction.ENROLL, "first"),
+        expected_revision=0,
+    )
+    registry_lock = state_root / "registry.lock"
+    if case == "missing":
+        registry_lock.unlink()
+    else:
+        registry_lock.chmod(0o644)
+    before = _tree_snapshot(state_root)
+
+    with pytest.raises(StatePathError):
+        registry.enroll(
+            discover_source(second_repo),
+            _authorization(IdentityAction.ENROLL, "second"),
+            expected_revision=1,
+        )
+
+    assert _tree_snapshot(state_root) == before
+
+
+@pytest.mark.parametrize("lock_name", ["registry", "workspace"])
 def test_lease_acquisition_deadline_bounds_mutating_lock_wait(
     tmp_path: Path,
     lock_name: str,

@@ -1039,20 +1039,11 @@ class SemanticReleasePolicyAuthorityStore:
         deadline_ns: int | None,
     ) -> Iterator[None]:
         lock_path = self._directory(repo_uuid) / "workspace.lock"
-        if exclusive:
-            with self.state.lock(
-                lock_path,
-                rank=WORKSPACE_LOCK_RANK,
-                name="workspace",
-                deadline_ns=deadline_ns,
-            ):
-                yield
-            return
         with self.state.existing_lock(
             lock_path,
             rank=WORKSPACE_LOCK_RANK,
             name="workspace",
-            exclusive=False,
+            exclusive=exclusive,
             deadline_ns=deadline_ns,
             kind="workspace",
         ):
@@ -1570,7 +1561,7 @@ class SemanticReleasePolicyAuthorityStore:
         deadline_ns: int | None,
     ) -> SemanticReleasePolicyAuthorityRecord:
 
-        with self.registry.exclusive_lock(deadline_ns=deadline_ns):
+        with self.registry.existing_exclusive_lock(deadline_ns=deadline_ns):
             registry = self._registry_locked(deadline_ns=deadline_ns)
             self._require_registered(registry, request.repo_uuid)
             with self._workspace_lock(
@@ -1704,7 +1695,7 @@ class SemanticReleasePolicyAuthorityStore:
         visibility: _CommitVisibility,
         deadline_ns: int | None,
     ) -> SemanticReleasePolicyAuthorityRecord | None:
-        with self.registry.exclusive_lock(deadline_ns=deadline_ns):
+        with self.registry.existing_exclusive_lock(deadline_ns=deadline_ns):
             registry = self._registry_locked(deadline_ns=deadline_ns)
             self._require_registered(registry, canonical_uuid)
             with self._workspace_lock(

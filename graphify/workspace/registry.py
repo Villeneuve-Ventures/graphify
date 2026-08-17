@@ -113,11 +113,43 @@ class RegistryStore:
 
     @contextmanager
     def exclusive_lock(self, *, deadline_ns: int | None = None) -> Iterator[None]:
+        """Hold the existing registry lock for a steady-state mutation."""
+
+        with self.existing_exclusive_lock(deadline_ns=deadline_ns):
+            yield
+
+    @contextmanager
+    def existing_exclusive_lock(
+        self,
+        *,
+        deadline_ns: int | None = None,
+    ) -> Iterator[None]:
+        """Hold the existing registry lock exclusively without repairing it."""
+
+        with self.state.existing_lock(
+            self.LOCK,
+            rank=REGISTRY_LOCK_RANK,
+            name="registry",
+            exclusive=True,
+            deadline_ns=deadline_ns,
+            kind="registry",
+        ):
+            yield
+
+    @contextmanager
+    def _enrollment_lock(self) -> Iterator[None]:
+        initialized = any(
+            self.state.private_file_exists(path)
+            for path in (self.LOCK, self.CURRENT, self.PREVIOUS, self.PENDING)
+        )
+        if initialized:
+            with self.existing_exclusive_lock():
+                yield
+            return
         with self.state.lock(
             self.LOCK,
             rank=REGISTRY_LOCK_RANK,
             name="registry",
-            deadline_ns=deadline_ns,
         ):
             yield
 
@@ -597,7 +629,7 @@ class RegistryStore:
     ) -> Registry:
         authorization.require(IdentityAction.ENROLL)
         self.state.assert_external_to(source.root)
-        with self.exclusive_lock():
+        with self._enrollment_lock():
             current = self._load_locked(allow_missing=True)
             revision = self._check_revision(current, expected_revision)
             entries = [] if current is None else current.to_dict()["workspaces"]

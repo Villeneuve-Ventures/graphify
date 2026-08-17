@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 from typing import Any, Iterator, cast
 
@@ -49,7 +50,13 @@ from graphify.workspace.semantic_release_policy import (
     SemanticReleasePolicySelection,
     SemanticReleasePolicySelectionAuthorization,
 )
-from tests.workspace_p3_helpers import REPO_UUID, SUPPORTED, RuntimeHarness, create_harness
+from tests.workspace_p3_helpers import (
+    REPO_UUID,
+    SUPPORTED,
+    RuntimeHarness,
+    create_harness,
+    tree_snapshot,
+)
 
 
 def _store(
@@ -167,6 +174,26 @@ def _authority_metadata(harness: RuntimeHarness) -> dict[str, tuple[int, int, in
                 hashlib.sha256(path.read_bytes()).hexdigest(),
             )
     return result
+
+
+def _damage_coordination_state(harness: RuntimeHarness, case: str) -> None:
+    directory = _authority_directory(harness)
+    workspace_lock = directory / "workspace.lock"
+    registry_lock = harness.state_root / "registry.lock"
+    if case == "workspace_directory_mode":
+        directory.chmod(0o755)
+    elif case == "workspace_lock_mode":
+        workspace_lock.chmod(0o644)
+    elif case == "workspace_lock_missing":
+        workspace_lock.unlink()
+    elif case == "workspace_directory_missing":
+        shutil.rmtree(directory)
+    elif case == "registry_lock_mode":
+        registry_lock.chmod(0o644)
+    elif case == "registry_lock_missing":
+        registry_lock.unlink()
+    else:  # pragma: no cover - test parameter is closed
+        raise AssertionError(f"unknown coordination-state case: {case}")
 
 
 def _rewrite_record(
@@ -563,6 +590,66 @@ def test_fixed_namespace_and_filesystem_reserve_fail_before_pending_visibility(
         store.select(_selection())
     assert not _authority_paths(harness)[2].exists()
     assert POLICY_AUTHORITY_TRANSACTION_PEAK_BYTES == 4 * POLICY_AUTHORITY_RECORD_MAX_BYTES
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "workspace_directory_mode",
+        "workspace_lock_mode",
+        "workspace_lock_missing",
+        "workspace_directory_missing",
+        "registry_lock_mode",
+        "registry_lock_missing",
+    ],
+)
+def test_selection_rejects_unsafe_existing_coordination_state_without_mutation(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    harness = create_harness(tmp_path)
+    _damage_coordination_state(harness, case)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError):
+        _store(harness).select(_selection())
+
+    assert tree_snapshot(harness.state_root) == before
+    assert not any(path.exists() for path in _authority_paths(harness))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "workspace_directory_mode",
+        "workspace_lock_mode",
+        "workspace_lock_missing",
+        "workspace_directory_missing",
+        "registry_lock_mode",
+        "registry_lock_missing",
+    ],
+)
+def test_recovery_rejects_unsafe_existing_coordination_state_without_mutation(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    harness = create_harness(tmp_path)
+
+    def failpoint(event: str) -> None:
+        if event == "semantic-release-policy-authority:pending_durable":
+            raise InjectedFault(event)
+
+    with pytest.raises(CommitUnknown):
+        _store(harness, fault_hook=failpoint).select(_selection())
+    assert _authority_paths(harness)[2].exists()
+
+    _damage_coordination_state(harness, case)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(StatePathError):
+        _store(harness).recover(REPO_UUID)
+
+    assert tree_snapshot(harness.state_root) == before
 
 
 def test_store_uses_shared_workspace_lock_for_reads_and_registry_then_workspace_order(
