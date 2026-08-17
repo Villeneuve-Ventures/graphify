@@ -206,8 +206,10 @@ publication behavior. Its acceptance grants none of those excluded behaviors
 and activates no successor.
 
 The separate internal unnumbered P5B2 semantic-release policy-authority
-provisioning prerequisite has one private implementation candidate and is
-`IN_PROGRESS`, not `READY` or `COMPLETE`.
+provisioning prerequisite is implemented and accepted as `COMPLETE` at the
+frozen private boundary. Completion evidence is the
+[`P5B2 semantic-release policy-authority` receipt](receipts/p5b2-semantic-release-policy-authority.md),
+which binds PR #71, PR #72, and PR #74.
 `SemanticReleasePolicyAuthorityStore` owns one per-workspace private
 current/previous/pending record set and reuses the existing canonical durable
 state-record protocol. A closed structured selection call supplies exact
@@ -231,8 +233,8 @@ temporary have a fixed 256 KiB peak. Any uncertainty after pending visibility
 is `CommitUnknown` and permits only exact original-transaction recovery under
 the same locks. Byte-identical completed replay is no-write; divergent or
 `REVOKED` state blocks. The architecture adds no lease, generation, pointer,
-journal, queue, decision-store, public transport, live policy choice, GC,
-readiness, acceptance, or successor authority.
+journal, queue, decision-store, public transport, live policy choice, GC, or
+successor authority. Acceptance provisions no live record.
 
 The encompassing unnumbered P5B2 semantic-content release/DLP decision child is
 contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
@@ -249,8 +251,8 @@ captured bytes, and final locked reread must reproduce both values.
 Classification, policy provisioning, and the release decision remain separate
 authorities. The decision
 composition consumes but cannot alter or override the repo-owned installed
-trust root above. The separately implemented but still `IN_PROGRESS` durable
-operator policy-authority store can select
+trust root above. The separately accepted durable operator policy-authority
+store can select
 one stable current `ACTIVE` revision; older-revision bindings are
 historical candidates only. The authority embeds a closed version-1
 coverage-sufficiency declaration whose release context and exact selected-profile set
@@ -288,9 +290,9 @@ runtime receipts do not become release authority. Nonempty decision state
 protects the generation from GC until a separately accepted integration. The
 freeze stops before omission execution, graph construction, projection, query,
 public semantic sync, publication, implementation or readiness of the
-encompassing child, or acceptance. P5 and P5B2 remain `IN_PROGRESS`; only the
-bounded trust-root prerequisite is accepted `COMPLETE`. The policy-authority
-implementation candidate remains `IN_PROGRESS`; live operator policy selection,
+encompassing child, or acceptance. P5 and P5B2 remain `IN_PROGRESS`; the bounded
+trust-root and policy-authority provisioning prerequisites are accepted
+`COMPLETE`. Live operator policy selection,
 `SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, the encompassing release/DLP decision, remaining
 P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
@@ -443,8 +445,8 @@ Each certification file is a separate immutable, store-owned internal record
 binding one generation and certification request to the revalidated queue view
 and exact sealed staged-input manifest.
 
-The implemented but still `IN_PROGRESS` policy-authority provisioning
-candidate reserves only this fixed external workspace namespace:
+The accepted policy-authority provisioning prerequisite reserves only this
+fixed external workspace namespace:
 
 ```text
 <external_state_root>/workspaces/<repo_uuid>/

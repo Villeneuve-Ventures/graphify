@@ -957,8 +957,11 @@ excluded authorities and activates no successor.
 
 ## Semantic-release policy-authority provisioning prerequisite
 
-This separate unnumbered P5B2 prerequisite has one private implementation
-candidate and remains `IN_PROGRESS`, not `READY` or `COMPLETE`.
+This separate unnumbered P5B2 prerequisite is implemented and accepted as
+`COMPLETE` at this frozen boundary. Completion evidence is the
+[`P5B2 semantic-release policy-authority` receipt](receipts/p5b2-semantic-release-policy-authority.md),
+binding PR #71's contract freeze, PR #72's implementation, and PR #74's
+lock-discipline correction.
 `SemanticReleasePolicyAuthorityStore` alone owns these
 external private stable records:
 
@@ -1033,15 +1036,16 @@ monotonic `ACTIVE` advancement, recovery projection, exact recovery,
 byte-identical replay, exact pending clear, and bounded orphan-temporary
 cleanup. Revocation, reactivation, rollback,
 downgrade, arbitrary repair, deletion, GC, decision binding, composition,
-omission, graph/query projection, publication, readiness,
-acceptance, and successor activation remain unauthorized and `WAITING` where
-applicable.
+omission, graph/query projection, publication, and successor activation remain
+unauthorized and `WAITING` where applicable. Acceptance provisions no live
+record and adds no runtime receipt or public schema.
 
 ## Semantic-content release/DLP decision
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
-child is a contract freeze at `WAITING`. Besides implemented and accepted
-trust-root bytes, it still requires operator policy-authority provisioning,
+child is a contract freeze at `WAITING`. Besides the implemented and accepted
+trust-root and policy-authority provisioning mechanisms, it still requires a
+provisioned stable current `ACTIVE` operator policy-authority record,
 `SemanticReleaseDecisionStore`, capacity/GC integration, classification
 composition, and every other frozen prerequisite. It may later add one private
 internal decision binding but no lifecycle transition, staged-build state,
@@ -1066,8 +1070,8 @@ not own or weaken that trust root. The trust-root subchild is accepted, but the
 encompassing decision child remains `WAITING` because its separate policy,
 persistence, capacity/GC, and composition prerequisites are absent.
 
-The separately implemented but still `IN_PROGRESS` and unaccepted
-`SemanticReleasePolicyAuthorityStore` provisioning prerequisite above owns
+The separately accepted `SemanticReleasePolicyAuthorityStore` provisioning
+prerequisite above owns
 these private stable paths:
 
 - `workspaces/<repository_uuid>/semantic-release-policy-authority.json`;
@@ -1256,9 +1260,8 @@ selection, networking, public/runtime schemas or receipts, status, repair,
 migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
 implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
-`IN_PROGRESS`; only the separate trust-root prerequisite is accepted
-`COMPLETE`. The policy-authority implementation candidate remains
-`IN_PROGRESS`.
+`IN_PROGRESS`; the separate trust-root and policy-authority provisioning
+prerequisites are accepted `COMPLETE`.
 This decision child, live operator policy selection/provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration,
 classification composition, omission execution, projection, public
