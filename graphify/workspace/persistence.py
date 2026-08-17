@@ -20,6 +20,7 @@ import uuid
 
 
 FaultHook = Callable[[str], None]
+REGISTRY_INITIALIZATION_LOCK_RANK = 5
 REGISTRY_LOCK_RANK = 10
 WORKSPACE_LOCK_RANK = 20
 GENERATION_LOCK_RANK = 30
@@ -428,6 +429,7 @@ class DurableStateRoot:
         *,
         ensure: bool,
         allow_missing: bool = False,
+        repair_existing: bool = True,
     ) -> Iterator[int | None]:
         """Hold the root and its verified parent across one contained operation."""
 
@@ -486,7 +488,7 @@ class DurableStateRoot:
                     self.root,
                 )
             try:
-                if ensure:
+                if ensure and (created or repair_existing):
                     os.fchmod(root_descriptor, 0o700)
                 opened = self._require_private_directory_descriptor(
                     root_descriptor,
@@ -1468,6 +1470,11 @@ class DurableStateRoot:
                             kind=name,
                         )
                     break
+                self._require_current_lock_binding(
+                    descriptor,
+                    path,
+                    kind=name,
+                )
                 token = _LOCK_STACK.set((*stack, (rank, name)))
                 self.fault_hook(f"lock:{name}:acquired")
                 try:
@@ -1483,6 +1490,67 @@ class DurableStateRoot:
                     self.fault_hook(f"lock:{name}:released")
             finally:
                 os.close(descriptor)
+
+    @contextmanager
+    def initialization_lock(
+        self,
+        *,
+        rank: int,
+        name: str,
+    ) -> Iterator[None]:
+        """Serialize initialization without adding another durable state path."""
+
+        stack = _LOCK_STACK.get()
+        if stack and (
+            rank < stack[-1][0]
+            or (rank == stack[-1][0] and name <= stack[-1][1])
+        ):
+            raise LockOrderError(
+                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
+            )
+        with self._root_directory(
+            ensure=True,
+            repair_existing=False,
+        ) as descriptor:
+            if descriptor is None:  # pragma: no cover - ensure is true
+                raise StatePathError(f"state directory is missing: {self.root}")
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - rejected by capability gate
+                raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    break
+                except InterruptedError:
+                    continue
+            locked = self._require_private_directory_descriptor(descriptor, self.root)
+            try:
+                current = self.root.lstat()
+            except OSError as exc:
+                raise StatePathError(
+                    f"{name} lock binding changed while acquiring: {self.root}"
+                ) from exc
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or (locked.st_dev, locked.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise StatePathError(
+                    f"{name} lock binding changed while acquiring: {self.root}"
+                )
+            token = _LOCK_STACK.set((*stack, (rank, name)))
+            self.fault_hook(f"lock:{name}:acquired")
+            try:
+                yield
+            finally:
+                _LOCK_STACK.reset(token)
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        break
+                    except InterruptedError:
+                        continue
+                self.fault_hook(f"lock:{name}:released")
 
     @contextmanager
     def existing_lock(
@@ -1559,6 +1627,11 @@ class DurableStateRoot:
                         kind=kind,
                     )
                 break
+            self._require_current_lock_binding(
+                descriptor,
+                path,
+                kind=kind,
+            )
             token = _LOCK_STACK.set((*stack, (rank, name)))
             self.fault_hook(f"lock:{name}:acquired")
             try:
@@ -1574,6 +1647,41 @@ class DurableStateRoot:
                 self.fault_hook(f"lock:{name}:released")
         finally:
             os.close(descriptor)
+
+    def _require_current_lock_binding(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        kind: str,
+    ) -> None:
+        """Require the acquired descriptor to remain bound to the lock pathname."""
+
+        locked = self._require_regular_descriptor(
+            descriptor,
+            path,
+            allowed_modes=_PRIVATE_FILE_MODES,
+        )
+        try:
+            current_descriptor = self._open_existing_file(path)
+        except (FileNotFoundError, OSError) as exc:
+            raise StatePathError(
+                f"{kind} lock binding changed while acquiring: {path}"
+            ) from exc
+        if current_descriptor is None:  # pragma: no cover - missing parent raises
+            raise StatePathError(f"{kind} lock binding changed while acquiring: {path}")
+        try:
+            current = self._require_regular_descriptor(
+                current_descriptor,
+                path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            if (locked.st_dev, locked.st_ino) != (current.st_dev, current.st_ino):
+                raise StatePathError(
+                    f"{kind} lock binding changed while acquiring: {path}"
+                )
+        finally:
+            os.close(current_descriptor)
 
     def write_once(self, relative: str | Path, data: bytes) -> Path:
         self._ensure_root()
@@ -3094,6 +3202,7 @@ __all__ = [
     "InjectedFault",
     "LockOrderError",
     "PosixSyscalls",
+    "REGISTRY_INITIALIZATION_LOCK_RANK",
     "REGISTRY_LOCK_RANK",
     "RuntimeCapabilities",
     "StateCorrupt",
