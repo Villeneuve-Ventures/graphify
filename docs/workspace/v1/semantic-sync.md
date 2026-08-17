@@ -1839,19 +1839,23 @@ reduction, omission execution, projection, new public CLI/schema/receipt
 surfaces, provider/backend behavior, publication, and every broader release/DLP
 decision.
 
-P5 and P5B2 remain `IN_PROGRESS`; only this trust-root prerequisite is
-`COMPLETE`. The encompassing semantic-content release/DLP decision child,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
+provisioning prerequisites are `COMPLETE`. The encompassing semantic-content
+release/DLP decision child,
 remaining P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later
 successor is `READY`. Acceptance is limited to the bounded internal prerequisite
 and invents no operator-policy provisioning or decision-store behavior.
 
 ## P5B2 semantic-release policy-authority provisioning prerequisite
 
-This separate internal unnumbered P5B2 prerequisite has one bounded private
-implementation candidate and remains `IN_PROGRESS`, not `READY` or `COMPLETE`.
-It owns the provisioning mechanism for the policy-authority record consumed by
-the encompassing decision child; this candidate does not provision a live
-record. No release context, profile set, coverage-sufficiency value,
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` at this frozen private boundary. Completion evidence is the
+[`P5B2 semantic-release policy-authority` receipt](receipts/p5b2-semantic-release-policy-authority.md),
+which binds PR #71's contract freeze, PR #72's implementation delivery, and PR
+#74's lock-discipline correction. It owns the provisioning mechanism for the
+policy-authority record consumed by the encompassing decision child; acceptance
+does not provision a live record. No release context, profile set,
+coverage-sufficiency value,
 category-disposition mapping, policy bytes, or operator record is selected here.
 
 ### Store ownership and canonical selection input
@@ -1994,15 +1998,13 @@ selection, monotonic `ACTIVE`-to-`ACTIVE` advancement, read-only recovery
 projection, exact transaction recovery, byte-identical replay, exact pending
 clear after recovery, and bounded orphan-temporary cleanup. Revocation,
 reactivation, rollback, downgrade, arbitrary repair, deletion of current or
-previous, policy-authority GC, public CLI/schema/receipt exposure, ambient or
+previous, policy-authority GC, public CLI/schema/runtime-receipt exposure, ambient or
 automatic policy choice, decision binding, classification composition,
-omission, graph/query projection, provider/backend use, publication,
-readiness, acceptance, and successor activation are not
-authorized.
+omission, graph/query projection, provider/backend use, publication, and
+successor activation are not authorized.
 
-P5 and P5B2 remain `IN_PROGRESS`; the accepted trust-root prerequisite remains
-`COMPLETE`, and this policy-authority provisioning prerequisite remains
-`IN_PROGRESS`. The encompassing release/DLP decision,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
+provisioning prerequisites are accepted `COMPLETE`. The encompassing release/DLP decision,
 `SemanticReleaseDecisionStore`, decision-store
 capacity/GC integration, classification composition, omission, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
@@ -2013,8 +2015,9 @@ remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 This encompassing proposed unnumbered P5B2 child is contract-frozen only at the
 private internal decision boundary in this section. It remains `WAITING`, not
 `READY` or `COMPLETE`, and has no implementation or acceptance receipt. It
-consumes the accepted trust-root prerequisite above but still depends on stable
-operator policy-authority provisioning, decision-store
+consumes the accepted trust-root and policy-authority provisioning prerequisites
+above but still depends on a provisioned stable current `ACTIVE` operator
+policy-authority record, decision-store
 capacity and GC integration, classification composition, and every other
 prerequisite named below. The freeze grants no execution authority and changes
 no parent phase, accepted receipt, JOS row, or later-successor status.
@@ -2142,8 +2145,9 @@ current, present pending, divergent current/previous chaining, rollback,
 unknown state or action, invalid authorization, or manifest/policy/profile
 disagreement rejects release. A higher current revision supersedes every older
 record and makes bindings under the older revision historical candidates only.
-The provisioning implementation candidate remains separately `IN_PROGRESS`
-and unaccepted, while this decision child remains `WAITING`.
+The provisioning mechanism is separately accepted `COMPLETE`, but no current
+`ACTIVE` operator record is provisioned and this decision child remains
+`WAITING`.
 
 All release-decision objects in this section use the hashed-JSON base encoding
 defined at the top of [`state-contract.md`](state-contract.md): UTF-8 JSON,
@@ -2676,9 +2680,9 @@ installation, performance/resource qualification, P5C, H3, P6+, parent completio
 implementation of the encompassing child, its readiness, acceptance, execution,
 or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
-trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; only the separate
-trust-root prerequisite is accepted `COMPLETE`. The policy-authority
-implementation candidate remains `IN_PROGRESS`. This encompassing child, live
+trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root
+and policy-authority provisioning prerequisites are accepted `COMPLETE`. This
+encompassing child, live
 operator policy selection/provisioning,
 `SemanticReleaseDecisionStore`, capacity/GC integration, classification
 composition, omission execution, projection, public CLI/schema/receipt,

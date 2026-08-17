@@ -9,8 +9,9 @@ host-agent semantic-worker transport, the accepted unnumbered P5B2
 semantic-result handoff and sealed-input finalization child, the accepted
 unnumbered P5B2 semantic-generation certification finalization child, and the
 accepted unnumbered P5B2 semantic-generation promotion and pointer-finalization
-child, and the accepted unnumbered P5B2 semantic-release bundle and
-deterministic-classifier trust-root prerequisite,
+child, the accepted unnumbered P5B2 semantic-release bundle and
+deterministic-classifier trust-root prerequisite, and the accepted unnumbered
+P5B2 semantic-release policy-authority provisioning prerequisite,
 P5C1 candidate-bound canonical runtime authority generation and isolated atomic
 installation/compensation proof, P5B2b provider-neutral code-only structural
 sync, P5B2b0 staged structural-build recovery, P5B2a initial workspace
@@ -91,8 +92,12 @@ override those bytes. Acceptance adds no content-release, publication,
 execution, parent-completion, or successor authority.
 
 The separate internal unnumbered P5B2 semantic-release policy-authority
-provisioning prerequisite now has one private implementation candidate and is
-`IN_PROGRESS`, not `READY` or `COMPLETE`. Its private store owns the exact
+provisioning prerequisite is implemented and accepted as `COMPLETE` only at the
+[frozen private boundary](semantic-sync.md#p5b2-semantic-release-policy-authority-provisioning-prerequisite).
+Its completion evidence is the
+[P5B2 semantic-release policy-authority acceptance receipt](receipts/p5b2-semantic-release-policy-authority.md),
+which binds PR #71's contract freeze, PR #72's implementation delivery, and
+PR #74's lock-discipline correction. Its private store owns the exact
 current/previous/pending authority paths, closed structured selection input,
 body/envelope/record digest binding, revision-plus-one and predecessor CAS,
 shared-read/exclusive-write registry-then-workspace locking, fixed 256 KiB
@@ -100,15 +105,14 @@ transaction peak, and the existing pending→previous→current→pending-clear
 durable protocol. It may
 create or advance only an `ACTIVE` record under
 `SELECT_SEMANTIC_RELEASE_POLICY`; `REVOKED` remains consumer-side fail-closed
-vocabulary and revocation or reactivation is not authorized. This candidate
+vocabulary and revocation or reactivation is not authorized. Acceptance
 selects or provisions no live release context, profiles, coverage result,
-policy mapping, or operator record.
+policy mapping, or operator record and activates no successor.
 
 The encompassing semantic-content release/DLP decision child remains
-`WAITING`. It additionally requires the implemented and accepted trust-root
-bytes, separate acceptance of the implemented but still `IN_PROGRESS`
-policy-authority provisioning prerequisite, a provisioned stable
-current `ACTIVE` operator policy authority, decision-store
+`WAITING`. It additionally requires the implemented and accepted trust-root and
+policy-authority provisioning prerequisites, a provisioned stable current
+`ACTIVE` operator policy authority, decision-store
 capacity/GC integration, classification composition, and the other frozen
 decision prerequisites before any private request-addressed binding can exist.
 Operator policy provisioning, omission execution, projection, public
@@ -758,8 +762,8 @@ set.
 | Semantic-generation certification finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal contract](semantic-sync.md#p5b2-semantic-generation-certification-finalization) starts only from the accepted handoff's exact reopened staged `COMPLETE` manifest and equal queue sealed-input digest, reacquires only the same request-bound `BUILD` recovery authority, and reuses the existing semantic certification view, immutable binding, generation receipt, journal, reservation, and staged-state transitions until the same target is durably verified as `CERTIFIED` and the lease is released. Accepted completion evidence: [`P5B2 semantic-generation certification finalization`](receipts/p5b2-semantic-generation-certification-finalization.md), limited to the corrected PR #56 plus PR #57 delivery chain. It grants no content-release, projection, promotion, pointer, public-command, or successor authority. |
 | Semantic-generation promotion and pointer-finalization | Unnumbered P5B2 child (`COMPLETE`) | The [accepted internal boundary](semantic-sync.md#p5b2-semantic-generation-promotion-and-pointer-finalization) starts only from the accepted certification terminal, moves only the same request's exact certified target through staged `PROMOTE` (including exact already-visible replay) or pending-intent `POINTER_RECOVERY` authority, and requires a staged `PROMOTED` record, exact visible-current and journal proof, no pending pointer intent, unchanged installed semantic evidence, and exact grant release. Accepted completion evidence: [`P5B2 semantic-generation promotion and pointer-finalization`](receipts/p5b2-semantic-generation-promotion-finalization.md), binding the exact PR #59 through PR #64 chain. The accepted child has no public command, grants no content-release, projection, or broader execution authority, and activates no later successor. |
 | Semantic-release bundle and deterministic-classifier trust-root | Unnumbered P5B2 prerequisite (`COMPLETE`) | The [accepted internal trust-root boundary](semantic-sync.md#p5b2-semantic-release-bundle-and-deterministic-classifier-trust-root) owns only the installed repo package-data manifest, deterministic classifier implementation/ABI, taxonomy, normalization, ruleset, required `core_secrets.v1`, selectable profile bundle, and existing installed executable bootstrap needed to exclude package-local bytecode caches and Python startup hooks from trusted execution. Completion evidence: [`P5B2 semantic-release trust root`](receipts/p5b2-semantic-release-trust-root.md), binding the exact PR #66 through PR #69 chain. It owns no operator policy selection, durable decision store, semantic-field composition, omission, projection, new public command/schema/receipt, provider/backend, publication, release, execution, or successor authority. |
-| Semantic-release policy-authority provisioning | Unnumbered P5B2 prerequisite (`IN_PROGRESS`; implementation candidate only) | The [frozen internal provisioning boundary](semantic-sync.md#p5b2-semantic-release-policy-authority-provisioning-prerequisite) gives private `SemanticReleasePolicyAuthorityStore` sole ownership of the private current/previous/pending records, exact `ACTIVE` selection input and digest preimages, revision-plus-one/predecessor CAS, shared-read/exclusive-write registry-then-workspace locking, fixed 256 KiB transaction peak, durable commit/recovery, commit-uncertainty, and byte-identical replay rules. The candidate provisions no live record. `SELECT_SEMANTIC_RELEASE_POLICY` cannot revoke or reactivate; `REVOKED` remains consumer-side fail-closed vocabulary. Readiness, acceptance, public surfaces, decision binding, composition, omission, projection, provider/backend, publication, and successor activation remain absent. |
-| Semantic-content release/DLP decision | Proposed unnumbered P5B2 child (`WAITING`; contract freeze only) | The [frozen private decision boundary](semantic-sync.md#p5b2-semantic-content-releasedlp-decision) requires the accepted exact promoted visible-current terminal, separately implemented and accepted trust-root, provisioned stable current `ACTIVE` operator policy authority, `SemanticReleaseDecisionStore`, capacity/GC integration, and classification composition. Omission execution, projection, public CLI/schema/receipt, provider/backend, publication, implementation, acceptance, and successor activation remain absent. |
+| Semantic-release policy-authority provisioning | Unnumbered P5B2 prerequisite (`COMPLETE`) | The [accepted internal provisioning boundary](semantic-sync.md#p5b2-semantic-release-policy-authority-provisioning-prerequisite) gives private `SemanticReleasePolicyAuthorityStore` sole ownership of the private current/previous/pending records, exact `ACTIVE` selection input and digest preimages, revision-plus-one/predecessor CAS, shared-read/exclusive-write registry-then-workspace locking, fixed 256 KiB transaction peak, durable commit/recovery, commit-uncertainty, and byte-identical replay rules. Completion evidence: [`P5B2 semantic-release policy authority`](receipts/p5b2-semantic-release-policy-authority.md), binding PR #71, PR #72, and PR #74. Acceptance provisions no live record. `SELECT_SEMANTIC_RELEASE_POLICY` cannot revoke or reactivate; `REVOKED` remains consumer-side fail-closed vocabulary. Public surfaces, decision binding, composition, omission, projection, provider/backend, publication, and successor activation remain absent. |
+| Semantic-content release/DLP decision | Proposed unnumbered P5B2 child (`WAITING`; contract freeze only) | The [frozen private decision boundary](semantic-sync.md#p5b2-semantic-content-releasedlp-decision) requires the accepted exact promoted visible-current terminal, accepted trust-root and policy-authority provisioning mechanisms, a provisioned stable current `ACTIVE` operator policy authority, `SemanticReleaseDecisionStore`, capacity/GC integration, and classification composition. Omission execution, projection, public CLI/schema/runtime receipt, provider/backend, publication, implementation, acceptance, and successor activation remain absent. |
 | Additional sync modes | Remaining P5B2 | Only provider-neutral structural `sync --code-only` and the accepted internal handoff are implemented. The handoff acceptance grants no public semantic-sync route. Full semantic sync, named/headless backends, and every broader mode require separately reviewed authority, redaction, recovery, and execution contracts. |
 | Certified one-shot query | P5B2c (`COMPLETE`) | Only `workspace query --request-stdin` is public: installed authority precedes input, one freshness query can release exact output after `observed_current`, and every other path withholds it. |
 | Identity maintenance | P5B2 identity maintenance (`COMPLETE`) | Accepted receipt: [`P5B2 identity maintenance`](receipts/p5b2-identity-maintenance.md). `workspace register rebind` and `rotate` expose only the existing registry policy with explicit UUID, revision CAS, matching authorization, cross-UUID rebind rejection before new source or identity-action evidence and the requested registry commit, unchanged active-source state, and a dedicated receipt schema. |
