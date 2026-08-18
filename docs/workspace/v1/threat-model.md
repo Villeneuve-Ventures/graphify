@@ -569,6 +569,16 @@ commit-uncertainty handling, and nonempty-state generation protection. It is not
 operator policy, classification, terminal release-decision, omission,
 projection, public, provider/backend, network, or publication authority.
 
+Pre-visibility crash residue is confined to one fixed mode-`0700`
+`semantic-release-decision-publication` slot outside both canonical decision
+state and lifecycle `staging`. A 4 KiB manifest, one payload, one-state geometry,
+and a fixed 256 KiB transient reserve allowance bound amplification. Only a
+fully durable ready payload can reach the first missing canonical boundary, and
+only through an exclusive no-overwrite rename. Retry rejects unknown names,
+types, links, modes, identities, digests, sizes, or drift and removes only a
+validated non-authoritative prefix/suffix after proving its destination absent
+or byte-identical; no recovery path deletes or repairs canonical state.
+
 Caller path and alias substitution are excluded because the store alone derives
 the path from validated repository, generation, and complete canonical
 decision-request-digest identity. Descriptor-relative no-follow traversal beneath
@@ -621,9 +631,9 @@ different, or ambiguous state is commit-unknown and fails closed.
 Safely observed absence of the top-level namespace is the zero-binding initial
 state; once it or an expected request path is present, unsafe, unreadable,
 ambiguous, missing-after-visibility, or snapshot-drifted state fails closed.
-Nonempty decision state is a pre-plan GC eligibility blocker and blocks
-quarantine or purge until separately accepted atomic store integration defines
-schema-compatible reason and wiring. No public protection-reason token is added.
+Nonempty decision state aborts the shared workspace reachability proof before a
+successful GC preview or plan and therefore blocks downstream execute,
+reconcile, and purge. No public protection-reason token is added.
 This retention rule prevents orphaned audit/projection evidence but grants no
 deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation
 authority. No failure or replay path may mutate a binding or any

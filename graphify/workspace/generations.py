@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import os
-from pathlib import Path
 import re
 import shutil
 import stat
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import (
@@ -19,9 +19,12 @@ from graphify.workspace.adapters import (
     UnsupportedCompatibility,
     select_adapter,
 )
-from graphify.workspace.identity import IdentityError
 from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
+    SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES,
+    SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION,
+    SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE,
+    SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES,
     CapacityPolicy,
     CapacityReservation,
     CapacityReservationState,
@@ -40,6 +43,7 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
     payload_manifest_sha256,
 )
+from graphify.workspace.identity import IdentityError
 from graphify.workspace.journal import JournalCorrupt, JournalStore
 from graphify.workspace.leases import (
     LeaseGrant,
@@ -64,7 +68,6 @@ from graphify.workspace.semantic_queue import (
     SemanticQueueStore,
 )
 
-
 _ALLOWED_FILE_MODES = frozenset({0o600, 0o644, 0o755})
 _ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
 _CAPACITY_CURRENT = Path("capacity.json")
@@ -77,9 +80,9 @@ _STAGED_BUILD_TERMINAL_STATES = frozenset({"PROMOTED", "ABANDONED"})
 _GENERATION_ID_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
 _HANDOFF_NAME_RE = re.compile(r"^[0-9a-f]{64}\.json$", re.ASCII)
 _DECISION_BINDING_NAME_RE = re.compile(r"^[0-9a-f]{64}\.json$", re.ASCII)
-_DECISION_BINDING_MAX_BYTES = 25 * 1024 * 1024
-_DECISION_BINDINGS_PER_GENERATION = 64
-_DECISION_BINDINGS_PER_WORKSPACE = 4_096
+_DECISION_BINDING_MAX_BYTES = SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES
+_DECISION_BINDINGS_PER_GENERATION = SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION
+_DECISION_BINDINGS_PER_WORKSPACE = SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE
 _MAX_CAPACITY_BYTES = 9_223_372_036_854_775_807
 
 
@@ -2426,7 +2429,10 @@ class GenerationStore:
                     remaining = opened.st_size
                     while remaining:
                         _require_inventory_deadline(deadline_ns)
-                        chunk = os.read(file_descriptor, min(remaining, 1024 * 1024))
+                        try:
+                            chunk = os.read(file_descriptor, min(remaining, 1024 * 1024))
+                        except InterruptedError:
+                            continue
                         _require_inventory_deadline(deadline_ns)
                         if not chunk:
                             raise StatePathError("decision binding was truncated while reading")
@@ -2790,6 +2796,7 @@ class GenerationStore:
             available
             - usage.unconsumed_reserved_bytes
             - additional_bytes
+            - (SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES if additional_bytes else 0)
             < policy.reserve_bytes
         ):
             raise CapacityExceeded("filesystem reserve threshold would be violated")
@@ -4744,7 +4751,7 @@ __all__ = [
     "StagedBuildOperation",
     "StagedBuildPreparation",
     "StagedBuildReadRecoveryRequired",
-    "StagedBuildStillCurrent",
     "StagedBuildState",
+    "StagedBuildStillCurrent",
     "StructuralBuildRequest",
 ]

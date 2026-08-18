@@ -264,10 +264,11 @@ composition through install-once and reopen.
 Byte-identical replay is no-write success; same-path different bytes conflict;
 partial, unsafe, unreadable, different, or ambiguous state is commit-unknown.
 
-Nonempty decision state is a pre-plan GC eligibility blocker until separately
-accepted atomic GC integration defines schema-compatible reason and wiring; it
-adds no token to the current public protection-reason vocabulary. This
-prerequisite owns no decision-request creation,
+Nonempty decision state aborts the shared workspace reachability proof before a
+successful GC preview or plan and therefore blocks downstream execute,
+reconcile, and purge. It adds no token to the current public protection-reason
+vocabulary and grants no GC mutation or canonical decision-state deletion
+authority. This prerequisite owns no decision-request creation,
 classifier or policy composition, terminal release decision, live policy
 selection, omission, projection, public CLI/schema/runtime receipt,
 provider/backend, network, cleanup, deletion, quarantine, repair, rollback,
@@ -513,7 +514,12 @@ validated canonical identity, not caller paths. The namespace is outside the
 sealed generation, is included in existing capacity and reserve accounting, and
 blocks GC eligibility whenever a generation's decision state is nonempty. A
 safely observed absent top-level namespace is the zero-binding initial state and
-may be created only at the first final install. No cleanup,
+may be created only by an exclusive first-boundary rename from the fixed
+`semantic-release-decision-publication` slot. That separate mode-`0700` slot is
+non-authoritative publication construction, not canonical decision state and not
+lifecycle `staging`; it contains at most one bounded build/ready/cleanup state,
+with a 4 KiB manifest and a 256 KiB physical-reserve allowance. Validated retry
+cleanup is confined to this slot and never removes canonical state. No canonical cleanup,
 repair, deletion, quarantine, rollback, public reason token, or public exposure
 is authorized by reserving the namespace.
 

@@ -11,19 +11,19 @@ checkout, service, or global installation.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
 import calendar
-from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
 import re
 import struct
 import tomllib
 import unicodedata
-from urllib.parse import urlsplit, urlunsplit
 import uuid
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, TypeVar, cast, overload
+from urllib.parse import urlsplit, urlunsplit
 
 WORKSPACE_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 1
@@ -33,6 +33,11 @@ ENGINE_BASELINE = "0.9.16"
 CANDIDATE_DISTRIBUTION_VERSION = "0.9.16+workspace.1"
 EXTRACTOR_CACHE_ABI = "graphify-0.9.16"
 UPSTREAM_BASELINE_COMMIT = "a0e4a1c6bd3a99edfdd84ad30927003f51face6a"
+SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES = 25 * 1024 * 1024
+SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION = 64
+SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE = 4_096
+SEMANTIC_RELEASE_DECISION_STAGING_MANIFEST_MAX_BYTES = 4 * 1024
+SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES = 256 * 1024
 REQUIRED_COMPATIBILITY_ARTIFACTS = (
     "contract-bundle.zip",
     "fixture-bundle.zip",

@@ -2044,6 +2044,20 @@ and `receipt.json`. The terminal filename is derived from the complete canonical
 decision-request digest; generation-only, newest-file, enumeration-selected, or
 caller-selected binding identity is never authority.
 
+First-time construction uses exactly one fixed mode-`0700`
+`semantic-release-decision-publication` slot under the workspace but outside
+`semantic-release-decisions` and outside lifecycle `staging`. This slot is
+non-authoritative publication state, never a decision binding or lifecycle
+record. It contains at most one bounded build, ready, or cleanup subtree: a
+canonical manifest of at most 4 KiB plus one payload. After complete file and
+directory durability, an exclusive no-overwrite rename makes the first missing
+canonical root, generation directory, or binding file visible. Retry accepts
+only enumerated prefixes/suffixes and removes only validated slot residue after
+the encoded canonical destination is absent or byte-identical; canonical state
+is never deleted, rewritten, repaired, or overwritten. Final reserve preflight
+charges the candidate plus a fixed 256 KiB transient staging allowance, while
+logical global/workspace ceilings charge the canonical candidate once.
+
 The binding uses canonical
 `graphify.workspace.semantic_release_decision.internal` format version 1 and the
 hashed-JSON base encoding in [`state-contract.md`](state-contract.md). Its exact
@@ -2103,13 +2117,11 @@ unreadable, unsafe, or ambiguous state and any presence, entry, count, or byte
 drift between the two bounded snapshots fail closed. Missing expected binding
 state after possible visibility follows the commit-uncertainty rules below.
 
-Nonempty decision state for a generation is a pre-plan GC eligibility blocker
-and blocks that generation from quarantine or purge. Until a separately accepted
-atomic GC integration defines schema-compatible reason and wiring, no successful
-public GC preview or executable plan may represent that state; this prerequisite
-adds no token to the existing closed `GcPlan.protected` reason vocabulary. It
-does not authorize deletion, cleanup, quarantine, repair, rollback, compaction,
-or GC mutation.
+Nonempty decision state aborts the shared workspace reachability proof before a
+successful GC preview or plan and therefore blocks downstream execute,
+reconcile, and purge for that generation. This prerequisite adds no token to the
+existing closed `GcPlan.protected` reason vocabulary and authorizes no canonical
+deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation.
 
 ### Install once, replay, and commit uncertainty
 

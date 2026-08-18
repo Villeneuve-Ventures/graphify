@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
+import json
 import os
-from pathlib import Path
 import stat
 import time
+from dataclasses import replace
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -16,14 +17,21 @@ import graphify.workspace as workspace
 import graphify.workspace.generations as generations_module
 import graphify.workspace.persistence as persistence_module
 from graphify.workspace.composition import WorkspaceRuntimeInputs, compose_workspace_runtime
-from graphify.workspace.contracts import CapacityPolicy, canonical_json_bytes
+from graphify.workspace.contracts import (
+    SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES,
+    CapacityPolicy,
+    canonical_json_bytes,
+)
 from graphify.workspace.gc import GcError, GcProtection, GcStore
 from graphify.workspace.generations import CapacityExceeded, GenerationStore
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.persistence import (
     CommitUnknown,
+    DurableStateRoot,
     InjectedFault,
     LockTimeout,
+    PosixSyscalls,
+    StateCorrupt,
     StatePathError,
 )
 from graphify.workspace.pointers import PointerStore
@@ -33,6 +41,7 @@ from graphify.workspace.semantic_release_decision import (
     DECISION_BINDINGS_PER_GENERATION,
     DECISION_BINDINGS_PER_WORKSPACE,
     SemanticReleaseDecisionBinding,
+    SemanticReleaseDecisionCapture,
     SemanticReleaseDecisionConflict,
     SemanticReleaseDecisionInvalid,
     SemanticReleaseDecisionStore,
@@ -46,7 +55,6 @@ from tests.workspace_p3_helpers import (
     metadata_snapshot,
     tree_snapshot,
 )
-
 
 POLICY = CapacityPolicy.from_mapping(
     {
@@ -80,6 +88,63 @@ class CrashAt:
         if event == self.event and not self.fired:
             self.fired = True
             raise InjectedFault(event)
+
+
+class DestinationRaceSyscalls(PosixSyscalls):
+    def __init__(self, create_destination) -> None:
+        self.create_destination = create_destination
+        self.fired = False
+
+    def rename_exclusive_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        if source == "payload" and not self.fired:
+            self.fired = True
+            self.create_destination()
+        super().rename_exclusive_at(
+            source,
+            destination,
+            source_dir_fd=source_dir_fd,
+            destination_dir_fd=destination_dir_fd,
+        )
+
+
+class CleanupFaultSyscalls(PosixSyscalls):
+    def __init__(self, operation: str) -> None:
+        self.operation = operation
+        self.fired = False
+        self._after_unlink = False
+        self._after_rmdir = False
+
+    def unlink_at(self, path: str, *, dir_fd: int) -> None:
+        super().unlink_at(path, dir_fd=dir_fd)
+        self._after_unlink = True
+        if self.operation == "unlink" and not self.fired:
+            self.fired = True
+            raise InjectedFault("cleanup:unlink")
+
+    def rmdir_at(self, path: str, *, dir_fd: int) -> None:
+        super().rmdir_at(path, dir_fd=dir_fd)
+        self._after_rmdir = True
+        if self.operation == "rmdir" and not self.fired:
+            self.fired = True
+            raise InjectedFault("cleanup:rmdir")
+
+    def fsync(self, descriptor: int) -> None:
+        super().fsync(descriptor)
+        if self.fired:
+            return
+        if self.operation == "unlink_parent_fsync" and self._after_unlink:
+            self.fired = True
+            raise InjectedFault("cleanup:unlink-parent-fsync")
+        if self.operation == "rmdir_parent_fsync" and self._after_rmdir:
+            self.fired = True
+            raise InjectedFault("cleanup:rmdir-parent-fsync")
 
 
 def _runtime(tmp_path: Path, *, fault_hook=None):
@@ -218,6 +283,16 @@ def _binding(*, terminal_outcome: str = "REJECTED") -> SemanticReleaseDecisionBi
     )
 
 
+def _binding_for(
+    generation_id: str,
+    request_sha256: str,
+) -> SemanticReleaseDecisionBinding:
+    value = _binding_value()
+    value["target_generation_id"] = generation_id
+    value["decision_request_sha256"] = request_sha256
+    return SemanticReleaseDecisionBinding.from_mapping(value)
+
+
 def _binding_path(root: Path, request_sha256: str = REQUEST_SHA256) -> Path:
     return (
         root
@@ -227,6 +302,52 @@ def _binding_path(root: Path, request_sha256: str = REQUEST_SHA256) -> Path:
         / GENERATION_ID
         / f"{request_sha256}.json"
     )
+
+
+def _prepare_publication_kind(
+    generations: GenerationStore,
+    store: SemanticReleaseDecisionStore,
+    publication_kind: str,
+) -> tuple[SemanticReleaseDecisionBinding, SemanticReleaseDecisionCapture]:
+    if publication_kind == "generation":
+        other_generation = "gen-other"
+        other_request = "2" * 64
+        active = generations._generation(REPO_UUID, other_generation)
+        generations.state.ensure_directory(active)
+        generations.state.install_once_bytes(
+            active / "payload.bin",
+            b"other retained generation",
+            label="test:other-generation",
+        )
+        generations.state.install_once_bytes(
+            generations._lock(REPO_UUID, other_generation),
+            b"generation lock\n",
+            label="test:other-lock",
+        )
+        other_binding = _binding_for(other_generation, other_request)
+        generations.state.install_once_bytes(
+            store._binding_path(REPO_UUID, other_generation, other_request),
+            other_binding.canonical,
+            label="test:other-decision",
+        )
+    elif publication_kind == "file":
+        prior_request = "2" * 64
+        prior = _binding_for(GENERATION_ID, prior_request)
+        prior_capture = store.capture(
+            REPO_UUID,
+            GENERATION_ID,
+            prior_request,
+            capacity_policy=POLICY,
+        )
+        store.install(prior_capture, prior, capacity_policy=POLICY)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    return binding, capture
 
 
 def test_binding_closes_members_orders_results_and_uses_exact_digest_preimages() -> None:
@@ -570,7 +691,7 @@ def test_post_install_exact_reopen_rejects_path_inode_substitution(
         payload = original_read(descriptor, maximum)
         if payload == binding.canonical:
             matching_reads += 1
-            if matching_reads == 3:
+            if matching_reads >= 3 and path.parent.exists():
                 replacement.write_bytes(binding.canonical)
                 replacement.chmod(0o600)
                 replacement.replace(path)
@@ -602,7 +723,7 @@ def test_generation_binding_bound_and_capacity_failure_are_no_write(tmp_path: Pa
         path.write_bytes(b"{}")
         path.chmod(0o600)
     before = tree_snapshot(harness.state_root)
-    with pytest.raises(CapacityExceeded, match="maximum|64"):
+    with pytest.raises(CapacityExceeded, match=r"maximum|64"):
         store.capture(
             REPO_UUID,
             GENERATION_ID,
@@ -1069,3 +1190,1040 @@ def test_runtime_composes_private_decision_store_without_public_schema_or_comman
     assert runtime.semantic_release_decisions.generations is runtime.generations
     assert runtime.semantic_release_decisions.registry is runtime.registry
     assert not hasattr(workspace, "SemanticReleaseDecisionStore")
+
+
+def test_previsibility_publish_failure_leaves_no_canonical_empty_namespace(
+    tmp_path: Path,
+) -> None:
+    crash = CrashAt("semantic-release-decision:publish:before_rename")
+    harness, _generations, store, _gc = _runtime(tmp_path, fault_hook=crash)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+
+    with pytest.raises(InjectedFault):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert crash.fired
+    assert not _binding_path(harness.state_root).parent.parent.exists()
+
+    installed = store.install(capture, binding, capacity_policy=POLICY)
+
+    assert installed == binding
+    assert _binding_path(harness.state_root).read_bytes() == binding.canonical
+
+
+@pytest.mark.parametrize("publication_kind", ["generation", "file"])
+def test_previsibility_failure_retries_without_empty_canonical_boundary(
+    tmp_path: Path,
+    publication_kind: str,
+) -> None:
+    harness, generations, initial_store, gc = _runtime(tmp_path)
+    if publication_kind == "generation":
+        other_generation = "gen-other"
+        other_request = "2" * 64
+        active = generations._generation(REPO_UUID, other_generation)
+        generations.state.ensure_directory(active)
+        generations.state.install_once_bytes(
+            active / "payload.bin",
+            b"other retained generation",
+            label="test:other-generation",
+        )
+        generations.state.install_once_bytes(
+            generations._lock(REPO_UUID, other_generation),
+            b"generation lock\n",
+            label="test:other-lock",
+        )
+        other_binding = _binding_for(other_generation, other_request)
+        other_path = initial_store._binding_path(
+            REPO_UUID,
+            other_generation,
+            other_request,
+        )
+        generations.state.install_once_bytes(
+            other_path,
+            other_binding.canonical,
+            label="test:other-decision",
+        )
+    else:
+        prior_request = "2" * 64
+        prior = _binding_for(GENERATION_ID, prior_request)
+        prior_capture = initial_store.capture(
+            REPO_UUID,
+            GENERATION_ID,
+            prior_request,
+            capacity_policy=POLICY,
+        )
+        initial_store.install(prior_capture, prior, capacity_policy=POLICY)
+
+    crash = CrashAt("semantic-release-decision:publish:before_rename")
+    store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        fault_hook=crash,
+    )
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+
+    with pytest.raises(InjectedFault):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    destination = _binding_path(harness.state_root)
+    if publication_kind == "generation":
+        assert not destination.parent.exists()
+    else:
+        assert destination.parent.is_dir()
+        assert not destination.exists()
+        assert not any(path.name.startswith(".") for path in destination.parent.iterdir())
+
+    assert store.install(capture, binding, capacity_policy=POLICY) == binding
+    assert destination.read_bytes() == binding.canonical
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        "semantic-release-decision:stage-manifest:created",
+        "semantic-release-decision:stage-manifest:written",
+        "semantic-release-decision:stage-manifest:durable",
+        "semantic-release-decision:stage-manifest:parent_durable",
+        "semantic-release-decision:stage-manifest:installed",
+        "semantic-release-decision:stage-binding:created",
+        "semantic-release-decision:stage-binding:written",
+        "semantic-release-decision:stage-binding:durable",
+        "semantic-release-decision:stage-binding:parent_durable",
+        "semantic-release-decision:stage-binding:installed",
+        "semantic-release-decision:stage:binding_contained_durable",
+        "semantic-release-decision:stage:generation_directory_durable",
+        "semantic-release-decision:stage:payload_directory_durable",
+        "semantic-release-decision:stage:build_directory_durable",
+        "semantic-release-decision:stage:slot_directory_durable",
+        "semantic-release-decision:stage:before_rename",
+        "semantic-release-decision:stage:renamed",
+        "semantic-release-decision:stage:source_parent_durable",
+        "semantic-release-decision:stage:destination_parent_durable",
+    ],
+)
+def test_interrupted_staging_is_noncanonical_and_retryable(
+    tmp_path: Path,
+    event: str,
+) -> None:
+    crash = CrashAt(event)
+    harness, _generations, store, _gc = _runtime(tmp_path, fault_hook=crash)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+
+    with pytest.raises((InjectedFault, SemanticReleaseDecisionConflict)):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert crash.fired
+    assert not _binding_path(harness.state_root).parent.parent.exists()
+    assert store.install(capture, binding, capacity_policy=POLICY) == binding
+
+
+@pytest.mark.parametrize("hostile_kind", ["extra", "hardlink", "symlink", "mode"])
+def test_unsafe_publication_staging_fails_closed(
+    tmp_path: Path,
+    hostile_kind: str,
+) -> None:
+    crash = CrashAt("semantic-release-decision:publish:before_rename")
+    harness, _generations, store, _gc = _runtime(tmp_path, fault_hook=crash)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    with pytest.raises(InjectedFault):
+        store.install(capture, binding, capacity_policy=POLICY)
+    ready = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+        / "ready"
+    )
+    manifest = ready / "manifest.json"
+    if hostile_kind == "extra":
+        hostile = ready / "extra"
+        hostile.write_bytes(b"unexpected")
+        hostile.chmod(0o600)
+    elif hostile_kind == "hardlink":
+        os.link(manifest, ready / "manifest-copy.json")
+    elif hostile_kind == "symlink":
+        (ready / "payload-link").symlink_to(ready / "payload")
+    else:
+        manifest.chmod(0o644)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(
+        (
+            SemanticReleaseDecisionInvalid,
+            SemanticReleaseDecisionConflict,
+            StateCorrupt,
+            StatePathError,
+        )
+    ):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert tree_snapshot(harness.state_root) == before
+    assert not _binding_path(harness.state_root).parent.parent.exists()
+
+
+@pytest.mark.parametrize("missing_kind", ["parent", "file"])
+def test_optional_stable_missing_read_checks_deadline_after_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    missing_kind: str,
+) -> None:
+    harness, _generations, store, _gc = _runtime(tmp_path)
+    relative = Path("workspaces") / REPO_UUID / "missing" / "record.json"
+    if missing_kind == "file":
+        store.state.ensure_directory(relative.parent)
+    observations = iter((1, 3))
+    monkeypatch.setattr(
+        persistence_module.time,
+        "monotonic_ns",
+        lambda: next(observations, 3),
+    )
+
+    with pytest.raises(LockTimeout):
+        store.state._read_optional_existing_stable_bytes(
+            relative,
+            deadline_ns=2,
+        )
+
+
+def test_decision_capacity_scan_retries_interrupted_binding_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    store.install(capture, binding, capacity_policy=POLICY)
+    original_read = generations_module.os.read
+    interrupted = False
+
+    def interrupt_once(descriptor: int, maximum: int) -> bytes:
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise InterruptedError
+        return original_read(descriptor, maximum)
+
+    monkeypatch.setattr(generations_module.os, "read", interrupt_once)
+
+    usage = generations.decision_capacity_usage_locked(REPO_UUID, POLICY)
+
+    assert interrupted
+    assert usage.generation_binding_count(GENERATION_ID) == 1
+    assert usage.decision_bytes_by_generation[(REPO_UUID, GENERATION_ID)] == len(
+        binding.canonical
+    )
+
+
+def test_reserve_preflight_charges_staging_overhead_without_logical_double_charge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    usage = generations.decision_capacity_usage_locked(REPO_UUID, POLICY)
+    reserved_usage = replace(usage, unconsumed_reserved_bytes=20)
+    reserve = POLICY.reserve_bytes
+    candidate_bytes = len(binding.canonical)
+    exact_free = (
+        reserve
+        + reserved_usage.unconsumed_reserved_bytes
+        + candidate_bytes
+        + SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES
+    )
+    disk_usage = generations_module.shutil.disk_usage(harness.state_root)
+    monkeypatch.setattr(
+        generations_module.shutil,
+        "disk_usage",
+        lambda _path: type(disk_usage)(disk_usage.total, disk_usage.used, exact_free),
+    )
+    logical_once = replace(
+        POLICY,
+        reserve_bytes=reserve,
+        workspace_max_bytes=usage.workspace_bytes + candidate_bytes,
+        global_max_bytes=usage.global_bytes + candidate_bytes,
+    )
+
+    generations.preflight_decision_install_locked(
+        REPO_UUID,
+        GENERATION_ID,
+        candidate_bytes=candidate_bytes,
+        additional_bytes=candidate_bytes,
+        capacity_policy=logical_once,
+        usage=reserved_usage,
+    )
+    monkeypatch.setattr(
+        generations_module.shutil,
+        "disk_usage",
+        lambda _path: type(disk_usage)(
+            disk_usage.total,
+            disk_usage.used,
+            reserve
+            + usage.unconsumed_reserved_bytes
+            + candidate_bytes
+            + SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES
+            - 1,
+        ),
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(CapacityExceeded, match="reserve threshold"):
+        store.install(
+            capture,
+            binding,
+            capacity_policy=POLICY,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+    assert not (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+    ).exists()
+
+
+@pytest.mark.parametrize("publication_kind", ["root", "generation", "file"])
+@pytest.mark.parametrize("race_bytes", ["exact", "different"])
+def test_exclusive_publication_never_overwrites_destination_race(
+    tmp_path: Path,
+    publication_kind: str,
+    race_bytes: str,
+) -> None:
+    harness, generations, initial_store, gc = _runtime(tmp_path)
+    binding, capture = _prepare_publication_kind(
+        generations,
+        initial_store,
+        publication_kind,
+    )
+    conflict_value = _binding_value()
+    conflict_value["policy_sha256"] = "7" * 64
+    conflict = SemanticReleaseDecisionBinding.from_mapping(conflict_value)
+    raced = binding if race_bytes == "exact" else conflict
+    destination = _binding_path(harness.state_root)
+
+    def create_destination() -> None:
+        destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        destination.parent.parent.chmod(0o700)
+        destination.parent.chmod(0o700)
+        destination.write_bytes(raced.canonical)
+        destination.chmod(0o600)
+
+    syscalls = DestinationRaceSyscalls(create_destination)
+    store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        syscalls=syscalls,
+    )
+
+    if race_bytes == "exact":
+        assert store.install(capture, binding, capacity_policy=POLICY) == binding
+    else:
+        with pytest.raises(SemanticReleaseDecisionConflict, match="different bytes"):
+            store.install(capture, binding, capacity_policy=POLICY)
+
+    assert syscalls.fired
+    assert destination.read_bytes() == raced.canonical
+    decision_names = {path.name for path in destination.parent.parent.rglob("*")}
+    assert not decision_names & {"build", "cleanup", "manifest.json", "payload", "ready"}
+
+
+@pytest.mark.parametrize("publication_kind", ["root", "generation", "file"])
+@pytest.mark.parametrize(
+    "event",
+    [
+        "semantic-release-decision:publish:renamed",
+        "semantic-release-decision:publish:source_parent_durable",
+        "semantic-release-decision:publish:destination_parent_durable",
+    ],
+)
+def test_post_publication_durability_fault_adopts_exact_bytes_or_is_unknown(
+    tmp_path: Path,
+    publication_kind: str,
+    event: str,
+) -> None:
+    harness, generations, initial_store, gc = _runtime(tmp_path)
+    binding, capture = _prepare_publication_kind(
+        generations,
+        initial_store,
+        publication_kind,
+    )
+    crash = CrashAt(event)
+    store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        fault_hook=crash,
+    )
+
+    try:
+        result = store.install(capture, binding, capacity_policy=POLICY)
+    except CommitUnknown:
+        result = None
+
+    assert crash.fired
+    assert result is None or result == binding
+    destination = _binding_path(harness.state_root)
+    assert destination.read_bytes() == binding.canonical
+    decision_names = {path.name for path in destination.parent.parent.rglob("*")}
+    assert not decision_names & {"build", "cleanup", "manifest.json", "payload", "ready"}
+
+
+@pytest.mark.parametrize(
+    "cleanup_fault",
+    [
+        "transition_before_rename",
+        "transition_renamed",
+        "transition_source_parent_durable",
+        "transition_destination_parent_durable",
+        "unlink",
+        "rmdir",
+        "unlink_parent_fsync",
+        "rmdir_parent_fsync",
+    ],
+)
+@pytest.mark.parametrize("publication_kind", ["root", "generation", "file"])
+def test_interrupted_cleanup_leaves_bounded_residue_and_retry_succeeds(
+    tmp_path: Path,
+    cleanup_fault: str,
+    publication_kind: str,
+) -> None:
+    initial_crash = CrashAt("semantic-release-decision:publish:before_rename")
+    harness, generations, seed_store, gc = _runtime(tmp_path)
+    binding, capture = _prepare_publication_kind(
+        generations,
+        seed_store,
+        publication_kind,
+    )
+    initial_store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        fault_hook=initial_crash,
+    )
+    with pytest.raises(InjectedFault):
+        initial_store.install(capture, binding, capacity_policy=POLICY)
+
+    if cleanup_fault.startswith("transition_"):
+        transition = cleanup_fault.removeprefix("transition_")
+        crash = CrashAt(
+            f"semantic-release-decision:cleanup-transition:{transition}"
+        )
+        syscalls = None
+        fault_hook = crash
+    else:
+        crash = None
+        syscalls = CleanupFaultSyscalls(cleanup_fault)
+        fault_hook = None
+    interrupted_store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        fault_hook=fault_hook,
+        syscalls=syscalls,
+    )
+
+    with pytest.raises((InjectedFault, SemanticReleaseDecisionConflict)):
+        interrupted_store.install(capture, binding, capacity_policy=POLICY)
+
+    if crash is not None:
+        assert crash.fired
+    if syscalls is not None:
+        assert syscalls.fired
+    slot = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+    )
+    assert len(list(slot.rglob("*"))) <= 5
+    destination = _binding_path(harness.state_root)
+    assert not destination.exists()
+    if publication_kind == "root":
+        assert not destination.parent.parent.exists()
+    elif publication_kind == "generation":
+        assert not destination.parent.exists()
+    else:
+        assert any(destination.parent.iterdir())
+
+    retry_store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+    )
+    assert retry_store.install(capture, binding, capacity_policy=POLICY) == binding
+
+
+@pytest.mark.parametrize(
+    "manifest_fault",
+    ["identity", "digest", "size", "bool_version"],
+)
+def test_ready_manifest_disagreement_fails_closed(
+    tmp_path: Path,
+    manifest_fault: str,
+) -> None:
+    crash = CrashAt("semantic-release-decision:publish:before_rename")
+    harness, _generations, store, _gc = _runtime(tmp_path, fault_hook=crash)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    with pytest.raises(InjectedFault):
+        store.install(capture, binding, capacity_policy=POLICY)
+    manifest_path = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+        / "ready"
+        / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_bytes())
+    if manifest_fault == "identity":
+        manifest["request_sha256"] = "2" * 64
+        manifest["destination"] = (
+            Path("workspaces")
+            / REPO_UUID
+            / "semantic-release-decisions"
+        ).as_posix()
+    elif manifest_fault == "digest":
+        manifest["binding_sha256"] = "2" * 64
+    elif manifest_fault == "size":
+        manifest["binding_bytes"] += 1
+    else:
+        manifest["format_version"] = True
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    manifest_path.chmod(0o600)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticReleaseDecisionInvalid):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert tree_snapshot(harness.state_root) == before
+    assert not _binding_path(harness.state_root).parent.parent.exists()
+
+
+@pytest.mark.parametrize("cleanup_fault", ["extra", "malformed_with_payload"])
+def test_hostile_cleanup_residue_fails_closed(
+    tmp_path: Path,
+    cleanup_fault: str,
+) -> None:
+    harness, _generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    cleanup = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+        / "cleanup"
+    )
+    cleanup.mkdir(parents=True, mode=0o700)
+    cleanup.parent.chmod(0o700)
+    if cleanup_fault == "extra":
+        extra = cleanup / "extra"
+        extra.write_bytes(b"hostile")
+        extra.chmod(0o600)
+    else:
+        manifest = cleanup / "manifest.json"
+        manifest.write_bytes(b"{")
+        manifest.chmod(0o600)
+        (cleanup / "payload").mkdir(mode=0o700)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticReleaseDecisionInvalid):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_malformed_manifest_only_ready_tomb_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    harness, _generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    ready = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+        / "ready"
+    )
+    ready.mkdir(parents=True, mode=0o700)
+    ready.parent.chmod(0o700)
+    manifest = ready / "manifest.json"
+    manifest.write_bytes(b"{")
+    manifest.chmod(0o600)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticReleaseDecisionInvalid):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert tree_snapshot(harness.state_root) == before
+    assert manifest.read_bytes() == b"{"
+    assert not _binding_path(harness.state_root).parent.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "residue",
+    ["build", "ready_with_payload", "ready_tomb", "cleanup"],
+)
+def test_foreign_repo_staging_manifest_fails_closed_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    residue: str,
+) -> None:
+    harness, _generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    foreign_repo_uuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    foreign_value = _binding_value()
+    foreign_value["repo_uuid"] = foreign_repo_uuid
+    foreign_binding = SemanticReleaseDecisionBinding.from_mapping(foreign_value)
+    manifest, manifest_bytes = store._publication_manifest(foreign_binding, "root")
+    slot = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+    )
+    state_name = "ready" if residue.startswith("ready") else residue
+    state = slot / state_name
+    state.mkdir(parents=True, mode=0o700)
+    slot.chmod(0o700)
+    manifest_path = state / "manifest.json"
+    manifest_path.write_bytes(manifest_bytes)
+    manifest_path.chmod(0o600)
+    if residue != "ready_tomb":
+        staged = (
+            state
+            / "payload"
+            / cast(str, manifest["generation_id"])
+            / f"{manifest['request_sha256']}.json"
+        )
+        staged.parent.mkdir(parents=True, mode=0o700)
+        (state / "payload").chmod(0o700)
+        staged.write_bytes(foreign_binding.canonical)
+        staged.chmod(0o600)
+    foreign_destination_reads: list[str] = []
+    original_read_binding = store._read_binding
+
+    def record_read_binding(
+        repo_uuid: str,
+        generation_id: str,
+        request_sha256: str,
+        *,
+        deadline_ns: int | None,
+    ) -> SemanticReleaseDecisionBinding | None:
+        if repo_uuid == foreign_repo_uuid:
+            foreign_destination_reads.append(repo_uuid)
+        return original_read_binding(
+            repo_uuid,
+            generation_id,
+            request_sha256,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(store, "_read_binding", record_read_binding)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticReleaseDecisionInvalid):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert foreign_destination_reads == []
+    assert tree_snapshot(harness.state_root) == before
+    assert not _binding_path(harness.state_root).exists()
+
+
+def test_published_tomb_binding_length_disagreement_fails_closed_without_mutation(
+    tmp_path: Path,
+) -> None:
+    harness, generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    generations.state.install_once_bytes(
+        store._binding_path(REPO_UUID, GENERATION_ID, REQUEST_SHA256),
+        binding.canonical,
+        label="test:installed-decision",
+    )
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    manifest, _manifest_bytes = store._publication_manifest(binding, "root")
+    manifest["binding_bytes"] = cast(int, manifest["binding_bytes"]) - 1
+    ready = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+        / "ready"
+    )
+    ready.mkdir(parents=True, mode=0o700)
+    ready.parent.chmod(0o700)
+    manifest_path = ready / "manifest.json"
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    manifest_path.chmod(0o600)
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(SemanticReleaseDecisionInvalid):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert tree_snapshot(harness.state_root) == before
+    assert _binding_path(harness.state_root).read_bytes() == binding.canonical
+
+
+def test_post_publication_same_workspace_tomb_substitution_fails_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    substituted_binding = _binding_for(GENERATION_ID, "2" * 64)
+    _substituted_manifest, substituted_manifest_bytes = store._publication_manifest(
+        substituted_binding,
+        "file",
+    )
+    original_read_binding = store._read_binding
+    substituted_snapshot: list[dict[str, tuple[int, int, int, str | None]]] = []
+
+    def substitute_tomb_after_publication(
+        repo_uuid: str,
+        generation_id: str,
+        request_sha256: str,
+        *,
+        deadline_ns: int | None,
+    ) -> SemanticReleaseDecisionBinding | None:
+        destination = _binding_path(harness.state_root)
+        manifest_path = (
+            harness.state_root
+            / "workspaces"
+            / REPO_UUID
+            / "semantic-release-decision-publication"
+            / "ready"
+            / "manifest.json"
+        )
+        if destination.exists() and manifest_path.exists() and not substituted_snapshot:
+            manifest_path.write_bytes(substituted_manifest_bytes)
+            manifest_path.chmod(0o600)
+            substituted_snapshot.append(tree_snapshot(harness.state_root))
+        return original_read_binding(
+            repo_uuid,
+            generation_id,
+            request_sha256,
+            deadline_ns=deadline_ns,
+        )
+
+    monkeypatch.setattr(store, "_read_binding", substitute_tomb_after_publication)
+
+    with pytest.raises(CommitUnknown):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert len(substituted_snapshot) == 1
+    assert tree_snapshot(harness.state_root) == substituted_snapshot[0]
+    assert _binding_path(harness.state_root).read_bytes() == binding.canonical
+
+
+def test_post_publication_manifest_kind_substitution_fails_without_mutation(
+    tmp_path: Path,
+) -> None:
+    harness, generations, seed_store, gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = seed_store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    substituted_snapshot: list[dict[str, tuple[int, int, int, str | None]]] = []
+
+    def substitute_manifest(event: str) -> None:
+        if event != "semantic-release-decision:installed" or substituted_snapshot:
+            return
+        manifest_path = (
+            harness.state_root
+            / "workspaces"
+            / REPO_UUID
+            / "semantic-release-decision-publication"
+            / "ready"
+            / "manifest.json"
+        )
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest["publication_kind"] = "file"
+        manifest["destination"] = (
+            Path("workspaces")
+            / REPO_UUID
+            / "semantic-release-decisions"
+            / GENERATION_ID
+            / f"{REQUEST_SHA256}.json"
+        ).as_posix()
+        manifest_path.write_bytes(canonical_json_bytes(manifest))
+        manifest_path.chmod(0o600)
+        substituted_snapshot.append(tree_snapshot(harness.state_root))
+
+    store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        fault_hook=substitute_manifest,
+    )
+
+    with pytest.raises(CommitUnknown):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert len(substituted_snapshot) == 1
+    assert tree_snapshot(harness.state_root) == substituted_snapshot[0]
+    assert _binding_path(harness.state_root).read_bytes() == binding.canonical
+
+
+@pytest.mark.parametrize("residue", ["empty_slot", "empty_build"])
+def test_empty_staging_prefix_retries_without_canonical_empty_namespace(
+    tmp_path: Path,
+    residue: str,
+) -> None:
+    harness, _generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    slot = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+    )
+    slot.mkdir(mode=0o700)
+    if residue == "empty_build":
+        (slot / "build").mkdir(mode=0o700)
+    destination = _binding_path(harness.state_root)
+
+    assert not destination.parent.parent.exists()
+    assert store.install(capture, binding, capacity_policy=POLICY) == binding
+    assert destination.read_bytes() == binding.canonical
+
+
+def test_exclusive_rename_rejects_source_path_substitution_before_visibility(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    source_relative = Path("rename-test") / "source" / "payload"
+    destination_relative = Path("rename-test") / "destination" / "binding"
+    source = harness.state_root / source_relative
+    destination = harness.state_root / destination_relative
+    aside = source.with_name("payload-original")
+
+    def substitute_source(event: str) -> None:
+        if event != "test-exclusive:before_rename":
+            return
+        source.rename(aside)
+        source.write_bytes(b"substitute")
+        source.chmod(0o600)
+
+    state = DurableStateRoot(
+        harness.state_root,
+        capabilities=SUPPORTED,
+        fault_hook=substitute_source,
+    )
+    state.ensure_directory(source_relative.parent)
+    state.ensure_directory(destination_relative.parent)
+    state.create_private_file_bytes(
+        source_relative,
+        b"original",
+        label="test-source",
+    )
+
+    with pytest.raises(StatePathError, match="source changed"):
+        state.rename_exclusive_contained(
+            source_relative,
+            destination_relative,
+            source_kind="regular",
+            label="test-exclusive",
+        )
+
+    assert not destination.exists()
+    assert source.read_bytes() == b"substitute"
+    assert aside.read_bytes() == b"original"
+
+
+def test_exclusive_rename_surfaces_destination_substitution_after_visibility(
+    tmp_path: Path,
+) -> None:
+    harness = create_harness(tmp_path)
+    source_relative = Path("rename-test") / "source" / "payload"
+    destination_relative = Path("rename-test") / "destination" / "binding"
+    source = harness.state_root / source_relative
+    destination = harness.state_root / destination_relative
+
+    def substitute_destination(event: str) -> None:
+        if event != "test-exclusive:renamed":
+            return
+        destination.unlink()
+        destination.write_bytes(b"substitute")
+        destination.chmod(0o600)
+
+    state = DurableStateRoot(
+        harness.state_root,
+        capabilities=SUPPORTED,
+        fault_hook=substitute_destination,
+    )
+    state.ensure_directory(source_relative.parent)
+    state.ensure_directory(destination_relative.parent)
+    state.create_private_file_bytes(
+        source_relative,
+        b"original",
+        label="test-source",
+    )
+
+    with pytest.raises(CommitUnknown):
+        state.rename_exclusive_contained(
+            source_relative,
+            destination_relative,
+            source_kind="regular",
+            label="test-exclusive",
+        )
+
+    assert not source.exists()
+    assert destination.read_bytes() == b"substitute"
+
+
+@pytest.mark.parametrize("parent_kind", ["source", "destination"])
+@pytest.mark.parametrize("visibility", ["before", "after"])
+def test_exclusive_rename_revalidates_parent_path_bindings(
+    tmp_path: Path,
+    parent_kind: str,
+    visibility: str,
+) -> None:
+    harness = create_harness(tmp_path)
+    source_relative = Path("rename-test") / "source" / "payload"
+    destination_relative = Path("rename-test") / "destination" / "binding"
+    source = harness.state_root / source_relative
+    destination = harness.state_root / destination_relative
+    selected_parent = source.parent if parent_kind == "source" else destination.parent
+    aside = selected_parent.with_name(f"{selected_parent.name}-original")
+    event_name = (
+        "test-exclusive:before_rename"
+        if visibility == "before"
+        else "test-exclusive:renamed"
+    )
+
+    def substitute_parent(event: str) -> None:
+        if event != event_name:
+            return
+        selected_parent.rename(aside)
+        selected_parent.mkdir(mode=0o700)
+
+    state = DurableStateRoot(
+        harness.state_root,
+        capabilities=SUPPORTED,
+        fault_hook=substitute_parent,
+    )
+    state.ensure_directory(source_relative.parent)
+    state.ensure_directory(destination_relative.parent)
+    state.create_private_file_bytes(
+        source_relative,
+        b"original",
+        label="test-source",
+    )
+
+    expected = StatePathError if visibility == "before" else CommitUnknown
+    with pytest.raises(expected):
+        state.rename_exclusive_contained(
+            source_relative,
+            destination_relative,
+            source_kind="regular",
+            label="test-exclusive",
+        )
+
+    if visibility == "before":
+        assert not destination.exists()
+    elif parent_kind == "destination":
+        assert not destination.exists()
+        assert (aside / destination.name).read_bytes() == b"original"
+    else:
+        assert destination.read_bytes() == b"original"

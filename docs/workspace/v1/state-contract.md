@@ -1075,6 +1075,17 @@ generation without overwrite or substitution. The binding contains no raw
 semantic prose, matched substring, generated explanation, confidence score,
 public source location, provider response, or credential.
 
+One fixed mode-`0700` `semantic-release-decision-publication` slot sits beside,
+not inside, the canonical namespace and is distinct from lifecycle `staging`.
+It is non-authoritative construction state with at most one bounded
+build/ready/cleanup subtree, one canonical manifest capped at 4 KiB, and one
+payload. The first missing root, generation, or binding becomes canonical only
+through an exclusive no-overwrite rename. Retry cleanup is limited to a
+validated slot prefix or suffix whose encoded destination is absent or contains
+the exact binding; it never deletes, rewrites, repairs, or overwrites canonical
+decision state. Filesystem-reserve preflight includes a fixed 256 KiB transient
+allowance, while logical byte ceilings count only the canonical binding.
+
 One binding is at most 25 MiB. Bounded no-follow enumeration permits at most 64
 bindings per generation and 4,096 per workspace and stops at maximum plus one.
 The store proves namespace shape, counts, and bytes before classification may
@@ -1098,8 +1109,9 @@ and digest, namespace shape, global/workspace counts and bytes, capacity
 ceilings, durable reservations, filesystem reserve, and GC eligibility state; it
 then installs once and reopens the file to prove exact path, type, link count,
 mode, size, bytes, and digest. The exclusive registry lock serializes global
-capacity and reserve accounting across workspaces. No new lease, lifecycle
-record, staged state, journal transition, or durable in-progress record exists.
+capacity and reserve accounting across workspaces. The publication slot is not
+lifecycle staged state or an authoritative durable in-progress record. No new
+lease, lifecycle record, or journal transition exists.
 
 Concurrent identical requests converge on identical canonical bytes at one path.
 Byte-identical completed replay is no-write success. Same-path different bytes
@@ -1117,12 +1129,11 @@ Once present, unreadable, unsafe, or ambiguous namespace state, an absent
 expected request path after possible visibility, or any presence/count/byte drift
 between bounded snapshots fails closed under the rules above.
 
-Any nonempty decision state is a pre-plan GC eligibility blocker and blocks
-quarantine or purge. Until separately accepted atomic GC integration owns the
-generation and its decision state, no successful public GC preview or executable
-plan may represent that blocker, and this prerequisite adds no token to the
-closed `GcPlan.protected` reason vocabulary. It grants no GC mutation or binding
-removal authority.
+Any nonempty decision state aborts the shared workspace reachability proof
+before successful GC preview or plan and consequently blocks downstream
+execute, reconcile, and purge. This prerequisite adds no token to the closed
+`GcPlan.protected` reason vocabulary and grants no GC mutation or binding-removal
+authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC

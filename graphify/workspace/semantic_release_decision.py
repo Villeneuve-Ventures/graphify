@@ -7,18 +7,30 @@ GC mutation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path
 import re
-from typing import Any, Mapping, cast
 import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping, cast
 from uuid import UUID
 
-from graphify.workspace.contracts import CapacityPolicy, Registry, canonical_json_bytes
-from graphify.workspace.generations import CapacityExceeded, GenerationStore
+from graphify.workspace.contracts import (
+    SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES,
+    SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION,
+    SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE,
+    SEMANTIC_RELEASE_DECISION_STAGING_MANIFEST_MAX_BYTES,
+    CapacityPolicy,
+    Registry,
+    canonical_json_bytes,
+)
 from graphify.workspace.gc import GcError, GcStore
+from graphify.workspace.generations import (
+    CapacityExceeded,
+    DecisionCapacityUsage,
+    GenerationStore,
+)
 from graphify.workspace.leases import LeaseStore
 from graphify.workspace.persistence import (
     CommitUnknown,
@@ -32,15 +44,29 @@ from graphify.workspace.persistence import (
 )
 from graphify.workspace.registry import RegistryStore
 
-
 SEMANTIC_RELEASE_DECISION_CONTRACT = (
     "graphify.workspace.semantic_release_decision.internal"
 )
 SEMANTIC_RELEASE_DECISION_FORMAT_VERSION = 1
-DECISION_BINDING_MAX_BYTES = 25 * 1024 * 1024
-DECISION_BINDINGS_PER_GENERATION = 64
-DECISION_BINDINGS_PER_WORKSPACE = 4_096
+DECISION_BINDING_MAX_BYTES = SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES
+DECISION_BINDINGS_PER_GENERATION = SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION
+DECISION_BINDINGS_PER_WORKSPACE = SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE
 DECISION_FIELD_RESULTS_MAX = 30_000
+_STAGING_MANIFEST_MAX_BYTES = SEMANTIC_RELEASE_DECISION_STAGING_MANIFEST_MAX_BYTES
+_STAGING_DIRECTORY_MODES = frozenset({0o700})
+_STAGING_FILE_MODES = frozenset({0o600})
+_STAGING_MANIFEST_MEMBERS = {
+    "binding_bytes",
+    "binding_sha256",
+    "contract",
+    "destination",
+    "format_version",
+    "generation_id",
+    "publication_kind",
+    "repo_uuid",
+    "request_sha256",
+}
+_STAGING_CONTRACT = "graphify.workspace.semantic_release_decision.publication.internal"
 _JSON_MAX_DEPTH = 64
 _SHA256_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _GENERATION_RE = re.compile(r"gen-[a-z0-9][a-z0-9._-]{0,62}", re.ASCII)
@@ -564,7 +590,7 @@ class SemanticReleaseDecisionStore:
 
     @staticmethod
     def _workspace(repo_uuid: str) -> Path:
-        return Path("workspaces") / _repo_uuid(repo_uuid)
+        return GenerationStore._workspace(_repo_uuid(repo_uuid))
 
     @classmethod
     def _generation_directory(cls, repo_uuid: str, generation_id: str) -> Path:
@@ -580,6 +606,568 @@ class SemanticReleaseDecisionStore:
         return cls._generation_directory(repo_uuid, generation_id) / (
             _sha256(decision_request_sha256, "decision_request_sha256") + ".json"
         )
+
+    @classmethod
+    def _staging_slot(cls, repo_uuid: str) -> Path:
+        return cls._workspace(repo_uuid) / "semantic-release-decision-publication"
+
+    def _directory_names(
+        self,
+        relative: Path,
+        *,
+        allow_missing: bool = False,
+        maximum_entries: int = 3,
+        deadline_ns: int | None = None,
+    ) -> tuple[str, ...] | None:
+        path = self.state.path(relative)
+        with self.state._existing_private_directory(
+            relative,
+            allow_missing=allow_missing,
+        ) as descriptor:
+            if descriptor is None:
+                return None
+            return tuple(
+                self.state._tree_entry_names_descriptor(
+                    descriptor,
+                    path,
+                    deadline_ns=deadline_ns,
+                    maximum_entries=maximum_entries,
+                )
+            )
+
+    def _staging_manifest(
+        self,
+        relative: Path,
+        *,
+        allow_partial: bool,
+        deadline_ns: int | None,
+    ) -> dict[str, object] | None:
+        payload = self.state._read_optional_existing_stable_bytes(
+            relative,
+            max_bytes=_STAGING_MANIFEST_MAX_BYTES,
+            deadline_ns=deadline_ns,
+        )
+        if payload is None:
+            return None
+        try:
+            value = _mapping(json.loads(payload), "decision publication manifest")
+            _exact_members(
+                value,
+                _STAGING_MANIFEST_MEMBERS,
+                "decision publication manifest",
+            )
+            if canonical_json_bytes(value) != payload:
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication manifest is not canonical"
+                )
+            if (
+                value["contract"] != _STAGING_CONTRACT
+                or type(value["format_version"]) is not int
+                or value["format_version"] != 1
+            ):
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication manifest contract is unsupported"
+                )
+            repo_uuid = _repo_uuid(value["repo_uuid"])
+            generation_id = _generation_id(value["generation_id"])
+            request_sha256 = _sha256(value["request_sha256"], "request_sha256")
+            binding_sha256 = _sha256(value["binding_sha256"], "binding_sha256")
+            binding_bytes = value["binding_bytes"]
+            if (
+                type(binding_bytes) is not int
+                or binding_bytes < 1
+                or binding_bytes > DECISION_BINDING_MAX_BYTES
+            ):
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication binding byte count is invalid"
+                )
+            publication_kind = value["publication_kind"]
+            if publication_kind not in {"root", "generation", "file"}:
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication kind is invalid"
+                )
+            destination = value["destination"]
+            if type(destination) is not str:
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication destination is invalid"
+                )
+            expected_binding = self._binding_path(
+                repo_uuid,
+                generation_id,
+                request_sha256,
+            )
+            expected_destination = {
+                "root": self._workspace(repo_uuid) / "semantic-release-decisions",
+                "generation": self._generation_directory(repo_uuid, generation_id),
+                "file": expected_binding,
+            }[cast(str, publication_kind)]
+            if destination != expected_destination.as_posix():
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication destination differs from its identity"
+                )
+            value["repo_uuid"] = repo_uuid
+            value["generation_id"] = generation_id
+            value["request_sha256"] = request_sha256
+            value["binding_sha256"] = binding_sha256
+            return value
+        except (
+            SemanticReleaseDecisionInvalid,
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            if allow_partial:
+                return None
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication manifest is invalid"
+            ) from exc
+
+    def _staged_binding_relative(
+        self,
+        state_relative: Path,
+        manifest: Mapping[str, object],
+    ) -> Path:
+        payload = state_relative / "payload"
+        generation_id = cast(str, manifest["generation_id"])
+        request_name = f"{manifest['request_sha256']}.json"
+        publication_kind = manifest["publication_kind"]
+        if publication_kind == "root":
+            return payload / generation_id / request_name
+        if publication_kind == "generation":
+            return payload / request_name
+        return payload
+
+    def _validate_staging_state(
+        self,
+        state_relative: Path,
+        *,
+        expected_repo_uuid: str,
+        complete: bool,
+        allow_partial_manifest: bool = True,
+        deadline_ns: int | None,
+    ) -> dict[str, object] | None:
+        names = self._directory_names(
+            state_relative,
+            maximum_entries=2,
+            deadline_ns=deadline_ns,
+        )
+        if names is None:  # pragma: no cover - tree_bytes proves presence
+            raise SemanticReleaseDecisionInvalid("decision publication state is missing")
+        if not set(names) <= {"manifest.json", "payload"}:
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication state contains an unexpected entry"
+            )
+        manifest = self._staging_manifest(
+            state_relative / "manifest.json",
+            allow_partial=(
+                allow_partial_manifest and not complete and "payload" not in names
+            ),
+            deadline_ns=deadline_ns,
+        )
+        if manifest is None:
+            if complete or "payload" in names:
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication payload lacks a complete manifest"
+                )
+            return None
+        if manifest["repo_uuid"] != expected_repo_uuid:
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication manifest belongs to a different workspace"
+            )
+        staged_binding = self._staged_binding_relative(state_relative, manifest)
+        publication_kind = manifest["publication_kind"]
+        if publication_kind == "file":
+            payload_names: tuple[str, ...] | None = None
+        else:
+            payload_names = self._directory_names(
+                state_relative / "payload",
+                allow_missing=True,
+                maximum_entries=1,
+                deadline_ns=deadline_ns,
+            )
+            if payload_names is not None:
+                expected = (
+                    cast(str, manifest["generation_id"])
+                    if publication_kind == "root"
+                    else f"{manifest['request_sha256']}.json"
+                )
+                if set(payload_names) not in (set(), {expected}):
+                    raise SemanticReleaseDecisionInvalid(
+                        "decision publication payload shape is invalid"
+                    )
+                if publication_kind == "root" and payload_names:
+                    generation_names = self._directory_names(
+                        state_relative / "payload" / cast(str, manifest["generation_id"]),
+                        maximum_entries=1,
+                        deadline_ns=deadline_ns,
+                    )
+                    if generation_names is None or set(generation_names) not in (
+                        set(),
+                        {f"{manifest['request_sha256']}.json"},
+                    ):
+                        raise SemanticReleaseDecisionInvalid(
+                            "decision publication generation payload shape is invalid"
+                        )
+        staged = self.state._read_optional_existing_stable_bytes(
+            staged_binding,
+            max_bytes=cast(int, manifest["binding_bytes"]),
+            deadline_ns=deadline_ns,
+        )
+        if staged is None:
+            if complete:
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication binding is missing"
+                )
+            return manifest
+        expected_bytes = cast(int, manifest["binding_bytes"])
+        if len(staged) > expected_bytes or (complete and len(staged) != expected_bytes):
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication binding length is invalid"
+            )
+        if len(staged) == expected_bytes:
+            if hashlib.sha256(staged).hexdigest() != manifest["binding_sha256"]:
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication binding digest is invalid"
+                )
+            binding = SemanticReleaseDecisionBinding.from_json(staged)
+            if (
+                binding.repo_uuid != manifest["repo_uuid"]
+                or binding.target_generation_id != manifest["generation_id"]
+                or binding.decision_request_sha256 != manifest["request_sha256"]
+            ):
+                raise SemanticReleaseDecisionInvalid(
+                    "decision publication binding identity is invalid"
+                )
+        elif complete:
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication binding is incomplete"
+            )
+        return manifest
+
+    def _prove_staging_destination(
+        self,
+        manifest: Mapping[str, object],
+        *,
+        deadline_ns: int | None,
+    ) -> None:
+        existing = self._read_binding(
+            cast(str, manifest["repo_uuid"]),
+            cast(str, manifest["generation_id"]),
+            cast(str, manifest["request_sha256"]),
+            deadline_ns=deadline_ns,
+        )
+        if existing is not None and (
+            len(existing.canonical) != manifest["binding_bytes"]
+            or existing.binding_sha256 != manifest["binding_sha256"]
+        ):
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication destination contains different bytes"
+            )
+
+    def _cleanup_staging(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None,
+    ) -> None:
+        slot = self._staging_slot(repo_uuid)
+        names = self._directory_names(
+            slot,
+            allow_missing=True,
+            maximum_entries=1,
+            deadline_ns=deadline_ns,
+        )
+        if names is None or not names:
+            return
+        if len(names) != 1 or names[0] not in {"build", "ready", "cleanup"}:
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication slot contains unexpected state"
+            )
+        state_name = names[0]
+        state_relative = slot / state_name
+        if state_name == "cleanup":
+            self._validate_staging_state(
+                state_relative,
+                expected_repo_uuid=repo_uuid,
+                complete=False,
+                deadline_ns=deadline_ns,
+            )
+        else:
+            state_entries = self._directory_names(
+                state_relative,
+                maximum_entries=2,
+                deadline_ns=deadline_ns,
+            )
+            manifest = self._validate_staging_state(
+                state_relative,
+                expected_repo_uuid=repo_uuid,
+                complete=state_name == "ready" and state_entries != ("manifest.json",),
+                allow_partial_manifest=state_name != "ready",
+                deadline_ns=deadline_ns,
+            )
+            if state_name == "ready" and manifest is not None:
+                self._prove_staging_destination(
+                    manifest,
+                    deadline_ns=deadline_ns,
+                )
+            try:
+                self.state.rename_exclusive_contained(
+                    state_relative,
+                    slot / "cleanup",
+                    source_kind="directory",
+                    label="semantic-release-decision:cleanup-transition",
+                    deadline_ns=deadline_ns,
+                )
+            except CommitUnknown as exc:
+                current = self._directory_names(
+                    slot,
+                    maximum_entries=1,
+                    deadline_ns=deadline_ns,
+                )
+                if current != ("cleanup",):
+                    raise
+                raise SemanticReleaseDecisionConflict(
+                    "decision publication cleanup transition is incomplete"
+                ) from exc
+            state_relative = slot / "cleanup"
+            self._validate_staging_state(
+                state_relative,
+                expected_repo_uuid=repo_uuid,
+                complete=False,
+                deadline_ns=deadline_ns,
+            )
+        self.state.remove_private_tree(
+            state_relative,
+            allowed_directory_modes=_STAGING_DIRECTORY_MODES,
+            allowed_file_modes=_STAGING_FILE_MODES,
+            first_entry="payload",
+            deadline_ns=deadline_ns,
+        )
+
+    def _publication_manifest(
+        self,
+        binding: SemanticReleaseDecisionBinding,
+        publication_kind: str,
+    ) -> tuple[dict[str, object], bytes]:
+        destination = {
+            "root": self._workspace(binding.repo_uuid) / "semantic-release-decisions",
+            "generation": self._generation_directory(
+                binding.repo_uuid,
+                binding.target_generation_id,
+            ),
+            "file": self._binding_path(
+                binding.repo_uuid,
+                binding.target_generation_id,
+                binding.decision_request_sha256,
+            ),
+        }[publication_kind]
+        value: dict[str, object] = {
+            "binding_bytes": len(binding.canonical),
+            "binding_sha256": binding.binding_sha256,
+            "contract": _STAGING_CONTRACT,
+            "destination": destination.as_posix(),
+            "format_version": 1,
+            "generation_id": binding.target_generation_id,
+            "publication_kind": publication_kind,
+            "repo_uuid": binding.repo_uuid,
+            "request_sha256": binding.decision_request_sha256,
+        }
+        canonical = canonical_json_bytes(value)
+        if len(canonical) > _STAGING_MANIFEST_MAX_BYTES:
+            raise SemanticReleaseDecisionInvalid(
+                "decision publication manifest exceeds its byte bound"
+            )
+        return value, canonical
+
+    def _remove_published_tomb(
+        self,
+        binding: SemanticReleaseDecisionBinding,
+        expected_manifest: Mapping[str, object],
+        *,
+        deadline_ns: int | None,
+    ) -> None:
+        slot = self._staging_slot(binding.repo_uuid)
+        ready = slot / "ready"
+        if self._directory_names(
+            ready,
+            maximum_entries=1,
+            deadline_ns=deadline_ns,
+        ) != ("manifest.json",):
+            raise SemanticReleaseDecisionInvalid(
+                "published decision staging tomb is invalid"
+            )
+        manifest = self._validate_staging_state(
+            ready,
+            expected_repo_uuid=binding.repo_uuid,
+            complete=False,
+            allow_partial_manifest=False,
+            deadline_ns=deadline_ns,
+        )
+        if manifest is None:  # pragma: no cover - complete manifest required above
+            raise SemanticReleaseDecisionInvalid(
+                "published decision staging tomb lacks a manifest"
+            )
+        if manifest != expected_manifest:
+            raise SemanticReleaseDecisionInvalid(
+                "published decision staging tomb differs from the installed binding"
+            )
+        installed = self._read_binding(
+            binding.repo_uuid,
+            binding.target_generation_id,
+            binding.decision_request_sha256,
+            deadline_ns=deadline_ns,
+        )
+        if installed is None or installed.canonical != binding.canonical:
+            raise SemanticReleaseDecisionInvalid(
+                "published decision staging tomb destination is not exact"
+            )
+        try:
+            self.state.rename_exclusive_contained(
+                ready,
+                slot / "cleanup",
+                source_kind="directory",
+                label="semantic-release-decision:cleanup-transition",
+                deadline_ns=deadline_ns,
+            )
+        except CommitUnknown:
+            if self._directory_names(
+                slot,
+                maximum_entries=1,
+                deadline_ns=deadline_ns,
+            ) != ("cleanup",):
+                raise
+        self.state.remove_private_tree(
+            slot / "cleanup",
+            allowed_directory_modes=_STAGING_DIRECTORY_MODES,
+            allowed_file_modes=_STAGING_FILE_MODES,
+            first_entry="payload",
+            deadline_ns=deadline_ns,
+        )
+
+    def _prepare_staging(
+        self,
+        binding: SemanticReleaseDecisionBinding,
+        publication_kind: str,
+        *,
+        deadline_ns: int | None,
+    ) -> tuple[Path, Mapping[str, object]]:
+        slot = self._staging_slot(binding.repo_uuid)
+        build = slot / "build"
+        ready = slot / "ready"
+        manifest, manifest_bytes = self._publication_manifest(
+            binding,
+            publication_kind,
+        )
+        self.state.ensure_directory(build)
+        self.state.create_private_file_bytes(
+            build / "manifest.json",
+            manifest_bytes,
+            label="semantic-release-decision:stage-manifest",
+            deadline_ns=deadline_ns,
+        )
+        payload = build / "payload"
+        binding_relative = self._staged_binding_relative(build, manifest)
+        if publication_kind == "root":
+            self.state.ensure_directory(payload / binding.target_generation_id)
+        elif publication_kind == "generation":
+            self.state.ensure_directory(payload)
+        self.state.create_private_file_bytes(
+            binding_relative,
+            binding.canonical,
+            label="semantic-release-decision:stage-binding",
+            deadline_ns=deadline_ns,
+        )
+        self.state.fsync_contained_regular_file(
+            build,
+            binding_relative.relative_to(build),
+            allowed_directory_modes=_STAGING_DIRECTORY_MODES,
+            allowed_file_modes=_STAGING_FILE_MODES,
+        )
+        self.state.fault_hook(
+            "semantic-release-decision:stage:binding_contained_durable"
+        )
+        if publication_kind == "root":
+            self.state.fsync_contained_directory(
+                build,
+                Path("payload") / binding.target_generation_id,
+                allowed_directory_modes=_STAGING_DIRECTORY_MODES,
+            )
+            self.state.fault_hook(
+                "semantic-release-decision:stage:generation_directory_durable"
+            )
+        if publication_kind != "file":
+            self.state.fsync_contained_directory(
+                build,
+                "payload",
+                allowed_directory_modes=_STAGING_DIRECTORY_MODES,
+            )
+            self.state.fault_hook(
+                "semantic-release-decision:stage:payload_directory_durable"
+            )
+        self.state.fsync_contained_directory(
+            slot,
+            "build",
+            allowed_directory_modes=_STAGING_DIRECTORY_MODES,
+        )
+        self.state.fault_hook("semantic-release-decision:stage:build_directory_durable")
+        self.state.fsync_contained_directory(
+            self._workspace(binding.repo_uuid),
+            "semantic-release-decision-publication",
+            allowed_directory_modes=_STAGING_DIRECTORY_MODES,
+        )
+        self.state.fault_hook("semantic-release-decision:stage:slot_directory_durable")
+        self._validate_staging_state(
+            build,
+            expected_repo_uuid=binding.repo_uuid,
+            complete=True,
+            deadline_ns=deadline_ns,
+        )
+        try:
+            self.state.rename_exclusive_contained(
+                build,
+                ready,
+                source_kind="directory",
+                label="semantic-release-decision:stage",
+                deadline_ns=deadline_ns,
+            )
+        except CommitUnknown as exc:
+            if self._directory_names(
+                slot,
+                maximum_entries=1,
+                deadline_ns=deadline_ns,
+            ) != ("ready",):
+                raise
+            raise SemanticReleaseDecisionConflict(
+                "decision publication staging transition is incomplete before canonical visibility"
+            ) from exc
+        self._validate_staging_state(
+            ready,
+            expected_repo_uuid=binding.repo_uuid,
+            complete=True,
+            deadline_ns=deadline_ns,
+        )
+        return ready, manifest
+
+    def _publish_staging(
+        self,
+        ready: Path,
+        manifest: Mapping[str, object],
+        *,
+        deadline_ns: int | None,
+    ) -> Path:
+        source = ready / "payload"
+        destination = Path(cast(str, manifest["destination"]))
+        source_kind = "regular" if manifest["publication_kind"] == "file" else "directory"
+        published = self.state.rename_exclusive_contained(
+            source,
+            destination,
+            source_kind=source_kind,
+            label="semantic-release-decision:publish",
+            deadline_ns=deadline_ns,
+        )
+        self.state.fault_hook("semantic-release-decision:installed")
+        return published
 
     @staticmethod
     def _require_registered(document: Registry, repo_uuid: str) -> None:
@@ -766,7 +1354,7 @@ class SemanticReleaseDecisionStore:
     def _require_capture_stable(
         self,
         capture: SemanticReleaseDecisionCapture,
-        current_usage: Any,
+        current_usage: DecisionCapacityUsage,
         current_binding: SemanticReleaseDecisionBinding | None,
         candidate: SemanticReleaseDecisionBinding,
     ) -> bool:
@@ -847,6 +1435,10 @@ class SemanticReleaseDecisionStore:
                         capture.repo_uuid,
                         deadline_ns=deadline_ns,
                     )
+                    self._cleanup_staging(
+                        capture.repo_uuid,
+                        deadline_ns=deadline_ns,
+                    )
                     current_usage = self.generations.decision_capacity_usage_locked(
                         capture.repo_uuid,
                         policy,
@@ -903,16 +1495,34 @@ class SemanticReleaseDecisionStore:
                                 "decision binding disappeared during replay proof"
                             )
                         return current_binding
-                    relative = self._binding_path(
-                        capture.repo_uuid,
-                        capture.generation_id,
-                        capture.decision_request_sha256,
-                    )
                     try:
-                        self.state.install_once_bytes(
-                            relative,
-                            binding.canonical,
-                            label="semantic-release-decision",
+                        decision_root = self._workspace(
+                            capture.repo_uuid
+                        ) / "semantic-release-decisions"
+                        if not self.state.private_directory_exists(decision_root):
+                            publication_kind = "root"
+                        elif not self.state.private_directory_exists(
+                            self._generation_directory(
+                                capture.repo_uuid,
+                                capture.generation_id,
+                            )
+                        ):
+                            publication_kind = "generation"
+                        else:
+                            publication_kind = "file"
+                        try:
+                            ready, manifest = self._prepare_staging(
+                                binding,
+                                publication_kind,
+                                deadline_ns=deadline_ns,
+                            )
+                        except CommitUnknown as staging_exc:
+                            raise SemanticReleaseDecisionConflict(
+                                "decision publication staging is incomplete before canonical visibility"
+                            ) from staging_exc
+                        self._publish_staging(
+                            ready,
+                            manifest,
                             deadline_ns=deadline_ns,
                         )
                     except BaseException as exc:
@@ -1006,6 +1616,11 @@ class SemanticReleaseDecisionStore:
                             raise CommitUnknown(
                                 "decision capacity state changed across the install boundary"
                             )
+                        self._remove_published_tomb(
+                            binding,
+                            manifest,
+                            deadline_ns=deadline_ns,
+                        )
                         return reopened
                     except CommitUnknown:
                         raise
@@ -1016,9 +1631,9 @@ class SemanticReleaseDecisionStore:
 
 
 __all__ = [
-    "DECISION_BINDING_MAX_BYTES",
     "DECISION_BINDINGS_PER_GENERATION",
     "DECISION_BINDINGS_PER_WORKSPACE",
+    "DECISION_BINDING_MAX_BYTES",
     "SEMANTIC_RELEASE_DECISION_CONTRACT",
     "SEMANTIC_RELEASE_DECISION_FORMAT_VERSION",
     "SemanticReleaseDecisionBinding",

@@ -1469,8 +1469,15 @@ Contract review must prove each of the following:
   workspace and generation, request-derived path, exact candidate canonical
   bytes/digest, namespace shape, global/workspace counts and bytes, capacity
   ceilings, durable reservations, filesystem reserve, and GC eligibility state.
-  No new lease, lifecycle record, staged state, journal transition, or durable
-  in-progress record participates;
+  The only added construction state is one fixed, bounded, non-authoritative
+  publication slot outside canonical decision state and lifecycle `staging`:
+  one build/ready/cleanup subtree, one at-most-4-KiB manifest, one payload,
+  exclusive no-overwrite publication of the first missing boundary, and a fixed
+  256 KiB transient reserve allowance. Tests prove interrupted construction and
+  cleanup prefixes are retryable, hostile residue fails closed, and canonical
+  state is never deleted, repaired, rewritten, or overwritten. No new lease,
+  lifecycle record, journal transition, or authoritative durable in-progress
+  record participates;
 - identical concurrent requests converge on one canonical binding;
   byte-identical completed replay is no-write; same-path different bytes
   conflict; distinct requests use distinct paths without substitution. Failure
@@ -1482,10 +1489,10 @@ Contract review must prove each of the following:
 - safely observed absence of the top-level decision namespace is the canonical
   zero-binding initial state and may be created only at the first final install.
   Once present, unreadable, unsafe, ambiguous, missing-after-visibility, or
-  snapshot-drifted state fails closed. Nonempty state is a pre-plan GC
-  eligibility blocker and blocks quarantine or purge until separately accepted
-  integration defines schema-compatible reason and wiring; no token is added to
-  the current public protection-reason vocabulary. No deletion, cleanup,
+  snapshot-drifted state fails closed. Nonempty state aborts the shared workspace
+  reachability proof before successful GC preview or plan and consequently
+  blocks downstream execute, reconcile, and purge; no token is added to the
+  current public protection-reason vocabulary. No canonical deletion, cleanup,
   quarantine, repair, rollback, compaction, GC mutation, live policy
   provisioning, decision composition, classification, omission, projection,
   public CLI/schema/runtime receipt, provider/backend, network, publication,
