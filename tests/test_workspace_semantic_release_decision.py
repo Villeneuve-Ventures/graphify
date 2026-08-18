@@ -1395,7 +1395,7 @@ def test_optional_stable_missing_read_checks_deadline_after_observation(
     monkeypatch: pytest.MonkeyPatch,
     missing_kind: str,
 ) -> None:
-    harness, _generations, store, _gc = _runtime(tmp_path)
+    _harness, _generations, store, _gc = _runtime(tmp_path)
     relative = Path("workspaces") / REPO_UUID / "missing" / "record.json"
     if missing_kind == "file":
         store.state.ensure_directory(relative.parent)
@@ -1417,7 +1417,7 @@ def test_decision_capacity_scan_retries_interrupted_binding_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    harness, generations, store, _gc = _runtime(tmp_path)
+    _harness, generations, store, _gc = _runtime(tmp_path)
     binding = _binding()
     capture = store.capture(
         REPO_UUID,
@@ -2086,6 +2086,118 @@ def test_empty_staging_prefix_retries_without_canonical_empty_namespace(
     assert not destination.parent.parent.exists()
     assert store.install(capture, binding, capacity_policy=POLICY) == binding
     assert destination.read_bytes() == binding.canonical
+
+
+def test_remove_tree_contents_wraps_entry_stat_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    state = DurableStateRoot(
+        harness.state_root,
+        capabilities=SUPPORTED,
+    )
+    cleanup_relative = Path("cleanup-race")
+    payload_relative = cleanup_relative / "payload"
+    state.ensure_directory(cleanup_relative)
+    state.create_private_file_bytes(
+        payload_relative,
+        b"payload",
+        label="test-cleanup-race",
+    )
+    original_stat = persistence_module.os.stat
+
+    def missing_during_sort(
+        path: str | bytes | int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        if path == "payload" and dir_fd is not None:
+            raise FileNotFoundError(path)
+        return original_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    with state.existing_private_directory(cleanup_relative) as descriptor:
+        monkeypatch.setattr(persistence_module.os, "stat", missing_during_sort)
+        with pytest.raises(
+            StatePathError,
+            match="state tree entry cannot be inspected safely",
+        ):
+            state._remove_tree_contents_descriptor(
+                descriptor,
+                harness.state_root / cleanup_relative,
+                allowed_directory_modes=frozenset({0o700}),
+                allowed_file_modes=frozenset({0o600}),
+            )
+
+    assert (harness.state_root / payload_relative).read_bytes() == b"payload"
+
+
+def test_remove_tree_contents_rejects_entry_replacement_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = create_harness(tmp_path)
+    state = DurableStateRoot(
+        harness.state_root,
+        capabilities=SUPPORTED,
+    )
+    cleanup_relative = Path("cleanup-replacement")
+    payload_relative = cleanup_relative / "payload"
+    payload = harness.state_root / payload_relative
+    original_payload = payload.with_name("payload-original")
+    state.ensure_directory(cleanup_relative)
+    state.create_private_file_bytes(
+        payload_relative,
+        b"original",
+        label="test-cleanup-replacement",
+    )
+    original_stat = persistence_module.os.stat
+    observations = 0
+
+    def replace_before_revalidation(
+        path: str | bytes | int,
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal observations
+        if path == "payload" and dir_fd is not None:
+            observations += 1
+            if observations == 2:
+                payload.rename(original_payload)
+                payload.write_bytes(b"replacement")
+                payload.chmod(0o600)
+        return original_stat(
+            path,
+            dir_fd=dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    with state.existing_private_directory(cleanup_relative) as descriptor:
+        monkeypatch.setattr(
+            persistence_module.os,
+            "stat",
+            replace_before_revalidation,
+        )
+        with pytest.raises(
+            StatePathError,
+            match="state tree entry changed before cleanup",
+        ):
+            state._remove_tree_contents_descriptor(
+                descriptor,
+                harness.state_root / cleanup_relative,
+                allowed_directory_modes=frozenset({0o700}),
+                allowed_file_modes=frozenset({0o600}),
+            )
+
+    assert observations == 2
+    assert original_payload.read_bytes() == b"original"
+    assert payload.read_bytes() == b"replacement"
 
 
 def test_exclusive_rename_rejects_source_path_substitution_before_visibility(

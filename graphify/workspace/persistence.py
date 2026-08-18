@@ -1215,23 +1215,49 @@ class DurableStateRoot:
             path,
             deadline_ns=deadline_ns,
         )
-        names.sort(
-            key=lambda name: (
-                0 if name == first_entry else 1,
-                0
-                if stat.S_ISDIR(
-                    os.stat(name, dir_fd=descriptor, follow_symlinks=False).st_mode
-                )
-                else 1
-            )
-        )
+        entries: list[tuple[str, os.stat_result]] = []
         for name in names:
             require_before_deadline(
                 deadline_ns,
                 _PRIVATE_TREE_DEADLINE_DETAIL,
             )
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {path / name}: {exc}"
+                ) from exc
+            entries.append((name, details))
+        entries.sort(
+            key=lambda item: (
+                0 if item[0] == first_entry else 1,
+                0 if stat.S_ISDIR(item[1].st_mode) else 1,
+            )
+        )
+        for name, observed in entries:
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
             candidate = path / name
-            details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {candidate}: {exc}"
+                ) from exc
+            if self._stat_identity(observed) != self._stat_identity(details):
+                raise StatePathError(
+                    f"state tree entry changed before cleanup: {candidate}"
+                )
             if stat.S_ISDIR(details.st_mode):
                 child = self._open_directory_at(
                     descriptor,
