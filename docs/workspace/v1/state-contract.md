@@ -1042,10 +1042,10 @@ record and adds no runtime receipt or public schema.
 
 ## Semantic-release decision-store and capacity/GC prerequisite
 
-This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
-remains `WAITING`, not `READY`, `IN_PROGRESS`, or `COMPLETE`. It has no
-implementation or acceptance receipt. A future `SemanticReleaseDecisionStore`
-alone owns this external private namespace:
+This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
+implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
+receipt. `SemanticReleaseDecisionStore` alone owns this external private
+namespace:
 
 ```text
 workspaces/<repository_uuid>/semantic-release-decisions/
@@ -1083,8 +1083,8 @@ independent of `CapacityPolicy`; they add no fields and do not reuse its
 generation-count fields. Decision-store bytes participate in the existing
 global/workspace byte ceilings and filesystem-reserve calculation while existing
 unconsumed durable byte reservations remain charged in that arithmetic. The
-authoritative usage scanner must include this namespace before the prerequisite
-can be `READY`. Insufficient capacity, an exceeded bound, unsafe or unstable
+authoritative usage scanner includes this namespace. Insufficient capacity, an
+exceeded bound, unsafe or unstable
 state, or inability to prove any count, byte total, reservation, or reserve fails
 closed.
 
@@ -1126,19 +1126,19 @@ removal authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite, the encompassing release/DLP decision, live operator policy
-selection/provisioning, classification composition, omission, projection,
-public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+prerequisite remains `IN_PROGRESS`; the encompassing release/DLP decision, live
+operator policy selection/provisioning, classification composition, omission,
+projection, public surfaces, provider/backend, publication, remaining P5B2 work,
+and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Semantic-content release/DLP decision
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is a contract freeze at `WAITING`. Besides the implemented and accepted
 trust-root and policy-authority provisioning mechanisms, it still requires a
-provisioned stable current `ACTIVE` operator policy-authority record,
-implementation and separate acceptance of the decision-store and capacity/GC
-prerequisite above, classification composition, and every other frozen
+provisioned stable current `ACTIVE` operator policy-authority record, separate
+acceptance of the implemented decision-store and capacity/GC prerequisite above,
+classification composition, and every other frozen
 prerequisite. It may later add one private internal decision binding but no
 lifecycle transition, staged-build state,
 journal event, generation receipt, public schema, runtime receipt, or public
@@ -1357,11 +1357,11 @@ implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
 `IN_PROGRESS`; the separate trust-root and policy-authority provisioning
 prerequisites are accepted `COMPLETE`.
-This decision-store and capacity/GC prerequisite, this decision child, live
-operator policy selection/provisioning,
-classification composition, omission execution, projection, public
-CLI/schema/receipt, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+This decision-store and capacity/GC prerequisite remains `IN_PROGRESS`; this
+decision child, live operator policy selection/provisioning, classification
+composition, omission execution, projection, public CLI/schema/receipt,
+provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
+H3 remains `DEFERRED`; no later successor is `READY`.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

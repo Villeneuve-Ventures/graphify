@@ -20,7 +20,7 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
     canonical_sha256,
 )
-from graphify.workspace.generations import GenerationStore
+from graphify.workspace.generations import CapacityExceeded, GenerationStore
 from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
@@ -565,6 +565,21 @@ class GcStore:
             maximum_entries=maximum_generations,
             deadline_ns=deadline_ns,
         )
+        try:
+            decision_generations = self.generations.decision_state_generations_locked(
+                repo_uuid,
+                deadline_ns=deadline_ns,
+            )
+        except CapacityExceeded as exc:
+            raise GcError(f"semantic-release decision state is unsafe: {exc}") from exc
+        if not decision_generations.issubset(generations):
+            raise GcError(
+                "semantic-release decision state does not name a retained generation"
+            )
+        if decision_generations:
+            raise GcError(
+                "semantic-release decision state blocks GC eligibility before planning"
+            )
         if maximum_generations is not None and len(set(generations) | set(reasons)) > (
             maximum_generations
         ):

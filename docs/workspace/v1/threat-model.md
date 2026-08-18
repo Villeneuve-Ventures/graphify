@@ -560,9 +560,10 @@ projection, public surfaces, publication, or successor activation.
 
 ## Semantic-release decision-store and capacity/GC threats
 
-This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
-remains `WAITING`. It has no implementation or acceptance receipt. Its threat
-boundary is limited to the future private `SemanticReleaseDecisionStore`, bounded
+This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
+implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
+receipt. Its threat boundary is limited to the private
+`SemanticReleaseDecisionStore`, bounded
 capacity and filesystem-reserve integration, install-once/replay behavior,
 commit-uncertainty handling, and nonempty-state generation protection. It is not
 operator policy, classification, terminal release-decision, omission,
@@ -631,10 +632,11 @@ policy, or other durable state.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite, live operator policy selection/provisioning, the encompassing
-release/DLP decision, classification composition, omission execution,
-projection, public surfaces, provider/backend, publication, remaining P5B2 work,
-and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+prerequisite remains `IN_PROGRESS`; live operator policy selection/provisioning,
+the encompassing release/DLP decision, classification composition, omission
+execution, projection, public surfaces, provider/backend, publication, remaining
+P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
+is `READY`.
 
 ## Semantic-content release/DLP decision threats
 
@@ -642,8 +644,8 @@ The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is contract-frozen only and remains `WAITING`. The trust-root and
 policy-authority provisioning prerequisites above are accepted, but no stable
 current `ACTIVE` operator record is provisioned; decision-store
-and capacity/GC implementation and separate acceptance, classification
-composition, and the other decision prerequisites also remain absent. The
+and capacity/GC acceptance, classification composition, and the other decision
+prerequisites also remain absent. The
 decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
 promoted generation, visible pointer, staged marker, receipt, handoff, semantic
@@ -793,11 +795,11 @@ coordinate before releasing the locks.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites are accepted `COMPLETE`. The encompassing
-release/DLP decision, the decision-store and capacity/GC prerequisite, live
-operator-policy selection/provisioning, classification composition, omission
-execution, projection,
+release/DLP decision, live operator-policy selection/provisioning,
+classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+remain `WAITING`; the decision-store and capacity/GC prerequisite remains
+`IN_PROGRESS`. H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Explicit non-claims
 

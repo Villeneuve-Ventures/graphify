@@ -2012,12 +2012,12 @@ remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-release decision-store and capacity/GC prerequisite
 
-This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
-remains `WAITING`, not `READY`, `IN_PROGRESS`, or `COMPLETE`. It has no
-implementation or acceptance receipt. It owns only the future private
+This separate internal unnumbered P5B2 prerequisite is now an `IN_PROGRESS`
+internal implementation candidate, not `READY` or `COMPLETE`, and has no
+acceptance receipt. It owns only the private
 `SemanticReleaseDecisionStore`, the decision namespace's integration into the
 existing capacity and filesystem-reserve calculations, and the pre-plan
-generation-eligibility blocker required before separate GC integration. It does
+generation-eligibility blocker in the existing GC planning path. It does
 not own operator
 policy selection or provisioning, decision-request or full-result composition,
 classification, policy reduction, a terminal release decision, omission,
@@ -2091,8 +2091,8 @@ independent store caps; they do not add `CapacityPolicy` fields or reuse its
 generation-count fields. Decision-store bytes are charged against the existing
 `CapacityPolicy` global/workspace byte ceilings and filesystem-reserve
 calculation, with existing unconsumed durable byte reservations retained in that
-arithmetic. The authoritative usage scanner must include this namespace before
-the prerequisite can be `READY`. Insufficient capacity, an exceeded limit,
+arithmetic. The authoritative usage scanner includes this namespace.
+Insufficient capacity, an exceeded limit,
 unstable usage, unsafe state, or inability to prove counts, bytes, reservations,
 or reserve fails closed.
 
@@ -2142,15 +2142,17 @@ deletes, rewrites, quarantines, repairs, or rolls back a binding or any semantic
 input, handoff, generation, receipt, journal, staged record, pointer, policy, or
 other durable state.
 
-This contract freeze changes no code, test, schema, fixture, dependency,
-workflow, receipt, generated Graphify output, runtime state, JOS disposition,
-public CLI/schema/runtime receipt, provider/backend, network, publication, or
-release authority. P5 and P5B2 remain `IN_PROGRESS`; the trust-root and
-policy-authority provisioning prerequisites remain `COMPLETE`. This
-decision-store and capacity/GC prerequisite, live operator policy
-selection/provisioning, the encompassing release/DLP decision, classification
-composition, omission, projection, remaining P5B2 work, and P5C remain
-`WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+This implementation candidate adds the private store, authoritative capacity
+accounting, pre-plan GC blocker, internal runtime dependency, and direct hostile
+and failure-injection tests. It adds no public CLI/schema/runtime receipt,
+workflow, dependency, acceptance receipt, live record, JOS disposition,
+provider/backend, network, publication, or release authority. P5 and P5B2 remain
+`IN_PROGRESS`; the trust-root and policy-authority provisioning prerequisites
+remain `COMPLETE`. This decision-store and capacity/GC prerequisite remains
+`IN_PROGRESS`; live operator policy selection/provisioning, the encompassing
+release/DLP decision, classification composition, omission, projection,
+remaining P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later
+successor is `READY`.
 
 ## P5B2 semantic-content release/DLP decision
 
@@ -2159,8 +2161,8 @@ private internal decision boundary in this section. It remains `WAITING`, not
 `READY` or `COMPLETE`, and has no implementation or acceptance receipt. It
 consumes the accepted trust-root and policy-authority provisioning prerequisites
 above but still depends on a provisioned stable current `ACTIVE` operator
-policy-authority record, implementation and separate acceptance of the
-decision-store and capacity/GC prerequisite above, classification composition,
+policy-authority record, separate acceptance of the implemented decision-store
+and capacity/GC prerequisite above, classification composition,
 and every other prerequisite named below. The freeze grants no execution
 authority and changes
 no parent phase, accepted receipt, JOS row, or later-successor status.
@@ -2641,8 +2643,8 @@ graph construction, or release.
 
 ### Decision-store prerequisite interface and audit evidence
 
-The separate `WAITING` decision-store and capacity/GC prerequisite owns the only
-future durable decision evidence: one private canonical
+The separate `IN_PROGRESS` decision-store and capacity/GC prerequisite owns the
+only durable decision-evidence format: one private canonical
 `graphify.workspace.semantic_release_decision.internal` format-version-1
 binding installed once at
 `workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`.
@@ -2711,10 +2713,10 @@ The binding is at most 25 MiB. There are at most 64 bindings for one generation
 and at most 4,096 bindings for one workspace, counted by bounded no-follow
 enumeration before classification and again before install. Decision-store
 bytes count against the existing `CapacityPolicy` global/workspace byte
-ceilings and reserve calculation. A future implementation must extend the
-authoritative capacity scanner to include this namespace before this child can
-be `READY`; insufficient capacity or inability to prove counts and bytes
-rejects release.
+ceilings and reserve calculation. The implementation candidate extends the
+authoritative capacity scanner to include this namespace, but this child cannot
+be `READY` before separate acceptance of that integration; insufficient capacity
+or inability to prove counts and bytes rejects release.
 
 No lifecycle journal transition, staged-build state, generation receipt,
 runtime receipt, public schema, or public result is added by this contract
@@ -2827,8 +2829,8 @@ or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
 trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root
 and policy-authority provisioning prerequisites are accepted `COMPLETE`. This
-decision-store and capacity/GC prerequisite, this encompassing child, live
-operator policy selection/provisioning, classification
+decision-store and capacity/GC prerequisite remains `IN_PROGRESS`; this
+encompassing child, live operator policy selection/provisioning, classification
 composition, omission execution, projection, public CLI/schema/receipt,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
 H3 remains `DEFERRED`; no later successor is `READY`.

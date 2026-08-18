@@ -1414,23 +1414,24 @@ Passing these gates accepts only this provisioning prerequisite as `COMPLETE`.
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite remains
 `COMPLETE`.
 The encompassing release/DLP decision,
-the decision-store and capacity/GC prerequisite, classification
-composition, omission, projection, public surfaces, provider/backend,
-publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
-`DEFERRED`; no later successor is `READY`.
+classification composition, omission, projection, public surfaces,
+provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
+the decision-store and capacity/GC prerequisite is an unaccepted `IN_PROGRESS`
+implementation candidate. H3 remains `DEFERRED`; no later successor is `READY`.
 
-## P5B2 semantic-release decision-store and capacity/GC contract-freeze gates
+## P5B2 semantic-release decision-store and capacity/GC implementation gates
 
-This separate internal unnumbered P5B2 prerequisite is documentation-only and
-remains `WAITING`, not `READY`, `IN_PROGRESS`, or `COMPLETE`. It has no
-implementation or acceptance receipt. The freeze is complete only when all seven
-maintained-current documents agree and the exact diff changes no code, test,
-schema, fixture, dependency, workflow, receipt, generated Graphify output,
-runtime state, or JOS disposition.
+This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
+implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
+receipt. The candidate is coherent only when the private store, authoritative
+capacity scanner, GC pre-plan blocker, internal runtime composition, direct
+tests, and all seven maintained-current documents agree while the diff adds no
+public schema, workflow, dependency, receipt, live runtime state, or JOS
+disposition.
 
 Contract review must prove each of the following:
 
-- only the future `SemanticReleaseDecisionStore` owns the exact external private
+- only `SemanticReleaseDecisionStore` owns the exact external private
   `workspaces/<repository_uuid>/semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
   namespace. Generation and complete canonical request digest are validated
   identity, never caller path components. Mode-`0700` directories, one
@@ -1488,46 +1489,50 @@ Contract review must prove each of the following:
   quarantine, repair, rollback, compaction, GC mutation, live policy
   provisioning, decision composition, classification, omission, projection,
   public CLI/schema/runtime receipt, provider/backend, network, publication,
-  release, implementation, acceptance, parent completion, or successor
+  release, acceptance, parent completion, or successor
   authority is granted.
 
-The focused predecessor checks for the already-existing policy, trust-root,
-generation-capacity, and GC behavior are:
+The focused checks for the implementation and predecessor policy, trust-root,
+generation-capacity, GC, and runtime behavior are:
 
 ```bash
 uv run --frozen --all-extras pytest -q \
+  tests/test_workspace_semantic_release_decision.py \
   tests/test_workspace_semantic_release_policy.py \
   tests/test_workspace_semantic_release.py \
   tests/test_workspace_generations.py \
-  tests/test_workspace_gc.py
+  tests/test_workspace_gc.py \
+  tests/test_workspace_runtime.py
 ```
 
-Those tests prove only that the predecessor surfaces needed by the contract
-remain intact; they are not implementation, readiness, or acceptance evidence
-for this prerequisite. The documentation freeze additionally requires
+Those tests establish implementation-candidate and regression evidence only;
+they are not readiness or acceptance evidence for this prerequisite. The
+candidate additionally requires a targeted repo-configured type check,
 `uv lock --check`, `uv run --frozen python -m tools.skillgen --check`,
 `uv run --frozen pre-commit run --all-files`,
 `uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, exact
 changed-file manifest verification, a relative Markdown link and heading-anchor
 audit across all seven documents, and the documentation-diff advisory audit.
-Generated Graphify output is not refreshed.
+After code changes, `uv run --frozen graphify update .` refreshes generated
+Graphify output, which must remain outside the tracked implementation diff.
 
-Passing these gates establishes only the separate frozen contract at `WAITING`.
+Passing these gates establishes only an `IN_PROGRESS` implementation candidate.
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite, the encompassing release/DLP decision, live operator policy
-selection/provisioning, classification composition, omission, projection,
-public surfaces, provider/backend, publication, remaining P5B2/P5C work remain
-`WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+prerequisite remains `IN_PROGRESS`; the encompassing release/DLP decision, live
+operator policy selection/provisioning, classification composition, omission,
+projection, public surfaces, provider/backend, publication, and remaining
+P5B2/P5C work remain `WAITING`; H3 remains `DEFERRED`; no later successor is
+`READY`.
 
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
 remains `WAITING`. It consumes the accepted trust-root and policy-authority
 provisioning prerequisites above. This child cannot become `READY` until a
-stable current `ACTIVE` operator policy-authority record, implementation and
-separate acceptance of the decision-store and capacity/GC prerequisite above,
-and composition prerequisites exist. The freeze is
+stable current `ACTIVE` operator policy-authority record, separate acceptance
+of the implemented decision-store and capacity/GC
+prerequisite above, and composition prerequisites exist. The freeze is
 complete only when all seven maintained-current documents agree and the diff
 changes no code, tests, schemas, fixtures, receipts, generated Graphify output,
 JOS row, or runtime artifact:
@@ -1543,9 +1548,10 @@ JOS row, or runtime artifact:
   the encompassing decision composition;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66-#75 provenance, the trust-root and
-  policy-authority provisioning prerequisites as `COMPLETE`, and both the
-  decision-store/capacity/GC prerequisite and encompassing child as `WAITING`;
+- `governance.md` records exact PR #66-#76 provenance, the trust-root and
+  policy-authority provisioning prerequisites as `COMPLETE`, the
+  decision-store/capacity/GC prerequisite as `IN_PROGRESS`, and the encompassing
+  child as `WAITING`;
   and
 - this file freezes the evidence and validation gates without creating or
   accepting a receipt.

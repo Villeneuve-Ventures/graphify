@@ -913,11 +913,13 @@ class DurableStateRoot:
         *,
         allow_missing: bool = False,
         maximum_entries: int | None = None,
+        deadline_ns: int | None = None,
     ) -> tuple[str, ...]:
         """List owned 0700 child directories without following any path component."""
 
         if maximum_entries is not None and maximum_entries < 0:
             raise ValueError("maximum_entries must be nonnegative")
+        require_before_deadline(deadline_ns, _PRIVATE_TREE_DEADLINE_DETAIL)
         destination = self.path(relative)
         with self._existing_private_directory(
             destination.relative_to(self.root),
@@ -929,6 +931,10 @@ class DurableStateRoot:
                 with os.scandir(descriptor) as entries:
                     names: list[str] = []
                     for entry in entries:
+                        require_before_deadline(
+                            deadline_ns,
+                            _PRIVATE_TREE_DEADLINE_DETAIL,
+                        )
                         name = entry.name
                         child_path = destination / name
                         child = self._open_directory_at(
@@ -949,6 +955,7 @@ class DurableStateRoot:
                 raise StatePathError(
                     f"state directory cannot be enumerated safely: {destination}: {exc}"
                 ) from exc
+            require_before_deadline(deadline_ns, _PRIVATE_TREE_DEADLINE_DETAIL)
             return tuple(sorted(names))
 
     def private_directory_exists(self, relative: str | Path) -> bool:
@@ -1154,6 +1161,7 @@ class DurableStateRoot:
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
     ) -> int:
         """Measure a private tree through a held no-follow root descriptor."""
 
@@ -1169,6 +1177,7 @@ class DurableStateRoot:
                 path,
                 allowed_directory_modes=allowed_directory_modes,
                 allowed_file_modes=allowed_file_modes,
+                deadline_ns=deadline_ns,
             )
 
     def _remove_tree_contents_descriptor(
@@ -2581,6 +2590,47 @@ class DurableStateRoot:
             deadline_ns=deadline_ns,
         )
 
+    def _read_optional_existing_stable_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
+        """Read through a held parent and prove the final path remains bound."""
+
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+        path = self.path(relative)
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return None
+            try:
+                descriptor = os.open(
+                    path.name,
+                    self._regular_open_flags(),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise StateCorrupt(
+                    f"state record cannot be opened safely: {path}: {exc}"
+                ) from exc
+            return self._read_regular_descriptor(
+                descriptor,
+                path,
+                max_bytes=max_bytes,
+                deadline_ns=deadline_ns,
+                stable_parent_descriptor=parent_descriptor,
+                stable_name=path.name,
+            )
+
     def read_current(
         self,
         relative: str | Path,
@@ -2989,6 +3039,8 @@ class DurableStateRoot:
         *,
         max_bytes: int | None = None,
         deadline_ns: int | None = None,
+        stable_parent_descriptor: int | None = None,
+        stable_name: str | None = None,
     ) -> bytes:
         try:
             require_before_deadline(deadline_ns, "state record read exceeded its deadline")
@@ -3002,6 +3054,22 @@ class DurableStateRoot:
                 raise StateCorrupt(
                     f"state record exceeds its read limit of {max_bytes} bytes: {path}"
                 )
+            identity = self._stat_identity(details)
+            if stable_parent_descriptor is not None:
+                if stable_name is None:
+                    raise ValueError("stable_name is required with a stable parent")
+                try:
+                    bound = os.stat(
+                        stable_name,
+                        dir_fd=stable_parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StateCorrupt(
+                        f"state record path changed while reading: {path}"
+                    ) from exc
+                if self._stat_identity(bound) != identity:
+                    raise StateCorrupt(f"state record path changed while reading: {path}")
             chunks: list[bytes] = []
             total = 0
             while True:
@@ -3015,6 +3083,29 @@ class DurableStateRoot:
                     continue
                 require_before_deadline(deadline_ns, "state record read exceeded its deadline")
                 if not chunk:
+                    if stable_parent_descriptor is not None:
+                        if stable_name is None:  # pragma: no cover - validated above
+                            raise ValueError(
+                                "stable_name is required with a stable parent"
+                            )
+                        reopened = os.fstat(descriptor)
+                        try:
+                            rebound = os.stat(
+                                stable_name,
+                                dir_fd=stable_parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        except OSError as exc:
+                            raise StateCorrupt(
+                                f"state record path changed while reading: {path}"
+                            ) from exc
+                        if (
+                            self._stat_identity(reopened) != identity
+                            or self._stat_identity(rebound) != identity
+                        ):
+                            raise StateCorrupt(
+                                f"state record path changed while reading: {path}"
+                            )
                     return b"".join(chunks)
                 total += len(chunk)
                 if max_bytes is not None and total > max_bytes:
