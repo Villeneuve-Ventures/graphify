@@ -249,21 +249,24 @@ preimages, and request-derived identity remain those frozen in the canonical
 semantic contract.
 
 The prerequisite caps one binding at 25 MiB, one generation at 64 bindings, and
-one workspace at 4,096 bindings. Decision-store bytes and binding counts must be
-included in the existing global/workspace capacity ceilings, durable reservation
-accounting, and filesystem-reserve calculation. The store performs bounded
-capacity enumeration before classification may begin and again immediately
-before installation. Capture uses existing shared registry, exclusive workspace,
-then shared target-generation locks. Final global/workspace capacity,
-reservation, reserve, request-path, candidate-byte, mode, size, and digest
-revalidation uses exclusive registry, exclusive workspace, then the same shared
-generation lock and retains that composition through install-once and reopen.
+one workspace at 4,096 bindings. Those count caps are independent store limits,
+not new or repurposed `CapacityPolicy` fields. Decision-store bytes are charged
+against existing global/workspace byte ceilings and filesystem reserve while
+existing unconsumed durable byte reservations remain charged in that arithmetic.
+The store performs bounded capacity enumeration before classification may begin
+and again immediately before installation. Capture uses existing shared
+registry, exclusive workspace, then shared target-generation locks. Final
+global/workspace byte capacity, reservation, reserve, request-path,
+candidate-byte, mode, size, and digest revalidation uses exclusive registry,
+exclusive workspace, then the same shared generation lock and retains that
+composition through install-once and reopen.
 Byte-identical replay is no-write success; same-path different bytes conflict;
 partial, unsafe, unreadable, different, or ambiguous state is commit-unknown.
 
-Nonempty decision state adds an exact generation-protection reason to the
-existing GC reachability composition until separately accepted atomic GC
-integration exists. This prerequisite owns no decision-request creation,
+Nonempty decision state is a pre-plan GC eligibility blocker until separately
+accepted atomic GC integration defines schema-compatible reason and wiring; it
+adds no token to the current public protection-reason vocabulary. This
+prerequisite owns no decision-request creation,
 classifier or policy composition, terminal release decision, live policy
 selection, omission, projection, public CLI/schema/runtime receipt,
 provider/backend, network, cleanup, deletion, quarantine, repair, rollback,
@@ -506,9 +509,11 @@ The future private store alone owns the mode-`0700` directory tree and canonical
 single-link mode-`0600` binding. Generation and request-digest components are
 validated canonical identity, not caller paths. The namespace is outside the
 sealed generation, is included in existing capacity and reserve accounting, and
-contributes an exact GC-protection reason whenever a generation's decision state
-is nonempty. No implementation, creation, cleanup, repair, deletion, quarantine,
-rollback, or public exposure is authorized by reserving the namespace.
+blocks GC eligibility whenever a generation's decision state is nonempty. A
+safely observed absent top-level namespace is the zero-binding initial state and
+may be created only at the first final install. No implementation, cleanup,
+repair, deletion, quarantine, rollback, public reason token, or public exposure
+is authorized by reserving the namespace.
 
 The accepted host-agent worker uses this private staging
 layout relative to the configured external state root:
@@ -787,10 +792,11 @@ than replay the old execute request.
 
 The contract-frozen decision-store prerequisite adds no lease domain. Its
 pre-classification capacity snapshot uses shared registry, exclusive workspace,
-then shared target-generation locks. After classification, the caller releases
-the snapshot locks. Its install boundary reacquires exclusive registry,
-exclusive workspace, then shared target-generation locks in that order,
-revalidates global/workspace counts and bytes, durable reservations, filesystem
-reserve, GC protection, request-derived identity, and candidate bytes, and
-retains that lock composition through install-once reopen. Classification itself
-remains outside those locks and outside the store prerequisite.
+then shared target-generation locks. After that snapshot, the caller releases
+all three locks and performs classification outside them. Its install boundary
+then reacquires exclusive registry, exclusive workspace, and shared
+target-generation locks in that order, revalidates global/workspace counts and
+bytes, durable reservations, filesystem reserve, GC eligibility,
+request-derived identity, and candidate bytes, and retains that lock composition
+through install-once reopen. Classification itself remains outside the store
+prerequisite.

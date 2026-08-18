@@ -1078,11 +1078,15 @@ public source location, provider response, or credential.
 One binding is at most 25 MiB. Bounded no-follow enumeration permits at most 64
 bindings per generation and 4,096 per workspace and stops at maximum plus one.
 The store proves namespace shape, counts, and bytes before classification may
-begin and again immediately before install. Decision-store bytes and binding
-counts participate in the existing `CapacityPolicy` global/workspace ceilings,
-durable capacity reservations, and filesystem-reserve calculation. Insufficient
-capacity, an exceeded bound, unsafe or unstable state, or inability to prove any
-count, byte total, reservation, or reserve fails closed.
+begin and again immediately before install. The fixed binding-count caps are
+independent of `CapacityPolicy`; they add no fields and do not reuse its
+generation-count fields. Decision-store bytes participate in the existing
+global/workspace byte ceilings and filesystem-reserve calculation while existing
+unconsumed durable byte reservations remain charged in that arithmetic. The
+authoritative usage scanner must include this namespace before the prerequisite
+can be `READY`. Insufficient capacity, an exceeded bound, unsafe or unstable
+state, or inability to prove any count, byte total, reservation, or reserve fails
+closed.
 
 The pre-classification proof uses the existing shared registry lock, exclusive
 workspace lock, then target-generation shared lock. Classification occurs outside
@@ -1091,7 +1095,7 @@ exclusive registry lock, exclusive workspace lock, then the same shared
 generation lock. While holding all three, the store revalidates repository and
 generation identity, the request-derived path, exact candidate canonical bytes
 and digest, namespace shape, global/workspace counts and bytes, capacity
-ceilings, durable reservations, filesystem reserve, and GC-protection input; it
+ceilings, durable reservations, filesystem reserve, and GC eligibility state; it
 then installs once and reopens the file to prove exact path, type, link count,
 mode, size, bytes, and digest. The exclusive registry lock serializes global
 capacity and reserve accounting across workspaces. No new lease, lifecycle
@@ -1107,11 +1111,18 @@ and capacity proof remain exact. Partial, unsafe, unreadable, different, or
 ambiguous state is commit-unknown and fails closed without deletion, cleanup,
 quarantine, repair, rollback, or rewrite.
 
-Any nonempty decision state contributes an exact protected-generation reason to
-existing GC reachability and blocks quarantine or purge. It remains protected
-until separately accepted atomic GC integration owns both the generation and its
-decision state. Missing, unreadable, unsafe, or ambiguous state is not empty.
-This prerequisite grants no GC mutation or binding removal authority.
+A safely observed absent top-level decision namespace is the canonical
+zero-binding initial state and may be created only at the first final install.
+Once present, unreadable, unsafe, or ambiguous namespace state, an absent
+expected request path after possible visibility, or any presence/count/byte drift
+between bounded snapshots fails closed under the rules above.
+
+Any nonempty decision state is a pre-plan GC eligibility blocker and blocks
+quarantine or purge. Until separately accepted atomic GC integration owns the
+generation and its decision state, no successful public GC preview or executable
+plan may represent that blocker, and this prerequisite adds no token to the
+closed `GcPlan.protected` reason vocabulary. It grants no GC mutation or binding
+removal authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
@@ -1314,10 +1325,10 @@ historical evidence only.
 
 Neither prerequisite nor decision child deletes decision state. Until
 separately accepted GC integration exists, a nonempty decision directory is a
-protected reason that
-blocks purge of its generation. Any later removal or quarantine must be
-authorized and coordinated with the same generation; no such authority is
-granted here.
+pre-plan eligibility blocker that blocks purge of its generation and is not
+projected into the current closed public protection-reason vocabulary. Any later
+removal or quarantine must be authorized and coordinated with the same
+generation; no such authority is granted here.
 
 Terminal proof is derived, not separately persisted. It takes the shared
 registry lock, exclusive workspace lock, then target-generation shared lock;

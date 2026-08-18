@@ -2016,8 +2016,9 @@ This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
 remains `WAITING`, not `READY`, `IN_PROGRESS`, or `COMPLETE`. It has no
 implementation or acceptance receipt. It owns only the future private
 `SemanticReleaseDecisionStore`, the decision namespace's integration into the
-existing capacity and filesystem-reserve calculations, and the exact
-generation-protection input required by existing GC. It does not own operator
+existing capacity and filesystem-reserve calculations, and the pre-plan
+generation-eligibility blocker required before separate GC integration. It does
+not own operator
 policy selection or provisioning, decision-request or full-result composition,
 classification, policy reduction, a terminal release decision, omission,
 redaction, graph construction, projection, query, or any public or publication
@@ -2085,19 +2086,30 @@ at most 64 bindings for one generation and at most 4,096 for one workspace.
 Enumeration stops at the applicable maximum plus one and closes the iterator on
 every early exit. The store enumerates and proves the namespace shape, binding
 counts, and byte usage before classification may begin and repeats the same
-bounded proof immediately before install. Decision-store bytes and binding
-counts are included in the existing `CapacityPolicy` global/workspace ceilings,
-durable reservation accounting, and filesystem-reserve calculation. Insufficient
-capacity, an exceeded limit, unstable usage, unsafe state, or inability to prove
-counts, bytes, reservations, or reserve fails closed.
+bounded proof immediately before install. The fixed binding-count limits are
+independent store caps; they do not add `CapacityPolicy` fields or reuse its
+generation-count fields. Decision-store bytes are charged against the existing
+`CapacityPolicy` global/workspace byte ceilings and filesystem-reserve
+calculation, with existing unconsumed durable byte reservations retained in that
+arithmetic. The authoritative usage scanner must include this namespace before
+the prerequisite can be `READY`. Insufficient capacity, an exceeded limit,
+unstable usage, unsafe state, or inability to prove counts, bytes, reservations,
+or reserve fails closed.
 
-Any nonempty decision state for a generation contributes an exact protection
-reason to the existing GC reachability input and blocks that generation from
-quarantine or purge. That protection remains until a separately accepted atomic
-GC integration owns both the generation and its decision state. The prerequisite
+A safely observed absent top-level decision namespace is the canonical
+zero-binding initial state; the store may create it only at the first final
+install boundary. Once the namespace or an expected request path is present,
+unreadable, unsafe, or ambiguous state and any presence, entry, count, or byte
+drift between the two bounded snapshots fail closed. Missing expected binding
+state after possible visibility follows the commit-uncertainty rules below.
+
+Nonempty decision state for a generation is a pre-plan GC eligibility blocker
+and blocks that generation from quarantine or purge. Until a separately accepted
+atomic GC integration defines schema-compatible reason and wiring, no successful
+public GC preview or executable plan may represent that state; this prerequisite
+adds no token to the existing closed `GcPlan.protected` reason vocabulary. It
 does not authorize deletion, cleanup, quarantine, repair, rollback, compaction,
-or GC mutation and cannot treat a missing, unreadable, or ambiguous decision
-namespace as empty.
+or GC mutation.
 
 ### Install once, replay, and commit uncertainty
 
@@ -2110,7 +2122,7 @@ exclusive workspace lock, then the same target-generation shared lock. While
 retaining all three, the store revalidates the registered workspace and
 generation, exact request-derived path, candidate canonical bytes and digest,
 namespace shape, global/workspace counts and bytes, durable reservations,
-capacity ceilings, filesystem reserve, and GC-protection input. It installs the
+capacity ceilings, filesystem reserve, and GC eligibility state. It installs the
 candidate once and reopens it to prove exact path, type, link count, mode, size,
 bytes, and digest before releasing any lock. The exclusive registry lock
 serializes global capacity and reserve accounting across workspaces. No new
@@ -2719,11 +2731,11 @@ oracle.
 
 Neither prerequisite nor decision child deletes a decision binding. Until a
 separately accepted GC contract integrates this store, any nonempty decision
-directory is an exact
-protected reason that blocks purge of its generation. Later GC may remove or
-quarantine bindings only atomically with the same generation under separate
-operator authority. This retention rule grants no cleanup, repair, or GC
-authority now.
+directory is a pre-plan eligibility blocker that blocks purge of its generation;
+it is not projected into the current closed public protection-reason vocabulary.
+Later GC may remove or quarantine bindings only atomically with the same
+generation under separate operator authority. This retention rule grants no
+cleanup, repair, or GC authority now.
 
 ### Decision-store composition, concurrency, commit uncertainty, and replay
 

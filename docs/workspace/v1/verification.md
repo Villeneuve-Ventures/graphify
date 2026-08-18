@@ -1455,18 +1455,19 @@ Contract review must prove each of the following:
 - hard bounds are 25 MiB per binding, 64 bindings per generation, and 4,096 per
   workspace. Bounded no-follow enumeration stops at maximum plus one, closes on
   every early exit, and runs before classification and immediately before
-  install. Decision-store bytes and binding counts are included in existing
-  global/workspace capacity ceilings, durable reservation accounting, and
-  filesystem-reserve calculations. Unsafe or unstable usage, exceeded limits,
-  or inability to prove namespace shape, counts, bytes, reservations, or reserve
-  fails closed;
+  install. Counts use those fixed independent caps and add or repurpose no
+  `CapacityPolicy` field. Decision-store bytes are included in existing
+  global/workspace byte ceilings and filesystem-reserve calculations while
+  existing unconsumed durable byte reservations remain charged in the same
+  arithmetic. Unsafe or unstable usage, exceeded limits, or inability to prove
+  namespace shape, counts, bytes, reservations, or reserve fails closed;
 - pre-classification capacity proof uses shared registry, exclusive workspace,
   then target-generation shared locks. Final revalidation uses exclusive
   registry, exclusive workspace, then the same generation shared lock and holds
   all three through install-once and reopen. It revalidates the registered
   workspace and generation, request-derived path, exact candidate canonical
   bytes/digest, namespace shape, global/workspace counts and bytes, capacity
-  ceilings, durable reservations, filesystem reserve, and GC-protection input.
+  ceilings, durable reservations, filesystem reserve, and GC eligibility state.
   No new lease, lifecycle record, staged state, journal transition, or durable
   in-progress record participates;
 - identical concurrent requests converge on one canonical binding;
@@ -1477,13 +1478,18 @@ Contract review must prove each of the following:
   unchanged request, candidate bytes, authority, and capacity proof. Partial,
   unsafe, unreadable, different, or ambiguous state is commit-unknown and fails
   closed; and
-- nonempty decision state contributes an exact protected-generation reason and
-  blocks quarantine or purge. Missing, unreadable, unsafe, or ambiguous state is
-  not treated as empty. No deletion, cleanup, quarantine, repair, rollback,
-  compaction, GC mutation, live policy provisioning, decision composition,
-  classification, omission, projection, public CLI/schema/runtime receipt,
-  provider/backend, network, publication, release, implementation, acceptance,
-  parent completion, or successor authority is granted.
+- safely observed absence of the top-level decision namespace is the canonical
+  zero-binding initial state and may be created only at the first final install.
+  Once present, unreadable, unsafe, ambiguous, missing-after-visibility, or
+  snapshot-drifted state fails closed. Nonempty state is a pre-plan GC
+  eligibility blocker and blocks quarantine or purge until separately accepted
+  integration defines schema-compatible reason and wiring; no token is added to
+  the current public protection-reason vocabulary. No deletion, cleanup,
+  quarantine, repair, rollback, compaction, GC mutation, live policy
+  provisioning, decision composition, classification, omission, projection,
+  public CLI/schema/runtime receipt, provider/backend, network, publication,
+  release, implementation, acceptance, parent completion, or successor
+  authority is granted.
 
 The focused predecessor checks for the already-existing policy, trust-root,
 generation-capacity, and GC behavior are:
@@ -1663,10 +1669,11 @@ Contract review must prove each of the following:
   private rule IDs, and disposition. Raw prose, substrings, explanations,
   confidence, public source locations, provider responses, and credentials are
   absent;
-- the separate prerequisite includes decision-store bytes and counts in existing
-  global/workspace capacity ceilings, durable reservation accounting, and
-  filesystem-reserve calculations; inability to prove bounded enumeration,
-  usage, or capacity rejects. Nonempty decision state protects its generation from GC
+- the separate prerequisite enforces its fixed binding-count caps independently
+  and includes decision-store bytes in existing global/workspace byte ceilings
+  and filesystem-reserve calculations while retaining existing durable byte
+  reservations in the arithmetic; inability to prove bounded enumeration,
+  usage, or capacity rejects. Nonempty decision state blocks GC eligibility
   until separately accepted integration exists;
 - composition with the separate prerequisite captures bounded private bytes
   under shared registry, exclusive workspace,

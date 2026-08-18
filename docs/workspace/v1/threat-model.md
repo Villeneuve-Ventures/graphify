@@ -596,18 +596,20 @@ access reduce exposure but do not claim cryptographic secrecy against that actor
 Capacity amplification is bounded at 25 MiB per binding, 64 bindings per
 generation, and 4,096 per workspace. Bounded no-follow enumeration stops at the
 applicable maximum plus one and runs before classification and immediately before
-install. Decision-store bytes and binding counts participate in existing
-global/workspace capacity ceilings, durable reservation accounting, and the
-filesystem-reserve calculation. Unsafe or unstable usage, an exceeded cap, or
-inability to prove namespace shape, counts, bytes, reservations, or reserve
-fails closed rather than falling back to partial accounting.
+install. Binding counts are governed by the fixed store caps, while
+decision-store bytes participate in existing global/workspace byte ceilings and
+filesystem-reserve calculation; existing unconsumed durable byte
+reservations remain charged in that arithmetic. No count cap is mapped onto a
+`CapacityPolicy` generation field. Unsafe or unstable usage, an exceeded cap, or
+inability to prove namespace shape, counts, bytes, reservations, or reserve fails
+closed rather than falling back to partial accounting.
 
 The pre-classification snapshot uses shared registry, exclusive workspace, then
 shared generation locks. Final install uses exclusive registry, exclusive
 workspace, then the same shared generation lock so global accounting cannot race
 across workspaces. Under that retained composition every request-path,
 candidate-byte/digest, namespace, global/workspace count and byte total,
-capacity, reservation, reserve, and GC-protection input is revalidated before
+capacity, reservation, reserve, and GC eligibility state is revalidated before
 install-once and exact reopen. Identical requests converge; same-path different
 bytes conflict; distinct requests use distinct paths. Byte-identical completed
 replay is no-write success. After a possible install fault, only exact existing
@@ -615,12 +617,15 @@ bytes adopt the commit. Proven absence is retryable only while request, bytes,
 authority, and capacity proof remain exact; partial, unsafe, unreadable,
 different, or ambiguous state is commit-unknown and fails closed.
 
-Nonempty decision state contributes an exact GC protection reason and blocks
-quarantine or purge of that generation until separately accepted atomic store
-integration exists. Missing, unreadable, unsafe, or ambiguous state cannot be
-treated as empty. This retention rule prevents orphaned audit/projection evidence
-but grants no deletion, cleanup, quarantine, repair, rollback, compaction, or GC
-mutation authority. No failure or replay path may mutate a binding or any
+Safely observed absence of the top-level namespace is the zero-binding initial
+state; once it or an expected request path is present, unsafe, unreadable,
+ambiguous, missing-after-visibility, or snapshot-drifted state fails closed.
+Nonempty decision state is a pre-plan GC eligibility blocker and blocks
+quarantine or purge until separately accepted atomic store integration defines
+schema-compatible reason and wiring. No public protection-reason token is added.
+This retention rule prevents orphaned audit/projection evidence but grants no
+deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation
+authority. No failure or replay path may mutate a binding or any
 semantic input, handoff, generation, receipt, journal, staged record, pointer,
 policy, or other durable state.
 

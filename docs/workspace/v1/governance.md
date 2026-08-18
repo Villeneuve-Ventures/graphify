@@ -809,15 +809,17 @@ substituting for one another.
 
 Hard bounds are 25 MiB per binding, 64 bindings per generation, and 4,096 per
 workspace. The store performs bounded no-follow enumeration before
-classification and again immediately before install. Decision-store bytes and
-binding counts are included in existing global/workspace capacity ceilings,
-durable reservation accounting, and filesystem-reserve calculations. Capture
-uses shared registry, exclusive workspace, then shared target-generation locks;
+classification and again immediately before install. Binding counts use those
+fixed independent caps, not new or repurposed `CapacityPolicy` fields.
+Decision-store bytes are included in existing global/workspace byte ceilings and
+filesystem-reserve calculations while existing unconsumed durable byte
+reservations remain charged in that arithmetic. Capture uses shared registry,
+exclusive workspace, then shared target-generation locks;
 final install uses exclusive registry, exclusive workspace, then the same shared
 generation lock. Under the final retained composition the store revalidates the
 request-derived path, exact canonical bytes/digest, namespace shape,
 global/workspace counts and bytes, capacity ceilings, durable reservations,
-filesystem reserve, and GC-protection input before install-once and exact reopen.
+filesystem reserve, and GC eligibility state before install-once and exact reopen.
 
 Identical concurrent requests converge on the same canonical bytes. A
 byte-identical completed replay is no-write success; same-path different bytes
@@ -827,10 +829,12 @@ reopened bytes adopt the commit; proven absence may retry only while request,
 candidate bytes, authority, and capacity proof remain exact. Partial, unsafe,
 unreadable, different, or ambiguous state is commit-unknown and fails closed.
 
-Any nonempty decision state is an exact protected-generation reason and blocks
+Any nonempty decision state is a pre-plan GC eligibility blocker and blocks
 quarantine or purge until separately accepted atomic GC integration owns both
-the generation and its decision state. Missing, unreadable, unsafe, or ambiguous
-state is not treated as empty. The prerequisite grants no deletion, cleanup,
+the generation and its decision state. A safely observed absent top-level
+namespace is the zero-binding initial state; once present, unreadable, unsafe,
+ambiguous, or drifted state fails closed. The prerequisite adds no public
+protection-reason token and grants no deletion, cleanup,
 quarantine, repair, rollback, compaction, GC mutation, decision-request or
 full-result composition, classifier/policy reduction, omission, redaction,
 projection, query, public CLI/schema/runtime receipt, provider/backend, network,
