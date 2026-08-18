@@ -236,10 +236,49 @@ the same locks. Byte-identical completed replay is no-write; divergent or
 journal, queue, decision-store, public transport, live policy choice, GC, or
 successor authority. Acceptance provisions no live record.
 
+The separate internal unnumbered P5B2 semantic-release decision-store and
+capacity/GC prerequisite is contract-frozen only and remains `WAITING`.
+`SemanticReleaseDecisionStore` is the sole future owner of the external private
+`semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
+namespace. Mode-`0700` directories, one single-link mode-`0600` canonical binding
+file, descriptor-relative no-follow traversal, and fail-closed bounded
+enumeration prevent caller-selected paths, aliasing, unsafe entry types, and
+generation-only overwrite. The binding's exact closed member sets, canonical
+field-result order, nonrecursive full-result and completed-binding digest
+preimages, and request-derived identity remain those frozen in the canonical
+semantic contract.
+
+The prerequisite caps one binding at 25 MiB, one generation at 64 bindings, and
+one workspace at 4,096 bindings. Those count caps are independent store limits,
+not new or repurposed `CapacityPolicy` fields. Decision-store bytes are charged
+against existing global/workspace byte ceilings and filesystem reserve while
+existing unconsumed durable byte reservations remain charged in that arithmetic.
+The store performs bounded capacity enumeration before classification may begin
+and again immediately before installation. Capture uses existing shared
+registry, exclusive workspace, then shared target-generation locks. Final
+global/workspace byte capacity, reservation, reserve, request-path,
+candidate-byte, mode, size, and digest revalidation uses exclusive registry,
+exclusive workspace, then the same shared generation lock and retains that
+composition through install-once and reopen.
+Byte-identical replay is no-write success; same-path different bytes conflict;
+partial, unsafe, unreadable, different, or ambiguous state is commit-unknown.
+
+Nonempty decision state is a pre-plan GC eligibility blocker until separately
+accepted atomic GC integration defines schema-compatible reason and wiring; it
+adds no token to the current public protection-reason vocabulary. This
+prerequisite owns no decision-request creation,
+classifier or policy composition, terminal release decision, live policy
+selection, omission, projection, public CLI/schema/runtime receipt,
+provider/backend, network, cleanup, deletion, quarantine, repair, rollback,
+publication, implementation, acceptance, parent completion, or successor
+authority.
+
 The encompassing unnumbered P5B2 semantic-content release/DLP decision child is
 contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
 promoted visible-current terminal plus separate implemented and accepted
-trust-root and stable operator policy-authority prerequisites. It captures the private target-owned
+trust-root and stable operator policy-authority prerequisites. It also requires
+implementation and separate acceptance of the decision-store and capacity/GC
+prerequisite above. It captures the private target-owned
 semantic inputs under existing read authority, classifies only node labels,
 optional node rationales, and hyperedge labels outside the coordination locks,
 then reacquires the locks and rejects any authority or byte drift before one
@@ -272,28 +311,20 @@ declaration; unknown or unmapped `MATCH` pairs reject. It may produce only
 `ALLOW_WITH_OMISSIONS`, or `REJECTED`. No environment, provider, model, network,
 credential, live catalogue, or fallback selects authority.
 
-The only new durable artifact at this boundary is a private canonical
-release-decision binding at the bounded, capacity-accounted external workspace
-namespace defined by the canonical contract, addressed by generation and the
-complete decision-request digest. It commits to exact promoted authority,
-installed bundle, current policy revision, inputs, complete bounded field
-results, and terminal outcome without duplicating semantic prose. Its own
-digest is computed over completed binding bytes and is not stored recursively.
-Capture uses shared registry, exclusive workspace, then shared generation
-locks; classification runs outside them. Final capacity revalidation, install,
-and reopen use exclusive registry, exclusive workspace, then shared generation
-locks so cross-workspace installs cannot oversubscribe global capacity. A redacted internal proof
+The decision child may consume only an exact binding installed by the separate
+prerequisite at the request-derived path. That binding commits to exact promoted
+authority, installed bundle, current policy revision, inputs, complete bounded
+field results, and terminal outcome without duplicating semantic prose. A
+redacted internal proof
 contains only coordinates, authority/result/binding digests, counts, and
 outcome; omission locators remain exclusively in the mode-`0600` binding. The
 lifecycle journal, staged-build state, generation receipt, public schemas, and
-runtime receipts do not become release authority. Nonempty decision state
-protects the generation from GC until a separately accepted integration. The
-freeze stops before omission execution, graph construction, projection, query,
-public semantic sync, publication, implementation or readiness of the
-encompassing child, or acceptance. P5 and P5B2 remain `IN_PROGRESS`; the bounded
-trust-root and policy-authority provisioning prerequisites are accepted
-`COMPLETE`. Live operator policy selection,
-`SemanticReleaseDecisionStore`, capacity/GC integration,
+runtime receipts do not become release authority. The freeze stops before
+omission execution, graph construction, projection, query, public semantic sync,
+publication, implementation or readiness of either waiting child, or acceptance.
+P5 and P5B2 remain `IN_PROGRESS`; the bounded trust-root and policy-authority
+provisioning prerequisites are accepted `COMPLETE`. The decision-store and
+capacity/GC prerequisite, live operator policy selection,
 classification composition, the encompassing release/DLP decision, remaining
 P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
 is `READY`.
@@ -465,6 +496,24 @@ only the original `ACTIVE` selection transaction. This namespace does not
 create a public record, receipt, lifecycle journal, decision binding, or live
 policy and does not authorize revocation, reactivation, rollback, arbitrary
 repair, deletion, or GC.
+
+The contract-frozen decision-store and capacity/GC prerequisite reserves only
+this additional external workspace namespace:
+
+```text
+<external_state_root>/workspaces/<repository_uuid>/semantic-release-decisions/
+  <generation_id>/<decision_request_sha256>.json
+```
+
+The future private store alone owns the mode-`0700` directory tree and canonical
+single-link mode-`0600` binding. Generation and request-digest components are
+validated canonical identity, not caller paths. The namespace is outside the
+sealed generation, is included in existing capacity and reserve accounting, and
+blocks GC eligibility whenever a generation's decision state is nonempty. A
+safely observed absent top-level namespace is the zero-binding initial state and
+may be created only at the first final install. No implementation, cleanup,
+repair, deletion, quarantine, rollback, public reason token, or public exposure
+is authorized by reserving the namespace.
 
 The accepted host-agent worker uses this private staging
 layout relative to the configured external state root:
@@ -740,3 +789,14 @@ can recover a journal, clean a temporary, replace/finalize a pointer, or
 quarantine a generation. A completed repair advances lifecycle authority; an
 uncertain caller must inspect status and start a new preview/request pair rather
 than replay the old execute request.
+
+The contract-frozen decision-store prerequisite adds no lease domain. Its
+pre-classification capacity snapshot uses shared registry, exclusive workspace,
+then shared target-generation locks. After that snapshot, the caller releases
+all three locks and performs classification outside them. Its install boundary
+then reacquires exclusive registry, exclusive workspace, and shared
+target-generation locks in that order, revalidates global/workspace counts and
+bytes, durable reservations, filesystem reserve, GC eligibility,
+request-derived identity, and candidate bytes, and retains that lock composition
+through install-once reopen. Classification itself remains outside the store
+prerequisite.
