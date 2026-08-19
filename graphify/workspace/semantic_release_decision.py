@@ -332,6 +332,13 @@ def _validated_field_results(value: object) -> list[dict[str, object]]:
             raise SemanticReleaseDecisionInvalid(
                 "NO_MATCH cannot carry category or rule matches"
             )
+        if classifier_outcome == "NO_MATCH" and disposition not in {
+            "ALLOW_FIELD",
+            "REJECT_RELEASE",
+        }:
+            raise SemanticReleaseDecisionInvalid(
+                "NO_MATCH must produce ALLOW_FIELD or REJECT_RELEASE"
+            )
         if classifier_outcome == "MATCH" and not categories:
             raise SemanticReleaseDecisionInvalid(
                 "MATCH must carry at least one category"

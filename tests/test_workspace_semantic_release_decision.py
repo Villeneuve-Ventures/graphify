@@ -412,6 +412,36 @@ def test_binding_closes_members_orders_results_and_uses_exact_digest_preimages()
         SemanticReleaseDecisionBinding.from_mapping(unsupported_rejection)
 
 
+def test_no_match_cannot_omit_rationale() -> None:
+    invalid = _binding_value(terminal_outcome="ALLOW_WITH_OMISSIONS")
+    results = cast(list[dict[str, object]], invalid["field_results"])
+    rationale = results[1]
+    rationale["classifier_outcome"] = "NO_MATCH"
+    rationale["category_ids"] = []
+    rationale["rule_ids"] = []
+    results[2]["disposition"] = "ALLOW_FIELD"
+    counts = cast(dict[str, int], invalid["counts"])
+    counts["matched_field_count"] = 1
+    invalid["full_result_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "eligible_field_inventory_sha256": invalid[
+                    "eligible_field_inventory_sha256"
+                ],
+                "counts": counts,
+                "field_results": results,
+                "terminal_outcome": invalid["terminal_outcome"],
+            }
+        )
+    ).hexdigest()
+
+    with pytest.raises(
+        SemanticReleaseDecisionInvalid,
+        match="NO_MATCH must produce ALLOW_FIELD or REJECT_RELEASE",
+    ):
+        SemanticReleaseDecisionBinding.from_mapping(invalid)
+
+
 def test_capture_is_bounded_read_only_and_constructor_adds_no_public_surface(
     tmp_path: Path,
 ) -> None:
