@@ -294,7 +294,10 @@ def _validated_field_results(value: object) -> list[dict[str, object]]:
         field_name = _plain_string(result["field_name"], "field_name")
         if entity_kind not in _ENTITY_ORDER:
             raise SemanticReleaseDecisionInvalid("entity_kind is unsupported")
-        if _SEMANTIC_ENTITY_ID_RE.fullmatch(entity_id) is None:
+        if (
+            _SEMANTIC_ENTITY_ID_RE.fullmatch(entity_id) is None
+            or ".." in entity_id
+        ):
             raise SemanticReleaseDecisionInvalid("entity_id violates semantic ID grammar")
         if field_name not in _FIELD_ORDER or (
             entity_kind == "hyperedge" and field_name != "label"
@@ -342,6 +345,14 @@ def _validated_field_results(value: object) -> list[dict[str, object]]:
         if classifier_outcome == "MATCH" and not categories:
             raise SemanticReleaseDecisionInvalid(
                 "MATCH must carry at least one category"
+            )
+        if classifier_outcome == "MATCH" and not rules:
+            raise SemanticReleaseDecisionInvalid(
+                "MATCH must carry at least one rule"
+            )
+        if classifier_outcome == "INDETERMINATE" and (categories or rules):
+            raise SemanticReleaseDecisionInvalid(
+                "INDETERMINATE cannot carry category or rule matches"
             )
         if classifier_outcome == "INDETERMINATE" and disposition != "REJECT_RELEASE":
             raise SemanticReleaseDecisionInvalid(

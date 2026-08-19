@@ -283,6 +283,21 @@ def _binding(*, terminal_outcome: str = "REJECTED") -> SemanticReleaseDecisionBi
     )
 
 
+def _refresh_full_result_sha256(value: dict[str, object]) -> None:
+    value["full_result_sha256"] = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "eligible_field_inventory_sha256": value[
+                    "eligible_field_inventory_sha256"
+                ],
+                "counts": value["counts"],
+                "field_results": value["field_results"],
+                "terminal_outcome": value["terminal_outcome"],
+            }
+        )
+    ).hexdigest()
+
+
 def _binding_for(
     generation_id: str,
     request_sha256: str,
@@ -438,6 +453,48 @@ def test_no_match_cannot_omit_rationale() -> None:
     with pytest.raises(
         SemanticReleaseDecisionInvalid,
         match="NO_MATCH must produce ALLOW_FIELD or REJECT_RELEASE",
+    ):
+        SemanticReleaseDecisionBinding.from_mapping(invalid)
+
+
+def test_binding_rejects_double_dot_semantic_entity_id() -> None:
+    invalid = _binding_value()
+    results = cast(list[dict[str, object]], invalid["field_results"])
+    results[0]["entity_id"] = "node..secret"
+    results[1]["entity_id"] = "node..secret"
+    _refresh_full_result_sha256(invalid)
+
+    with pytest.raises(
+        SemanticReleaseDecisionInvalid,
+        match="entity_id violates semantic ID grammar",
+    ):
+        SemanticReleaseDecisionBinding.from_mapping(invalid)
+
+
+def test_match_requires_private_rule_provenance() -> None:
+    invalid = _binding_value()
+    results = cast(list[dict[str, object]], invalid["field_results"])
+    results[1]["rule_ids"] = []
+    _refresh_full_result_sha256(invalid)
+
+    with pytest.raises(
+        SemanticReleaseDecisionInvalid,
+        match="MATCH must carry at least one rule",
+    ):
+        SemanticReleaseDecisionBinding.from_mapping(invalid)
+
+
+def test_indeterminate_cannot_retain_match_provenance() -> None:
+    invalid = _binding_value()
+    results = cast(list[dict[str, object]], invalid["field_results"])
+    results[2]["classifier_outcome"] = "INDETERMINATE"
+    counts = cast(dict[str, int], invalid["counts"])
+    counts["matched_field_count"] = 1
+    _refresh_full_result_sha256(invalid)
+
+    with pytest.raises(
+        SemanticReleaseDecisionInvalid,
+        match="INDETERMINATE cannot carry category or rule matches",
     ):
         SemanticReleaseDecisionBinding.from_mapping(invalid)
 
