@@ -1042,10 +1042,10 @@ record and adds no runtime receipt or public schema.
 
 ## Semantic-release decision-store and capacity/GC prerequisite
 
-This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
-remains `WAITING`, not `READY`, `IN_PROGRESS`, or `COMPLETE`. It has no
-implementation or acceptance receipt. A future `SemanticReleaseDecisionStore`
-alone owns this external private namespace:
+This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
+implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
+receipt. `SemanticReleaseDecisionStore` alone owns this external private
+namespace:
 
 ```text
 workspaces/<repository_uuid>/semantic-release-decisions/
@@ -1075,6 +1075,17 @@ generation without overwrite or substitution. The binding contains no raw
 semantic prose, matched substring, generated explanation, confidence score,
 public source location, provider response, or credential.
 
+One fixed mode-`0700` `semantic-release-decision-publication` slot sits beside,
+not inside, the canonical namespace and is distinct from lifecycle `staging`.
+It is non-authoritative construction state with at most one bounded
+build/ready/cleanup subtree, one canonical manifest capped at 4 KiB, and one
+payload. The first missing root, generation, or binding becomes canonical only
+through an exclusive no-overwrite rename. Retry cleanup is limited to a
+validated slot prefix or suffix whose encoded destination is absent or contains
+the exact binding; it never deletes, rewrites, repairs, or overwrites canonical
+decision state. Filesystem-reserve preflight includes a fixed 256 KiB transient
+allowance, while logical byte ceilings count only the canonical binding.
+
 One binding is at most 25 MiB. Bounded no-follow enumeration permits at most 64
 bindings per generation and 4,096 per workspace and stops at maximum plus one.
 The store proves namespace shape, counts, and bytes before classification may
@@ -1083,8 +1094,8 @@ independent of `CapacityPolicy`; they add no fields and do not reuse its
 generation-count fields. Decision-store bytes participate in the existing
 global/workspace byte ceilings and filesystem-reserve calculation while existing
 unconsumed durable byte reservations remain charged in that arithmetic. The
-authoritative usage scanner must include this namespace before the prerequisite
-can be `READY`. Insufficient capacity, an exceeded bound, unsafe or unstable
+authoritative usage scanner includes this namespace. Insufficient capacity, an
+exceeded bound, unsafe or unstable
 state, or inability to prove any count, byte total, reservation, or reserve fails
 closed.
 
@@ -1098,8 +1109,9 @@ and digest, namespace shape, global/workspace counts and bytes, capacity
 ceilings, durable reservations, filesystem reserve, and GC eligibility state; it
 then installs once and reopens the file to prove exact path, type, link count,
 mode, size, bytes, and digest. The exclusive registry lock serializes global
-capacity and reserve accounting across workspaces. No new lease, lifecycle
-record, staged state, journal transition, or durable in-progress record exists.
+capacity and reserve accounting across workspaces. The publication slot is not
+lifecycle staged state or an authoritative durable in-progress record. No new
+lease, lifecycle record, or journal transition exists.
 
 Concurrent identical requests converge on identical canonical bytes at one path.
 Byte-identical completed replay is no-write success. Same-path different bytes
@@ -1117,28 +1129,27 @@ Once present, unreadable, unsafe, or ambiguous namespace state, an absent
 expected request path after possible visibility, or any presence/count/byte drift
 between bounded snapshots fails closed under the rules above.
 
-Any nonempty decision state is a pre-plan GC eligibility blocker and blocks
-quarantine or purge. Until separately accepted atomic GC integration owns the
-generation and its decision state, no successful public GC preview or executable
-plan may represent that blocker, and this prerequisite adds no token to the
-closed `GcPlan.protected` reason vocabulary. It grants no GC mutation or binding
-removal authority.
+Any nonempty decision state aborts the shared workspace reachability proof
+before successful GC preview or plan and consequently blocks downstream
+execute, reconcile, and purge. This prerequisite adds no token to the closed
+`GcPlan.protected` reason vocabulary and grants no GC mutation or binding-removal
+authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite, the encompassing release/DLP decision, live operator policy
-selection/provisioning, classification composition, omission, projection,
-public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+prerequisite remains `IN_PROGRESS`; the encompassing release/DLP decision, live
+operator policy selection/provisioning, classification composition, omission,
+projection, public surfaces, provider/backend, publication, remaining P5B2 work,
+and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Semantic-content release/DLP decision
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is a contract freeze at `WAITING`. Besides the implemented and accepted
 trust-root and policy-authority provisioning mechanisms, it still requires a
-provisioned stable current `ACTIVE` operator policy-authority record,
-implementation and separate acceptance of the decision-store and capacity/GC
-prerequisite above, classification composition, and every other frozen
+provisioned stable current `ACTIVE` operator policy-authority record, separate
+acceptance of the implemented decision-store and capacity/GC prerequisite above,
+classification composition, and every other frozen
 prerequisite. It may later add one private internal decision binding but no
 lifecycle transition, staged-build state,
 journal event, generation receipt, public schema, runtime receipt, or public
@@ -1357,11 +1368,11 @@ implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
 `IN_PROGRESS`; the separate trust-root and policy-authority provisioning
 prerequisites are accepted `COMPLETE`.
-This decision-store and capacity/GC prerequisite, this decision child, live
-operator policy selection/provisioning,
-classification composition, omission execution, projection, public
-CLI/schema/receipt, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+This decision-store and capacity/GC prerequisite remains `IN_PROGRESS`; this
+decision child, live operator policy selection/provisioning, classification
+composition, omission execution, projection, public CLI/schema/receipt,
+provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
+H3 remains `DEFERRED`; no later successor is `READY`.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

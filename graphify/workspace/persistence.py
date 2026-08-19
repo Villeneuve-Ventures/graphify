@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager, ExitStack
-from contextvars import ContextVar
 import ctypes
-from dataclasses import dataclass
 import errno
 import hashlib
 import os
-from pathlib import Path, PurePosixPath
 import platform
 import re
 import stat
 import subprocess
 import time
-from typing import Any, Callable, Generic, Iterator, Protocol, Sequence, TypeVar
 import uuid
-
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Generic, Iterator, Protocol, Sequence, TypeVar
 
 FaultHook = Callable[[str], None]
 REGISTRY_INITIALIZATION_LOCK_RANK = 5
@@ -807,6 +806,27 @@ class DurableStateRoot:
         with self._existing_private_directory(relative):
             pass
 
+    def _require_held_private_directory_binding(
+        self,
+        relative: Path,
+        descriptor: int,
+        path: Path,
+    ) -> None:
+        """Prove a held private directory still occupies its canonical path."""
+
+        held = self._require_private_directory_descriptor(descriptor, path)
+        with self._existing_private_directory(relative) as current_descriptor:
+            if current_descriptor is None:  # pragma: no cover - allow_missing is false
+                raise StatePathError(f"state directory is missing: {path}")
+            current = self._require_private_directory_descriptor(
+                current_descriptor,
+                path,
+            )
+            if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                raise StatePathError(
+                    f"state directory binding changed while held: {path}"
+                )
+
     def path(self, relative: str | Path) -> Path:
         pure = PurePosixPath(Path(relative).as_posix())
         if pure.is_absolute() or not pure.parts or ".." in pure.parts or "." in pure.parts:
@@ -913,11 +933,13 @@ class DurableStateRoot:
         *,
         allow_missing: bool = False,
         maximum_entries: int | None = None,
+        deadline_ns: int | None = None,
     ) -> tuple[str, ...]:
         """List owned 0700 child directories without following any path component."""
 
         if maximum_entries is not None and maximum_entries < 0:
             raise ValueError("maximum_entries must be nonnegative")
+        require_before_deadline(deadline_ns, _PRIVATE_TREE_DEADLINE_DETAIL)
         destination = self.path(relative)
         with self._existing_private_directory(
             destination.relative_to(self.root),
@@ -929,6 +951,10 @@ class DurableStateRoot:
                 with os.scandir(descriptor) as entries:
                     names: list[str] = []
                     for entry in entries:
+                        require_before_deadline(
+                            deadline_ns,
+                            _PRIVATE_TREE_DEADLINE_DETAIL,
+                        )
                         name = entry.name
                         child_path = destination / name
                         child = self._open_directory_at(
@@ -949,6 +975,7 @@ class DurableStateRoot:
                 raise StatePathError(
                     f"state directory cannot be enumerated safely: {destination}: {exc}"
                 ) from exc
+            require_before_deadline(deadline_ns, _PRIVATE_TREE_DEADLINE_DETAIL)
             return tuple(sorted(names))
 
     def private_directory_exists(self, relative: str | Path) -> bool:
@@ -1154,6 +1181,7 @@ class DurableStateRoot:
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
     ) -> int:
         """Measure a private tree through a held no-follow root descriptor."""
 
@@ -1169,6 +1197,7 @@ class DurableStateRoot:
                 path,
                 allowed_directory_modes=allowed_directory_modes,
                 allowed_file_modes=allowed_file_modes,
+                deadline_ns=deadline_ns,
             )
 
     def _remove_tree_contents_descriptor(
@@ -1178,6 +1207,7 @@ class DurableStateRoot:
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        first_entry: str | None = None,
         deadline_ns: int | None = None,
     ) -> None:
         names = self._tree_entry_names_descriptor(
@@ -1185,13 +1215,49 @@ class DurableStateRoot:
             path,
             deadline_ns=deadline_ns,
         )
+        entries: list[tuple[str, os.stat_result]] = []
         for name in names:
             require_before_deadline(
                 deadline_ns,
                 _PRIVATE_TREE_DEADLINE_DETAIL,
             )
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {path / name}: {exc}"
+                ) from exc
+            entries.append((name, details))
+        entries.sort(
+            key=lambda item: (
+                0 if item[0] == first_entry else 1,
+                0 if stat.S_ISDIR(item[1].st_mode) else 1,
+            )
+        )
+        for name, observed in entries:
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
             candidate = path / name
-            details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {candidate}: {exc}"
+                ) from exc
+            if self._stat_identity(observed) != self._stat_identity(details):
+                raise StatePathError(
+                    f"state tree entry changed before cleanup: {candidate}"
+                )
             if stat.S_ISDIR(details.st_mode):
                 child = self._open_directory_at(
                     descriptor,
@@ -1207,6 +1273,7 @@ class DurableStateRoot:
                         candidate,
                         allowed_directory_modes=allowed_directory_modes,
                         allowed_file_modes=allowed_file_modes,
+                        first_entry=None,
                         deadline_ns=deadline_ns,
                     )
                 finally:
@@ -1216,6 +1283,7 @@ class DurableStateRoot:
                     _PRIVATE_TREE_DEADLINE_DETAIL,
                 )
                 self.syscalls.rmdir_at(name, dir_fd=descriptor)
+                self.syscalls.fsync(descriptor)
                 require_before_deadline(
                     deadline_ns,
                     _PRIVATE_TREE_DEADLINE_DETAIL,
@@ -1231,6 +1299,7 @@ class DurableStateRoot:
                 _PRIVATE_TREE_DEADLINE_DETAIL,
             )
             self.syscalls.unlink_at(name, dir_fd=descriptor)
+            self.syscalls.fsync(descriptor)
             require_before_deadline(
                 deadline_ns,
                 _PRIVATE_TREE_DEADLINE_DETAIL,
@@ -1242,6 +1311,7 @@ class DurableStateRoot:
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        first_entry: str | None = None,
         deadline_ns: int | None = None,
     ) -> bool:
         """Validate and remove one private tree through held no-follow descriptors."""
@@ -1280,6 +1350,7 @@ class DurableStateRoot:
                     path,
                     allowed_directory_modes=allowed_directory_modes,
                     allowed_file_modes=allowed_file_modes,
+                    first_entry=first_entry,
                     deadline_ns=deadline_ns,
                 )
             finally:
@@ -1746,6 +1817,42 @@ class DurableStateRoot:
             raise StateCorrupt(f"immutable state verification failed at {path}")
         return path
 
+    def create_private_file_bytes(
+        self,
+        relative: str | Path,
+        data: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> Path:
+        """Create one exact private file without a temporary or parent creation."""
+
+        require_before_deadline(deadline_ns, "private file creation exceeded its deadline")
+        path = self.path(relative)
+        parent_relative = path.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(
+                path.name,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                self.fault_hook(f"{label}:created")
+                self._write_all(descriptor, data)
+                self.fault_hook(f"{label}:written")
+                self.syscalls.fsync(descriptor)
+                self.fault_hook(f"{label}:durable")
+            finally:
+                os.close(descriptor)
+            self.syscalls.fsync(parent_descriptor)
+            self.fault_hook(f"{label}:parent_durable")
+            self.fault_hook(f"{label}:installed")
+        return path
+
     def atomic_replace_bytes(
         self,
         relative: str | Path,
@@ -1848,6 +1955,181 @@ class DurableStateRoot:
                                 f"{label} rename became visible before both directories were durable"
                             ) from exc
                         raise
+                finally:
+                    os.close(source_descriptor)
+        return destination_path
+
+    def rename_exclusive_contained(
+        self,
+        source: str | Path,
+        destination: str | Path,
+        *,
+        source_kind: str,
+        label: str,
+        deadline_ns: int | None = None,
+        recover_commit_unknown: bool = False,
+    ) -> Path:
+        """Exclusively publish one held private file or directory without mkdir."""
+
+        if source_kind not in {"directory", "regular"}:
+            raise ValueError("exclusive rename source_kind must be directory or regular")
+        require_before_deadline(deadline_ns, "state rename exceeded its deadline")
+        self._ensure_root()
+        source_path = self.path(source)
+        destination_path = self.path(destination)
+        source_parent_relative = source_path.parent.relative_to(self.root)
+        destination_parent_relative = destination_path.parent.relative_to(self.root)
+        visible = False
+        with self.existing_private_directory(source_parent_relative) as source_parent:
+            with self.existing_private_directory(
+                destination_parent_relative
+            ) as destination_parent:
+                if source_kind == "directory":
+                    source_descriptor = self._open_directory_at(
+                        source_parent,
+                        source_path.name,
+                        source_path,
+                        allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                        allow_missing=True,
+                    )
+                    if source_descriptor is None:
+                        raise StatePathError(f"rename source is missing: {source_path}")
+                    source_details = os.fstat(source_descriptor)
+                else:
+                    try:
+                        source_descriptor = os.open(
+                            source_path.name,
+                            self._regular_open_flags(),
+                            dir_fd=source_parent,
+                        )
+                    except FileNotFoundError as exc:
+                        raise StatePathError(f"rename source is missing: {source_path}") from exc
+                    source_details = self._require_regular_descriptor(
+                        source_descriptor,
+                        source_path,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                try:
+                    source_bound = os.stat(
+                        source_path.name,
+                        dir_fd=source_parent,
+                        follow_symlinks=False,
+                    )
+                    source_identity = self._stat_identity(source_details)
+                    if self._stat_identity(source_bound) != source_identity:
+                        raise StatePathError(
+                            f"rename source changed while opening: {source_path}"
+                        )
+
+                    def require_visible_binding() -> None:
+                        self._require_held_private_directory_binding(
+                            source_parent_relative,
+                            source_parent,
+                            source_path.parent,
+                        )
+                        self._require_held_private_directory_binding(
+                            destination_parent_relative,
+                            destination_parent,
+                            destination_path.parent,
+                        )
+                        destination_bound = os.stat(
+                            destination_path.name,
+                            dir_fd=destination_parent,
+                            follow_symlinks=False,
+                        )
+                        source_current = os.fstat(source_descriptor)
+                        if source_kind == "regular":
+                            self._require_regular_details(
+                                source_current,
+                                destination_path,
+                                allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                            self._require_regular_details(
+                                destination_bound,
+                                destination_path,
+                                allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                        else:
+                            self._require_private_directory_descriptor(
+                                source_descriptor,
+                                destination_path,
+                            )
+                            if (
+                                not stat.S_ISDIR(destination_bound.st_mode)
+                                or stat.S_IMODE(destination_bound.st_mode)
+                                not in _PRIVATE_DIRECTORY_MODES
+                            ):
+                                raise StatePathError(
+                                    "rename destination is not a private directory: "
+                                    f"{destination_path}"
+                                )
+                            self._require_owner(destination_bound, destination_path)
+                        if (destination_bound.st_dev, destination_bound.st_ino) != (
+                            source_current.st_dev,
+                            source_current.st_ino,
+                        ):
+                            raise StatePathError(
+                                "rename destination changed after visibility: "
+                                f"{destination_path}"
+                            )
+
+                    self.fault_hook(f"{label}:before_rename")
+                    require_before_deadline(
+                        deadline_ns,
+                        "state rename exceeded its deadline",
+                    )
+                    self._require_held_private_directory_binding(
+                        source_parent_relative,
+                        source_parent,
+                        source_path.parent,
+                    )
+                    self._require_held_private_directory_binding(
+                        destination_parent_relative,
+                        destination_parent,
+                        destination_path.parent,
+                    )
+                    source_rebound = os.stat(
+                        source_path.name,
+                        dir_fd=source_parent,
+                        follow_symlinks=False,
+                    )
+                    if self._stat_identity(source_rebound) != source_identity:
+                        raise StatePathError(
+                            f"rename source changed before visibility: {source_path}"
+                        )
+                    try:
+                        self.syscalls.rename_exclusive_at(
+                            source_path.name,
+                            destination_path.name,
+                            source_dir_fd=source_parent,
+                            destination_dir_fd=destination_parent,
+                        )
+                        visible = True
+                        self.fault_hook(f"{label}:renamed")
+                        require_visible_binding()
+                        self.syscalls.fsync(source_parent)
+                        self.fault_hook(f"{label}:source_parent_durable")
+                        if destination_parent_relative != source_parent_relative:
+                            self.syscalls.fsync(destination_parent)
+                        self.fault_hook(f"{label}:destination_parent_durable")
+                    except BaseException as exc:
+                        if visible:
+                            if recover_commit_unknown:
+                                try:
+                                    self.syscalls.fsync(source_parent)
+                                    if destination_parent_relative != source_parent_relative:
+                                        self.syscalls.fsync(destination_parent)
+                                    require_visible_binding()
+                                except BaseException as recovery_exc:
+                                    raise CommitUnknown(
+                                        f"{label} rename became visible before both directories were durable"
+                                    ) from recovery_exc
+                            else:
+                                raise CommitUnknown(
+                                    f"{label} rename became visible before both directories were durable"
+                                ) from exc
+                        else:
+                            raise
                 finally:
                     os.close(source_descriptor)
         return destination_path
@@ -2581,6 +2863,55 @@ class DurableStateRoot:
             deadline_ns=deadline_ns,
         )
 
+    def _read_optional_existing_stable_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
+        """Read through a held parent and prove the final path remains bound."""
+
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+        path = self.path(relative)
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                require_before_deadline(
+                    deadline_ns,
+                    "state record read exceeded its deadline",
+                )
+                return None
+            try:
+                descriptor = os.open(
+                    path.name,
+                    self._regular_open_flags(),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                require_before_deadline(
+                    deadline_ns,
+                    "state record read exceeded its deadline",
+                )
+                return None
+            except OSError as exc:
+                raise StateCorrupt(
+                    f"state record cannot be opened safely: {path}: {exc}"
+                ) from exc
+            return self._read_regular_descriptor(
+                descriptor,
+                path,
+                max_bytes=max_bytes,
+                deadline_ns=deadline_ns,
+                stable_parent_descriptor=parent_descriptor,
+                stable_name=path.name,
+            )
+
     def read_current(
         self,
         relative: str | Path,
@@ -2989,6 +3320,8 @@ class DurableStateRoot:
         *,
         max_bytes: int | None = None,
         deadline_ns: int | None = None,
+        stable_parent_descriptor: int | None = None,
+        stable_name: str | None = None,
     ) -> bytes:
         try:
             require_before_deadline(deadline_ns, "state record read exceeded its deadline")
@@ -3002,6 +3335,22 @@ class DurableStateRoot:
                 raise StateCorrupt(
                     f"state record exceeds its read limit of {max_bytes} bytes: {path}"
                 )
+            identity = self._stat_identity(details)
+            if stable_parent_descriptor is not None:
+                if stable_name is None:
+                    raise ValueError("stable_name is required with a stable parent")
+                try:
+                    bound = os.stat(
+                        stable_name,
+                        dir_fd=stable_parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StateCorrupt(
+                        f"state record path changed while reading: {path}"
+                    ) from exc
+                if self._stat_identity(bound) != identity:
+                    raise StateCorrupt(f"state record path changed while reading: {path}")
             chunks: list[bytes] = []
             total = 0
             while True:
@@ -3015,6 +3364,29 @@ class DurableStateRoot:
                     continue
                 require_before_deadline(deadline_ns, "state record read exceeded its deadline")
                 if not chunk:
+                    if stable_parent_descriptor is not None:
+                        if stable_name is None:  # pragma: no cover - validated above
+                            raise ValueError(
+                                "stable_name is required with a stable parent"
+                            )
+                        reopened = os.fstat(descriptor)
+                        try:
+                            rebound = os.stat(
+                                stable_name,
+                                dir_fd=stable_parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        except OSError as exc:
+                            raise StateCorrupt(
+                                f"state record path changed while reading: {path}"
+                            ) from exc
+                        if (
+                            self._stat_identity(reopened) != identity
+                            or self._stat_identity(rebound) != identity
+                        ):
+                            raise StateCorrupt(
+                                f"state record path changed while reading: {path}"
+                            )
                     return b"".join(chunks)
                 total += len(chunk)
                 if max_bytes is not None and total > max_bytes:
@@ -3194,22 +3566,22 @@ class DurableStateRoot:
                 raise
 
 __all__ = [
+    "GENERATION_LOCK_RANK",
+    "REGISTRY_INITIALIZATION_LOCK_RANK",
+    "REGISTRY_LOCK_RANK",
+    "WORKSPACE_LOCK_RANK",
     "CommitUnknown",
     "DurableRecordRecovery",
     "DurableStateRoot",
     "FaultHook",
-    "GENERATION_LOCK_RANK",
     "InjectedFault",
     "LockOrderError",
     "PosixSyscalls",
-    "REGISTRY_INITIALIZATION_LOCK_RANK",
-    "REGISTRY_LOCK_RANK",
     "RuntimeCapabilities",
     "StateCorrupt",
     "StatePathError",
     "StateRecoveryRequired",
     "Syscalls",
     "UnsupportedRuntime",
-    "WORKSPACE_LOCK_RANK",
     "WorkspaceRuntimeError",
 ]

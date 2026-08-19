@@ -560,13 +560,24 @@ projection, public surfaces, publication, or successor activation.
 
 ## Semantic-release decision-store and capacity/GC threats
 
-This separate internal unnumbered P5B2 prerequisite is contract-frozen only and
-remains `WAITING`. It has no implementation or acceptance receipt. Its threat
-boundary is limited to the future private `SemanticReleaseDecisionStore`, bounded
+This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
+implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
+receipt. Its threat boundary is limited to the private
+`SemanticReleaseDecisionStore`, bounded
 capacity and filesystem-reserve integration, install-once/replay behavior,
 commit-uncertainty handling, and nonempty-state generation protection. It is not
 operator policy, classification, terminal release-decision, omission,
 projection, public, provider/backend, network, or publication authority.
+
+Pre-visibility crash residue is confined to one fixed mode-`0700`
+`semantic-release-decision-publication` slot outside both canonical decision
+state and lifecycle `staging`. A 4 KiB manifest, one payload, one-state geometry,
+and a fixed 256 KiB transient reserve allowance bound amplification. Only a
+fully durable ready payload can reach the first missing canonical boundary, and
+only through an exclusive no-overwrite rename. Retry rejects unknown names,
+types, links, modes, identities, digests, sizes, or drift and removes only a
+validated non-authoritative prefix/suffix after proving its destination absent
+or byte-identical; no recovery path deletes or repairs canonical state.
 
 Caller path and alias substitution are excluded because the store alone derives
 the path from validated repository, generation, and complete canonical
@@ -620,9 +631,9 @@ different, or ambiguous state is commit-unknown and fails closed.
 Safely observed absence of the top-level namespace is the zero-binding initial
 state; once it or an expected request path is present, unsafe, unreadable,
 ambiguous, missing-after-visibility, or snapshot-drifted state fails closed.
-Nonempty decision state is a pre-plan GC eligibility blocker and blocks
-quarantine or purge until separately accepted atomic store integration defines
-schema-compatible reason and wiring. No public protection-reason token is added.
+Nonempty decision state aborts the shared workspace reachability proof before a
+successful GC preview or plan and therefore blocks downstream execute,
+reconcile, and purge. No public protection-reason token is added.
 This retention rule prevents orphaned audit/projection evidence but grants no
 deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation
 authority. No failure or replay path may mutate a binding or any
@@ -631,10 +642,11 @@ policy, or other durable state.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite, live operator policy selection/provisioning, the encompassing
-release/DLP decision, classification composition, omission execution,
-projection, public surfaces, provider/backend, publication, remaining P5B2 work,
-and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+prerequisite remains `IN_PROGRESS`; live operator policy selection/provisioning,
+the encompassing release/DLP decision, classification composition, omission
+execution, projection, public surfaces, provider/backend, publication, remaining
+P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
+is `READY`.
 
 ## Semantic-content release/DLP decision threats
 
@@ -642,8 +654,8 @@ The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is contract-frozen only and remains `WAITING`. The trust-root and
 policy-authority provisioning prerequisites above are accepted, but no stable
 current `ACTIVE` operator record is provisioned; decision-store
-and capacity/GC implementation and separate acceptance, classification
-composition, and the other decision prerequisites also remain absent. The
+and capacity/GC acceptance, classification composition, and the other decision
+prerequisites also remain absent. The
 decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
 promoted generation, visible pointer, staged marker, receipt, handoff, semantic
@@ -793,11 +805,11 @@ coordinate before releasing the locks.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites are accepted `COMPLETE`. The encompassing
-release/DLP decision, the decision-store and capacity/GC prerequisite, live
-operator-policy selection/provisioning, classification composition, omission
-execution, projection,
+release/DLP decision, live operator-policy selection/provisioning,
+classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+remain `WAITING`; the decision-store and capacity/GC prerequisite remains
+`IN_PROGRESS`. H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Explicit non-claims
 

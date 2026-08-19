@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import hashlib
 import os
-from pathlib import Path
 import re
 import shutil
 import stat
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import (
@@ -19,9 +19,12 @@ from graphify.workspace.adapters import (
     UnsupportedCompatibility,
     select_adapter,
 )
-from graphify.workspace.identity import IdentityError
 from graphify.workspace.adapters.base import SourceObservation
 from graphify.workspace.contracts import (
+    SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES,
+    SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION,
+    SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE,
+    SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES,
     CapacityPolicy,
     CapacityReservation,
     CapacityReservationState,
@@ -40,6 +43,7 @@ from graphify.workspace.contracts import (
     canonical_json_bytes,
     payload_manifest_sha256,
 )
+from graphify.workspace.identity import IdentityError
 from graphify.workspace.journal import JournalCorrupt, JournalStore
 from graphify.workspace.leases import (
     LeaseGrant,
@@ -64,7 +68,6 @@ from graphify.workspace.semantic_queue import (
     SemanticQueueStore,
 )
 
-
 _ALLOWED_FILE_MODES = frozenset({0o600, 0o644, 0o755})
 _ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
 _CAPACITY_CURRENT = Path("capacity.json")
@@ -76,6 +79,10 @@ _MAX_STAGED_BUILD_STATE_BYTES = 64 * 1024
 _STAGED_BUILD_TERMINAL_STATES = frozenset({"PROMOTED", "ABANDONED"})
 _GENERATION_ID_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$", re.ASCII)
 _HANDOFF_NAME_RE = re.compile(r"^[0-9a-f]{64}\.json$", re.ASCII)
+_DECISION_BINDING_NAME_RE = re.compile(r"^[0-9a-f]{64}\.json$", re.ASCII)
+_DECISION_BINDING_MAX_BYTES = SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES
+_DECISION_BINDINGS_PER_GENERATION = SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION
+_DECISION_BINDINGS_PER_WORKSPACE = SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE
 _MAX_CAPACITY_BYTES = 9_223_372_036_854_775_807
 
 
@@ -221,6 +228,9 @@ class _PayloadInventory:
 class _Usage:
     primary_bytes_by_generation: Mapping[tuple[str, str], int]
     handoff_bytes_by_generation: Mapping[tuple[str, str], int]
+    decision_bytes_by_generation: Mapping[tuple[str, str], int]
+    decision_bindings_by_generation: Mapping[tuple[str, str], int]
+    decision_binding_members: Mapping[tuple[str, str, str], tuple[int, str]]
     reserved_bytes_by_generation: Mapping[tuple[str, str], int]
     unconsumed_reserved_bytes: int
 
@@ -229,12 +239,14 @@ class _Usage:
         keys = (
             set(self.primary_bytes_by_generation)
             | set(self.handoff_bytes_by_generation)
+            | set(self.decision_bytes_by_generation)
             | set(self.reserved_bytes_by_generation)
         )
         return {
             key: _bounded_capacity_sum(
                 (
                     self.handoff_bytes_by_generation.get(key, 0),
+                    self.decision_bytes_by_generation.get(key, 0),
                     max(
                         self.primary_bytes_by_generation.get(key, 0),
                         self.reserved_bytes_by_generation.get(key, 0),
@@ -266,6 +278,148 @@ class _Usage:
             1
             for candidate_uuid, _generation_id in self.bytes_by_generation
             if candidate_uuid == repo_uuid
+        )
+
+
+def _capacity_rows(values: Mapping[tuple[str, str], int]) -> list[dict[str, object]]:
+    return [
+        {"repo_uuid": repo_uuid, "generation_id": generation_id, "value": value}
+        for (repo_uuid, generation_id), value in sorted(values.items())
+    ]
+
+
+def _decision_binding_rows(
+    values: Mapping[tuple[str, str, str], tuple[int, str]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "repo_uuid": repo_uuid,
+            "generation_id": generation_id,
+            "decision_request_sha256": request_sha256,
+            "size": size,
+            "binding_sha256": binding_sha256,
+        }
+        for (repo_uuid, generation_id, request_sha256), (
+            size,
+            binding_sha256,
+        ) in sorted(values.items())
+    ]
+
+
+@dataclass(frozen=True)
+class DecisionCapacityUsage:
+    """Stable authoritative usage projection including private decision bytes."""
+
+    repo_uuid: str
+    primary_bytes_by_generation: Mapping[tuple[str, str], int]
+    handoff_bytes_by_generation: Mapping[tuple[str, str], int]
+    decision_bytes_by_generation: Mapping[tuple[str, str], int]
+    decision_bindings_by_generation: Mapping[tuple[str, str], int]
+    decision_binding_members: Mapping[tuple[str, str, str], tuple[int, str]]
+    reserved_bytes_by_generation: Mapping[tuple[str, str], int]
+    unconsumed_reserved_bytes: int
+
+    def _state_value(
+        self,
+        *,
+        remove_binding: tuple[str, str, str, int, str] | None = None,
+    ) -> dict[str, object]:
+        decision_bytes = dict(self.decision_bytes_by_generation)
+        decision_counts = dict(self.decision_bindings_by_generation)
+        decision_members = dict(self.decision_binding_members)
+        if remove_binding is not None:
+            repo_uuid, generation_id, request_sha256, size, binding_sha256 = (
+                remove_binding
+            )
+            key = (repo_uuid, generation_id)
+            member_key = (repo_uuid, generation_id, request_sha256)
+            current_bytes = decision_bytes.get(key, 0)
+            current_count = decision_counts.get(key, 0)
+            if (
+                size < 1
+                or current_bytes < size
+                or current_count < 1
+                or decision_members.get(member_key) != (size, binding_sha256)
+            ):
+                raise CapacityExceeded("decision binding removal projection is invalid")
+            decision_members.pop(member_key)
+            remaining_bytes = current_bytes - size
+            remaining_count = current_count - 1
+            if remaining_count == 0:
+                if remaining_bytes != 0:
+                    raise CapacityExceeded("decision binding byte/count projection disagrees")
+                decision_bytes.pop(key, None)
+                decision_counts.pop(key, None)
+            else:
+                if remaining_bytes < remaining_count:
+                    raise CapacityExceeded("decision binding byte projection is invalid")
+                decision_bytes[key] = remaining_bytes
+                decision_counts[key] = remaining_count
+        return {
+            "primary": _capacity_rows(self.primary_bytes_by_generation),
+            "handoffs": _capacity_rows(self.handoff_bytes_by_generation),
+            "decisions": _capacity_rows(decision_bytes),
+            "decision_bindings": _capacity_rows(decision_counts),
+            "decision_binding_members": _decision_binding_rows(decision_members),
+            "reservations": _capacity_rows(self.reserved_bytes_by_generation),
+            "unconsumed_reserved_bytes": self.unconsumed_reserved_bytes,
+        }
+
+    @property
+    def state_sha256(self) -> str:
+        return hashlib.sha256(canonical_json_bytes(self._state_value())).hexdigest()
+
+    def state_sha256_without_binding(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        request_sha256: str,
+        size: int,
+        binding_sha256: str,
+    ) -> str:
+        return hashlib.sha256(
+            canonical_json_bytes(
+                self._state_value(
+                    remove_binding=(
+                        repo_uuid,
+                        generation_id,
+                        request_sha256,
+                        size,
+                        binding_sha256,
+                    )
+                )
+            )
+        ).hexdigest()
+
+    @property
+    def global_bytes(self) -> int:
+        return self._usage.global_bytes
+
+    @property
+    def workspace_bytes(self) -> int:
+        return self._usage.workspace_bytes(self.repo_uuid)
+
+    @property
+    def workspace_binding_count(self) -> int:
+        return sum(
+            count
+            for (candidate_uuid, _generation_id), count in self.decision_bindings_by_generation.items()
+            if candidate_uuid == self.repo_uuid
+        )
+
+    def generation_binding_count(self, generation_id: str) -> int:
+        return self.decision_bindings_by_generation.get((self.repo_uuid, generation_id), 0)
+
+    @property
+    def _usage(self) -> _Usage:
+        return _Usage(
+            primary_bytes_by_generation=self.primary_bytes_by_generation,
+            handoff_bytes_by_generation=self.handoff_bytes_by_generation,
+            decision_bytes_by_generation=self.decision_bytes_by_generation,
+            decision_bindings_by_generation=self.decision_bindings_by_generation,
+            decision_binding_members=self.decision_binding_members,
+            reserved_bytes_by_generation=self.reserved_bytes_by_generation,
+            unconsumed_reserved_bytes=self.unconsumed_reserved_bytes,
         )
 
 
@@ -2100,7 +2254,10 @@ class GenerationStore:
         self,
         repo_uuid: str,
         generation_id: str,
+        *,
+        deadline_ns: int | None = None,
     ) -> int:
+        _require_inventory_deadline(deadline_ns)
         relative = self._workspace(repo_uuid) / "semantic-staging" / "handoffs" / generation_id
         path = self.state.path(relative)
         with self.state._existing_private_directory(
@@ -2110,9 +2267,14 @@ class GenerationStore:
             if descriptor is None:
                 raise FileNotFoundError(path)
             before = os.fstat(descriptor)
-            names = self.state._tree_entry_names_descriptor(descriptor, path)
+            names = self.state._tree_entry_names_descriptor(
+                descriptor,
+                path,
+                deadline_ns=deadline_ns,
+            )
             total = 0
             for name in names:
+                _require_inventory_deadline(deadline_ns)
                 if _HANDOFF_NAME_RE.fullmatch(name) is None:
                     raise StatePathError("retained semantic handoff name is noncanonical")
                 candidate = path / name
@@ -2150,7 +2312,13 @@ class GenerationStore:
                         raise StatePathError("retained semantic handoff usage overflows")
                 finally:
                     os.close(file_descriptor)
-            after_names = self.state._tree_entry_names_descriptor(descriptor, path)
+                _require_inventory_deadline(deadline_ns)
+            after_names = self.state._tree_entry_names_descriptor(
+                descriptor,
+                path,
+                deadline_ns=deadline_ns,
+            )
+            _require_inventory_deadline(deadline_ns)
             after = os.fstat(descriptor)
             if names != after_names or self.state._stat_identity(
                 before
@@ -2158,40 +2326,213 @@ class GenerationStore:
                 raise StatePathError("retained semantic handoff usage changed while scanning")
         return total
 
+    def _decision_generation_ids(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> tuple[str, ...]:
+        _require_inventory_deadline(deadline_ns)
+        decision_root = self._workspace(repo_uuid) / "semantic-release-decisions"
+        path = self.state.path(decision_root)
+        with self.state._existing_private_directory(
+            decision_root,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                return ()
+            before = os.fstat(descriptor)
+            names = self.state._tree_entry_names_descriptor(
+                descriptor,
+                path,
+                deadline_ns=deadline_ns,
+                maximum_entries=_DECISION_BINDINGS_PER_WORKSPACE,
+            )
+            _require_inventory_deadline(deadline_ns)
+            after = os.fstat(descriptor)
+            if self.state._stat_identity(before) != self.state._stat_identity(after):
+                raise StatePathError(
+                    "decision generation namespace changed while scanning"
+                )
+            if not names:
+                raise StatePathError("decision generation namespace is present but empty")
+            return tuple(names)
+
+    def _decision_directory_usage(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        maximum_bindings: int = _DECISION_BINDINGS_PER_GENERATION,
+        deadline_ns: int | None = None,
+    ) -> tuple[int, int, dict[str, tuple[int, str]]]:
+        _require_inventory_deadline(deadline_ns)
+        if not 0 <= maximum_bindings <= _DECISION_BINDINGS_PER_GENERATION:
+            raise ValueError("maximum_bindings is outside the decision-store bound")
+        relative = (
+            self._workspace(repo_uuid)
+            / "semantic-release-decisions"
+            / generation_id
+        )
+        path = self.state.path(relative)
+        with self.state._existing_private_directory(relative) as descriptor:
+            if descriptor is None:  # pragma: no cover - allow_missing is false
+                raise StatePathError("decision binding directory is missing")
+            before = os.fstat(descriptor)
+            names = self.state._tree_entry_names_descriptor(
+                descriptor,
+                path,
+                deadline_ns=deadline_ns,
+                maximum_entries=maximum_bindings,
+            )
+            if not names:
+                raise StatePathError("decision binding directory is empty")
+            total = 0
+            members: dict[str, tuple[int, str]] = {}
+            for name in names:
+                _require_inventory_deadline(deadline_ns)
+                if _DECISION_BINDING_NAME_RE.fullmatch(name) is None:
+                    raise StatePathError("decision binding name is noncanonical")
+                candidate = path / name
+                details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                self.state._require_regular_details(
+                    details,
+                    candidate,
+                    allowed_modes=frozenset({0o600}),
+                )
+                if details.st_size < 1 or details.st_size > _DECISION_BINDING_MAX_BYTES:
+                    raise StatePathError("decision binding exceeds its byte bound")
+                try:
+                    file_descriptor = os.open(
+                        name,
+                        self.state._regular_open_flags(),
+                        dir_fd=descriptor,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        "decision binding cannot be opened safely"
+                    ) from exc
+                try:
+                    opened = self.state._require_regular_descriptor(
+                        file_descriptor,
+                        candidate,
+                        allowed_modes=frozenset({0o600}),
+                    )
+                    current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    identity = self.state._stat_identity(details)
+                    if (
+                        self.state._stat_identity(opened) != identity
+                        or self.state._stat_identity(current) != identity
+                    ):
+                        raise StatePathError("decision binding changed while scanning")
+                    chunks: list[bytes] = []
+                    remaining = opened.st_size
+                    while remaining:
+                        _require_inventory_deadline(deadline_ns)
+                        try:
+                            chunk = os.read(file_descriptor, min(remaining, 1024 * 1024))
+                        except InterruptedError:
+                            continue
+                        _require_inventory_deadline(deadline_ns)
+                        if not chunk:
+                            raise StatePathError("decision binding was truncated while reading")
+                        chunks.append(chunk)
+                        remaining -= len(chunk)
+                    payload = b"".join(chunks)
+                    from graphify.workspace.semantic_release_decision import (
+                        SemanticReleaseDecisionBinding,
+                        SemanticReleaseDecisionInvalid,
+                    )
+
+                    try:
+                        binding = SemanticReleaseDecisionBinding.from_json(payload)
+                    except SemanticReleaseDecisionInvalid as exc:
+                        raise StatePathError("decision binding is not canonical") from exc
+                    reopened = os.fstat(file_descriptor)
+                    rebound = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if (
+                        self.state._stat_identity(reopened) != identity
+                        or self.state._stat_identity(rebound) != identity
+                    ):
+                        raise StatePathError("decision binding changed while scanning")
+                    if (
+                        binding.repo_uuid != repo_uuid
+                        or binding.target_generation_id != generation_id
+                        or f"{binding.decision_request_sha256}.json" != name
+                    ):
+                        raise StatePathError(
+                            "decision binding identity differs from its path"
+                        )
+                    total = _bounded_capacity_sum((total, opened.st_size))
+                    members[binding.decision_request_sha256] = (
+                        opened.st_size,
+                        binding.binding_sha256,
+                    )
+                finally:
+                    os.close(file_descriptor)
+            after_names = self.state._tree_entry_names_descriptor(
+                descriptor,
+                path,
+                deadline_ns=deadline_ns,
+                maximum_entries=maximum_bindings,
+            )
+            _require_inventory_deadline(deadline_ns)
+            after = os.fstat(descriptor)
+            if names != after_names or self.state._stat_identity(
+                before
+            ) != self.state._stat_identity(after):
+                raise StatePathError("decision binding usage changed while scanning")
+            return total, len(names), members
+
     def _scan_usage_once(
         self,
+        *,
+        deadline_ns: int | None = None,
     ) -> tuple[
         dict[tuple[str, str], int],
         dict[tuple[str, str], int],
+        dict[tuple[str, str], int],
+        dict[tuple[str, str], int],
+        dict[tuple[str, str, str], tuple[int, str]],
     ]:
         primary_usage: dict[tuple[str, str], int] = {}
         handoff_usage: dict[tuple[str, str], int] = {}
+        decision_usage: dict[tuple[str, str], int] = {}
+        decision_bindings: dict[tuple[str, str], int] = {}
+        decision_binding_members: dict[tuple[str, str, str], tuple[int, str]] = {}
+        active_generations: set[tuple[str, str]] = set()
         try:
+            _require_inventory_deadline(deadline_ns)
             workspaces = Path("workspaces")
             for repo_uuid in self.state.list_existing_private_directories(
                 workspaces,
                 allow_missing=True,
+                deadline_ns=deadline_ns,
             ):
+                _require_inventory_deadline(deadline_ns)
                 workspace = workspaces / repo_uuid
-                containers: list[tuple[Path, bool]] = [
-                    (workspace / "generations", False),
-                    (workspace / "staging", False),
+                containers: list[tuple[Path, bool, bool]] = [
+                    (workspace / "generations", False, True),
+                    (workspace / "staging", False, False),
                 ]
                 quarantine_root = workspace / "quarantine"
                 quarantine_kinds = self.state.list_existing_private_directories(
                     quarantine_root,
                     allow_missing=True,
+                    deadline_ns=deadline_ns,
                 )
                 containers.extend(
-                    (quarantine_root / quarantine_kind, True)
+                    (quarantine_root / quarantine_kind, True, False)
                     for quarantine_kind in ("gc", "corrupt")
                     if quarantine_kind in quarantine_kinds
                 )
-                for container, strips_epoch in containers:
+                for container, strips_epoch, is_active in containers:
                     for name in self.state.list_existing_private_directories(
                         container,
                         allow_missing=True,
+                        deadline_ns=deadline_ns,
                     ):
+                        _require_inventory_deadline(deadline_ns)
                         generation_id = name.rsplit(".", 1)[0] if strips_epoch else name
                         key = (repo_uuid, generation_id)
                         if key in primary_usage:
@@ -2203,26 +2544,86 @@ class GenerationStore:
                             container / name,
                             allowed_directory_modes=_ALLOWED_DIRECTORY_MODES,
                             allowed_file_modes=_ALLOWED_FILE_MODES,
+                            deadline_ns=deadline_ns,
                         )
+                        if is_active:
+                            active_generations.add(key)
                 handoff_root = workspace / "semantic-staging" / "handoffs"
                 for generation_id in self.state.list_existing_private_directories(
                     handoff_root,
                     allow_missing=True,
+                    deadline_ns=deadline_ns,
                 ):
+                    _require_inventory_deadline(deadline_ns)
                     if _GENERATION_ID_RE.fullmatch(generation_id) is None:
                         raise StatePathError("retained semantic handoff target is noncanonical")
-                    size = self._handoff_directory_bytes(repo_uuid, generation_id)
+                    size = self._handoff_directory_bytes(
+                        repo_uuid,
+                        generation_id,
+                        deadline_ns=deadline_ns,
+                    )
+                    _require_inventory_deadline(deadline_ns)
                     if size:
                         handoff_usage[(repo_uuid, generation_id)] = size
+                total_bindings = 0
+                for generation_id in self._decision_generation_ids(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                ):
+                    _require_inventory_deadline(deadline_ns)
+                    if _GENERATION_ID_RE.fullmatch(generation_id) is None:
+                        raise StatePathError("decision target generation is noncanonical")
+                    key = (repo_uuid, generation_id)
+                    if key not in active_generations:
+                        raise StatePathError(
+                            "decision state does not name one retained active generation"
+                        )
+                    size, count, members = self._decision_directory_usage(
+                        repo_uuid,
+                        generation_id,
+                        maximum_bindings=min(
+                            _DECISION_BINDINGS_PER_GENERATION,
+                            _DECISION_BINDINGS_PER_WORKSPACE - total_bindings,
+                        ),
+                        deadline_ns=deadline_ns,
+                    )
+                    total_bindings += count
+                    if total_bindings > _DECISION_BINDINGS_PER_WORKSPACE:
+                        raise StatePathError(
+                            "decision workspace exceeds 4096 bindings"
+                        )
+                    decision_usage[key] = size
+                    decision_bindings[key] = count
+                    decision_binding_members.update(
+                        {
+                            (repo_uuid, generation_id, request_sha256): member
+                            for request_sha256, member in members.items()
+                        }
+                    )
+            _require_inventory_deadline(deadline_ns)
         except StatePathError as exc:
             raise CapacityExceeded(f"unsafe state path in capacity scan: {exc}") from exc
-        return primary_usage, handoff_usage
+        return (
+            primary_usage,
+            handoff_usage,
+            decision_usage,
+            decision_bindings,
+            decision_binding_members,
+        )
 
-    def _usage(self, reservations: Sequence[CapacityReservation]) -> _Usage:
+    def _usage(
+        self,
+        reservations: Sequence[CapacityReservation],
+        *,
+        deadline_ns: int | None = None,
+    ) -> _Usage:
         previous: (
             tuple[
                 dict[tuple[str, str], int],
                 dict[tuple[str, str], int],
+                dict[tuple[str, str], int],
+                dict[tuple[str, str], int],
+                dict[tuple[str, str, str], tuple[int, str]],
             ]
             | None
         ) = None
@@ -2231,12 +2632,16 @@ class GenerationStore:
             tuple[
                 dict[tuple[str, str], int],
                 dict[tuple[str, str], int],
+                dict[tuple[str, str], int],
+                dict[tuple[str, str], int],
+                dict[tuple[str, str, str], tuple[int, str]],
             ]
             | None
         ) = None
         for _attempt in range(5):
+            _require_inventory_deadline(deadline_ns)
             try:
-                observed = self._scan_usage_once()
+                observed = self._scan_usage_once(deadline_ns=deadline_ns)
             except FileNotFoundError:
                 previous = None
                 repeated_change = None
@@ -2253,9 +2658,16 @@ class GenerationStore:
                 observed_usage = observed
                 break
             previous = observed
+        _require_inventory_deadline(deadline_ns)
         if observed_usage is None:
             raise CapacityExceeded("capacity filesystem snapshot did not stabilize")
-        primary_usage, handoff_usage = observed_usage
+        (
+            primary_usage,
+            handoff_usage,
+            decision_usage,
+            decision_bindings,
+            decision_binding_members,
+        ) = observed_usage
         reserved_usage = {
             (reservation.repo_uuid, reservation.generation_id): reservation.reserved_bytes
             for reservation in reservations
@@ -2273,9 +2685,168 @@ class GenerationStore:
         return _Usage(
             primary_bytes_by_generation=primary_usage,
             handoff_bytes_by_generation=handoff_usage,
+            decision_bytes_by_generation=decision_usage,
+            decision_bindings_by_generation=decision_bindings,
+            decision_binding_members=decision_binding_members,
             reserved_bytes_by_generation=reserved_usage,
             unconsumed_reserved_bytes=unconsumed_reserved_bytes,
         )
+
+    def _read_capacity_reservations_locked(
+        self,
+        *,
+        deadline_ns: int | None = None,
+    ) -> tuple[CapacityReservation, ...]:
+        """Project stable reservation arithmetic without recovery or mutation."""
+
+        try:
+            projection = self.state.project_record_recovery(
+                label="capacity",
+                current=_CAPACITY_CURRENT,
+                previous=_CAPACITY_PREVIOUS,
+                pending=_CAPACITY_PENDING,
+                decoder=CapacityReservationState.from_json,
+                revision=lambda value: value.revision,
+                allow_missing=True,
+                deadline_ns=deadline_ns,
+            )
+        except StateCorrupt as exc:
+            raise CapacityExceeded(f"capacity reservation state is corrupt: {exc}") from exc
+        if projection.requires_recovery:
+            raise CapacityExceeded("capacity reservation state requires durable recovery")
+        if projection.record is None:
+            return ()
+        return projection.record.reservations
+
+    def decision_capacity_usage_locked(
+        self,
+        repo_uuid: str,
+        capacity_policy: CapacityPolicy,
+        *,
+        deadline_ns: int | None = None,
+    ) -> DecisionCapacityUsage:
+        """Return one stable capacity proof; caller owns registry/workspace locks."""
+
+        policy = self._validated_capacity_policy(capacity_policy)
+        usage = self._usage(
+            self._read_capacity_reservations_locked(deadline_ns=deadline_ns),
+            deadline_ns=deadline_ns,
+        )
+        workspace_bytes = usage.workspace_bytes(repo_uuid)
+        if workspace_bytes > policy.workspace_max_bytes:
+            raise CapacityExceeded("workspace byte limit is already exceeded")
+        if usage.global_bytes > policy.global_max_bytes:
+            raise CapacityExceeded("global byte limit is already exceeded")
+        if usage.workspace_generations(repo_uuid) > policy.workspace_max_generations:
+            raise CapacityExceeded("workspace generation limit is already exceeded")
+        if usage.global_generations > policy.global_max_generations:
+            raise CapacityExceeded("global generation limit is already exceeded")
+        available = shutil.disk_usage(self.state.root.parent).free
+        _require_inventory_deadline(deadline_ns)
+        if available - usage.unconsumed_reserved_bytes < policy.reserve_bytes:
+            raise CapacityExceeded("filesystem reserve threshold is already violated")
+        return DecisionCapacityUsage(
+            repo_uuid=repo_uuid,
+            primary_bytes_by_generation=dict(usage.primary_bytes_by_generation),
+            handoff_bytes_by_generation=dict(usage.handoff_bytes_by_generation),
+            decision_bytes_by_generation=dict(usage.decision_bytes_by_generation),
+            decision_bindings_by_generation=dict(usage.decision_bindings_by_generation),
+            decision_binding_members=dict(usage.decision_binding_members),
+            reserved_bytes_by_generation=dict(usage.reserved_bytes_by_generation),
+            unconsumed_reserved_bytes=usage.unconsumed_reserved_bytes,
+        )
+
+    def preflight_decision_install_locked(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        *,
+        candidate_bytes: int,
+        additional_bytes: int,
+        capacity_policy: CapacityPolicy,
+        usage: DecisionCapacityUsage,
+    ) -> None:
+        """Apply binding caps, byte ceilings, reservations, and reserve exactly once."""
+
+        policy = self._validated_capacity_policy(capacity_policy)
+        if usage.repo_uuid != repo_uuid:
+            raise CapacityExceeded("decision usage belongs to another workspace")
+        if candidate_bytes < 1 or candidate_bytes > _DECISION_BINDING_MAX_BYTES:
+            raise CapacityExceeded("decision binding exceeds 25 MiB")
+        if additional_bytes not in {0, candidate_bytes}:
+            raise CapacityExceeded("decision binding additional-byte projection is invalid")
+        if additional_bytes:
+            if (
+                usage.generation_binding_count(generation_id)
+                >= _DECISION_BINDINGS_PER_GENERATION
+            ):
+                raise CapacityExceeded("decision generation exceeds 64 bindings")
+            if usage.workspace_binding_count >= _DECISION_BINDINGS_PER_WORKSPACE:
+                raise CapacityExceeded("decision workspace exceeds 4096 bindings")
+        projected_workspace = _bounded_capacity_sum(
+            (usage.workspace_bytes, additional_bytes)
+        )
+        projected_global = _bounded_capacity_sum((usage.global_bytes, additional_bytes))
+        if projected_workspace > policy.workspace_max_bytes:
+            raise CapacityExceeded("workspace byte limit would be exceeded")
+        if projected_global > policy.global_max_bytes:
+            raise CapacityExceeded("global byte limit would be exceeded")
+        available = shutil.disk_usage(self.state.root.parent).free
+        if (
+            available
+            - usage.unconsumed_reserved_bytes
+            - additional_bytes
+            - (SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES if additional_bytes else 0)
+            < policy.reserve_bytes
+        ):
+            raise CapacityExceeded("filesystem reserve threshold would be violated")
+
+    def decision_state_generations_locked(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> frozenset[str]:
+        """Return exact nonempty decision targets without creating or repairing state."""
+
+        previous: tuple[tuple[str, int, int], ...] | None = None
+        for _attempt in range(5):
+            _require_inventory_deadline(deadline_ns)
+            try:
+                observed: list[tuple[str, int, int]] = []
+                total_bindings = 0
+                for generation_id in self._decision_generation_ids(
+                    repo_uuid,
+                    deadline_ns=deadline_ns,
+                ):
+                    if _GENERATION_ID_RE.fullmatch(generation_id) is None:
+                        raise StatePathError("decision target generation is noncanonical")
+                    size, count, _members = self._decision_directory_usage(
+                        repo_uuid,
+                        generation_id,
+                        maximum_bindings=min(
+                            _DECISION_BINDINGS_PER_GENERATION,
+                            _DECISION_BINDINGS_PER_WORKSPACE - total_bindings,
+                        ),
+                        deadline_ns=deadline_ns,
+                    )
+                    total_bindings += count
+                    if total_bindings > _DECISION_BINDINGS_PER_WORKSPACE:
+                        raise StatePathError("decision workspace exceeds 4096 bindings")
+                    observed.append((generation_id, size, count))
+            except (FileNotFoundError, StatePathError) as exc:
+                if isinstance(exc, StatePathError):
+                    raise CapacityExceeded(
+                        f"unsafe semantic-release decision state: {exc}"
+                    ) from exc
+                previous = None
+                continue
+            snapshot = tuple(observed)
+            if previous is not None and snapshot == previous:
+                _require_inventory_deadline(deadline_ns)
+                return frozenset(generation_id for generation_id, _size, count in snapshot if count)
+            previous = snapshot
+        raise CapacityExceeded("semantic-release decision snapshot did not stabilize")
 
     def _preflight(
         self,
@@ -2302,6 +2873,7 @@ class GenerationStore:
         projected_size = _bounded_capacity_sum(
             (
                 usage.handoff_bytes_by_generation.get(key, 0),
+                usage.decision_bytes_by_generation.get(key, 0),
                 max(
                     usage.primary_bytes_by_generation.get(key, 0),
                     expected_payload_bytes,
@@ -2378,6 +2950,7 @@ class GenerationStore:
         projected_total = _bounded_capacity_sum(
             (
                 projected_retained,
+                usage.decision_bytes_by_generation.get(key, 0),
                 max(
                     usage.primary_bytes_by_generation.get(key, 0),
                     usage.reserved_bytes_by_generation.get(key, 0),
@@ -4178,7 +4751,7 @@ __all__ = [
     "StagedBuildOperation",
     "StagedBuildPreparation",
     "StagedBuildReadRecoveryRequired",
-    "StagedBuildStillCurrent",
     "StagedBuildState",
+    "StagedBuildStillCurrent",
     "StructuralBuildRequest",
 ]

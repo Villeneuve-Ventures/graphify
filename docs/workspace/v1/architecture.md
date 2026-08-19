@@ -237,8 +237,9 @@ journal, queue, decision-store, public transport, live policy choice, GC, or
 successor authority. Acceptance provisions no live record.
 
 The separate internal unnumbered P5B2 semantic-release decision-store and
-capacity/GC prerequisite is contract-frozen only and remains `WAITING`.
-`SemanticReleaseDecisionStore` is the sole future owner of the external private
+capacity/GC prerequisite is an `IN_PROGRESS` internal implementation candidate,
+not `READY` or `COMPLETE`, and has no acceptance receipt.
+`SemanticReleaseDecisionStore` is the sole owner of the external private
 `semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
 namespace. Mode-`0700` directories, one single-link mode-`0600` canonical binding
 file, descriptor-relative no-follow traversal, and fail-closed bounded
@@ -263,21 +264,22 @@ composition through install-once and reopen.
 Byte-identical replay is no-write success; same-path different bytes conflict;
 partial, unsafe, unreadable, different, or ambiguous state is commit-unknown.
 
-Nonempty decision state is a pre-plan GC eligibility blocker until separately
-accepted atomic GC integration defines schema-compatible reason and wiring; it
-adds no token to the current public protection-reason vocabulary. This
-prerequisite owns no decision-request creation,
+Nonempty decision state aborts the shared workspace reachability proof before a
+successful GC preview or plan and therefore blocks downstream execute,
+reconcile, and purge. It adds no token to the current public protection-reason
+vocabulary and grants no GC mutation or canonical decision-state deletion
+authority. This prerequisite owns no decision-request creation,
 classifier or policy composition, terminal release decision, live policy
 selection, omission, projection, public CLI/schema/runtime receipt,
 provider/backend, network, cleanup, deletion, quarantine, repair, rollback,
-publication, implementation, acceptance, parent completion, or successor
+publication, acceptance, parent completion, or successor
 authority.
 
 The encompassing unnumbered P5B2 semantic-content release/DLP decision child is
 contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
 promoted visible-current terminal plus separate implemented and accepted
 trust-root and stable operator policy-authority prerequisites. It also requires
-implementation and separate acceptance of the decision-store and capacity/GC
+separate acceptance of the implemented decision-store and capacity/GC
 prerequisite above. It captures the private target-owned
 semantic inputs under existing read authority, classifies only node labels,
 optional node rationales, and hyperedge labels outside the coordination locks,
@@ -321,10 +323,11 @@ outcome; omission locators remain exclusively in the mode-`0600` binding. The
 lifecycle journal, staged-build state, generation receipt, public schemas, and
 runtime receipts do not become release authority. The freeze stops before
 omission execution, graph construction, projection, query, public semantic sync,
-publication, implementation or readiness of either waiting child, or acceptance.
+publication, readiness of the decision-store prerequisite or implementation or
+readiness of the encompassing child, or acceptance.
 P5 and P5B2 remain `IN_PROGRESS`; the bounded trust-root and policy-authority
 provisioning prerequisites are accepted `COMPLETE`. The decision-store and
-capacity/GC prerequisite, live operator policy selection,
+capacity/GC prerequisite remains `IN_PROGRESS`; live operator policy selection,
 classification composition, the encompassing release/DLP decision, remaining
 P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
 is `READY`.
@@ -497,7 +500,7 @@ create a public record, receipt, lifecycle journal, decision binding, or live
 policy and does not authorize revocation, reactivation, rollback, arbitrary
 repair, deletion, or GC.
 
-The contract-frozen decision-store and capacity/GC prerequisite reserves only
+The `IN_PROGRESS` decision-store and capacity/GC implementation candidate owns
 this additional external workspace namespace:
 
 ```text
@@ -505,13 +508,18 @@ this additional external workspace namespace:
   <generation_id>/<decision_request_sha256>.json
 ```
 
-The future private store alone owns the mode-`0700` directory tree and canonical
+The private store alone owns the mode-`0700` directory tree and canonical
 single-link mode-`0600` binding. Generation and request-digest components are
 validated canonical identity, not caller paths. The namespace is outside the
 sealed generation, is included in existing capacity and reserve accounting, and
 blocks GC eligibility whenever a generation's decision state is nonempty. A
 safely observed absent top-level namespace is the zero-binding initial state and
-may be created only at the first final install. No implementation, cleanup,
+may be created only by an exclusive first-boundary rename from the fixed
+`semantic-release-decision-publication` slot. That separate mode-`0700` slot is
+non-authoritative publication construction, not canonical decision state and not
+lifecycle `staging`; it contains at most one bounded build/ready/cleanup state,
+with a 4 KiB manifest and a 256 KiB physical-reserve allowance. Validated retry
+cleanup is confined to this slot and never removes canonical state. No canonical cleanup,
 repair, deletion, quarantine, rollback, public reason token, or public exposure
 is authorized by reserving the namespace.
 
@@ -790,7 +798,7 @@ quarantine a generation. A completed repair advances lifecycle authority; an
 uncertain caller must inspect status and start a new preview/request pair rather
 than replay the old execute request.
 
-The contract-frozen decision-store prerequisite adds no lease domain. Its
+The `IN_PROGRESS` decision-store implementation adds no lease domain. Its
 pre-classification capacity snapshot uses shared registry, exclusive workspace,
 then shared target-generation locks. After that snapshot, the caller releases
 all three locks and performs classification outside them. Its install boundary

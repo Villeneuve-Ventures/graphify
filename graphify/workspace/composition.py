@@ -35,6 +35,7 @@ from graphify.workspace.semantic_queue import SemanticQueuePolicy, SemanticQueue
 
 if TYPE_CHECKING:
     from graphify.workspace.semantic_handoff import SemanticResultHandoffStore
+    from graphify.workspace.semantic_release_decision import SemanticReleaseDecisionStore
 
 
 RUNTIME_AUTHORITY_CONTRACT = "graphify.workspace.runtime_authority.internal"
@@ -221,12 +222,14 @@ class WorkspaceRuntime:
     freshness: FreshnessAuthority
     gc: GcStore
     semantic_handoffs: SemanticResultHandoffStore | None = None
+    semantic_release_decisions: SemanticReleaseDecisionStore | None = None
 
 
 def compose_workspace_runtime(inputs: WorkspaceRuntimeInputs) -> WorkspaceRuntime:
     """Validate authorities, then wire the existing stores without state access."""
 
     from graphify.workspace.semantic_handoff import SemanticResultHandoffStore
+    from graphify.workspace.semantic_release_decision import SemanticReleaseDecisionStore
 
     compatibility = CompatibilityTuple.from_manifest(inputs.compatibility_manifest)
     select_adapter(compatibility, intent=AdapterIntent.EXECUTE).require_adapter()
@@ -281,6 +284,14 @@ def compose_workspace_runtime(inputs: WorkspaceRuntimeInputs) -> WorkspaceRuntim
         pointers,
         **shared,
     )
+    semantic_release_decisions = SemanticReleaseDecisionStore(
+        inputs.state_root,
+        registry,
+        leases,
+        generations,
+        gc,
+        **shared,
+    )
     return WorkspaceRuntime(
         registry=registry,
         leases=leases,
@@ -291,6 +302,7 @@ def compose_workspace_runtime(inputs: WorkspaceRuntimeInputs) -> WorkspaceRuntim
         freshness=freshness,
         gc=gc,
         semantic_handoffs=semantic_handoffs,
+        semantic_release_decisions=semantic_release_decisions,
     )
 
 

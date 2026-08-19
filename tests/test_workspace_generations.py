@@ -2115,6 +2115,7 @@ def test_capacity_scan_retries_a_transient_cross_workspace_rename(
         *,
         allowed_directory_modes: frozenset[int],
         allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
     ) -> int:
         nonlocal moved
         if not moved and Path(relative) == source_relative:
@@ -2128,6 +2129,7 @@ def test_capacity_scan_retries_a_transient_cross_workspace_rename(
             relative,
             allowed_directory_modes=allowed_directory_modes,
             allowed_file_modes=allowed_file_modes,
+            deadline_ns=deadline_ns,
         )
 
     monkeypatch.setattr(store.state, "tree_bytes", move_between_list_and_measure)
