@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import time
 from dataclasses import replace
@@ -112,6 +113,20 @@ class DestinationRaceSyscalls(PosixSyscalls):
             source_dir_fd=source_dir_fd,
             destination_dir_fd=destination_dir_fd,
         )
+
+
+class PostFaultFsyncSyscalls(PosixSyscalls):
+    def __init__(self, fault: CrashAt, *, fail_after_fault: bool = False) -> None:
+        self.fault = fault
+        self.fail_after_fault = fail_after_fault
+        self.post_fault_fsync_count = 0
+
+    def fsync(self, descriptor: int) -> None:
+        super().fsync(descriptor)
+        if self.fault.fired:
+            self.post_fault_fsync_count += 1
+            if self.fail_after_fault:
+                raise InjectedFault("publication:post-fault-fsync")
 
 
 class CleanupFaultSyscalls(PosixSyscalls):
@@ -1666,7 +1681,7 @@ def test_exclusive_publication_never_overwrites_destination_race(
         "semantic-release-decision:publish:destination_parent_durable",
     ],
 )
-def test_post_publication_durability_fault_adopts_exact_bytes_or_is_unknown(
+def test_post_publication_durability_fault_finishes_parent_sync_before_adoption(
     tmp_path: Path,
     publication_kind: str,
     event: str,
@@ -1678,6 +1693,7 @@ def test_post_publication_durability_fault_adopts_exact_bytes_or_is_unknown(
         publication_kind,
     )
     crash = CrashAt(event)
+    syscalls = PostFaultFsyncSyscalls(crash)
     store = SemanticReleaseDecisionStore(
         harness.state_root,
         harness.registry,
@@ -1686,19 +1702,103 @@ def test_post_publication_durability_fault_adopts_exact_bytes_or_is_unknown(
         gc,
         capabilities=SUPPORTED,
         fault_hook=crash,
+        syscalls=syscalls,
     )
 
-    try:
-        result = store.install(capture, binding, capacity_policy=POLICY)
-    except CommitUnknown:
-        result = None
+    result = store.install(capture, binding, capacity_policy=POLICY)
 
     assert crash.fired
-    assert result is None or result == binding
+    assert result == binding
+    assert syscalls.post_fault_fsync_count >= 2
     destination = _binding_path(harness.state_root)
     assert destination.read_bytes() == binding.canonical
     decision_names = {path.name for path in destination.parent.parent.rglob("*")}
     assert not decision_names & {"build", "cleanup", "manifest.json", "payload", "ready"}
+
+
+def test_post_publication_parent_sync_failure_remains_commit_unknown(
+    tmp_path: Path,
+) -> None:
+    harness, generations, initial_store, gc = _runtime(tmp_path)
+    binding, capture = _prepare_publication_kind(
+        generations,
+        initial_store,
+        "root",
+    )
+    crash = CrashAt("semantic-release-decision:publish:renamed")
+    syscalls = PostFaultFsyncSyscalls(crash, fail_after_fault=True)
+    store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        fault_hook=crash,
+        syscalls=syscalls,
+    )
+
+    with pytest.raises(
+        CommitUnknown,
+        match="rename became visible before both directories were durable",
+    ):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert crash.fired
+    assert syscalls.post_fault_fsync_count == 1
+    assert _binding_path(harness.state_root).read_bytes() == binding.canonical
+
+
+@pytest.mark.parametrize("parent_kind", ["source", "destination"])
+def test_post_publication_parent_substitution_remains_commit_unknown(
+    tmp_path: Path,
+    parent_kind: str,
+) -> None:
+    harness, generations, initial_store, gc = _runtime(tmp_path)
+    binding, capture = _prepare_publication_kind(
+        generations,
+        initial_store,
+        "file",
+    )
+    destination = _binding_path(harness.state_root)
+    ready = (
+        harness.state_root
+        / "workspaces"
+        / REPO_UUID
+        / "semantic-release-decision-publication"
+        / "ready"
+    )
+    selected_parent = ready if parent_kind == "source" else destination.parent
+    aside = selected_parent.with_name(f"{selected_parent.name}-original")
+    fired = False
+
+    def substitute_parent(event: str) -> None:
+        nonlocal fired
+        if event != "semantic-release-decision:publish:renamed" or fired:
+            return
+        fired = True
+        selected_parent.rename(aside)
+        shutil.copytree(aside, selected_parent)
+
+    store = SemanticReleaseDecisionStore(
+        harness.state_root,
+        harness.registry,
+        harness.leases,
+        generations,
+        gc,
+        capabilities=SUPPORTED,
+        fault_hook=substitute_parent,
+    )
+
+    with pytest.raises(CommitUnknown):
+        store.install(capture, binding, capacity_policy=POLICY)
+
+    assert fired
+    assert aside.is_dir()
+    if parent_kind == "source":
+        assert destination.read_bytes() == binding.canonical
+    else:
+        assert (aside / destination.name).read_bytes() == binding.canonical
 
 
 @pytest.mark.parametrize(

@@ -1183,6 +1183,7 @@ class SemanticReleaseDecisionStore:
             source_kind=source_kind,
             label="semantic-release-decision:publish",
             deadline_ns=deadline_ns,
+            recover_commit_unknown=True,
         )
         self.state.fault_hook("semantic-release-decision:installed")
         return published
@@ -1544,6 +1545,8 @@ class SemanticReleaseDecisionStore:
                             deadline_ns=deadline_ns,
                         )
                     except BaseException as exc:
+                        if isinstance(exc, CommitUnknown):
+                            raise
                         try:
                             reopened = self._read_binding(
                                 capture.repo_uuid,
@@ -1588,8 +1591,6 @@ class SemanticReleaseDecisionStore:
                             raise SemanticReleaseDecisionConflict(
                                 "request-derived path already contains different bytes"
                             ) from exc
-                        if isinstance(exc, CommitUnknown):
-                            raise
                         try:
                             observed = self.generations.decision_capacity_usage_locked(
                                 capture.repo_uuid,

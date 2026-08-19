@@ -1967,6 +1967,7 @@ class DurableStateRoot:
         source_kind: str,
         label: str,
         deadline_ns: int | None = None,
+        recover_commit_unknown: bool = False,
     ) -> Path:
         """Exclusively publish one held private file or directory without mkdir."""
 
@@ -2019,39 +2020,8 @@ class DurableStateRoot:
                         raise StatePathError(
                             f"rename source changed while opening: {source_path}"
                         )
-                    self.fault_hook(f"{label}:before_rename")
-                    require_before_deadline(
-                        deadline_ns,
-                        "state rename exceeded its deadline",
-                    )
-                    self._require_held_private_directory_binding(
-                        source_parent_relative,
-                        source_parent,
-                        source_path.parent,
-                    )
-                    self._require_held_private_directory_binding(
-                        destination_parent_relative,
-                        destination_parent,
-                        destination_path.parent,
-                    )
-                    source_rebound = os.stat(
-                        source_path.name,
-                        dir_fd=source_parent,
-                        follow_symlinks=False,
-                    )
-                    if self._stat_identity(source_rebound) != source_identity:
-                        raise StatePathError(
-                            f"rename source changed before visibility: {source_path}"
-                        )
-                    try:
-                        self.syscalls.rename_exclusive_at(
-                            source_path.name,
-                            destination_path.name,
-                            source_dir_fd=source_parent,
-                            destination_dir_fd=destination_parent,
-                        )
-                        visible = True
-                        self.fault_hook(f"{label}:renamed")
+
+                    def require_visible_binding() -> None:
                         self._require_held_private_directory_binding(
                             source_parent_relative,
                             source_parent,
@@ -2090,7 +2060,8 @@ class DurableStateRoot:
                                 not in _PRIVATE_DIRECTORY_MODES
                             ):
                                 raise StatePathError(
-                                    f"rename destination is not a private directory: {destination_path}"
+                                    "rename destination is not a private directory: "
+                                    f"{destination_path}"
                                 )
                             self._require_owner(destination_bound, destination_path)
                         if (destination_bound.st_dev, destination_bound.st_ino) != (
@@ -2098,8 +2069,44 @@ class DurableStateRoot:
                             source_current.st_ino,
                         ):
                             raise StatePathError(
-                                f"rename destination changed after visibility: {destination_path}"
+                                "rename destination changed after visibility: "
+                                f"{destination_path}"
                             )
+
+                    self.fault_hook(f"{label}:before_rename")
+                    require_before_deadline(
+                        deadline_ns,
+                        "state rename exceeded its deadline",
+                    )
+                    self._require_held_private_directory_binding(
+                        source_parent_relative,
+                        source_parent,
+                        source_path.parent,
+                    )
+                    self._require_held_private_directory_binding(
+                        destination_parent_relative,
+                        destination_parent,
+                        destination_path.parent,
+                    )
+                    source_rebound = os.stat(
+                        source_path.name,
+                        dir_fd=source_parent,
+                        follow_symlinks=False,
+                    )
+                    if self._stat_identity(source_rebound) != source_identity:
+                        raise StatePathError(
+                            f"rename source changed before visibility: {source_path}"
+                        )
+                    try:
+                        self.syscalls.rename_exclusive_at(
+                            source_path.name,
+                            destination_path.name,
+                            source_dir_fd=source_parent,
+                            destination_dir_fd=destination_parent,
+                        )
+                        visible = True
+                        self.fault_hook(f"{label}:renamed")
+                        require_visible_binding()
                         self.syscalls.fsync(source_parent)
                         self.fault_hook(f"{label}:source_parent_durable")
                         if destination_parent_relative != source_parent_relative:
@@ -2107,10 +2114,22 @@ class DurableStateRoot:
                         self.fault_hook(f"{label}:destination_parent_durable")
                     except BaseException as exc:
                         if visible:
-                            raise CommitUnknown(
-                                f"{label} rename became visible before both directories were durable"
-                            ) from exc
-                        raise
+                            if recover_commit_unknown:
+                                try:
+                                    self.syscalls.fsync(source_parent)
+                                    if destination_parent_relative != source_parent_relative:
+                                        self.syscalls.fsync(destination_parent)
+                                    require_visible_binding()
+                                except BaseException as recovery_exc:
+                                    raise CommitUnknown(
+                                        f"{label} rename became visible before both directories were durable"
+                                    ) from recovery_exc
+                            else:
+                                raise CommitUnknown(
+                                    f"{label} rename became visible before both directories were durable"
+                                ) from exc
+                        else:
+                            raise
                 finally:
                     os.close(source_descriptor)
         return destination_path
