@@ -2003,18 +2003,19 @@ automatic policy choice, decision binding, classification composition,
 omission, graph/query projection, provider/backend use, publication, and
 successor activation are not authorized.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites are accepted `COMPLETE`. The decision-store and
-capacity/GC prerequisite, the encompassing release/DLP decision, classification
-composition, omission, projection,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites are accepted `COMPLETE`. The
+encompassing release/DLP decision, classification composition, omission, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-release decision-store and capacity/GC prerequisite
 
-This separate internal unnumbered P5B2 prerequisite is now an `IN_PROGRESS`
-internal implementation candidate, not `READY` or `COMPLETE`, and has no
-acceptance receipt. It owns only the private
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` only at this frozen internal boundary. Completion evidence is the
+[`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
+binding PR #76's contract freeze, PR #77's implementation delivery, and PR #79's
+canonical-directory correction. It owns only the private
 `SemanticReleaseDecisionStore`, the decision namespace's integration into the
 existing capacity and filesystem-reserve calculations, and the pre-plan
 generation-eligibility blocker in the existing GC planning path. It does
@@ -2154,27 +2155,25 @@ deletes, rewrites, quarantines, repairs, or rolls back a binding or any semantic
 input, handoff, generation, receipt, journal, staged record, pointer, policy, or
 other durable state.
 
-This implementation candidate adds the private store, authoritative capacity
+The accepted prerequisite adds the private store, authoritative capacity
 accounting, pre-plan GC blocker, internal runtime dependency, and direct hostile
 and failure-injection tests. It adds no public CLI/schema/runtime receipt,
-workflow, dependency, acceptance receipt, live record, JOS disposition,
+workflow, dependency, live record, JOS disposition,
 provider/backend, network, publication, or release authority. P5 and P5B2 remain
-`IN_PROGRESS`; the trust-root and policy-authority provisioning prerequisites
-remain `COMPLETE`. This decision-store and capacity/GC prerequisite remains
-`IN_PROGRESS`; live operator policy selection/provisioning, the encompassing
-release/DLP decision, classification composition, omission, projection,
-remaining P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later
-successor is `READY`.
+`IN_PROGRESS`; the trust-root, policy-authority provisioning, and
+decision-store/capacity/GC prerequisites remain `COMPLETE`; live operator policy
+selection/provisioning, the encompassing release/DLP decision, classification
+composition, omission, projection, remaining P5B2 work, and P5C remain
+`WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-content release/DLP decision
 
 This encompassing proposed unnumbered P5B2 child is contract-frozen only at the
 private internal decision boundary in this section. It remains `WAITING`, not
 `READY` or `COMPLETE`, and has no implementation or acceptance receipt. It
-consumes the accepted trust-root and policy-authority provisioning prerequisites
-above but still depends on a provisioned stable current `ACTIVE` operator
-policy-authority record, separate acceptance of the implemented decision-store
-and capacity/GC prerequisite above, classification composition,
+consumes the accepted trust-root, policy-authority provisioning, and
+decision-store/capacity/GC prerequisites above but still depends on a provisioned
+stable current `ACTIVE` operator policy-authority record, classification composition,
 and every other prerequisite named below. The freeze grants no execution
 authority and changes
 no parent phase, accepted receipt, JOS row, or later-successor status.
@@ -2655,7 +2654,7 @@ graph construction, or release.
 
 ### Decision-store prerequisite interface and audit evidence
 
-The separate `IN_PROGRESS` decision-store and capacity/GC prerequisite owns the
+The separate accepted `COMPLETE` decision-store and capacity/GC prerequisite owns the
 only durable decision-evidence format: one private canonical
 `graphify.workspace.semantic_release_decision.internal` format-version-1
 binding installed once at
@@ -2725,10 +2724,11 @@ The binding is at most 25 MiB. There are at most 64 bindings for one generation
 and at most 4,096 bindings for one workspace, counted by bounded no-follow
 enumeration before classification and again before install. Decision-store
 bytes count against the existing `CapacityPolicy` global/workspace byte
-ceilings and reserve calculation. The implementation candidate extends the
-authoritative capacity scanner to include this namespace, but this child cannot
-be `READY` before separate acceptance of that integration; insufficient capacity
-or inability to prove counts and bytes rejects release.
+ceilings and reserve calculation. The accepted decision-store/capacity/GC
+prerequisite extends the authoritative capacity scanner to include this
+namespace. Insufficient capacity or inability to prove counts and bytes rejects
+release; the encompassing decision child remains `WAITING` on live policy
+selection and classification composition.
 
 No lifecycle journal transition, staged-build state, generation receipt,
 runtime receipt, public schema, or public result is added by this contract
@@ -2743,13 +2743,13 @@ projection consumer must reopen the private mode-`0600` binding to recover the
 exact omission set; the derived proof is deliberately not a low-entropy value
 oracle.
 
-Neither prerequisite nor decision child deletes a decision binding. Until a
-separately accepted GC contract integrates this store, any nonempty decision
-directory is a pre-plan eligibility blocker that blocks purge of its generation;
-it is not projected into the current closed public protection-reason vocabulary.
-Later GC may remove or quarantine bindings only atomically with the same
-generation under separate operator authority. This retention rule grants no
-cleanup, repair, or GC authority now.
+Neither prerequisite nor decision child deletes a decision binding. The accepted
+decision-store/capacity/GC prerequisite makes any nonempty decision directory a
+pre-plan eligibility blocker that blocks purge of its generation; it is not
+projected into the current closed public protection-reason vocabulary. Binding
+deletion, quarantine, cleanup, repair, and GC mutation remain separately
+unauthorized and require later operator authority coordinated with the same
+generation.
 
 ### Decision-store composition, concurrency, commit uncertainty, and replay
 
@@ -2839,10 +2839,10 @@ installation, performance/resource qualification, P5C, H3, P6+, parent completio
 implementation of the encompassing child, its readiness, acceptance, execution,
 or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
-trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root
-and policy-authority provisioning prerequisites are accepted `COMPLETE`. This
-decision-store and capacity/GC prerequisite remains `IN_PROGRESS`; this
-encompassing child, live operator policy selection/provisioning, classification
+trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root,
+policy-authority provisioning, and decision-store/capacity/GC prerequisites are
+accepted `COMPLETE`. This encompassing child, live operator policy
+selection/provisioning, classification
 composition, omission execution, projection, public CLI/schema/receipt,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
 H3 remains `DEFERRED`; no later successor is `READY`.

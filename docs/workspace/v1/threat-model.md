@@ -560,9 +560,10 @@ projection, public surfaces, publication, or successor activation.
 
 ## Semantic-release decision-store and capacity/GC threats
 
-This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
-implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
-receipt. Its threat boundary is limited to the private
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` only at its frozen internal boundary. Completion evidence is the
+[`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
+binding PR #76, PR #77, and PR #79. Its threat boundary is limited to the private
 `SemanticReleaseDecisionStore`, bounded
 capacity and filesystem-reserve integration, install-once/replay behavior,
 commit-uncertainty handling, and nonempty-state generation protection. It is not
@@ -640,22 +641,21 @@ authority. No failure or replay path may mutate a binding or any
 semantic input, handoff, generation, receipt, journal, staged record, pointer,
 policy, or other durable state.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite remains `IN_PROGRESS`; live operator policy selection/provisioning,
-the encompassing release/DLP decision, classification composition, omission
-execution, projection, public surfaces, provider/backend, publication, remaining
-P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
-is `READY`.
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites remain `COMPLETE`. Live operator
+policy selection/provisioning, the encompassing release/DLP decision,
+classification composition, omission execution, projection, public surfaces,
+provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
+H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
-child is contract-frozen only and remains `WAITING`. The trust-root and
-policy-authority provisioning prerequisites above are accepted, but no stable
-current `ACTIVE` operator record is provisioned; decision-store
-and capacity/GC acceptance, classification composition, and the other decision
-prerequisites also remain absent. The
+child is contract-frozen only and remains `WAITING`. The trust-root,
+policy-authority provisioning, and decision-store/capacity/GC prerequisites
+above are accepted, but no stable current `ACTIVE` operator record is
+provisioned; classification composition and the other decision prerequisites
+remain absent. The
 decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
 promoted generation, visible pointer, staged marker, receipt, handoff, semantic
@@ -787,10 +787,10 @@ exact; partial, unreadable, different, unsafe, or ambiguous state is
 commit-unknown and fails closed. No new lease, lifecycle state, journal transition,
 cleanup, deletion, rollback, or destructive recovery is introduced.
 
-The separate prerequisite's nonempty decision state protects its generation
-from GC until separately accepted store integration exists. This prevents
-orphaning the audit/projection
-evidence and does not grant the decision child cleanup authority.
+The accepted decision-store/capacity/GC prerequisite makes nonempty decision
+state block GC eligibility and purge. This prevents orphaning the audit/projection
+evidence; deletion, quarantine, cleanup, repair, and GC mutation remain
+separately unauthorized.
 
 A later pointer or authority change makes an exact binding historical evidence
 only. It cannot be repaired into current authority. `REJECTED`,
@@ -808,8 +808,8 @@ provisioning prerequisites are accepted `COMPLETE`. The encompassing
 release/DLP decision, live operator-policy selection/provisioning,
 classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; the decision-store and capacity/GC prerequisite remains
-`IN_PROGRESS`. H3 remains `DEFERRED`; no later successor is `READY`.
+remain `WAITING`; the decision-store and capacity/GC prerequisite is accepted
+`COMPLETE`. H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Explicit non-claims
 

@@ -1042,9 +1042,11 @@ record and adds no runtime receipt or public schema.
 
 ## Semantic-release decision-store and capacity/GC prerequisite
 
-This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
-implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
-receipt. `SemanticReleaseDecisionStore` alone owns this external private
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` only at this frozen internal boundary. Completion evidence is the
+[`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
+binding PR #76, PR #77, and PR #79. `SemanticReleaseDecisionStore` alone owns
+this external private
 namespace:
 
 ```text
@@ -1135,21 +1137,20 @@ execute, reconcile, and purge. This prerequisite adds no token to the closed
 `GcPlan.protected` reason vocabulary and grants no GC mutation or binding-removal
 authority.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite remains `IN_PROGRESS`; the encompassing release/DLP decision, live
-operator policy selection/provisioning, classification composition, omission,
-projection, public surfaces, provider/backend, publication, remaining P5B2 work,
-and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites remain `COMPLETE`. The encompassing
+release/DLP decision, live operator policy selection/provisioning,
+classification composition, omission, projection, public surfaces,
+provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
+H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Semantic-content release/DLP decision
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is a contract freeze at `WAITING`. Besides the implemented and accepted
-trust-root and policy-authority provisioning mechanisms, it still requires a
-provisioned stable current `ACTIVE` operator policy-authority record, separate
-acceptance of the implemented decision-store and capacity/GC prerequisite above,
-classification composition, and every other frozen
+trust-root, policy-authority provisioning, and decision-store/capacity/GC
+mechanisms, it still requires a provisioned stable current `ACTIVE` operator
+policy-authority record, classification composition, and every other frozen
 prerequisite. It may later add one private internal decision binding but no
 lifecycle transition, staged-build state,
 journal event, generation receipt, public schema, runtime receipt, or public
@@ -1169,9 +1170,10 @@ One coordinate alone, a historical promoted generation, or drift is never
 decision authority.
 
 The decision child consumes the exact installed bundle contract above; it does
-not own or weaken that trust root. The trust-root subchild is accepted, but the
-encompassing decision child remains `WAITING` because its separate policy,
-persistence, capacity/GC, and composition prerequisites are absent.
+not own or weaken that trust root. The trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites are accepted, but the encompassing
+decision child remains `WAITING` because no stable live policy selection or
+classification composition exists.
 
 The separately accepted `SemanticReleasePolicyAuthorityStore` provisioning
 prerequisite above owns
@@ -1334,12 +1336,12 @@ binding, semantic input, handoff, generation, receipt, journal, staged record,
 pointer, or policy. A later pointer or authority change makes a prior binding
 historical evidence only.
 
-Neither prerequisite nor decision child deletes decision state. Until
-separately accepted GC integration exists, a nonempty decision directory is a
+Neither prerequisite nor decision child deletes decision state. The accepted
+decision-store/capacity/GC prerequisite makes a nonempty decision directory a
 pre-plan eligibility blocker that blocks purge of its generation and is not
 projected into the current closed public protection-reason vocabulary. Any later
-removal or quarantine must be authorized and coordinated with the same
-generation; no such authority is granted here.
+removal or quarantine must be separately authorized and coordinated with the
+same generation; no such authority is granted here.
 
 Terminal proof is derived, not separately persisted. It takes the shared
 registry lock, exclusive workspace lock, then target-generation shared lock;
@@ -1367,9 +1369,8 @@ migrate, GC or binding cleanup, service/watch, publication, P5C, H3, P6+,
 implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
 `IN_PROGRESS`; the separate trust-root and policy-authority provisioning
-prerequisites are accepted `COMPLETE`.
-This decision-store and capacity/GC prerequisite remains `IN_PROGRESS`; this
-decision child, live operator policy selection/provisioning, classification
+prerequisites and the decision-store/capacity/GC prerequisite are accepted
+`COMPLETE`. This decision child, live operator policy selection/provisioning, classification
 composition, omission execution, projection, public CLI/schema/receipt,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
 H3 remains `DEFERRED`; no later successor is `READY`.

@@ -26,6 +26,7 @@ from the verified canonical branch.
 - [P5B2 semantic-generation promotion and pointer-finalization](p5b2-semantic-generation-promotion-finalization.md)
 - [P5B2 semantic-release bundle and deterministic-classifier trust root](p5b2-semantic-release-trust-root.md)
 - [P5B2 semantic-release policy-authority provisioning](p5b2-semantic-release-policy-authority.md)
+- [P5B2 semantic-release decision-store and capacity/GC](p5b2-semantic-release-decision-store-capacity-gc.md)
 - [JOS test-harness determinism](jos-test-harness-determinism.md)
 - [P5B2b provider-neutral structural sync](p5b2b.md)
 - [P5B2c one-shot certified workspace query](p5b2c.md)

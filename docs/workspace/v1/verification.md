@@ -1290,10 +1290,9 @@ two-candidate artifact proof, all 34 unresolved-thread dispositions, and the
 PR #69 C1 repair. Delivery alone did not grant acceptance; this separate staged
 governance closeout proposes it.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites are accepted `COMPLETE`. The encompassing
-semantic-content release/DLP decision, the decision-store and capacity/GC
-prerequisite, classification composition, omission execution,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites are accepted `COMPLETE`. The
+encompassing semantic-content release/DLP decision, classification composition, omission execution,
 projection, public surfaces, provider/backend, publication, remaining P5B2
 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
 `READY`.
@@ -1416,17 +1415,18 @@ P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite remains
 The encompassing release/DLP decision,
 classification composition, omission, projection, public surfaces,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
-the decision-store and capacity/GC prerequisite is an unaccepted `IN_PROGRESS`
-implementation candidate. H3 remains `DEFERRED`; no later successor is `READY`.
+the decision-store and capacity/GC prerequisite is separately accepted
+`COMPLETE`. H3 remains `DEFERRED`; no later successor is `READY`.
 
-## P5B2 semantic-release decision-store and capacity/GC implementation gates
+## P5B2 semantic-release decision-store and capacity/GC acceptance gates
 
-This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
-implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
-receipt. The candidate is coherent only when the private store, authoritative
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` only at the frozen boundary and with the
+[`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md).
+The accepted boundary is coherent only when the private store, authoritative
 capacity scanner, GC pre-plan blocker, internal runtime composition, direct
-tests, and all seven maintained-current documents agree while the diff adds no
-public schema, workflow, dependency, receipt, live runtime state, or JOS
+tests, all seven maintained-current documents, receipt index, and receipt agree
+while the governance diff adds no public schema, workflow, dependency, live runtime state, or JOS
 disposition.
 
 Contract review must prove each of the following:
@@ -1496,8 +1496,16 @@ Contract review must prove each of the following:
   quarantine, repair, rollback, compaction, GC mutation, live policy
   provisioning, decision composition, classification, omission, projection,
   public CLI/schema/runtime receipt, provider/backend, network, publication,
-  release, acceptance, parent completion, or successor
+  release, broader acceptance, parent completion, or successor
   authority is granted.
+
+The exact canonical-directory correction regressions are:
+
+```bash
+uv run --frozen pytest -q \
+  tests/test_workspace_semantic_release_decision.py::test_capacity_scanner_rejects_detached_decision_directory_binding \
+  tests/test_workspace_semantic_release_decision.py::test_gc_plan_rejects_detached_decision_directory_binding_as_unsafe
+```
 
 The focused checks for the implementation and predecessor policy, trust-root,
 generation-capacity, GC, and runtime behavior are:
@@ -1512,34 +1520,35 @@ uv run --frozen --all-extras pytest -q \
   tests/test_workspace_runtime.py
 ```
 
-Those tests establish implementation-candidate and regression evidence only;
-they are not readiness or acceptance evidence for this prerequisite. The
-candidate additionally requires a targeted repo-configured type check,
+Those tests establish implementation and regression evidence; governance
+acceptance additionally requires the exact PR #76/#77/#79 identity, CI,
+manifest, comment/review/thread disposition, and receipt proof. The closeout
+also requires a targeted repo-configured type check,
 `uv lock --check`, `uv run --frozen python -m tools.skillgen --check`,
 `uv run --frozen pre-commit run --all-files`,
 `uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, exact
 changed-file manifest verification, a relative Markdown link and heading-anchor
-audit across all seven documents, and the documentation-diff advisory audit.
-After code changes, `uv run --frozen graphify update .` refreshes generated
-Graphify output, which must remain outside the tracked implementation diff.
+audit across all nine changed documents, the documentation-diff advisory audit,
+and independent exact-diff documentation, lifecycle, evidence, and architecture
+review. This governance-only closeout intentionally does not run
+`graphify update .` because no code or test bytes change and generated Graphify
+output must remain outside the tracked diff.
 
-Passing these gates establishes only an `IN_PROGRESS` implementation candidate.
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite remains `IN_PROGRESS`; the encompassing release/DLP decision, live
-operator policy selection/provisioning, classification composition, omission,
-projection, public surfaces, provider/backend, publication, and remaining
-P5B2/P5C work remain `WAITING`; H3 remains `DEFERRED`; no later successor is
-`READY`.
+Passing these gates accepts only this decision-store/capacity/GC prerequisite as
+`COMPLETE`. P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
+provisioning prerequisites remain `COMPLETE`. The encompassing release/DLP
+decision, live operator policy selection/provisioning, classification
+composition, omission, projection, public surfaces, provider/backend,
+publication, and remaining P5B2/P5C work remain `WAITING`; H3 remains
+`DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
-remains `WAITING`. It consumes the accepted trust-root and policy-authority
-provisioning prerequisites above. This child cannot become `READY` until a
-stable current `ACTIVE` operator policy-authority record, separate acceptance
-of the implemented decision-store and capacity/GC
-prerequisite above, and composition prerequisites exist. The freeze is
+remains `WAITING`. It consumes the accepted trust-root, policy-authority
+provisioning, and decision-store/capacity/GC prerequisites above. This child
+cannot become `READY` until a stable current `ACTIVE` operator policy-authority
+record and composition prerequisites exist. The freeze is
 complete only when all seven maintained-current documents agree and the diff
 changes no code, tests, schemas, fixtures, receipts, generated Graphify output,
 JOS row, or runtime artifact:
@@ -1555,10 +1564,9 @@ JOS row, or runtime artifact:
   the encompassing decision composition;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66-#76 provenance, the trust-root and
-  policy-authority provisioning prerequisites as `COMPLETE`, the
-  decision-store/capacity/GC prerequisite as `IN_PROGRESS`, and the encompassing
-  child as `WAITING`;
+- `governance.md` records exact PR #66-#79 provenance, the trust-root,
+  policy-authority provisioning, and decision-store/capacity/GC prerequisites as
+  `COMPLETE`, and the encompassing child as `WAITING`;
   and
 - this file freezes the evidence and validation gates without creating or
   accepting a receipt.
@@ -1686,8 +1694,9 @@ Contract review must prove each of the following:
   and includes decision-store bytes in existing global/workspace byte ceilings
   and filesystem-reserve calculations while retaining existing durable byte
   reservations in the arithmetic; inability to prove bounded enumeration,
-  usage, or capacity rejects. Nonempty decision state blocks GC eligibility
-  until separately accepted integration exists;
+  usage, or capacity rejects. The accepted prerequisite makes nonempty decision
+  state block GC eligibility and purge, while deletion, quarantine, cleanup,
+  repair, and GC mutation remain separately unauthorized;
 - composition with the separate prerequisite captures bounded private bytes
   under shared registry, exclusive workspace,
   then shared target-generation locks and classified outside coordination locks
@@ -1739,11 +1748,11 @@ changed document, and an independent documentation review. Generated Graphify
 output is not refreshed because no code changes and this batch expressly
 excludes generated artifacts.
 
-Passing those gates establishes only documentation consistency. It leaves P5
-and P5B2 `IN_PROGRESS`; the separately accepted trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. The decision-store and capacity/GC
-prerequisite, the encompassing decision child, live operator-policy
-selection/provisioning, classification composition, omission execution,
+Passing those gates establishes only documentation consistency for the
+encompassing still-waiting child. It leaves P5 and P5B2 `IN_PROGRESS`; the
+separately accepted trust-root, policy-authority provisioning, and
+decision-store/capacity/GC prerequisites remain `COMPLETE`. The encompassing
+decision child, live operator-policy selection/provisioning, classification composition, omission execution,
 projection,
 public surfaces, provider/backend, publication, and remaining P5B2/P5C work
 remain `WAITING`; H3 remains `DEFERRED`,
