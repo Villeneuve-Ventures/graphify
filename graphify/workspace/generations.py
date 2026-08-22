@@ -2482,6 +2482,11 @@ class GenerationStore:
                 before
             ) != self.state._stat_identity(after):
                 raise StatePathError("decision binding usage changed while scanning")
+            self.state._require_held_private_directory_binding(
+                relative,
+                descriptor,
+                path,
+            )
             return total, len(names), members
 
     def _scan_usage_once(

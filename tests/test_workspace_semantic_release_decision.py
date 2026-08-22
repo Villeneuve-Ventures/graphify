@@ -334,6 +334,103 @@ def _binding_path(root: Path, request_sha256: str = REQUEST_SHA256) -> Path:
     )
 
 
+def _arm_decision_directory_rebind_race(
+    monkeypatch: pytest.MonkeyPatch,
+    decision_directory: Path,
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Replace each enumerated canonical directory while its descriptor is held."""
+
+    race_root = decision_directory.parent.with_name("decision-directory-rebind-race")
+    race_root.mkdir(mode=0o700)
+    observations: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    original_names = DurableStateRoot._tree_entry_names_descriptor
+    detached_directory: Path | None = None
+    hostile_installed = False
+    target_scan_armed = False
+
+    def install_hostile_directory(descriptor: int) -> None:
+        nonlocal detached_directory, hostile_installed, target_scan_armed
+        index = len(observations)
+        detached_directory = race_root / f"detached-{index}"
+        hostile = race_root / f"hostile-staged-{index}"
+        hostile.mkdir(mode=0o700)
+        decision_directory.rename(detached_directory)
+        hostile.rename(decision_directory)
+        held = os.fstat(descriptor)
+        canonical = decision_directory.stat(follow_symlinks=False)
+        observations.append(
+            (
+                (held.st_dev, held.st_ino),
+                (canonical.st_dev, canonical.st_ino),
+            )
+        )
+        hostile_installed = True
+        target_scan_armed = False
+
+    class RebindingNames(list[str]):
+        def __init__(self, names: list[str], descriptor: int) -> None:
+            super().__init__(names)
+            self.descriptor = descriptor
+            self.compared = False
+
+        def __ne__(self, other: object) -> bool:
+            if not self.compared:
+                self.compared = True
+                install_hostile_directory(self.descriptor)
+            return super().__ne__(other)
+
+    def racing_tree_entry_names_descriptor(
+        state: DurableStateRoot,
+        descriptor: int,
+        path: Path,
+        *,
+        deadline_ns: int | None = None,
+        maximum_entries: int | None = None,
+    ) -> list[str]:
+        nonlocal detached_directory, hostile_installed, target_scan_armed
+        if path == decision_directory.parent and hostile_installed:
+            assert detached_directory is not None
+            index = len(observations) - 1
+            replacement = race_root / f"replacement-{index}"
+            archived_hostile = race_root / f"hostile-{index}"
+            shutil.copytree(detached_directory, replacement)
+            decision_directory.rename(archived_hostile)
+            replacement.rename(decision_directory)
+            hostile_installed = False
+        names = original_names(
+            state,
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+            maximum_entries=maximum_entries,
+        )
+        if (
+            path == decision_directory
+            and not hostile_installed
+            and not target_scan_armed
+            and len(observations) < 2
+        ):
+            target_scan_armed = True
+            return RebindingNames(names, descriptor)
+        return names
+
+    monkeypatch.setattr(
+        DurableStateRoot,
+        "_tree_entry_names_descriptor",
+        racing_tree_entry_names_descriptor,
+    )
+    return observations
+
+
+def _assert_detached_decision_directories(
+    observations: list[tuple[tuple[int, int], tuple[int, int]]],
+    *,
+    minimum: int,
+) -> None:
+    assert len(observations) >= minimum, observations
+    assert all(held != canonical for held, canonical in observations), observations
+
+
 def _prepare_publication_kind(
     generations: GenerationStore,
     store: SemanticReleaseDecisionStore,
@@ -1038,6 +1135,84 @@ def test_authoritative_capacity_scanner_charges_decision_bytes_and_gc_blocks_pre
         )
     assert tree_snapshot(harness.state_root) == before
     assert metadata_snapshot(harness.state_root) == before_metadata
+
+
+def test_capacity_scanner_rejects_detached_decision_directory_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    store.install(capture, binding, capacity_policy=POLICY)
+    observations = _arm_decision_directory_rebind_race(
+        monkeypatch,
+        _binding_path(harness.state_root).parent,
+    )
+
+    failure: CapacityExceeded | None = None
+    try:
+        generations.decision_capacity_usage_locked(REPO_UUID, POLICY)
+    except CapacityExceeded as exc:
+        failure = exc
+
+    if failure is None:
+        _assert_detached_decision_directories(observations, minimum=2)
+        pytest.fail(
+            "detached decision-directory capacity evidence was accepted; "
+            f"observations={observations!r}"
+        )
+    _assert_detached_decision_directories(observations, minimum=1)
+    assert "unsafe state path in capacity scan" in str(failure)
+    assert isinstance(failure.__cause__, StatePathError)
+    assert "state directory binding changed while held" in str(failure.__cause__)
+
+
+def test_gc_plan_rejects_detached_decision_directory_binding_as_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, store, gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    store.install(capture, binding, capacity_policy=POLICY)
+    grant = acquire(harness, "GC", tick=2)
+    observations = _arm_decision_directory_rebind_race(
+        monkeypatch,
+        _binding_path(harness.state_root).parent,
+    )
+
+    with pytest.raises(GcError) as failure:
+        gc.plan(
+            grant,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            monotonic_ns=20_001,
+        )
+
+    detail = str(failure.value)
+    if "blocks GC eligibility before planning" in detail:
+        _assert_detached_decision_directories(observations, minimum=2)
+    _assert_detached_decision_directories(observations, minimum=1)
+    assert "semantic-release decision state is unsafe" in detail, (
+        f"{detail}; observations={observations!r}"
+    )
+    capacity_failure = failure.value.__cause__
+    assert isinstance(capacity_failure, CapacityExceeded)
+    assert "unsafe semantic-release decision state" in str(capacity_failure)
+    path_failure = capacity_failure.__cause__
+    assert isinstance(path_failure, StatePathError)
+    assert "state directory binding changed while held" in str(path_failure)
 
 
 def test_gc_preview_deadline_is_enforced_during_decision_binding_scan(
