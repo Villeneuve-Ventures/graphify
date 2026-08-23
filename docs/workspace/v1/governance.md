@@ -161,12 +161,12 @@ PR #70 governance acceptance transitioned only that trust-root prerequisite to
 prerequisite, PR #72 implemented it, and PR #74 corrected its lock discipline.
 PR #75 made only that policy-authority acceptance canonical as `COMPLETE` and
 activated no successor. PR #76 then froze the separate decision-store and
-capacity/GC contract at `WAITING`; PR #77 delivered its implementation; and pull
-request #79 corrected the final canonical-directory rebinding defect. This staged
-governance closeout proposes only that prerequisite as `COMPLETE`. The encompassing
-release/DLP decision and every downstream dependency remain `WAITING`. Parent P5
-and P5B2 remain `IN_PROGRESS`, H3 remains `DEFERRED`, and no later successor is
-activated.
+capacity/GC contract at `WAITING`; PR #77 delivered its implementation; and
+pull request #79 corrected the final canonical-directory rebinding defect.
+This staged governance closeout proposes only that prerequisite as `COMPLETE`.
+The encompassing release/DLP decision and every downstream dependency remain
+`WAITING`. Parent P5 and P5B2 remain `IN_PROGRESS`, H3 remains `DEFERRED`, and
+no later successor is activated.
 
 ## Justified out-of-scope follow-up register
 
@@ -850,11 +850,11 @@ publication, release, parent completion, or
 successor authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
-and decision-store/capacity/GC prerequisites remain `COMPLETE`. Live operator
-policy selection/provisioning, the encompassing release/DLP decision,
-classification composition, omission, projection, public surfaces,
-provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
-H3 remains `DEFERRED`; no later successor is `READY`.
+and decision-store/capacity/GC prerequisites remain
+`COMPLETE`. Live operator policy selection/provisioning, the encompassing
+release/DLP decision, classification composition, omission, projection, public
+surfaces, provider/backend, publication, remaining P5B2 work, and P5C remain
+`WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-content release/DLP decision contract freeze
 

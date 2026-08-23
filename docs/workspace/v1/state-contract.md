@@ -1149,10 +1149,10 @@ H3 remains `DEFERRED`; no later successor is `READY`.
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
 child is a contract freeze at `WAITING`. Besides the implemented and accepted
 trust-root, policy-authority provisioning, and decision-store/capacity/GC
-mechanisms, it still requires a provisioned stable current `ACTIVE` operator
-policy-authority record, classification composition, and every other frozen
-prerequisite. It may later add one private internal decision binding but no
-lifecycle transition, staged-build state,
+mechanisms, it still requires a provisioned stable current `ACTIVE`
+operator policy-authority record, classification composition, and every other
+frozen prerequisite. It may later add one private internal decision binding but
+no lifecycle transition, staged-build state,
 journal event, generation receipt, public schema, runtime receipt, or public
 result.
 
@@ -1370,10 +1370,11 @@ implementation or readiness of the encompassing decision child, acceptance,
 parent completion, execution, or later successor authority. P5 and P5B2 remain
 `IN_PROGRESS`; the separate trust-root and policy-authority provisioning
 prerequisites and the decision-store/capacity/GC prerequisite are accepted
-`COMPLETE`. This decision child, live operator policy selection/provisioning, classification
-composition, omission execution, projection, public CLI/schema/receipt,
-provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
-H3 remains `DEFERRED`; no later successor is `READY`.
+`COMPLETE`. This decision child,
+live operator policy selection/provisioning, classification composition,
+omission execution, projection, public CLI/schema/receipt, provider/backend,
+publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
+`DEFERRED`; no later successor is `READY`.
 
 `graphify.workspace.pointer_set` atomically represents current, verified
 last-good, pointer revision, source/operation/schema epochs, and the distinct

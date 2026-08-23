@@ -2161,10 +2161,11 @@ and failure-injection tests. It adds no public CLI/schema/runtime receipt,
 workflow, dependency, live record, JOS disposition,
 provider/backend, network, publication, or release authority. P5 and P5B2 remain
 `IN_PROGRESS`; the trust-root, policy-authority provisioning, and
-decision-store/capacity/GC prerequisites remain `COMPLETE`; live operator policy
-selection/provisioning, the encompassing release/DLP decision, classification
-composition, omission, projection, remaining P5B2 work, and P5C remain
-`WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
+decision-store/capacity/GC prerequisites remain `COMPLETE`;
+live operator policy selection/provisioning, the encompassing release/DLP
+decision, classification composition, omission, projection, remaining P5B2
+work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
+`READY`.
 
 ## P5B2 semantic-content release/DLP decision
 
@@ -2727,8 +2728,8 @@ bytes count against the existing `CapacityPolicy` global/workspace byte
 ceilings and reserve calculation. The accepted decision-store/capacity/GC
 prerequisite extends the authoritative capacity scanner to include this
 namespace. Insufficient capacity or inability to prove counts and bytes rejects
-release; the encompassing decision child remains `WAITING` on live policy
-selection and classification composition.
+release; the encompassing decision child remains `WAITING` on
+live policy selection and classification composition.
 
 No lifecycle journal transition, staged-build state, generation receipt,
 runtime receipt, public schema, or public result is added by this contract
@@ -2841,8 +2842,8 @@ or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
 trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root,
 policy-authority provisioning, and decision-store/capacity/GC prerequisites are
-accepted `COMPLETE`. This encompassing child, live operator policy
-selection/provisioning, classification
-composition, omission execution, projection, public CLI/schema/receipt,
-provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
-H3 remains `DEFERRED`; no later successor is `READY`.
+accepted `COMPLETE`. This encompassing child,
+live operator policy selection/provisioning, classification composition,
+omission execution, projection, public CLI/schema/receipt, provider/backend,
+publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
+`DEFERRED`; no later successor is `READY`.

@@ -642,11 +642,12 @@ semantic input, handoff, generation, receipt, journal, staged record, pointer,
 policy, or other durable state.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
-and decision-store/capacity/GC prerequisites remain `COMPLETE`. Live operator
-policy selection/provisioning, the encompassing release/DLP decision,
-classification composition, omission execution, projection, public surfaces,
-provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
-H3 remains `DEFERRED`; no later successor is `READY`.
+and decision-store/capacity/GC prerequisites remain
+`COMPLETE`. Live operator policy selection/provisioning, the encompassing
+release/DLP decision, classification composition, omission execution,
+projection, public surfaces, provider/backend, publication, remaining P5B2
+work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
+`READY`.
 
 ## Semantic-content release/DLP decision threats
 

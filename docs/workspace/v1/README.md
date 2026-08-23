@@ -139,9 +139,9 @@ binding bytes.
 The encompassing semantic-content release/DLP decision child remains
 `WAITING`. It additionally requires the implemented and accepted trust-root and
 policy-authority provisioning prerequisites, a provisioned stable current
-`ACTIVE` operator policy authority, the accepted decision-store and capacity/GC
-prerequisite, classification composition,
-and the other frozen decision prerequisites before any live private
+`ACTIVE` operator policy authority, the accepted
+decision-store and capacity/GC prerequisite, classification composition, and
+the other frozen decision prerequisites before any live private
 request-addressed binding can exist.
 Operator policy provisioning, omission execution, projection, public
 CLI/schema/receipt, provider/backend, publication, and successor activation all

@@ -1554,10 +1554,10 @@ output must remain outside the tracked diff.
 Passing these gates accepts only this decision-store/capacity/GC prerequisite as
 `COMPLETE`. P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
 provisioning prerequisites remain `COMPLETE`. The encompassing release/DLP
-decision, live operator policy selection/provisioning, classification
-composition, omission, projection, public surfaces, provider/backend,
-publication, and remaining P5B2/P5C work remain `WAITING`; H3 remains
-`DEFERRED`; no later successor is `READY`.
+decision, live operator policy selection/provisioning,
+classification composition, omission, projection, public surfaces,
+provider/backend, publication, and remaining P5B2/P5C work remain `WAITING`;
+H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
