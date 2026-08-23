@@ -77,9 +77,9 @@ shows that the lane is mismatched:
   orchestration; preserve its supervised interview, planning, and durable
   execution stages.
 
-Route new work only through active workflows in the current installed OMX
-catalog, and use live `omx --help` when workflow availability or command syntax
-matters.
+When routing work through OMX, use only workflows that are active in the
+currently installed OMX catalog, and use live `omx --help` when workflow
+availability or command syntax matters.
 
 Use normal Codex repository tools for ordinary inspection. Use
 `omx sparkshell -- <command>` only for explicit shell-native read-only evidence
