@@ -1045,7 +1045,9 @@ record and adds no runtime receipt or public schema.
 This separate internal unnumbered P5B2 prerequisite is implemented and accepted
 as `COMPLETE` only at this frozen internal boundary. Completion evidence is the
 [`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
-binding PR #76, PR #77, and PR #79. `SemanticReleaseDecisionStore` alone owns
+binding PR #76, PR #77, PR #79, and PR #83. PR #79 corrects held
+generation-directory rebinding; PR #83 separately corrects top-level
+`semantic-release-decisions` namespace rebinding. `SemanticReleaseDecisionStore` alone owns
 this external private
 namespace:
 
@@ -1308,9 +1310,8 @@ provider responses, and credentials are forbidden.
 The binding is at most 25 MiB. Bounded no-follow enumeration permits at most 64
 bindings per generation and 4,096 per workspace. All decision-store bytes are
 charged against existing `CapacityPolicy` global/workspace byte ceilings and
-reserve, and the authoritative usage scanner must include this namespace before
-the prerequisite can be `READY`. Limit, enumeration, or capacity uncertainty
-rejects.
+reserve, and the accepted prerequisite's authoritative usage scanner includes
+this namespace. Limit, enumeration, or capacity uncertainty rejects.
 
 The write boundary uses capture-classify-revalidate-install. Under the existing
 shared registry lock, exclusive workspace lock, then target-generation shared
@@ -1336,12 +1337,14 @@ binding, semantic input, handoff, generation, receipt, journal, staged record,
 pointer, or policy. A later pointer or authority change makes a prior binding
 historical evidence only.
 
-Neither prerequisite nor decision child deletes decision state. The accepted
-decision-store/capacity/GC prerequisite makes a nonempty decision directory a
-pre-plan eligibility blocker that blocks purge of its generation and is not
-projected into the current closed public protection-reason vocabulary. Any later
-removal or quarantine must be separately authorized and coordinated with the
-same generation; no such authority is granted here.
+Neither prerequisite nor decision child deletes decision state. Any nonempty
+decision state in the workspace aborts shared workspace reachability before GC
+preview or plan succeeds. Therefore no GC plan exists for any generation in
+that workspace, and execute, reconcile, and purge are blocked, including
+operations aimed at unrelated generations. This blockade is not projected into
+the current closed public protection-reason vocabulary. Any later removal or
+quarantine must be separately authorized and coordinated with the same
+generation; no such authority is granted here.
 
 Terminal proof is derived, not separately persisted. It takes the shared
 registry lock, exclusive workspace lock, then target-generation shared lock;

@@ -1499,12 +1499,15 @@ Contract review must prove each of the following:
   release, broader acceptance, parent completion, or successor
   authority is granted.
 
-The exact canonical-directory correction regressions are:
+The exact held generation-directory and top-level decision-namespace correction
+regressions are:
 
 ```bash
 uv run --frozen pytest -q \
   tests/test_workspace_semantic_release_decision.py::test_capacity_scanner_rejects_detached_decision_directory_binding \
-  tests/test_workspace_semantic_release_decision.py::test_gc_plan_rejects_detached_decision_directory_binding_as_unsafe
+  tests/test_workspace_semantic_release_decision.py::test_gc_plan_rejects_detached_decision_directory_binding_as_unsafe \
+  tests/test_workspace_semantic_release_decision.py::test_capacity_scanner_rejects_rebound_top_level_decision_namespace \
+  tests/test_workspace_semantic_release_decision.py::test_gc_plan_rejects_rebound_top_level_decision_namespace_as_unsafe
 ```
 
 The focused checks for the implementation and predecessor policy, trust-root,
@@ -1520,7 +1523,7 @@ uv run --frozen --all-extras pytest -q \
   tests/test_workspace_runtime.py
 ```
 
-The required targeted repository-configured type check is:
+The repository-configured targeted type check is:
 
 ```bash
 uv run --frozen pyright \
@@ -1538,7 +1541,7 @@ uv run --frozen pyright \
 It must complete with zero errors, warnings, or information messages.
 
 Those tests establish implementation and regression evidence; governance
-acceptance additionally requires the exact PR #76/#77/#79 identity, CI,
+acceptance additionally requires the exact PR #76/#77/#79/#83 identity, CI,
 manifest, comment/review/thread disposition, and receipt proof. The closeout
 also requires the exact targeted type check above, `uv lock --check`,
 `uv run --frozen python -m tools.skillgen --check`,
@@ -1581,7 +1584,9 @@ JOS row, or runtime artifact:
   the encompassing decision composition;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66-#79 provenance, the trust-root,
+- `governance.md` records exact PR #66-#83 provenance, including PR #79's held
+  generation-directory correction and PR #83's top-level decision-namespace
+  correction, the trust-root,
   policy-authority provisioning, and decision-store/capacity/GC prerequisites as
   `COMPLETE`, and the encompassing child as `WAITING`;
   and

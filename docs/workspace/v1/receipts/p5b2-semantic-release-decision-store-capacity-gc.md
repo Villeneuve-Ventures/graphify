@@ -1,27 +1,31 @@
-# P5B2 semantic-release decision-store and capacity/GC accepted completion receipt
+# P5B2 semantic-release decision-store and capacity/GC staged completion receipt proposal
 
-Receipt status: `ACCEPTED`
+Receipt proposal status: `STAGED`
 
 Surface: `P5B2 semantic-release decision-store and capacity/GC` (unnumbered
 prerequisite)
 
-Accepted at live refresh: `2026-08-22T21:31:53Z`
+Proposed at live refresh: `2026-08-23T21:08:59Z`
 
-Repository authority state: `STAGED`. This governance-only receipt proposal
-becomes repo-local accepted evidence only when its commit is separately
-published and merged into `Villeneuve-Ventures/graphify@workspace/v1`. Until
-then, the published canonical branch remains authoritative.
+Repository authority state: `STAGED`. This governance-only receipt proposal is
+not accepted evidence. Only a committed copy byte-identical to the final
+independently reviewed nine-document candidate becomes repo-local accepted
+evidence when it is separately published and merged into
+`Villeneuve-Ventures/graphify@workspace/v1`. Any pre-merge content drift
+invalidates the reviewed digest and requires fresh independent review. Until
+that byte-identical merge, the published canonical branch remains authoritative.
 
 ## Frozen scope
 
-This receipt accepts only the internal persistence and shared-capacity boundary
-frozen in
+This receipt proposes acceptance only of the internal persistence and
+shared-capacity boundary frozen in
 [`../semantic-sync.md`](../semantic-sync.md#p5b2-semantic-release-decision-store-and-capacitygc-prerequisite).
-Acceptance requires PR #76's contract freeze, PR #77's implementation delivery,
-and PR #79's canonical-directory correction together. PR #77 alone does not
-satisfy the final accepted boundary.
+Proposed acceptance requires PR #76's contract freeze, PR #77's implementation
+delivery, PR #79's held generation-directory correction, and PR #83's
+top-level decision-namespace correction together. PR #77 alone does not
+satisfy the proposed final boundary.
 
-The accepted surface is exactly:
+The surface proposed for acceptance is exactly:
 
 - private `SemanticReleaseDecisionStore` ownership of the request-addressed
   mode-`0600` binding namespace and its bounded non-authoritative publication
@@ -36,7 +40,7 @@ The accepted surface is exactly:
 - shared workspace reachability treatment that blocks the GC lifecycle while
   any nonempty decision state exists.
 
-Acceptance provisions no live policy-authority or decision record. It creates
+Proposed acceptance provisions no live policy-authority or decision record. It creates
 no classification composition, omission, projection, public CLI/schema/runtime
 receipt, provider/backend, network, publication, release, canonical-state
 cleanup, binding deletion, repair, quarantine, rollback, GC mutation, parent
@@ -86,15 +90,15 @@ completion, or successor authority.
   `COMMENTED` reviews, and 16 threads: nine resolved, six current unresolved,
   and one unresolved/outdated.
 
-### PR #79 canonical-directory correction
+### PR #79 held generation-directory correction
 
 - Pull request: [#79](https://github.com/Villeneuve-Ventures/graphify/pull/79),
   merged at `2026-08-22T20:34:08Z`.
 - Exact base: `a3e5021fbdfcc3fe8e70fc75b34a0214fc3b03d2`.
 - Exact head: `26f4025274d9cd2184397fbbfde22aa8baf2f98d`.
-- Merge/current canonical commit:
+- Merge commit:
   `c54c6116a45cf026546579b2fd6421fbad6dcf74`.
-- Head, merge, and current canonical tree:
+- Head and merge tree:
   `5d5de9f6b7bcbc3fae2a0d51399b262a896ffe90`.
 - Exact-head CI [32593448372](https://github.com/Villeneuve-Ventures/graphify/actions/runs/32593448372),
   exact-head PR Agent [32596616049](https://github.com/Villeneuve-Ventures/graphify/actions/runs/32596616049),
@@ -111,20 +115,54 @@ tests/test_workspace_semantic_release_decision.py
 - Review inventory: three top-level timeline comments, no submitted reviews,
   and zero review threads.
 
-PR #78 and PR #80 are intervening ancestry, not acceptance evidence. PR #78
+### PR #83 top-level decision-namespace correction
+
+- Pull request: [#83](https://github.com/Villeneuve-Ventures/graphify/pull/83),
+  merged at `2026-08-23T20:36:19Z`.
+- Exact base: `2328f2bf3f5497482accf224ab1320688a43e706`.
+- Exact head: `17bd783cd7707ea34c7d8f831391d80415a17059`.
+- Head tree: `1572b81a698113ab72c48e95a7f205815da073b6`.
+- Normal merge commit:
+  `2ba0abcad54fcaaeb9127564c0d1c9d0965750ab`, with ordered parents
+  `2328f2bf3f5497482accf224ab1320688a43e706` and
+  `17bd783cd7707ea34c7d8f831391d80415a17059`.
+- Merge and current canonical tree:
+  `e4838ebac9e07481bb139e4ae330ea34a9f2c338`.
+- Exact binary three-dot patch SHA-256:
+  `030de91113ddfc0ad97c3156bca42bd64cc28975c9c2d42c56b5e04870af149e`.
+- Exact changed manifest:
+
+```text
+graphify/workspace/generations.py
+tests/test_workspace_semantic_release_decision.py
+```
+
+- Exact-head CI [32657311665](https://github.com/Villeneuve-Ventures/graphify/actions/runs/32657311665)
+  passed `skillgen-check`, `test (3.14)`, and `security-scan`; ready-triggered
+  PR Agent [32663886361](https://github.com/Villeneuve-Ventures/graphify/actions/runs/32663886361)
+  passed `review`; CodeRabbit completed with no actionable comments.
+- Independent exact-head review reported code-reviewer `APPROVE` with zero
+  findings and architect `CLEAR`. The residual replacement window after the
+  final binding check and before a later child reopen remains a separately
+  deferred descriptor-continuity boundary.
+- Review inventory: no submitted GitHub reviews and zero review threads.
+
+PR #78, PR #80, and PR #82 are intervening ancestry, not acceptance evidence. PR #78
 merged `3cc2dfe154e91bd6a29f416d8d242fb16010bb79`, tree
 `eafd90c43827ad822363108dc61a40e4cf7046f7`, and changed repository guidance
 and translated-readme state. PR #80 merged
 `a3e5021fbdfcc3fe8e70fc75b34a0214fc3b03d2`, tree
 `66a601954c64961e6ace08ebe0304b1d2ffc68f9`, and changed only `uv.lock`.
-Neither changes the selected semantic outcome or acceptance proof boundary.
+PR #82 merged `2328f2bf3f5497482accf224ab1320688a43e706` and changed only
+`AGENTS.md`. None changes the selected semantic outcome or proposed acceptance
+proof boundary.
 
-## Exact-current-tree review disposition
+## Canonical implementation review disposition
 
 GitHub review state was inspected read-only and was not treated as technical
 proof. No comment, reply, review, thread, or other GitHub review state was
 mutated. Every substantive concern is dispositioned against current canonical
-tree `5d5de9f6b7bcbc3fae2a0d51399b262a896ffe90`:
+tree `e4838ebac9e07481bb139e4ae330ea34a9f2c338`:
 
 | Pull request / thread | Concern | Exact-current-tree disposition |
 |---|---|---|
@@ -149,41 +187,66 @@ tree `5d5de9f6b7bcbc3fae2a0d51399b262a896ffe90`:
 | #77 `PRRT_kwDOTZvP8s6aVrve` | Double-dot semantic entity IDs could enter a persisted binding. | Fixed by PR #77 commit `00d33254732fd2a595b7cd9faf0aade41213c6af` and `test_binding_rejects_double_dot_semantic_entity_id`. |
 | #77 `PRRT_kwDOTZvP8s6aVrvf` | Persisted classifier results did not enforce match/indeterminate invariants. | Fixed by `test_match_requires_private_rule_provenance` and `test_indeterminate_cannot_retain_match_provenance`. |
 | #77 `PRRT_kwDOTZvP8s6adwH6` | Pre-parent-fsync publication uncertainty could be misreported as committed. | Fixed by PR #77 head `28d204cf66fc4026a8cd631d4a6462d64575063e` and the three post-publication durability regressions. |
-| #77 `PRRT_kwDOTZvP8s6ahsvj` | Capacity and GC scans could validate a detached decision directory after canonical replacement. | Fixed by PR #79 commit `3723a42e1ffb3262764c1c8b5bbe7d3527fbbe2d` and the two exact canonical-directory regressions. |
+| #77 `PRRT_kwDOTZvP8s6ahsvj` | Capacity and GC scans could validate a detached held generation decision directory after canonical replacement. | Fixed by PR #79 commit `3723a42e1ffb3262764c1c8b5bbe7d3527fbbe2d` and the two exact held-generation-directory regressions. |
+| #81 `PRRT_kwDOTZvP8s6bdODr` | Capacity and GC scans could still accept a byte-identical replacement of the top-level `semantic-release-decisions` namespace. | Fixed by PR #83 head `17bd783cd7707ea34c7d8f831391d80415a17059` and the two exact top-level namespace regressions. |
 
 GitHub's resolved/outdated presentation is immutable historical UI state for
 this closeout, not acceptance evidence. PR #76 remains one resolved/outdated
 plus five unresolved/outdated threads; PR #77 remains nine resolved, six
-current unresolved, and one unresolved/outdated; PR #79 remains thread-free.
+current unresolved, and one unresolved/outdated; PR #79 and PR #83 remain
+thread-free. PR #81's current unresolved threads remain delivery-state work and
+are not mutated by this local repair.
 
-## Local acceptance validation
+## Staged validation evidence
 
-The exact current canonical tree and staged documentation candidate passed these
-required local gates:
+The evidence domains remain separate: PR #83 exact head owns exact repair-patch
+review, its normal merge owns canonical implementation validation, and the
+staged PR #81 worktree owns only the dirty documentation-candidate checks.
 
-- exact canonical-directory regressions: `2 passed` in `1.21s`;
-- exact six-file decision-store/capacity/GC suite: `652 passed` in `152.55s`;
-- targeted Ruff over the delivered implementation and tests: passed;
-- targeted repository-configured Pyright over the same surface: zero errors,
-  warnings, or information messages;
-- the exact current `persistence.py` source compiled in memory under project
-  Python `3.14.3`, corroborating the PEP 758 thread disposition;
+Fresh PR #83 exact-head evidence at
+`17bd783cd7707ea34c7d8f831391d80415a17059`:
+
+- the four exact held generation-directory and top-level namespace regressions:
+  `4 passed` in `1.45s`; and
+- before/after status plus HEAD/tree checks proved zero tracked or untracked
+  target change.
+
+Fresh canonical-merge evidence from a disposable non-worktree materialization
+of `2ba0abcad54fcaaeb9127564c0d1c9d0965750ab`:
+
+- the exact implementation and regression-test blobs matched PR #83 head;
 - `uv lock --check`: passed;
 - `tools.skillgen --check`: all 134 artifacts matched;
-- `tools.skillgen --audit-coverage`, `--schema-singleton`,
-  `--monolith-roundtrip`, and `--always-on-roundtrip`: passed;
+- `tools.skillgen --schema-singleton`: passed;
+- the four exact rebinding regressions: `4 passed` in `1.53s`;
+- the exact six-file decision-store/capacity/GC suite: `654 passed` in
+  `185.02s`; and
+- targeted repository-configured Pyright over the delivered implementation and
+  tests: zero errors, warnings, or information messages.
+
+The archive intentionally contains no Git metadata, so `tools.skillgen
+--audit-coverage`, `--monolith-roundtrip`, and `--always-on-roundtrip` reported
+their documented git-history-dependent skip. Exact-head hosted CI and the PR
+#83 worktree remain the separately bound evidence for those checks; the skips
+are not presented as canonical-materialization passes.
+
+The fresh full repository run in that materialization completed with `5735`
+passed, `3` skipped, and `12` failed in `2003.43s`. Eleven failures were the
+same git-history-dependent skillgen tests that cannot run without `.git`. The
+remaining maintenance-lock observation failed once and then passed four
+consecutive focused reruns. This materialization result is a reported
+validation gap, not a canonical full-suite pass; PR #83's separately bound
+hosted `test (3.14)` check remains green.
+
+Fresh staged-documentation evidence:
+
 - `uv run --frozen pre-commit run --all-files`: passed `skillgen --check` and
-  `ruff`;
-- full repository suite: `5745 passed, 3 skipped, 5 warnings` in `1606.51s`;
-- the explicit nine-file relative-link and heading-anchor audit passed with 166
-  headings, 211 local link targets, and 46 heading-anchor targets;
+  `ruff` with its cache redirected outside the target;
+- the explicit nine-file relative-link and heading-anchor audit passed with 167
+  headings, 211 local link targets, and 46 heading-anchor targets; and
 - the documentation advisory audit completed with only expected
   source-verification prompts and action-run-number heuristics for the exact
-  material claims already bound above; and
-- the bounded anti-slop inventory found no placeholder, workaround, bypass,
-  fallback, dead-code, or debug-marker addition. Repeated lifecycle wording is
-  the maintained cross-document governance invariant, not duplicate alternate
-  behavior.
+  material claims bound above.
 
 The targeted repository-configured Pyright result above came from this exact
 command:
@@ -207,10 +270,12 @@ Final whitespace, exact-manifest, independent-review, and patch-digest evidence
 is reported at the local-diff boundary rather than embedded here, avoiding a
 self-referential receipt digest.
 
-## Accepted disposition
+## Proposed accepted disposition
 
-Only `P5B2 semantic-release decision-store and capacity/GC` transitions from
-`IN_PROGRESS` to `COMPLETE` at this staged governance boundary. The trust-root
+Only a byte-identical reviewed copy merged into canonical `workspace/v1` would
+transition `P5B2 semantic-release decision-store and capacity/GC` from
+`IN_PROGRESS` to `COMPLETE`. This staged governance proposal does not perform
+that transition. The trust-root
 and policy-authority provisioning prerequisites remain `COMPLETE`. P5 and P5B2
 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP decision,
 live operator-policy selection/provisioning, classification composition,
@@ -220,5 +285,5 @@ becomes `READY`.
 
 No source, test, schema, fixture, dependency, lockfile, configuration, workflow,
 generated Graphify output, runtime state, or GitHub review state is changed by
-this staged receipt. Merge, cleanup, broader acceptance, and successor
-activation remain separate reserved actions.
+this staged receipt proposal. Commit, push, PR mutation, merge, cleanup,
+broader acceptance, and successor activation remain separate reserved actions.

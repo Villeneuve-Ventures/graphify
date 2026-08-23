@@ -240,7 +240,9 @@ The separate internal unnumbered P5B2 semantic-release decision-store and
 capacity/GC prerequisite is implemented and accepted as `COMPLETE` only at its
 frozen internal boundary. Completion evidence is the
 [`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
-binding PR #76, PR #77, and PR #79.
+binding PR #76, PR #77, PR #79, and PR #83. PR #79 corrects held
+generation-directory rebinding; PR #83 separately corrects top-level
+`semantic-release-decisions` namespace rebinding.
 `SemanticReleaseDecisionStore` is the sole owner of the external private
 `semantic-release-decisions/<generation_id>/<decision_request_sha256>.json`
 namespace. Mode-`0700` directories, one single-link mode-`0600` canonical binding
@@ -279,9 +281,10 @@ authority.
 
 The encompassing unnumbered P5B2 semantic-content release/DLP decision child is
 contract-frozen only and remains `WAITING`. Its sole entry is the accepted exact
-promoted visible-current terminal plus separate implemented and accepted
-trust-root, stable operator policy-authority, and decision-store/capacity/GC
-prerequisites. It captures the private target-owned
+promoted visible-current terminal plus the separately accepted trust-root,
+policy-authority provisioning mechanism, and decision-store/capacity/GC
+prerequisites. It still requires a separately provisioned stable current
+`ACTIVE` operator policy-authority record. It captures the private target-owned
 semantic inputs under existing read authority, classifies only node labels,
 optional node rationales, and hyperedge labels outside the coordination locks,
 then reacquires the locks and rejects any authority or byte drift before one
@@ -511,7 +514,8 @@ The private store alone owns the mode-`0700` directory tree and canonical
 single-link mode-`0600` binding. Generation and request-digest components are
 validated canonical identity, not caller paths. The namespace is outside the
 sealed generation, is included in existing capacity and reserve accounting, and
-blocks GC eligibility whenever a generation's decision state is nonempty. A
+blocks workspace-wide GC preview and planning whenever any decision state is
+nonempty. A
 safely observed absent top-level namespace is the zero-binding initial state and
 may be created only by an exclusive first-boundary rename from the fixed
 `semantic-release-decision-publication` slot. That separate mode-`0700` slot is

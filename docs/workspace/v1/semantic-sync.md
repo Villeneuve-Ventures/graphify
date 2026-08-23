@@ -2014,8 +2014,9 @@ remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 This separate internal unnumbered P5B2 prerequisite is implemented and accepted
 as `COMPLETE` only at this frozen internal boundary. Completion evidence is the
 [`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
-binding PR #76's contract freeze, PR #77's implementation delivery, and PR #79's
-canonical-directory correction. It owns only the private
+binding PR #76's contract freeze, PR #77's implementation delivery, PR #79's
+held generation-directory correction, and PR #83's top-level
+decision-namespace correction. It owns only the private
 `SemanticReleaseDecisionStore`, the decision namespace's integration into the
 existing capacity and filesystem-reserve calculations, and the pre-plan
 generation-eligibility blocker in the existing GC planning path. It does
@@ -2118,11 +2119,13 @@ unreadable, unsafe, or ambiguous state and any presence, entry, count, or byte
 drift between the two bounded snapshots fail closed. Missing expected binding
 state after possible visibility follows the commit-uncertainty rules below.
 
-Nonempty decision state aborts the shared workspace reachability proof before a
-successful GC preview or plan and therefore blocks downstream execute,
-reconcile, and purge for that generation. This prerequisite adds no token to the
-existing closed `GcPlan.protected` reason vocabulary and authorizes no canonical
-deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation.
+Any nonempty decision state in the workspace aborts shared workspace
+reachability before GC preview or plan succeeds. Therefore no GC plan exists
+for any generation in that workspace, and execute, reconcile, and purge are
+blocked, including operations aimed at unrelated generations. This prerequisite
+adds no token to the existing closed `GcPlan.protected` reason vocabulary and
+authorizes no canonical deletion, cleanup, quarantine, repair, rollback,
+compaction, or GC mutation.
 
 ### Install once, replay, and commit uncertainty
 
@@ -2744,9 +2747,11 @@ projection consumer must reopen the private mode-`0600` binding to recover the
 exact omission set; the derived proof is deliberately not a low-entropy value
 oracle.
 
-Neither prerequisite nor decision child deletes a decision binding. The accepted
-decision-store/capacity/GC prerequisite makes any nonempty decision directory a
-pre-plan eligibility blocker that blocks purge of its generation; it is not
+Neither prerequisite nor decision child deletes a decision binding. Any
+nonempty decision state in the workspace aborts shared workspace reachability
+before GC preview or plan succeeds. Therefore no GC plan exists for any
+generation in that workspace, and execute, reconcile, and purge are blocked,
+including operations aimed at unrelated generations. This blockade is not
 projected into the current closed public protection-reason vocabulary. Binding
 deletion, quarantine, cleanup, repair, and GC mutation remain separately
 unauthorized and require later operator authority coordinated with the same

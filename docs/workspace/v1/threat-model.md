@@ -563,10 +563,12 @@ projection, public surfaces, publication, or successor activation.
 This separate internal unnumbered P5B2 prerequisite is implemented and accepted
 as `COMPLETE` only at its frozen internal boundary. Completion evidence is the
 [`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
-binding PR #76, PR #77, and PR #79. Its threat boundary is limited to the private
+binding PR #76, PR #77, PR #79, and PR #83. PR #79 corrects held
+generation-directory rebinding; PR #83 separately corrects top-level
+`semantic-release-decisions` namespace rebinding. Its threat boundary is limited to the private
 `SemanticReleaseDecisionStore`, bounded
 capacity and filesystem-reserve integration, install-once/replay behavior,
-commit-uncertainty handling, and nonempty-state generation protection. It is not
+commit-uncertainty handling, and workspace-wide pre-plan GC blockade. It is not
 operator policy, classification, terminal release-decision, omission,
 projection, public, provider/backend, network, or publication authority.
 
@@ -788,10 +790,12 @@ exact; partial, unreadable, different, unsafe, or ambiguous state is
 commit-unknown and fails closed. No new lease, lifecycle state, journal transition,
 cleanup, deletion, rollback, or destructive recovery is introduced.
 
-The accepted decision-store/capacity/GC prerequisite makes nonempty decision
-state block GC eligibility and purge. This prevents orphaning the audit/projection
-evidence; deletion, quarantine, cleanup, repair, and GC mutation remain
-separately unauthorized.
+Any nonempty decision state in the workspace aborts shared workspace
+reachability before GC preview or plan succeeds. Therefore no GC plan exists
+for any generation in that workspace, and execute, reconcile, and purge are
+blocked, including operations aimed at unrelated generations. This prevents
+orphaning the audit/projection evidence; deletion, quarantine, cleanup, repair,
+and GC mutation remain separately unauthorized.
 
 A later pointer or authority change makes an exact binding historical evidence
 only. It cannot be repaired into current authority. `REJECTED`,
