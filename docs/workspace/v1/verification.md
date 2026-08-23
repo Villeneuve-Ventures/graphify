@@ -1520,11 +1520,28 @@ uv run --frozen --all-extras pytest -q \
   tests/test_workspace_runtime.py
 ```
 
+The required targeted repository-configured type check is:
+
+```bash
+uv run --frozen pyright \
+  graphify/workspace/composition.py graphify/workspace/contracts.py \
+  graphify/workspace/gc.py graphify/workspace/generations.py \
+  graphify/workspace/persistence.py \
+  graphify/workspace/semantic_release_decision.py \
+  tests/test_workspace_semantic_release_decision.py \
+  tests/test_workspace_semantic_release_policy.py \
+  tests/test_workspace_semantic_release.py \
+  tests/test_workspace_generations.py tests/test_workspace_gc.py \
+  tests/test_workspace_runtime.py
+```
+
+It must complete with zero errors, warnings, or information messages.
+
 Those tests establish implementation and regression evidence; governance
 acceptance additionally requires the exact PR #76/#77/#79 identity, CI,
 manifest, comment/review/thread disposition, and receipt proof. The closeout
-also requires a targeted repo-configured type check,
-`uv lock --check`, `uv run --frozen python -m tools.skillgen --check`,
+also requires the exact targeted type check above, `uv lock --check`,
+`uv run --frozen python -m tools.skillgen --check`,
 `uv run --frozen pre-commit run --all-files`,
 `uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, exact
 changed-file manifest verification, a relative Markdown link and heading-anchor

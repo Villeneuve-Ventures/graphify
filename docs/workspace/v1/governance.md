@@ -1,6 +1,6 @@
 # Workspace governance
 
-Ledger refresh: `2026-08-14T22:39:49Z`
+Ledger refresh: `2026-08-22T21:31:53Z`
 
 This document became the canonical live ledger for Graphify-local phases
 P1-P5C, H1-H3, their readiness state, and accepted completion receipts only
@@ -161,8 +161,8 @@ PR #70 governance acceptance transitioned only that trust-root prerequisite to
 prerequisite, PR #72 implemented it, and PR #74 corrected its lock discipline.
 PR #75 made only that policy-authority acceptance canonical as `COMPLETE` and
 activated no successor. PR #76 then froze the separate decision-store and
-capacity/GC contract at `WAITING`; PR #77 delivered its implementation; and PR
-#79 corrected the final canonical-directory rebinding defect. This staged
+capacity/GC contract at `WAITING`; PR #77 delivered its implementation; and pull
+request #79 corrected the final canonical-directory rebinding defect. This staged
 governance closeout proposes only that prerequisite as `COMPLETE`. The encompassing
 release/DLP decision and every downstream dependency remain `WAITING`. Parent P5
 and P5B2 remain `IN_PROGRESS`, H3 remains `DEFERRED`, and no later successor is

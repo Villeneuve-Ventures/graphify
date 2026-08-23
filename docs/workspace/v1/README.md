@@ -115,8 +115,8 @@ capacity/GC prerequisite is implemented and accepted as `COMPLETE` only at its
 [private boundary](semantic-sync.md#p5b2-semantic-release-decision-store-and-capacitygc-prerequisite).
 Its completion evidence is the
 [P5B2 semantic-release decision-store and capacity/GC acceptance receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
-which binds PR #76's contract freeze, PR #77's implementation delivery, and PR
-#79's canonical-directory correction. The boundary gives
+which binds PR #76's contract freeze, PR #77's implementation delivery, and the
+canonical-directory correction from PR #79. The boundary gives
 `SemanticReleaseDecisionStore` sole ownership of the
 request-addressed private binding namespace, exact canonical binding shapes and
 digest preimages, bounded capacity enumeration and accounting, install-once and

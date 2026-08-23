@@ -185,6 +185,24 @@ required local gates:
   the maintained cross-document governance invariant, not duplicate alternate
   behavior.
 
+The targeted repository-configured Pyright result above came from this exact
+command:
+
+```bash
+uv run --frozen pyright \
+  graphify/workspace/composition.py graphify/workspace/contracts.py \
+  graphify/workspace/gc.py graphify/workspace/generations.py \
+  graphify/workspace/persistence.py \
+  graphify/workspace/semantic_release_decision.py \
+  tests/test_workspace_semantic_release_decision.py \
+  tests/test_workspace_semantic_release_policy.py \
+  tests/test_workspace_semantic_release.py \
+  tests/test_workspace_generations.py tests/test_workspace_gc.py \
+  tests/test_workspace_runtime.py
+```
+
+It completed with zero errors, warnings, or information messages.
+
 Final whitespace, exact-manifest, independent-review, and patch-digest evidence
 is reported at the local-diff boundary rather than embedded here, avoiding a
 self-referential receipt digest.
