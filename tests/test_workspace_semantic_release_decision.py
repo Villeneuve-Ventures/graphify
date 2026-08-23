@@ -431,6 +431,90 @@ def _assert_detached_decision_directories(
     assert all(held != canonical for held, canonical in observations), observations
 
 
+class _TopLevelDecisionNamespaceRebindObservations:
+    def __init__(self) -> None:
+        self.inode_pairs: list[tuple[tuple[int, int], tuple[int, int]]] = []
+        self.hook_count = 0
+        self.snapshots_equal: list[bool] = []
+
+
+def _arm_top_level_decision_namespace_rebind_race(
+    monkeypatch: pytest.MonkeyPatch,
+    decision_namespace: Path,
+) -> _TopLevelDecisionNamespaceRebindObservations:
+    """Replace the top-level namespace after its final descriptor metadata read."""
+
+    observations = _TopLevelDecisionNamespaceRebindObservations()
+    original_names = DurableStateRoot._tree_entry_names_descriptor
+
+    class RebindingNames(list[str]):
+        def __init__(self, names: list[str], descriptor: int) -> None:
+            super().__init__(names)
+            self.descriptor = descriptor
+            self.fired = False
+
+        def __bool__(self) -> bool:
+            if not self.fired:
+                self.fired = True
+                observations.hook_count += 1
+                detached = decision_namespace.with_name(
+                    "semantic-release-decisions-detached"
+                )
+                replacement = decision_namespace.with_name(
+                    "semantic-release-decisions-replacement"
+                )
+                shutil.copytree(decision_namespace, replacement)
+                decision_namespace.rename(detached)
+                replacement.rename(decision_namespace)
+                held = os.fstat(self.descriptor)
+                canonical = decision_namespace.stat(follow_symlinks=False)
+                observations.inode_pairs.append(
+                    (
+                        (held.st_dev, held.st_ino),
+                        (canonical.st_dev, canonical.st_ino),
+                    )
+                )
+                observations.snapshots_equal.append(
+                    tree_snapshot(detached) == tree_snapshot(decision_namespace)
+                )
+            return list.__len__(self) != 0
+
+    def racing_tree_entry_names_descriptor(
+        state: DurableStateRoot,
+        descriptor: int,
+        path: Path,
+        *,
+        deadline_ns: int | None = None,
+        maximum_entries: int | None = None,
+    ) -> list[str]:
+        names = original_names(
+            state,
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+            maximum_entries=maximum_entries,
+        )
+        if path == decision_namespace and observations.hook_count == 0:
+            return RebindingNames(names, descriptor)
+        return names
+
+    monkeypatch.setattr(
+        DurableStateRoot,
+        "_tree_entry_names_descriptor",
+        racing_tree_entry_names_descriptor,
+    )
+    return observations
+
+
+def _assert_top_level_decision_namespace_rebound(
+    observations: _TopLevelDecisionNamespaceRebindObservations,
+) -> None:
+    assert observations.hook_count == 1
+    assert len(observations.inode_pairs) == 1
+    assert observations.inode_pairs[0][0] != observations.inode_pairs[0][1]
+    assert observations.snapshots_equal == [True]
+
+
 def _prepare_publication_kind(
     generations: GenerationStore,
     store: SemanticReleaseDecisionStore,
@@ -1207,6 +1291,84 @@ def test_gc_plan_rejects_detached_decision_directory_binding_as_unsafe(
     assert "semantic-release decision state is unsafe" in detail, (
         f"{detail}; observations={observations!r}"
     )
+    capacity_failure = failure.value.__cause__
+    assert isinstance(capacity_failure, CapacityExceeded)
+    assert "unsafe semantic-release decision state" in str(capacity_failure)
+    path_failure = capacity_failure.__cause__
+    assert isinstance(path_failure, StatePathError)
+    assert "state directory binding changed while held" in str(path_failure)
+
+
+def test_capacity_scanner_rejects_rebound_top_level_decision_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, generations, store, _gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    store.install(capture, binding, capacity_policy=POLICY)
+    observations = _arm_top_level_decision_namespace_rebind_race(
+        monkeypatch,
+        _binding_path(harness.state_root).parent.parent,
+    )
+
+    failure: CapacityExceeded | None = None
+    try:
+        generations.decision_capacity_usage_locked(REPO_UUID, POLICY)
+    except CapacityExceeded as exc:
+        failure = exc
+
+    _assert_top_level_decision_namespace_rebound(observations)
+    if failure is None:
+        pytest.fail(
+            "rebound top-level decision namespace was accepted by the capacity scan; "
+            f"inode_pairs={observations.inode_pairs!r}"
+        )
+    assert "unsafe state path in capacity scan" in str(failure)
+    path_failure = failure.__cause__
+    assert isinstance(path_failure, StatePathError)
+    assert "state directory binding changed while held" in str(path_failure)
+
+
+def test_gc_plan_rejects_rebound_top_level_decision_namespace_as_unsafe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness, _generations, store, gc = _runtime(tmp_path)
+    binding = _binding()
+    capture = store.capture(
+        REPO_UUID,
+        GENERATION_ID,
+        REQUEST_SHA256,
+        capacity_policy=POLICY,
+    )
+    store.install(capture, binding, capacity_policy=POLICY)
+    grant = acquire(harness, "GC", tick=2)
+    observations = _arm_top_level_decision_namespace_rebind_race(
+        monkeypatch,
+        _binding_path(harness.state_root).parent.parent,
+    )
+
+    with pytest.raises(GcError) as failure:
+        gc.plan(
+            grant,
+            capacity_policy=POLICY,
+            protections=EMPTY_PROTECTION,
+            monotonic_ns=20_001,
+        )
+
+    _assert_top_level_decision_namespace_rebound(observations)
+    detail = str(failure.value)
+    assert "blocks GC eligibility before planning" not in detail, (
+        f"ordinary GC blockade accepted rebound namespace; "
+        f"inode_pairs={observations.inode_pairs!r}"
+    )
+    assert "semantic-release decision state is unsafe" in detail
     capacity_failure = failure.value.__cause__
     assert isinstance(capacity_failure, CapacityExceeded)
     assert "unsafe semantic-release decision state" in str(capacity_failure)

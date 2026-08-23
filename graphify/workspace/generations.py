@@ -2356,6 +2356,11 @@ class GenerationStore:
                 )
             if not names:
                 raise StatePathError("decision generation namespace is present but empty")
+            self.state._require_held_private_directory_binding(
+                decision_root,
+                descriptor,
+                path,
+            )
             return tuple(names)
 
     def _decision_directory_usage(
