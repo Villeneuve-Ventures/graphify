@@ -6,7 +6,7 @@ import importlib.metadata
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import platform
 import signal
 import socket
@@ -114,10 +114,15 @@ _CANDIDATE_PYTEST_PLUGIN_ENTRYPOINTS = [
         "version": "3.8.0",
     },
 ]
-_ALLOWED_SNAPSHOT_TRANSITION_FILES = [".github/workflows/ci.yml", "AGENTS.md"]
+_ALLOWED_SNAPSHOT_TRANSITION_FILES = [
+    ".github/workflows/ci.yml",
+    "AGENTS.md",
+    "README.md",
+]
 _REVIEWED_PATHS = [
     ".github/workflows/ci.yml",
     "AGENTS.md",
+    "README.md",
     "pyproject.toml",
     "tests/test_pytest_parallel_gate.py",
     "tests/test_workspace_adapter.py",
@@ -760,20 +765,38 @@ def _validate_measurement_command(
         raise ValueError("serial commands cannot carry xdist scheduler settings")
 
 
+def _terminate_windows_process_tree(process: subprocess.Popen[Any]) -> None:
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    if not isinstance(system_root, str) or not PureWindowsPath(system_root).is_absolute():
+        raise OSError("Windows process-tree termination requires an absolute SystemRoot")
+    taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
+    try:
+        subprocess.run(
+            [taskkill, "/PID", str(process.pid), "/T", "/F"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OSError("Windows process-tree termination timed out") from exc
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        raise OSError("Windows process tree did not terminate") from exc
+
+
 def _terminate_process(process: subprocess.Popen[Any]) -> None:
+    if os.name == "nt":
+        _terminate_windows_process_tree(process)
+        return
     if process.poll() is not None:
         return
-    if os.name == "nt":
-        process.terminate()
-    else:
-        os.killpg(process.pid, signal.SIGTERM)
+    os.killpg(process.pid, signal.SIGTERM)
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            process.kill()
-        else:
-            os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
 
 
@@ -1551,28 +1574,31 @@ def _validate_hosted_ci_evidence(
     pull_request_number = artifact.get("pull_request_number")
     run_id = artifact.get("run_id")
     repository_url = f"https://github.com/{_HOSTED_CI_REPOSITORY}"
+    if not isinstance(pull_request_number, int) or pull_request_number <= 0:
+        raise ValueError("hosted CI field pull_request_number is invalid")
+    if not isinstance(run_id, int) or run_id <= 0:
+        raise ValueError("hosted CI field run_id is invalid")
+    if artifact.get("pull_request_base_ref") != "workspace/v1":
+        raise ValueError("hosted CI field pull_request_base_ref is invalid")
+    if artifact.get("run_attempt") != 1:
+        raise ValueError("hosted CI field run_attempt is invalid")
+    if artifact.get("run_url") != f"{repository_url}/actions/runs/{run_id}":
+        raise ValueError("hosted CI field run_url is invalid")
     if (
         artifact.get("repository") != _HOSTED_CI_REPOSITORY
         or artifact.get("workflow_name") != _HOSTED_CI_WORKFLOW
         or artifact.get("workflow_path") != _HOSTED_CI_WORKFLOW_PATH
         or artifact.get("event") != "pull_request"
         or artifact.get("head_branch") != "codex/pytest-parallel-gate"
-        or not isinstance(pull_request_number, int)
-        or pull_request_number <= 0
         or artifact.get("pull_request_url")
         != f"{repository_url}/pull/{pull_request_number}"
         or artifact.get("pull_request_state") != "OPEN"
         or artifact.get("pull_request_is_draft") is not True
-        or artifact.get("pull_request_base_ref") != "workspace/v1"
         or artifact.get("pull_request_head_ref") != "codex/pytest-parallel-gate"
         or artifact.get("pull_request_head_sha") != candidate_head
         or artifact.get("run_pull_request_number") != pull_request_number
         or artifact.get("python_version") != "3.14"
-        or artifact.get("run_attempt") != 1
         or artifact.get("conclusion") != "success"
-        or not isinstance(run_id, int)
-        or run_id <= 0
-        or artifact.get("run_url") != f"{repository_url}/actions/runs/{run_id}"
         or artifact.get("run_inventory_query")
         != [
             "gh",
@@ -1900,6 +1926,10 @@ def _validate_hosted_variance_evidence(
     source_run_id = artifact.get("source_run_id")
     source_job_id = artifact.get("source_job_id")
     repository_url = f"https://github.com/{_HOSTED_CI_REPOSITORY}"
+    if source_run_id != _PR81_RUN_ID:
+        raise ValueError("hosted variance field source_run_id is invalid")
+    if artifact.get("source_job_conclusion") != "success":
+        raise ValueError("hosted variance field source_job_conclusion is invalid")
     job_started = _parse_utc(artifact["source_job_started_at"])
     job_completed = _parse_utc(artifact["source_job_completed_at"])
     setup_started = _parse_utc(artifact["source_setup_started_at"])
@@ -1944,7 +1974,6 @@ def _validate_hosted_variance_evidence(
         or artifact.get("source_pull_request_base_ref") != "workspace/v1"
         or artifact.get("source_pull_request_head_ref") != _PR81_HEAD_REF
         or artifact.get("source_pull_request_head_sha") != _PR81_HEAD_SHA
-        or source_run_id != _PR81_RUN_ID
         or artifact.get("source_run_url")
         != f"{repository_url}/actions/runs/{source_run_id}"
         or artifact.get("source_run_attempt") != 1
@@ -1958,7 +1987,6 @@ def _validate_hosted_variance_evidence(
         != f"{repository_url}/actions/runs/{source_run_id}/job/{source_job_id}"
         or artifact.get("source_head_sha") != _PR81_HEAD_SHA
         or artifact.get("source_job_status") != "completed"
-        or artifact.get("source_job_conclusion") != "success"
         or artifact.get("runner_image") != _PR81_RUNNER_IMAGE
         or candidate_test_job.get("runner_os") != artifact.get("runner_os")
         or candidate_test_job.get("runner_arch") != artifact.get("runner_arch")
@@ -1976,9 +2004,10 @@ def _validate_hosted_variance_evidence(
         or not (job_started <= setup_started <= setup_completed <= test_started)
         or not (test_started < test_completed <= job_completed)
         or variance_explanation != expected_explanation
-        or hosted_seconds * 5 > serial_seconds * 4
     ):
         raise ValueError("hosted variance evidence is not a comparable 20 percent improvement")
+    if hosted_seconds * 5 > serial_seconds * 4:
+        raise ValueError("hosted variance field hosted_seconds does not prove 20 percent improvement")
 
 
 def _validate_gate_receipt(

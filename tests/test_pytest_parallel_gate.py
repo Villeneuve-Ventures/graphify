@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tomllib
+from typing import Any, cast
 
 import pytest
 
@@ -135,6 +136,7 @@ def test_ci_full_suite_command_and_serial_fallback_are_exact():
     repo_root = Path(__file__).parents[1]
     workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     instructions = (repo_root / "AGENTS.md").read_text(encoding="utf-8")
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
     serial = "uv run --frozen pytest tests/ -q --tb=short"
     selected = f"{serial} -n 2 --dist=loadfile --max-worker-restart=0"
     test_job = workflow.split("\n  test:\n", 1)[1].split("\n  security-scan:\n", 1)[0]
@@ -147,6 +149,9 @@ def test_ci_full_suite_command_and_serial_fallback_are_exact():
     assert "continue-on-error" not in test_job
     assert f"`{selected}`" in instructions
     assert f"`{serial}`" in instructions
+    assert f"{selected}  # full CI gate" in readme
+    assert f"{serial}  # serial diagnostic and compatibility fallback" in readme
+    assert f"Before opening a PR, run `{selected}`" in readme
 
 
 def test_repository_manifest_detects_file_mode_and_symlink(tmp_path: Path):
@@ -241,6 +246,7 @@ def _manifest(tag: str) -> dict[str, object]:
     contents = {
         ".github/workflows/ci.yml": f"ci-{tag}",
         "AGENTS.md": f"agents-{tag}",
+        "README.md": f"readme-{tag}",
         "source.txt": source_tag,
     }
     if tag in {"matrix", "candidate"}:
@@ -1008,7 +1014,7 @@ def test_hosted_ci_derives_duration_and_rejects_reruns():
         evidence, "b" * 40, manifest_sha
     ) == pytest.approx(590)
     evidence["run_attempt"] = 2
-    with pytest.raises(ValueError, match="first attempt"):
+    with pytest.raises(ValueError, match="run_attempt"):
         gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
 
 
@@ -1019,7 +1025,7 @@ def test_hosted_ci_rejects_wrong_repository_urls():
         evidence, "b" * 40, manifest_sha
     ) == pytest.approx(590)
     evidence["run_url"] = "https://github.com/attacker/dummy/actions/runs/42"
-    with pytest.raises(ValueError, match="first attempt"):
+    with pytest.raises(ValueError, match="run_url"):
         gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
 
 
@@ -1030,7 +1036,7 @@ def test_hosted_ci_rejects_wrong_pr_delivery_metadata():
         evidence, "b" * 40, manifest_sha
     ) == pytest.approx(590)
     evidence["pull_request_base_ref"] = "main"
-    with pytest.raises(ValueError, match="first attempt"):
+    with pytest.raises(ValueError, match="pull_request_base_ref"):
         gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
 
 
@@ -1210,7 +1216,7 @@ def test_hosted_variance_accepts_exact_644_second_boundary(tmp_path: Path):
     gate._atomic_write_json(manifest_path, {})
     hosted = _hosted_ci_evidence("c" * 64)
     gate._validate_hosted_variance_evidence(manifest_path, reference, hosted, 644)
-    with pytest.raises(ValueError, match="20 percent improvement"):
+    with pytest.raises(ValueError, match="hosted_seconds"):
         gate._validate_hosted_variance_evidence(
             manifest_path, reference, hosted, 644.01
         )
@@ -1229,7 +1235,7 @@ def test_hosted_variance_rejects_unsuccessful_source_job(tmp_path: Path):
     )
     variance["source_job_conclusion"] = "failure"
     reference = _write_ref(tmp_path, "variance-failed", variance)
-    with pytest.raises(ValueError, match="20 percent improvement"):
+    with pytest.raises(ValueError, match="source_job_conclusion"):
         gate._validate_hosted_variance_evidence(
             manifest_path,
             reference,
@@ -1260,7 +1266,7 @@ def test_hosted_variance_rejects_coordinated_source_identity_substitution(
     variance["source_head_sha"] = "9" * 40
     variance["source_pull_request_head_sha"] = "9" * 40
     reference = _write_ref(tmp_path, "variance-substituted", variance)
-    with pytest.raises(ValueError, match="20 percent improvement"):
+    with pytest.raises(ValueError, match="source_run_id"):
         gate._validate_hosted_variance_evidence(
             manifest_path,
             reference,
@@ -1419,6 +1425,57 @@ def test_missing_plugin_artifact_is_fail_closed(tmp_path: Path, monkeypatch):
     result = gate.run_pytest(repo, artifact, command, kind="integration")
     assert result["passed"] is False
     assert result["complete"] is False
+
+
+def test_windows_timeout_terminates_entire_process_tree(monkeypatch: pytest.MonkeyPatch):
+    parent_pid = 4242
+    child_pid = 4243
+    alive = {parent_pid, child_pid}
+
+    class Process:
+        pid = parent_pid
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == 5
+            assert alive == set()
+            return 1
+
+    def taskkill(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[list[str]]:
+        assert command == [
+            r"C:\Windows\System32\taskkill.exe",
+            "/PID",
+            str(parent_pid),
+            "/T",
+            "/F",
+        ]
+        assert kwargs == {
+            "check": True,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "timeout": 5,
+        }
+        alive.clear()
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.delenv("WINDIR", raising=False)
+    monkeypatch.setattr(gate.subprocess, "run", taskkill)
+
+    gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
+    assert alive == set()
+
+
+def test_windows_timeout_fails_closed_without_trusted_taskkill(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Process:
+        pid = 4242
+
+    monkeypatch.delenv("SystemRoot", raising=False)
+    monkeypatch.delenv("WINDIR", raising=False)
+
+    with pytest.raises(OSError, match="SystemRoot"):
+        gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
 
 
 def test_timeout_is_fail_closed(tmp_path: Path):

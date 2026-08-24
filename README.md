@@ -800,7 +800,8 @@ uv run python -c "import graphify; print(graphify.__file__)"
 ### Running tests
 
 ```bash
-uv run pytest tests/ -q                # run the full suite
+uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0  # full CI gate
+uv run --frozen pytest tests/ -q --tb=short  # serial diagnostic and compatibility fallback
 uv run pytest tests/test_extract.py -q # one module
 uv run pytest tests/ -q -k "python"    # filter by name
 ```
@@ -811,7 +812,7 @@ uv run pytest tests/ -q -k "python"    # filter by name
 
 - Active development happens on the `v8` branch.
 - Commit style: `fix: <description>` / `feat: <description>` / `docs: <description>`
-- Before opening a PR, run `uv run pytest tests/ -q` and confirm it passes.
+- Before opening a PR, run `uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0` and confirm it passes.
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
 
 ### What to contribute
