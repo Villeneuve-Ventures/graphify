@@ -1809,14 +1809,23 @@ def _validate_hosted_ci_evidence(
     )
     pull_request_number = artifact.get("pull_request_number")
     run_id = artifact.get("run_id")
+    run_attempt = artifact.get("run_attempt")
     repository_url = f"https://github.com/{_HOSTED_CI_REPOSITORY}"
-    if not isinstance(pull_request_number, int) or pull_request_number <= 0:
+    if (
+        isinstance(pull_request_number, bool)
+        or not isinstance(pull_request_number, int)
+        or pull_request_number <= 0
+    ):
         raise ValueError("hosted CI field pull_request_number is invalid")
-    if not isinstance(run_id, int) or run_id <= 0:
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
         raise ValueError("hosted CI field run_id is invalid")
     if artifact.get("pull_request_base_ref") != "workspace/v1":
         raise ValueError("hosted CI field pull_request_base_ref is invalid")
-    if artifact.get("run_attempt") != 1:
+    if (
+        isinstance(run_attempt, bool)
+        or not isinstance(run_attempt, int)
+        or run_attempt != 1
+    ):
         raise ValueError("hosted CI field run_attempt is invalid")
     if artifact.get("run_url") != f"{repository_url}/actions/runs/{run_id}":
         raise ValueError("hosted CI field run_url is invalid")
@@ -1870,6 +1879,7 @@ def _validate_hosted_ci_evidence(
         or not isinstance(inventory[0], dict)
         or set(inventory[0])
         != {*expected_inventory, "created_at", "updated_at"}
+        or isinstance(inventory[0].get("run_attempt"), bool)
         or any(inventory[0].get(key) != value for key, value in expected_inventory.items())
         or _parse_utc(inventory[0]["created_at"]) > run_started
         or _parse_utc(inventory[0]["updated_at"]) < run_completed
@@ -2012,6 +2022,7 @@ def _verify_live_github_hosted(
         raise ValueError("live GitHub workflow run is associated with another pull request")
     if (
         run.get("id") != run_id
+        or isinstance(run.get("run_attempt"), bool)
         or run.get("run_attempt") != 1
         or run.get("event") != "pull_request"
         or run.get("name") != _HOSTED_CI_WORKFLOW
@@ -2046,7 +2057,8 @@ def _verify_live_github_hosted(
         raise ValueError("live GitHub does not show one sole final-SHA CI run")
     inventory = artifact["workflow_runs_for_head"][0]
     if (
-        matching_runs[0].get("run_attempt") != inventory.get("run_attempt")
+        isinstance(matching_runs[0].get("run_attempt"), bool)
+        or matching_runs[0].get("run_attempt") != inventory.get("run_attempt")
         or matching_runs[0].get("event") != inventory.get("event")
         or matching_runs[0].get("head_sha") != inventory.get("head_sha")
         or matching_runs[0].get("status") != inventory.get("status")

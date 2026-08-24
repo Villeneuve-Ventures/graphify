@@ -1020,6 +1020,35 @@ def test_hosted_ci_derives_duration_and_rejects_reruns():
         gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("pull_request_number", True),
+        ("run_id", True),
+        ("run_attempt", True),
+    ],
+)
+def test_hosted_ci_rejects_boolean_integer_fields(field: str, value: bool):
+    manifest_sha = "c" * 64
+    evidence = _hosted_ci_evidence(manifest_sha)
+    evidence[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
+
+
+def test_hosted_ci_rejects_boolean_inventory_run_attempt():
+    manifest_sha = "c" * 64
+    evidence = _hosted_ci_evidence(manifest_sha)
+    inventory = evidence["workflow_runs_for_head"]
+    assert isinstance(inventory, list)
+    assert isinstance(inventory[0], dict)
+    inventory[0]["run_attempt"] = True
+
+    with pytest.raises(ValueError, match="inventory"):
+        gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
+
+
 def test_hosted_ci_rejects_wrong_repository_urls():
     manifest_sha = "c" * 64
     evidence = _hosted_ci_evidence(manifest_sha)
@@ -1153,6 +1182,34 @@ def test_live_github_rejects_coordinated_candidate_identity_substitution():
         api_loader=api_loader,
         job_log_loader=lambda run, job: "Image: ubuntu-24.04\n",
     )
+
+    def boolean_run_attempt_loader(endpoint: str) -> dict[str, object]:
+        result = api_loader(endpoint)
+        if endpoint.endswith(f"/actions/runs/{run_id}") and "?" not in endpoint:
+            result = json.loads(json.dumps(result))
+            result["run_attempt"] = True
+        return result
+
+    with pytest.raises(ValueError, match="workflow run differs"):
+        gate._verify_live_github_hosted(
+            evidence,
+            api_loader=boolean_run_attempt_loader,
+            job_log_loader=lambda run, job: "Image: ubuntu-24.04\n",
+        )
+
+    def boolean_inventory_attempt_loader(endpoint: str) -> dict[str, object]:
+        result = api_loader(endpoint)
+        if "actions/runs?" in endpoint:
+            result = json.loads(json.dumps(result))
+            result["workflow_runs"][0]["run_attempt"] = True
+        return result
+
+    with pytest.raises(ValueError, match="final-SHA inventory differs"):
+        gate._verify_live_github_hosted(
+            evidence,
+            api_loader=boolean_inventory_attempt_loader,
+            job_log_loader=lambda run, job: "Image: ubuntu-24.04\n",
+        )
 
     def wrong_pr_loader(endpoint: str) -> dict[str, object]:
         result = api_loader(endpoint)
@@ -1663,6 +1720,7 @@ def test_windows_job_launcher_rejects_invalid_payload(payload: str) -> None:
         input=payload,
         text=True,
         check=False,
+        timeout=60,
     )
 
     assert result.returncode == 125
@@ -1675,6 +1733,7 @@ def test_windows_job_launcher_returns_requested_exit_code() -> None:
         input=json.dumps(command) + "\n",
         text=True,
         check=False,
+        timeout=60,
     )
 
     assert result.returncode == 7
