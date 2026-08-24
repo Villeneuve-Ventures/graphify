@@ -141,7 +141,9 @@ prefer frozen commands matching CI.
 
 - Focused tests:
   `uv run --frozen pytest tests/<test_file>.py -q --tb=short`
-- Full test gate for cross-cutting or release-sensitive changes:
+- Canonical full test gate for cross-cutting or release-sensitive changes:
+  `uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0`
+- Serial diagnostic and compatibility fallback:
   `uv run --frozen pytest tests/ -q --tb=short`
 - Generated skill changes:
   `uv run --frozen python -m tools.skillgen --check`, followed when applicable

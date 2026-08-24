@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, cast, Iterator
 
@@ -2948,20 +2949,28 @@ def test_status_emits_no_transient_filesystem_write_events(tmp_path: Path) -> No
     events_module = pytest.importorskip("watchdog.events")
     harness = create_harness(tmp_path)
     observed: list[tuple[str, str]] = []
+    sentinel = harness.state_root / ".watchdog-ready"
+    sentinel_deleted = threading.Event()
 
     class Handler(events_module.FileSystemEventHandler):  # type: ignore[misc]
         def on_any_event(self, event: Any) -> None:
             if event.event_type not in {"opened", "closed", "closed_no_write"}:
                 observed.append((event.event_type, event.src_path))
+            if event.event_type == "deleted" and event.src_path == str(sentinel):
+                sentinel_deleted.set()
 
     observer = watchdog.Observer()
     observer.schedule(Handler(), str(harness.state_root), recursive=True)
     observer.start()
     try:
-        time.sleep(0.1)
+        sentinel.write_bytes(b"")
+        sentinel.unlink()
+        assert sentinel_deleted.wait(timeout=5)
+        observer.event_queue.join()
         observed.clear()
         inspect_workspace_status(_inputs(harness.state_root))
         time.sleep(0.1)
+        observer.event_queue.join()
     finally:
         observer.stop()
         observer.join(timeout=5)
