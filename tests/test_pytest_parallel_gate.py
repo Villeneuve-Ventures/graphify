@@ -1015,6 +1015,9 @@ def test_hosted_ci_derives_duration_and_rejects_reruns():
 def test_hosted_ci_rejects_wrong_repository_urls():
     manifest_sha = "c" * 64
     evidence = _hosted_ci_evidence(manifest_sha)
+    assert gate._validate_hosted_ci_evidence(
+        evidence, "b" * 40, manifest_sha
+    ) == pytest.approx(590)
     evidence["run_url"] = "https://github.com/attacker/dummy/actions/runs/42"
     with pytest.raises(ValueError, match="first attempt"):
         gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
@@ -1023,6 +1026,9 @@ def test_hosted_ci_rejects_wrong_repository_urls():
 def test_hosted_ci_rejects_wrong_pr_delivery_metadata():
     manifest_sha = "c" * 64
     evidence = _hosted_ci_evidence(manifest_sha)
+    assert gate._validate_hosted_ci_evidence(
+        evidence, "b" * 40, manifest_sha
+    ) == pytest.approx(590)
     evidence["pull_request_base_ref"] = "main"
     with pytest.raises(ValueError, match="first attempt"):
         gate._validate_hosted_ci_evidence(evidence, "b" * 40, manifest_sha)
@@ -1212,10 +1218,17 @@ def test_hosted_variance_accepts_exact_644_second_boundary(tmp_path: Path):
 
 def test_hosted_variance_rejects_unsuccessful_source_job(tmp_path: Path):
     variance = _hosted_variance_evidence()
-    variance["source_job_conclusion"] = "failure"
-    reference = _write_ref(tmp_path, "variance-failed", variance)
+    valid_reference = _write_ref(tmp_path, "variance-valid", variance)
     manifest_path = tmp_path / "evidence.json"
     gate._atomic_write_json(manifest_path, {})
+    gate._validate_hosted_variance_evidence(
+        manifest_path,
+        valid_reference,
+        _hosted_ci_evidence("c" * 64),
+        640,
+    )
+    variance["source_job_conclusion"] = "failure"
+    reference = _write_ref(tmp_path, "variance-failed", variance)
     with pytest.raises(ValueError, match="20 percent improvement"):
         gate._validate_hosted_variance_evidence(
             manifest_path,
@@ -1229,6 +1242,15 @@ def test_hosted_variance_rejects_coordinated_source_identity_substitution(
     tmp_path: Path,
 ):
     variance = _hosted_variance_evidence()
+    valid_reference = _write_ref(tmp_path, "variance-valid", variance)
+    manifest_path = tmp_path / "evidence.json"
+    gate._atomic_write_json(manifest_path, {})
+    gate._validate_hosted_variance_evidence(
+        manifest_path,
+        valid_reference,
+        _hosted_ci_evidence("c" * 64),
+        640,
+    )
     variance["source_run_id"] = 999999
     variance["source_run_url"] = (
         f"https://github.com/{gate._HOSTED_CI_REPOSITORY}/actions/runs/999999"
@@ -1238,8 +1260,6 @@ def test_hosted_variance_rejects_coordinated_source_identity_substitution(
     variance["source_head_sha"] = "9" * 40
     variance["source_pull_request_head_sha"] = "9" * 40
     reference = _write_ref(tmp_path, "variance-substituted", variance)
-    manifest_path = tmp_path / "evidence.json"
-    gate._atomic_write_json(manifest_path, {})
     with pytest.raises(ValueError, match="20 percent improvement"):
         gate._validate_hosted_variance_evidence(
             manifest_path,

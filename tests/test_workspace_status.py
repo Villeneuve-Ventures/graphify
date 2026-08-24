@@ -2949,13 +2949,20 @@ def test_status_emits_no_transient_filesystem_write_events(tmp_path: Path) -> No
     events_module = pytest.importorskip("watchdog.events")
     harness = create_harness(tmp_path)
     observed: list[tuple[str, str]] = []
+    readiness_probe = harness.state_root / ".watchdog-readiness-probe"
     sentinel = harness.state_root / ".watchdog-ready"
+    readiness_observed = threading.Event()
+    sentinel_created = threading.Event()
     sentinel_deleted = threading.Event()
 
     class Handler(events_module.FileSystemEventHandler):  # type: ignore[misc]
         def on_any_event(self, event: Any) -> None:
             if event.event_type not in {"opened", "closed", "closed_no_write"}:
                 observed.append((event.event_type, event.src_path))
+            if event.event_type == "created" and event.src_path == str(readiness_probe):
+                readiness_observed.set()
+            if event.event_type == "created" and event.src_path == str(sentinel):
+                sentinel_created.set()
             if event.event_type == "deleted" and event.src_path == str(sentinel):
                 sentinel_deleted.set()
 
@@ -2963,7 +2970,17 @@ def test_status_emits_no_transient_filesystem_write_events(tmp_path: Path) -> No
     observer.schedule(Handler(), str(harness.state_root), recursive=True)
     observer.start()
     try:
+        readiness_deadline = time.monotonic() + 5
+        while not readiness_observed.is_set():
+            readiness_probe.write_bytes(b"")
+            if readiness_observed.wait(timeout=0.05):
+                break
+            readiness_probe.unlink(missing_ok=True)
+            if time.monotonic() >= readiness_deadline:
+                pytest.fail("watchdog did not observe the readiness probe")
+        readiness_probe.unlink(missing_ok=True)
         sentinel.write_bytes(b"")
+        assert sentinel_created.wait(timeout=5)
         sentinel.unlink()
         assert sentinel_deleted.wait(timeout=5)
         observer.event_queue.join()
