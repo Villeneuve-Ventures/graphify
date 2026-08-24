@@ -1692,8 +1692,19 @@ if os.name == "nt":
             "    time.sleep(0.05)\n"
         )
         parent = (
-            "import subprocess, sys, time\n"
+            "from pathlib import Path; import subprocess, sys, time\n"
+            "heartbeat = Path(sys.argv[2])\n"
             "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+            "deadline = time.monotonic() + 5\n"
+            "while time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        if heartbeat.read_text(encoding='utf-8'):\n"
+            "            break\n"
+            "    except (FileNotFoundError, OSError):\n"
+            "        pass\n"
+            "    time.sleep(0.01)\n"
+            "else:\n"
+            "    raise SystemExit(91)\n"
             "time.sleep(30)\n"
         )
 
@@ -1701,9 +1712,10 @@ if os.name == "nt":
             [sys.executable, "-c", parent, child, str(heartbeat)],
             tmp_path,
             os.environ.copy(),
-            1,
+            10,
         ) == (124, True)
         assert heartbeat.exists()
+        time.sleep(0.3)
         stopped_value = heartbeat.read_text(encoding="utf-8")
         time.sleep(0.3)
         assert heartbeat.read_text(encoding="utf-8") == stopped_value
