@@ -1494,11 +1494,19 @@ Contract review must prove each of the following:
 - safely observed absence of the top-level decision namespace is the canonical
   zero-binding initial state and may be created only at the first final install.
   Once present, unreadable, unsafe, ambiguous, missing-after-visibility, or
-  snapshot-drifted state fails closed. Nonempty state aborts the shared workspace
-  reachability proof before successful GC preview or plan and consequently
-  blocks downstream execute, reconcile, and purge; no token is added to the
-  current public protection-reason vocabulary. No canonical deletion, cleanup,
-  quarantine, repair, rollback, compaction, GC mutation, live policy
+  snapshot-drifted state fails closed. Nonempty state aborts shared workspace
+  reachability before a successful GC preview or plan. That prevents execute,
+  intent-bearing reconcile, and first-time purge from performing
+  reachability-dependent quarantine, completion, intent clearing, or purge
+  mutation, including for unrelated generations. A blocked intent-bearing
+  reconcile or first-time purge may still acquire and release fenced authority
+  or clean permitted residue before the reachability failure; the blockade is
+  not a claim that every rejected invocation is wholly write-free. Existing
+  no-write exits remain available without recomputing reachability: reconcile
+  with no intent, matching current-epoch completion recovery, and exact immutable
+  terminal purge replay; no token is added to the current public
+  protection-reason vocabulary. No canonical decision-state deletion, cleanup,
+  quarantine, repair, rollback, compaction, new GC mutation authority, live policy
   provisioning, decision composition, classification, omission, projection,
   public CLI/schema/runtime receipt, provider/backend, network, publication,
   release, broader acceptance, parent completion, or successor
@@ -1726,9 +1734,17 @@ Contract review must prove each of the following:
   and includes decision-store bytes in existing global/workspace byte ceilings
   and filesystem-reserve calculations while retaining existing durable byte
   reservations in the arithmetic; inability to prove bounded enumeration,
-  usage, or capacity rejects. The accepted prerequisite makes nonempty decision
-  state block GC eligibility and purge, while deletion, quarantine, cleanup,
-  repair, and GC mutation remain separately unauthorized;
+  usage, or capacity rejects. Nonempty decision state aborts shared workspace
+  reachability before a successful GC preview or plan, preventing execute,
+  intent-bearing reconcile, and first-time purge from performing
+  reachability-dependent mutation, including for unrelated generations. A
+  blocked intent-bearing reconcile or first-time purge may still acquire and
+  release fenced authority or clean permitted residue before the reachability
+  failure; the blockade does not claim that every rejected invocation is wholly
+  write-free. Reconcile with no intent, matching current-epoch completion
+  recovery, and exact immutable terminal purge replay remain no-write exits
+  without recomputing reachability, while deletion, quarantine, cleanup, repair,
+  and GC mutation remain separately unauthorized;
 - composition with the separate prerequisite captures bounded private bytes
   under shared registry, exclusive workspace,
   then shared target-generation locks and classified outside coordination locks

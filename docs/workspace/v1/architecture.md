@@ -268,11 +268,19 @@ composition through install-once and reopen.
 Byte-identical replay is no-write success; same-path different bytes conflict;
 partial, unsafe, unreadable, different, or ambiguous state is commit-unknown.
 
-Nonempty decision state aborts the shared workspace reachability proof before a
-successful GC preview or plan and therefore blocks downstream execute,
-reconcile, and purge. It adds no token to the current public protection-reason
-vocabulary and grants no GC mutation or canonical decision-state deletion
-authority. This prerequisite owns no decision-request creation,
+Nonempty decision state aborts shared workspace reachability before a
+successful GC preview or plan. That prevents execute, intent-bearing reconcile,
+and first-time purge from performing reachability-dependent quarantine,
+completion, intent clearing, or purge mutation, including for unrelated
+generations. A blocked intent-bearing reconcile or first-time purge may still
+acquire and release fenced authority or clean permitted residue before the
+reachability failure; the blockade is not a claim that every rejected invocation
+is wholly write-free. Existing no-write exits remain available without
+recomputing reachability: reconcile with no intent, matching current-epoch
+completion recovery, and exact immutable terminal purge replay. It adds no token
+to the current public protection-reason vocabulary and grants no new GC mutation
+or canonical decision-state deletion authority. This prerequisite owns no
+decision-request creation,
 classifier or policy composition, terminal release decision, live policy
 selection, omission, projection, public CLI/schema/runtime receipt,
 provider/backend, network, cleanup, deletion, quarantine, repair, rollback,

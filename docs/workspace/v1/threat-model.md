@@ -634,14 +634,27 @@ different, or ambiguous state is commit-unknown and fails closed.
 Safely observed absence of the top-level namespace is the zero-binding initial
 state; once it or an expected request path is present, unsafe, unreadable,
 ambiguous, missing-after-visibility, or snapshot-drifted state fails closed.
-Nonempty decision state aborts the shared workspace reachability proof before a
-successful GC preview or plan and therefore blocks downstream execute,
-reconcile, and purge. No public protection-reason token is added.
-This retention rule prevents orphaned audit/projection evidence but grants no
-deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation
-authority. No failure or replay path may mutate a binding or any
-semantic input, handoff, generation, receipt, journal, staged record, pointer,
-policy, or other durable state.
+Nonempty decision state aborts shared workspace reachability before a
+successful GC preview or plan. That prevents execute, intent-bearing reconcile,
+and first-time purge from performing reachability-dependent quarantine,
+completion, intent clearing, or purge mutation, including for unrelated
+generations. A blocked intent-bearing reconcile or first-time purge may still
+acquire and release fenced authority or clean permitted residue before the
+reachability failure; the blockade is not a claim that every rejected invocation
+is wholly write-free. Existing no-write exits remain available without
+recomputing reachability: reconcile with no intent, matching current-epoch
+completion recovery, and exact immutable terminal purge replay. No public
+protection-reason token is added. This retention rule prevents orphaned
+audit/projection evidence but grants no deletion, cleanup, quarantine, repair,
+rollback, or compaction authority and no new GC mutation authority.
+Decision-store failure is definite no-commit only when proven to precede
+possible binding visibility. A first install may make exact binding bytes
+visible before a later durability failure; after possible visibility, exact
+reopened bytes may adopt the install, while unsafe, unreadable, different, or
+ambiguous state remains `CommitUnknown` and fails closed. Decision-store failure
+handling and binding replay have no authority to delete, rewrite, quarantine,
+repair, or roll back a binding. This boundary does not constrain existing fenced
+GC-authority transitions or permitted residue cleanup.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
 and decision-store/capacity/GC prerequisites remain
@@ -791,11 +804,17 @@ commit-unknown and fails closed. No new lease, lifecycle state, journal transiti
 cleanup, deletion, rollback, or destructive recovery is introduced.
 
 Any nonempty decision state in the workspace aborts shared workspace
-reachability before GC preview or plan succeeds. Therefore no GC plan exists
-for any generation in that workspace, and execute, reconcile, and purge are
-blocked, including operations aimed at unrelated generations. This prevents
-orphaning the audit/projection evidence; deletion, quarantine, cleanup, repair,
-and GC mutation remain separately unauthorized.
+reachability before a successful GC preview or plan. That prevents execute,
+intent-bearing reconcile, and first-time purge from performing
+reachability-dependent quarantine, completion, intent clearing, or purge
+mutation, including for unrelated generations. A blocked intent-bearing
+reconcile or first-time purge may still acquire and release fenced authority or
+clean permitted residue before the reachability failure; the blockade is not a
+claim that every rejected invocation is wholly write-free. Existing no-write
+exits remain available without recomputing reachability: reconcile with no
+intent, matching current-epoch completion recovery, and exact immutable terminal
+purge replay. This prevents orphaning the audit/projection evidence; deletion,
+quarantine, cleanup, repair, and GC mutation remain separately unauthorized.
 
 A later pointer or authority change makes an exact binding historical evidence
 only. It cannot be repaired into current authority. `REJECTED`,

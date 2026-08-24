@@ -37,8 +37,16 @@ The accepted surface is exactly:
   durable-reservation, and filesystem-reserve accounting;
 - existing registry/workspace/generation lock-order integration and exact
   current-directory rebinding after capacity and GC scans; and
-- shared workspace reachability treatment that blocks the GC lifecycle while
-  any nonempty decision state exists.
+- shared workspace reachability treatment under which nonempty decision state
+  aborts before a successful GC preview or plan, preventing execute,
+  intent-bearing reconcile, and first-time purge from performing
+  reachability-dependent mutation, including for unrelated generations, while
+  preserving the no-write exits for reconcile with no intent, matching
+  current-epoch completion recovery, and exact immutable terminal purge replay.
+  A blocked intent-bearing reconcile or first-time purge may still acquire and
+  release fenced authority or clean permitted residue before the reachability
+  failure; the blockade does not claim that every rejected invocation is wholly
+  write-free.
 
 Acceptance provisions no live policy-authority or decision record. It creates
 no classification composition, omission, projection, public CLI/schema/runtime
@@ -171,12 +179,12 @@ Every substantive concern is dispositioned against current canonical tree
 | #76 `PRRT_kwDOTZvP8s6Z5kqZ` | Classification could begin before the capture locks were released. | Fixed: capture releases registry/workspace/generation locks before classification and reacquires the frozen final-install order afterward. |
 | #76 `PRRT_kwDOTZvP8s6Z7H_Q` | The contract did not state the lock release before classification precisely enough. | Fixed by the maintained capture/classify/reacquire sequence and its focused tests. |
 | #76 `PRRT_kwDOTZvP8s6Z7H_S` | Binding-count limits had to remain independent of `CapacityPolicy`. | Fixed: 25 MiB, 64-per-generation, and 4,096-per-workspace are separate non-caller-expandable bounds. |
-| #76 `PRRT_kwDOTZvP8s6Z7H_U` | A new public GC protection-reason token would widen the public contract. | Fixed: shared reachability blocks the lifecycle without adding public reason vocabulary. |
+| #76 `PRRT_kwDOTZvP8s6Z7H_U` | A new public GC protection-reason token would widen the public contract. | Fixed: nonempty decision state aborts successful preview/plan and prevents reachability-dependent mutation by execute, intent-bearing reconcile, and first-time purge without adding public reason vocabulary, while preserving no-intent reconcile, matching current-epoch completion recovery, and exact immutable terminal purge replay. |
 | #76 `PRRT_kwDOTZvP8s6Z7H_V` | A pristine absent namespace needed an explicit zero-state rule. | Fixed: safely observed top-level absence is zero binding state; present unsafe or ambiguous state fails closed. |
 | #77 `PRRT_kwDOTZvP8s6aGkxs` | Empty crash residue could brick the decision namespace. | Fixed by PR #77 commit `200784e6b4b837ad10ad452449208ffdca21106a` and its previsibility, interrupted-staging, and retry regressions. |
 | #77 `PRRT_kwDOTZvP8s6aGkxy` | Optional stable missing reads could bypass the deadline. | Fixed by `test_optional_stable_missing_read_checks_deadline_after_observation`. |
 | #77 `PRRT_kwDOTZvP8s6aG7Oi` | A timestamped mutable preflight snapshot was compared with the later PR head. | Rejected: the row explicitly records its independent-review preflight time and uncommitted working-tree digest; it is historical evidence, not a claim about PR #77's final head. |
-| #77 `PRRT_kwDOTZvP8s6aG7Or` | The delivered GC blocker scope was understated. | Fixed: maintained authority records that shared workspace reachability blocks preview/plan and therefore execute, reconcile, and purge. |
+| #77 `PRRT_kwDOTZvP8s6aG7Or` | The delivered GC blocker scope was understated. | Fixed: maintained authority records that nonempty decision state aborts successful preview/plan and prevents execute, intent-bearing reconcile, and first-time purge from performing reachability-dependent mutation, while preserving no-intent reconcile, current-epoch completion recovery, and exact terminal purge replay no-write exits and acknowledging permitted pre-failure authority/residue writes. |
 | #77 `PRRT_kwDOTZvP8s6aG7O-` | The capacity binding read loop did not retry `InterruptedError`. | Fixed by PR #77 commit `200784e6b4b837ad10ad452449208ffdca21106a` and `test_decision_capacity_scan_retries_interrupted_binding_read`. |
 | #77 `PRRT_kwDOTZvP8s6aG7PH` | The store could derive a workspace path outside shared `GenerationStore` authority. | Fixed by reusing the registered `GenerationStore` workspace and its existing lock/capacity ownership. |
 | #77 `PRRT_kwDOTZvP8s6aG7PQ` | Repeated global capacity scans were unnecessarily expensive. | Deferred: the retained fail-closed scans are bounded and correctness-preserving, while scan optimization and performance/resource qualification remain separate P5C work outside this prerequisite. |

@@ -1133,11 +1133,18 @@ Once present, unreadable, unsafe, or ambiguous namespace state, an absent
 expected request path after possible visibility, or any presence/count/byte drift
 between bounded snapshots fails closed under the rules above.
 
-Any nonempty decision state aborts the shared workspace reachability proof
-before successful GC preview or plan and consequently blocks downstream
-execute, reconcile, and purge. This prerequisite adds no token to the closed
-`GcPlan.protected` reason vocabulary and grants no GC mutation or binding-removal
-authority.
+Any nonempty decision state aborts shared workspace reachability before a
+successful GC preview or plan. That prevents execute, intent-bearing reconcile,
+and first-time purge from performing reachability-dependent quarantine,
+completion, intent clearing, or purge mutation, including for unrelated
+generations. A blocked intent-bearing reconcile or first-time purge may still
+acquire and release fenced authority or clean permitted residue before the
+reachability failure; the blockade is not a claim that every rejected invocation
+is wholly write-free. Existing no-write exits remain available without
+recomputing reachability: reconcile with no intent, matching current-epoch
+completion recovery, and exact immutable terminal purge replay. This
+prerequisite adds no token to the closed `GcPlan.protected` reason vocabulary and
+grants no new GC mutation or binding-removal authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
 and decision-store/capacity/GC prerequisites remain `COMPLETE`. The encompassing
@@ -1348,13 +1355,19 @@ pointer, or policy. A later pointer or authority change makes a prior binding
 historical evidence only.
 
 Neither prerequisite nor decision child deletes decision state. Any nonempty
-decision state in the workspace aborts shared workspace reachability before GC
-preview or plan succeeds. Therefore no GC plan exists for any generation in
-that workspace, and execute, reconcile, and purge are blocked, including
-operations aimed at unrelated generations. This blockade is not projected into
-the current closed public protection-reason vocabulary. Any later removal or
-quarantine must be separately authorized and coordinated with the same
-generation; no such authority is granted here.
+decision state in the workspace aborts shared workspace reachability before a
+successful GC preview or plan. That prevents execute, intent-bearing reconcile,
+and first-time purge from performing reachability-dependent quarantine,
+completion, intent clearing, or purge mutation, including for unrelated
+generations. A blocked intent-bearing reconcile or first-time purge may still
+acquire and release fenced authority or clean permitted residue before the
+reachability failure; the blockade is not a claim that every rejected invocation
+is wholly write-free. Existing no-write exits remain available without
+recomputing reachability: reconcile with no intent, matching current-epoch
+completion recovery, and exact immutable terminal purge replay. This blockade
+is not projected into the current closed public protection-reason vocabulary.
+Any later removal or quarantine must be separately authorized and coordinated
+with the same generation; no such authority is granted here.
 
 Terminal proof is derived, not separately persisted. It takes the shared
 registry lock, exclusive workspace lock, then target-generation shared lock;

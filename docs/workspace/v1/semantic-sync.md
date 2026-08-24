@@ -2131,12 +2131,19 @@ drift between the two bounded snapshots fail closed. Missing expected binding
 state after possible visibility follows the commit-uncertainty rules below.
 
 Any nonempty decision state in the workspace aborts shared workspace
-reachability before GC preview or plan succeeds. Therefore no GC plan exists
-for any generation in that workspace, and execute, reconcile, and purge are
-blocked, including operations aimed at unrelated generations. This prerequisite
-adds no token to the existing closed `GcPlan.protected` reason vocabulary and
-authorizes no canonical deletion, cleanup, quarantine, repair, rollback,
-compaction, or GC mutation.
+reachability before a successful GC preview or plan. That prevents execute,
+intent-bearing reconcile, and first-time purge from performing
+reachability-dependent quarantine, completion, intent clearing, or purge
+mutation, including for unrelated generations. A blocked intent-bearing
+reconcile or first-time purge may still acquire and release fenced authority or
+clean permitted residue before the reachability failure; the blockade is not a
+claim that every rejected invocation is wholly write-free. Existing no-write
+exits remain available without recomputing reachability: reconcile with no
+intent, matching current-epoch completion recovery, and exact immutable terminal
+purge replay. This prerequisite adds no token to the existing closed
+`GcPlan.protected` reason vocabulary and authorizes no canonical deletion,
+cleanup, quarantine, repair, rollback, or compaction, and grants no new GC
+mutation authority.
 
 ### Install once, replay, and commit uncertainty
 
@@ -2768,13 +2775,19 @@ oracle.
 
 Neither prerequisite nor decision child deletes a decision binding. Any
 nonempty decision state in the workspace aborts shared workspace reachability
-before GC preview or plan succeeds. Therefore no GC plan exists for any
-generation in that workspace, and execute, reconcile, and purge are blocked,
-including operations aimed at unrelated generations. This blockade is not
-projected into the current closed public protection-reason vocabulary. Binding
-deletion, quarantine, cleanup, repair, and GC mutation remain separately
-unauthorized and require later operator authority coordinated with the same
-generation.
+before a successful GC preview or plan. That prevents execute, intent-bearing
+reconcile, and first-time purge from performing reachability-dependent
+quarantine, completion, intent clearing, or purge mutation, including for
+unrelated generations. A blocked intent-bearing reconcile or first-time purge
+may still acquire and release fenced authority or clean permitted residue before
+the reachability failure; the blockade is not a claim that every rejected
+invocation is wholly write-free. Existing no-write exits remain available
+without recomputing reachability: reconcile with no intent, matching
+current-epoch completion recovery, and exact immutable terminal purge replay.
+This blockade is not projected into the current closed public protection-reason
+vocabulary. Binding deletion, quarantine, cleanup, repair, and GC mutation
+remain separately unauthorized and require later operator authority coordinated
+with the same generation.
 
 ### Decision-store composition, concurrency, commit uncertainty, and replay
 

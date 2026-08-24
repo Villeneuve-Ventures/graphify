@@ -843,17 +843,24 @@ reopened bytes adopt the commit; proven absence may retry only while request,
 candidate bytes, authority, and capacity proof remain exact. Partial, unsafe,
 unreadable, different, or ambiguous state is commit-unknown and fails closed.
 
-Any nonempty decision state aborts the shared workspace reachability proof
-before a successful GC preview or plan and therefore blocks downstream execute,
-reconcile, and purge. A safely observed absent top-level
-namespace is the zero-binding initial state; once present, unreadable, unsafe,
-ambiguous, or drifted state fails closed. The prerequisite adds no public
-protection-reason token and grants no GC mutation, deletion, cleanup,
-quarantine, repair, rollback, compaction, decision-request or
-full-result composition, classifier/policy reduction, omission, redaction,
-projection, query, public CLI/schema/runtime receipt, provider/backend, network,
-publication, release, parent completion, or
-successor authority.
+Any nonempty decision state aborts shared workspace reachability before a
+successful GC preview or plan. That prevents execute, intent-bearing reconcile,
+and first-time purge from performing reachability-dependent quarantine,
+completion, intent clearing, or purge mutation, including for unrelated
+generations. A blocked intent-bearing reconcile or first-time purge may still
+acquire and release fenced authority or clean permitted residue before the
+reachability failure; the blockade is not a claim that every rejected invocation
+is wholly write-free. Existing no-write exits remain available without
+recomputing reachability: reconcile with no intent, matching current-epoch
+completion recovery, and exact immutable terminal purge replay. A safely
+observed absent top-level namespace is the zero-binding initial state; once
+present, unreadable, unsafe, ambiguous, or drifted state fails closed. The
+prerequisite adds no public protection-reason token and grants no new GC
+mutation, deletion, cleanup, quarantine, repair, rollback, compaction,
+decision-request or full-result composition, classifier/policy reduction,
+omission, redaction, projection, query, public CLI/schema/runtime receipt,
+provider/backend, network, publication, release, parent completion, or successor
+authority.
 
 P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
 and decision-store/capacity/GC prerequisites remain
@@ -995,11 +1002,17 @@ new lease, journal transition, lifecycle state, inferred cleanup, destructive
 rollback, or rewrite authority exists.
 
 Neither prerequisite nor decision child deletes bindings. Any nonempty decision
-state in the workspace aborts shared workspace reachability before GC preview
-or plan succeeds. Therefore no GC plan exists for any generation in that
-workspace, and execute, reconcile, and purge are blocked, including operations
-aimed at unrelated generations. This is a retention constraint, not cleanup or
-GC authority.
+state in the workspace aborts shared workspace reachability before a successful
+GC preview or plan. That prevents execute, intent-bearing reconcile, and
+first-time purge from performing reachability-dependent quarantine, completion,
+intent clearing, or purge mutation, including for unrelated generations. A
+blocked intent-bearing reconcile or first-time purge may still acquire and
+release fenced authority or clean permitted residue before the reachability
+failure; the blockade is not a claim that every rejected invocation is wholly
+write-free. Existing no-write exits remain available without recomputing
+reachability: reconcile with no intent, matching current-epoch completion
+recovery, and exact immutable terminal purge replay. This is a retention
+constraint, not cleanup or GC authority.
 
 Terminal proof takes shared registry, exclusive workspace, then shared
 target-generation locks; reopens the still-current exact promoted terminal, decision
