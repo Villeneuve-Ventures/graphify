@@ -1,11 +1,9 @@
 name: PR Agent
-
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created, edited]
-
 concurrency:
   group: >-
     pr-agent-${{
@@ -28,7 +26,6 @@ concurrency:
       )
     }}
   cancel-in-progress: false
-
 jobs:
   review:
     # Fork pull requests receive no secret. A trusted maintainer can explicitly
@@ -59,18 +56,15 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
-
     steps:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
-
       - name: Install pinned PR-Agent
         run: >-
           python -m pip install --disable-pip-version-check
           "git+https://github.com/the-pr-agent/pr-agent.git@570f67ed5fc8db5be74c18df070bc20079b64b0d"
-
       - name: Run PR-Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -97,6 +91,7 @@ jobs:
           import asyncio, fnmatch, hashlib, json, os, re
           from github import Github
           from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
+          from pr_agent.algo.git_patch_processing import decouple_and_convert_to_hunks_with_lines_numbers
           from pr_agent.algo.language_handler import is_valid_file
           from pr_agent.algo.utils import get_max_tokens
           from pr_agent.config_loader import get_settings
@@ -106,8 +101,8 @@ jobs:
           def _valid_int(value, positive=False):
               return type(value) is int and value >= (1 if positive else 0)
           def _valid_path(path):
-              return (isinstance(path, str) and path and not path.startswith("/")
-                      and "\\" not in path and not any(ord(c) < 32 or ord(c) == 127 for c in path)
+              return (isinstance(path, str) and path and not path.startswith("/") and "\\" not in path
+                      and not any(ord(c) < 32 or ord(c) == 127 for c in path)
                       and all(part not in {"", ".", ".."} for part in path.split("/")))
           def _manifest(pull, files):
               count = getattr(pull, "changed_files", None)
@@ -115,10 +110,8 @@ jobs:
                   raise RuntimeError("GitHub file manifest is empty, capped, or incomplete")
               seen = set()
               for file in files:
-                  name = getattr(file, "filename", None)
-                  status = getattr(file, "status", None)
-                  additions = getattr(file, "additions", None)
-                  deletions = getattr(file, "deletions", None)
+                  name, status = getattr(file, "filename", None), getattr(file, "status", None)
+                  additions, deletions = getattr(file, "additions", None), getattr(file, "deletions", None)
                   if (not _valid_path(name) or name in seen or status not in
                           {"added", "modified", "removed", "renamed"}
                           or not _valid_int(additions) or not _valid_int(deletions)):
@@ -130,16 +123,13 @@ jobs:
                           raise RuntimeError("Malformed rename record")
               return files
           def _same_files(expected, actual):
-              expected_names = [file.filename for file in expected]
-              actual_names = [file.filename for file in actual]
+              expected_names, actual_names = ([file.filename for file in files] for files in (expected, actual))
               return len(actual_names) == len(set(actual_names)) and set(actual_names) == set(expected_names)
           def _strict_filter(files):
               patterns = _setting("IGNORE.REGEX")
               globs = _setting("IGNORE.GLOB")
-              if isinstance(patterns, str):
-                  patterns = [patterns]
-              if isinstance(globs, str):
-                  globs = globs.strip("[]").split(",")
+              patterns = [patterns] if isinstance(patterns, str) else patterns
+              globs = globs.strip("[]").split(",") if isinstance(globs, str) else globs
               if not isinstance(patterns, (list, tuple)) or not isinstance(globs, (list, tuple)):
                   raise RuntimeError("Invalid PR-Agent ignore policy type")
               patterns = list(patterns)
@@ -167,13 +157,16 @@ jobs:
                   raise RuntimeError("Invalid PR-Agent ignore regex") from error
               return [file for file in files if file.filename
                       and not any(pattern.match(file.filename) for pattern in compiled)]
-          def _raw_diff(files, token_handler, model, max_tokens=get_max_tokens):
+          def _raw_diff(files, token_handler, model, numbered=False, max_tokens=get_max_tokens):
               chunks = []
               for file in files:
                   patch = getattr(file, "patch", None)
                   additions, deletions = file.additions, file.deletions
+                  metadata = f"## File: '{file.filename}'\nstatus: {file.status}"
+                  if file.status == "renamed":
+                      metadata += f"\nrename from {file.previous_filename}\nrename to {file.filename}"
                   if file.status == "renamed" and additions == deletions == 0 and not patch:
-                      chunks.append(f"rename from {file.previous_filename}\nrename to {file.filename}")
+                      chunks.append(metadata)
                       continue
                   if not isinstance(patch, str) or not patch.strip():
                       raise RuntimeError(f"Eligible patch unavailable: {file.filename}")
@@ -181,10 +174,14 @@ jobs:
                   minus = sum(line.startswith("-") and not line.startswith("---") for line in patch.splitlines())
                   if plus != additions or minus != deletions:
                       raise RuntimeError(f"Eligible patch is clipped or inconsistent: {file.filename}")
-                  metadata = f"status: {file.status}\nfile: {file.filename}"
-                  if file.status == "renamed":
-                      metadata += f"\nrename from {file.previous_filename}\nrename to {file.filename}"
-                  chunks.append(f"{metadata}\n{patch}")
+                  rendered = patch
+                  if numbered and file.status != "removed":
+                      rendered = decouple_and_convert_to_hunks_with_lines_numbers(patch, None)
+                      numbered_plus = sum(re.match(r"^\d+ \+", line) is not None for line in rendered.splitlines())
+                      numbered_minus = sum(line.startswith("-") for line in rendered.splitlines())
+                      if numbered_plus != additions or numbered_minus != deletions:
+                          raise RuntimeError(f"Numbered patch is incomplete: {file.filename}")
+                  chunks.append(f"{metadata}\n{rendered}")
               diff = "\n\n".join(chunks)
               if not diff or token_handler.prompt_tokens + token_handler.count_tokens(diff) + 1500 >= max_tokens(model):
                   raise RuntimeError("Complete raw comparison exceeds the one-call token budget")
@@ -317,17 +314,16 @@ jobs:
           def _setting(key):
               return get_settings().get(key, None)
           def _same(actual, expected):
-              if isinstance(expected, bool) and isinstance(actual, str):
-                  return actual.lower() == str(expected).lower()
-              if isinstance(expected, int) and isinstance(actual, str):
-                  return actual.isdigit() and int(actual) == expected
-              if isinstance(expected, list) and isinstance(actual, str):
+              if isinstance(expected, bool) and isinstance(actual, str): return actual.lower() == str(expected).lower()
+              if isinstance(expected, int) and isinstance(actual, str): return actual.isdigit() and int(actual) == expected
+              if not isinstance(expected, list):
+                  return actual == expected
+              if isinstance(actual, str):
                   try:
                       actual = json.loads(actual)
                   except json.JSONDecodeError:
                       return False
-              return list(actual) == expected if isinstance(expected, list) else actual == expected
-
+              return isinstance(actual, (list, tuple)) and list(actual) == expected
           def _attest():
               checks = {
                   "CONFIG.GIT_PROVIDER": "github", "CONFIG.PUBLISH_OUTPUT": True,
@@ -359,7 +355,6 @@ jobs:
               instructions = str(_setting("PR_REVIEWER.EXTRA_INSTRUCTIONS") or "")
               if "target branch's requires-python declaration" not in instructions or "SECURITY.md" not in instructions:
                   raise RuntimeError("Review instruction policy mismatch")
-
           def strict_apply(url):
               global policy_attested, policy_served, eligible_files
               policy_attested = policy_served = False
@@ -370,12 +365,10 @@ jobs:
               if not eligible_files:
                   raise RuntimeError("No eligible files in complete comparison")
               policy_attested = True
-
           import pr_agent.agent.pr_agent as agent_module
           import pr_agent.servers.github_action_runner as runner_module
           agent_module.apply_repo_settings = strict_apply
           runner_module.apply_repo_settings = strict_apply
-
           def _complete_diff(provider, token_handler, model, *args, **kwargs):
               if not policy_attested or _identity(provider.pr) != frozen:
                   raise RuntimeError("Diff requested before frozen policy attestation")
@@ -383,22 +376,33 @@ jobs:
                                   if is_valid_file(file.filename)]
               if not _same_files(eligible_files, current_eligible):
                   raise RuntimeError("Eligible file comparison changed")
-              return _raw_diff(eligible_files, token_handler, model)
-
+              numbered = kwargs.get("add_line_numbers_to_hunks", False)
+              if type(numbered) is not bool:
+                  raise RuntimeError("Invalid numbered-diff request")
+              return _raw_diff(eligible_files, token_handler, model, numbered=numbered)
           pr_description.get_pr_diff = _complete_diff
           pr_reviewer.get_pr_diff = _complete_diff
           verification = {"summary": False, "review": False}
-
           def _guard_constructor(original):
               def guarded(self, *args, **kwargs):
                   if not policy_attested:
                       raise RuntimeError("PR-Agent tool constructed before policy attestation")
                   return original(self, *args, **kwargs)
               return guarded
-
           PRDescription.__init__ = _guard_constructor(PRDescription.__init__)
           PRReviewer.__init__ = _guard_constructor(PRReviewer.__init__)
-
+          original_prepare_description = PRDescription._prepare_prediction
+          async def prepare_valid_description(self, model):
+              self.prediction = None
+              await original_prepare_description(self, model)
+              parsed = pr_description.load_yaml(self.prediction.strip(), keys_fix_yaml=self.keys_fix) if isinstance(self.prediction, str) else None
+              file_keys = ("filename", "changes_title", "label") + (("changes_summary",) if self.vars.get("include_file_summary_changes", True) else ())
+              strings = isinstance(parsed, dict) and all(isinstance(parsed.get(key), str) and parsed[key].strip() for key in ("title", "description"))
+              types, files = (parsed.get("type"), parsed.get("pr_files")) if strings else (None, None)
+              valid_files = isinstance(files, list) and files and all(isinstance(item, dict) and all(isinstance(item.get(key), str) and item[key].strip() for key in file_keys) for item in files)
+              if (not isinstance(types, list) or not types or not all(isinstance(item, str) and item in {"Bug fix", "Tests", "Enhancement", "Documentation", "Other"} for item in types) or not valid_files):
+                  raise RuntimeError("PR-Agent description prediction is not valid structured YAML")
+          PRDescription._prepare_prediction = prepare_valid_description
           def _verified_run(kind, original):
               async def run(self):
                   published = []
@@ -426,7 +430,6 @@ jobs:
                   verification[kind] = True
                   return result
               return run
-
           PRDescription.run = _verified_run("summary", PRDescription.run)
           PRReviewer.run = _verified_run("review", PRReviewer.run)
           original_handle = PRAgent.handle_request
@@ -438,7 +441,6 @@ jobs:
                   raise RuntimeError("PR-Agent swallowed a review failure")
               return handled
           PRAgent.handle_request = handle_verified
-
           from pr_agent.servers.github_action_runner import _run_action_and_drain
           asyncio.run(_run_action_and_drain())
           if (not policy_attested or not verification["review"]

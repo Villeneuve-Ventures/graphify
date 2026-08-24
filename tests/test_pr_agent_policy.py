@@ -7,6 +7,7 @@ import types
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -14,6 +15,9 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+VALID_DESCRIPTION = ("title: Test\ndescription: Body\ntype:\n- Enhancement\npr_files:\n"
+                     "- filename: src/a.py\n  changes_title: Improve behavior\n"
+                     "  changes_summary: Improve behavior safely\n  label: enhancement")
 
 
 def _workflow() -> str:
@@ -28,14 +32,15 @@ def _embedded_python() -> str:
     return "\n".join(line[indent:] if line.strip() else "" for line in lines[start:end])
 
 
-def _helpers() -> dict:
+def _helpers(converter=lambda _patch, _file: "@@ -1 +1 @@\n__new hunk__\n1 +new\n__old hunk__\n-old") -> dict:
     tree = ast.parse(_embedded_python())
-    wanted = {"_body_digest", "_canonical_body", "_manifest", "_marker", "_raw_diff",
+    wanted = {"_body_digest", "_canonical_body", "_manifest", "_marker", "_raw_diff", "_same",
               "_same_files", "_substantive", "_valid_int", "_valid_path", "_visible"}
     body = [node for node in tree.body if (
-        isinstance(node, ast.Import) and any(alias.name in {"hashlib", "re"} for alias in node.names)
+        isinstance(node, ast.Import) and any(alias.name in {"hashlib", "json", "re"} for alias in node.names)
     ) or (isinstance(node, ast.FunctionDef) and node.name in wanted)]
-    namespace: dict = {"get_max_tokens": lambda _model: 65536}
+    namespace: dict = {"get_max_tokens": lambda _model: 65536,
+                       "decouple_and_convert_to_hunks_with_lines_numbers": converter}
     exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
                  "<pr-agent-policy>", "exec"), namespace)
     return namespace
@@ -138,6 +143,33 @@ def test_raw_diff_proves_patch_counts_deletions_renames_and_token_bound() -> Non
                  "model", max_tokens=lambda _: 10000)
 
 
+def test_numbered_diff_preserves_deletions_renames_counts_and_final_token_bound() -> None:
+    files = [_file(), _file("gone.py", "removed", 0, 1, "@@ -1 +0,0 @@\n-secret"),
+             _file("new.py", "renamed", 0, 0, None, "old.py")]
+    token_handler = SimpleNamespace(prompt_tokens=10, count_tokens=len)
+    numbered = _helpers()["_raw_diff"](
+        files, token_handler, "model", numbered=True, max_tokens=lambda _: 10000)
+    assert numbered.count("## File:") == 3
+    assert "__new hunk__\n1 +new" in numbered
+    assert "secret" in numbered
+    assert "rename from old.py\nrename to new.py" in numbered
+    lossy = _helpers(lambda _patch, _file: "__new hunk__\n__old hunk__\n-old")["_raw_diff"]
+    with pytest.raises(RuntimeError, match="Numbered patch is incomplete"):
+        lossy([_file()], token_handler, "model", numbered=True, max_tokens=lambda _: 10000)
+    expanded = _helpers(lambda _patch, _file: (
+        "__new hunk__\n1 +new\n__old hunk__\n-old\n" + "x" * 300))["_raw_diff"]
+    assert _helpers()["_raw_diff"](
+        [_file()], token_handler, "model", max_tokens=lambda _: 1700)
+    with pytest.raises(RuntimeError, match="token budget"):
+        expanded([_file()], token_handler, "model", numbered=True, max_tokens=lambda _: 1700)
+
+
+def test_list_policy_comparison_rejects_noniterable_and_mapping_actuals() -> None:
+    same = _helpers()["_same"]
+    assert not same(1, ["a"])
+    assert not same({"a": 1}, ["a"])
+
+
 def test_eligible_canonical_files_and_ineligible_missing_patch() -> None:
     h = _helpers()
     expected = [_file("a.py"), _file("b.py")]
@@ -217,11 +249,19 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                        publish_current=True, visible_transform=None, seed_old=False,
                        body_overrides=None, omit=None,
                        run_id="123", attempt="2", apply_error=False,
-                       tool_error=False, policy_error=False, event_mutator=None):
+                       tool_error=False, policy_error=False, event_mutator=None,
+                       description_predictions=None, record=None,
+                       conversion_loss=False, review_numbered=True,
+                       summary_include_changes=True):
     base, head = "a" * 40, "b" * 40
     policy = (ROOT / ".pr_agent.toml").read_bytes()
     comments = []
-    reads = {"pull": 0, "requests": [], "aliases": [], "eager": 0}
+    reads = {"pull": 0, "requests": [], "aliases": [], "eager": 0,
+             "description_models": [], "description_diffs": [], "tool_diffs": [],
+             "conversions": [], "published": []}
+    if record is not None:
+        record["reads"] = reads
+    prediction_queue = list(description_predictions or [VALID_DESCRIPTION])
     changed = _file()
     pull = SimpleNamespace(number=7, base=SimpleNamespace(sha=base), head=SimpleNamespace(sha=head),
                            additions=1, deletions=1, changed_files=1,
@@ -281,19 +321,23 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
             if publish_current:
                 visible = visible_transform(body) if visible_transform else body
                 comments.append(SimpleNamespace(body=visible, user=SimpleNamespace(login="github-actions[bot]")))
+                reads["published"].append(kwargs.get("name"))
 
     class Tool:
         kind = "review"
         def __init__(self, *args, **kwargs):
             self.git_provider = GithubProvider("https://example/pull/7")
             self.prediction = None
+            self.vars = {"include_file_summary_changes": summary_include_changes}
         async def run(self):
             if tool_error:
                 raise RuntimeError("tool failed")
             self.prediction = "prediction"
             alias = description_module.get_pr_diff if self.kind == "summary" else reviewer_module.get_pr_diff
-            alias(self.git_provider, SimpleNamespace(prompt_tokens=1, count_tokens=lambda text: len(text)), "model")
+            diff = alias(self.git_provider, SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+                         add_line_numbers_to_hunks=review_numbered)
             reads["aliases"].append(self.kind)
+            reads["tool_diffs"].append(diff)
             defaults = {"summary": "## Title\n\nTitle\n\n___\n\n### Walkthrough\nBody",
                         "review": "## PR Reviewer Guide 🔍\n\n### No major issues detected\n\n| A | B |\n|---|---|"}
             body = (body_overrides or {}).get(self.kind, defaults[self.kind])
@@ -301,6 +345,24 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
 
     class Description(Tool):
         kind = "summary"
+        keys_fix = ["filename:"]
+        async def _prepare_prediction(self, model):
+            if tool_error:
+                raise RuntimeError("tool failed")
+            if prediction_queue:
+                self.prediction = prediction_queue.pop(0)
+            diff = description_module.get_pr_diff(
+                self.git_provider, SimpleNamespace(prompt_tokens=1, count_tokens=len), model)
+            reads["aliases"].append(self.kind)
+            reads["description_models"].append(model)
+            reads["description_diffs"].append(diff)
+        async def run(self):
+            await description_module.retry_with_fallback_models(self._prepare_prediction, "weak")
+            if not isinstance(description_module.load_yaml(self.prediction), dict):
+                raise TypeError("description data is not a mapping")
+            body = (body_overrides or {}).get(
+                self.kind, "## Title\n\nTitle\n\n___\n\n### Walkthrough\nBody")
+            self.git_provider.publish_persistent_comment(body, name=self.kind)
     class Reviewer(Tool):
         pass
     class Agent:
@@ -337,6 +399,12 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     pr_agent = module("pr_agent")
     algo = module("pr_agent.algo", SUPPORT_REASONING_EFFORT_MODELS=[])
     module("pr_agent.algo.file_filter", filter_ignored=lambda files: files)
+    def convert_patch(_patch, file):
+        reads["conversions"].append(file)
+        return ("__new hunk__\n__old hunk__\n-old" if conversion_loss else
+                "@@ -1 +1 @@\n__new hunk__\n1 +new\n__old hunk__\n-old")
+    module("pr_agent.algo.git_patch_processing",
+           decouple_and_convert_to_hunks_with_lines_numbers=convert_patch)
     module("pr_agent.algo.language_handler", is_valid_file=lambda name: True)
     module("pr_agent.algo.utils", get_max_tokens=lambda model: 65536)
     module("pr_agent.config_loader", get_settings=lambda: settings)
@@ -349,7 +417,22 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     utils_module = module("pr_agent.git_providers.utils", apply_repo_settings=apply)
     module("pr_agent.agent")
     agent_module = module("pr_agent.agent.pr_agent", PRAgent=Agent, apply_repo_settings=apply)
-    description_module = module("pr_agent.tools.pr_description", PRDescription=Description, get_pr_diff=None)
+    def load_yaml(text, **_kwargs):
+        try:
+            return yaml.safe_load(text)
+        except yaml.YAMLError:
+            return None
+    async def retry_with_fallback_models(function, _model_type):
+        models = ["gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite"]
+        for index, model in enumerate(models):
+            try:
+                return await function(model)
+            except Exception as error:
+                if index == len(models) - 1:
+                    raise RuntimeError("all description models failed") from error
+    description_module = module("pr_agent.tools.pr_description", PRDescription=Description,
+                                get_pr_diff=None, load_yaml=load_yaml,
+                                retry_with_fallback_models=retry_with_fallback_models)
     reviewer_module = module("pr_agent.tools.pr_reviewer", PRReviewer=Reviewer, get_pr_diff=None)
     tools_module = module("pr_agent.tools", pr_description=description_module, pr_reviewer=reviewer_module)
     async def drain():
@@ -401,10 +484,71 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
     assert reads["pull"] >= 6
     assert description.get_pr_diff is reviewer.get_pr_diff
     assert reads["aliases"] == ["summary", "review"]
+    assert "__new hunk__" not in reads["description_diffs"][0]
+    assert "## File: 'src/a.py'" in reads["tool_diffs"][0]
+    assert "__new hunk__\n1 +new" in reads["tool_diffs"][0]
+    assert reads["conversions"] == [None]
     assert reads["eager"] >= 3
     reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment")
     assert reads["requests"] == ["/review"]
     assert reads["aliases"] == ["review"]
+
+
+def test_description_malformed_primary_uses_valid_fallback(monkeypatch, tmp_path) -> None:
+    malformed = "pr_files:\n- filename: |.github/workflows/pr-agent.yml"
+    reads, _, _ = _run_stubbed_entry(
+        monkeypatch, tmp_path, description_predictions=[malformed, VALID_DESCRIPTION])
+    assert reads["description_models"] == [
+        "gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite"]
+    assert reads["aliases"] == ["summary", "summary", "review"]
+    assert reads["description_diffs"][0] == reads["description_diffs"][1]
+    assert reads["published"] == ["summary", "review"]
+
+
+@pytest.mark.parametrize("predictions", [
+    ["filename: |.github/a.py"],
+    ["{}", "[]"],
+    ["title: ''\ndescription: Body\ntype: [feature]\npr_files: [{filename: a.py}]", "{title: Test}"],
+    ["title: Test\ndescription: Body\ntype: feature\npr_files: [{filename: a.py}]", "title: Test\ndescription: Body\ntype: []\npr_files: []"],
+    ["title: Test\ndescription: Body\ntype: [feature]\npr_files: [a.py]", "title: Test\ndescription: Body\ntype: ['']\npr_files: [{}]"],
+    ["title: Test\ndescription: Body\ntype: [Feature]\npr_files: [{filename: a.py, changes_title: T, changes_summary: S, label: L}]", "title: Test\ndescription: Body\ntype: [Other]\npr_files: [{filename: a.py}]"],
+    ["title: Test\ndescription: Body\ntype: [{}]\npr_files: [{filename: a.py, changes_title: T, changes_summary: S, label: L}]"],
+])
+def test_description_all_invalid_attempts_publish_nothing(
+        monkeypatch, tmp_path, predictions) -> None:
+    record = {}
+    with pytest.raises(RuntimeError, match="all description models failed"):
+        _run_stubbed_entry(
+            monkeypatch, tmp_path, description_predictions=predictions, record=record)
+    assert record["reads"]["description_models"] == [
+        "gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite"]
+    assert record["reads"]["published"] == []
+
+
+def test_description_valid_primary_is_single_attempt(monkeypatch, tmp_path) -> None:
+    reads, _, _ = _run_stubbed_entry(
+        monkeypatch, tmp_path, description_predictions=[VALID_DESCRIPTION])
+    assert reads["description_models"] == ["gemini/gemini-3.6-flash"]
+    assert reads["aliases"] == ["summary", "review"]
+    assert reads["published"] == ["summary", "review"]
+
+
+def test_description_changes_summary_is_required_only_when_prompt_includes_it(
+        monkeypatch, tmp_path) -> None:
+    prediction = ("title: Test\ndescription: Body\ntype: [Other]\npr_files:\n"
+                  "- filename: src/a.py\n  changes_title: T\n  label: other")
+    reads, _, _ = _run_stubbed_entry(
+        monkeypatch, tmp_path, description_predictions=[prediction],
+        summary_include_changes=False)
+    assert reads["description_models"] == ["gemini/gemini-3.6-flash"]
+
+
+def test_stubbed_entry_rejects_numbered_conversion_loss_and_invalid_flag(
+        monkeypatch, tmp_path) -> None:
+    with pytest.raises(RuntimeError, match="Numbered patch is incomplete"):
+        _run_stubbed_entry(monkeypatch, tmp_path, conversion_loss=True)
+    with pytest.raises(RuntimeError, match="Invalid numbered-diff request"):
+        _run_stubbed_entry(monkeypatch, tmp_path, review_numbered="true")
 
 
 def test_stubbed_embedded_entry_propagates_false_handle(monkeypatch, tmp_path) -> None:
@@ -439,7 +583,7 @@ def test_stubbed_entry_fails_closed_on_invalid_ignore_policy(monkeypatch, tmp_pa
 @pytest.mark.parametrize("setting_updates", [
     {"CONFIG.GIT_PROVIDER": "gitlab"}, {"CONFIG.MODEL": "other"},
     {"CONFIG.USE_GLOBAL_SETTINGS_FILE": True}, {"CONFIG.EXTRA_CONFIG_URL": "https://x"},
-    {"CONFIG.REPO_CONTEXT_FILES": ["AGENTS.md"]},
+    {"CONFIG.REPO_CONTEXT_FILES": ["AGENTS.md"]}, {"CONFIG.REPO_CONTEXT_FILES": 1},
     {"GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER": True},
     {"PR_DESCRIPTION.PUBLISH_DESCRIPTION_AS_COMMENT": False},
     {"PR_REVIEWER.NUM_MAX_FINDINGS": 3},
@@ -455,7 +599,7 @@ def test_stubbed_entry_propagates_settings_tool_and_policy_api_failures(monkeypa
         _run_stubbed_entry(monkeypatch, tmp_path, apply_error=True)
     with pytest.raises(RuntimeError, match="swallowed a review failure"):
         _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment", apply_error=True)
-    with pytest.raises(RuntimeError, match="tool failed"):
+    with pytest.raises(RuntimeError, match="all description models failed"):
         _run_stubbed_entry(monkeypatch, tmp_path, tool_error=True)
     with pytest.raises(RuntimeError, match="swallowed a review failure"):
         _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment", tool_error=True)
