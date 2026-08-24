@@ -1417,6 +1417,28 @@ def _committed_test_repo(tmp_path: Path, body: str) -> Path:
     return repo
 
 
+def test_nested_pytest_drops_outer_xdist_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = _committed_test_repo(tmp_path, "def test_pass():\n    assert True\n")
+    for variable in (
+        "PYTEST_XDIST_WORKER",
+        "PYTEST_XDIST_WORKER_COUNT",
+        "PYTEST_XDIST_TESTRUNUID",
+    ):
+        monkeypatch.setenv(variable, "outer-xdist")
+
+    result = gate.run_pytest(
+        repo,
+        tmp_path / "artifact",
+        [sys.executable, "-m", "pytest", "test_sample.py", "-q"],
+        kind="integration",
+    )
+
+    assert result["passed"] is True
+
+
 def test_missing_plugin_artifact_is_fail_closed(tmp_path: Path, monkeypatch):
     repo = _committed_test_repo(tmp_path, "def test_pass():\n    assert True\n")
     artifact = tmp_path / "artifact"
@@ -1463,6 +1485,49 @@ def test_windows_timeout_terminates_entire_process_tree(monkeypatch: pytest.Monk
 
     gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
     assert alive == set()
+
+
+def test_windows_timeout_ignores_missing_exited_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parent_pid = 4242
+
+    class Process:
+        pid = parent_pid
+
+        def poll(self) -> int:
+            return 0
+
+    def taskkill(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[list[str]]:
+        raise subprocess.CalledProcessError(128, command)
+
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.delenv("WINDIR", raising=False)
+    monkeypatch.setattr(gate.subprocess, "run", taskkill)
+
+    gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
+
+
+def test_windows_timeout_fails_closed_when_taskkill_rejects_live_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parent_pid = 4242
+
+    class Process:
+        pid = parent_pid
+
+        def poll(self) -> None:
+            return None
+
+    def taskkill(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[list[str]]:
+        raise subprocess.CalledProcessError(128, command)
+
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.delenv("WINDIR", raising=False)
+    monkeypatch.setattr(gate.subprocess, "run", taskkill)
+
+    with pytest.raises(OSError, match="termination failed"):
+        gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
 
 
 def test_windows_timeout_fails_closed_without_trusted_taskkill(

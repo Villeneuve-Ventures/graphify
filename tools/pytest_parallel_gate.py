@@ -41,6 +41,11 @@ _SAFE_ENV_KEYS = (
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
     "PYTEST_PLUGINS",
 )
+_OUTER_XDIST_ENV_KEYS = (
+    "PYTEST_XDIST_WORKER",
+    "PYTEST_XDIST_WORKER_COUNT",
+    "PYTEST_XDIST_TESTRUNUID",
+)
 _EXCLUDED_DIRECTORY_NAMES = frozenset(
     {
         ".git",
@@ -780,6 +785,10 @@ def _terminate_windows_process_tree(process: subprocess.Popen[Any]) -> None:
         )
     except subprocess.TimeoutExpired as exc:
         raise OSError("Windows process-tree termination timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        if process.poll() is not None:
+            return
+        raise OSError("Windows process-tree termination failed") from exc
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired as exc:
@@ -860,6 +869,8 @@ def run_pytest(
     plugin_path = artifact_root / "pytest-plugin.json"
     final_path = artifact_root / "run.json"
     environment = os.environ.copy()
+    for variable in _OUTER_XDIST_ENV_KEYS:
+        environment.pop(variable, None)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTEST_ADDOPTS"] = ""
     environment["PYTEST_PLUGINS"] = ""
