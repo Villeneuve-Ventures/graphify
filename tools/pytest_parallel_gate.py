@@ -1023,15 +1023,51 @@ def _execute_windows(
         _close_windows_job(job)
 
 
-def _terminate_process(process: subprocess.Popen[Any]) -> None:
-    if process.poll() is not None:
-        return
-    os.killpg(process.pid, signal.SIGTERM)
+def _process_group_signalable(process_group_id: int) -> bool | None:
     try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return None
+    return True
+
+
+def _verify_process_group_gone_after_reap(process: subprocess.Popen[Any]) -> None:
+    process.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while _process_group_signalable(process.pid) is not False:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("POSIX process group cleanup could not be verified")
+        time.sleep(min(0.05, remaining))
+
+
+def _terminate_process(process: subprocess.Popen[Any]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
         process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+        return
+    deadline = time.monotonic() + 5
+    while True:
+        group_signalable = _process_group_signalable(process.pid)
+        if group_signalable is False:
+            process.wait(timeout=5)
+            return
+        if group_signalable is None:
+            _verify_process_group_gone_after_reap(process)
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.05, remaining))
+    try:
         os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
         process.wait(timeout=5)
+        return
+    _verify_process_group_gone_after_reap(process)
 
 
 def _execute(command: Sequence[str], repo_root: Path, environment: dict[str, str], timeout: float) -> tuple[int, bool]:
@@ -1593,7 +1629,7 @@ def _assert_environment_and_versions(
     ):
         raise ValueError("pytest child versions differ from the frozen environment")
     if (
-        versions.get("python") != "3.14.3"
+        not _is_supported_python_version(versions.get("python"))
         or versions.get("pytest") != "9.0.3"
         or run.get("uv_version") != expected_uv_version
         or expected_uv_version != "uv 0.11.30"
@@ -1606,6 +1642,37 @@ def _assert_environment_and_versions(
     )
     if run.get("plugin_names") != expected_plugin_names:
         raise ValueError("loaded pytest plugin identity differs from the canonical environment")
+
+
+def _is_supported_python_version(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parts = value.split(".")
+    if len(parts) != 3 or parts[:2] != ["3", "14"]:
+        return False
+    patch = parts[2]
+    return (
+        patch.isascii()
+        and patch.isdecimal()
+        and (patch == "0" or not patch.startswith("0"))
+    )
+
+
+def _assert_comparable_python_versions(
+    baseline_versions: Any,
+    candidate_versions: Any,
+) -> None:
+    baseline_python = (
+        baseline_versions.get("python") if isinstance(baseline_versions, dict) else None
+    )
+    candidate_python = (
+        candidate_versions.get("python") if isinstance(candidate_versions, dict) else None
+    )
+    if (
+        baseline_python != candidate_python
+        or not _is_supported_python_version(baseline_python)
+    ):
+        raise ValueError("baseline and candidate must use the same supported Python patch")
 
 
 def _assert_parity(
@@ -2431,6 +2498,10 @@ def verify_evidence(manifest_path: Path) -> dict[str, Any]:
         or expected_candidate_plugins != _CANDIDATE_PYTEST_PLUGIN_ENTRYPOINTS
     ):
         raise ValueError("frozen baseline/candidate dependency versions are invalid")
+    _assert_comparable_python_versions(
+        expected_baseline_versions,
+        expected_candidate_versions,
+    )
     _assert_environment_and_versions(
         baseline,
         expected_environment=expected_environment,

@@ -6,6 +6,7 @@ import math
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -928,6 +929,62 @@ def test_verify_evidence_enforces_full_bound_contract(
     assert result["improvement_vs_baseline"] == pytest.approx(0.39)
 
 
+@pytest.mark.parametrize(
+    ("python_version", "accepted"),
+    [
+        ("3.14.4", True),
+        ("3.15.0", False),
+        ("3.14.04", False),
+        ("3.14.٤", False),
+        ("3.14.0rc1", False),
+    ],
+)
+def test_environment_validates_supported_python_patch_line(
+    python_version: str,
+    accepted: bool,
+):
+    environment = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": None,
+        "PYTEST_PLUGINS": "",
+        "PYTHONPATH_policy": "evaluator-only",
+    }
+    versions = {"python": python_version, "pytest": "9.0.3"}
+    run = {
+        "environment": environment,
+        "child_versions": versions,
+        "uv_version": "uv 0.11.30",
+        "pytest_plugin_entrypoints": [],
+        "plugin_names": [Path(gate.__file__).stem],
+    }
+
+    def validate() -> None:
+        gate._assert_environment_and_versions(
+            run,
+            expected_environment=environment,
+            expected_versions=versions,
+            expected_plugin_entrypoints=[],
+            expected_uv_version="uv 0.11.30",
+        )
+
+    if accepted:
+        validate()
+    else:
+        with pytest.raises(ValueError, match="Python, pytest, or uv version"):
+            validate()
+
+
+def test_expected_versions_require_same_python_patch():
+    versions = {"python": "3.14.4"}
+    gate._assert_comparable_python_versions(versions, versions.copy())
+
+    with pytest.raises(ValueError, match="same supported Python patch"):
+        gate._assert_comparable_python_versions(
+            {"python": "3.14.3"},
+            {"python": "3.14.4"},
+        )
+
+
 def test_verify_evidence_rejects_per_node_swap():
     baseline = {"collection_order": ["test_a", "test_b"], "outcomes": {"test_a": "passed", "test_b": "skipped"}}
     candidate = {"collection_order": ["test_a", "test_b"], "outcomes": {"test_a": "skipped", "test_b": "passed"}}
@@ -1506,6 +1563,124 @@ def test_missing_plugin_artifact_is_fail_closed(tmp_path: Path, monkeypatch):
     result = gate.run_pytest(repo, artifact, command, kind="integration")
     assert result["passed"] is False
     assert result["complete"] is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups only")
+def test_posix_termination_kills_group_after_leader_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaped = False
+    signals: list[int] = []
+    monotonic_values = iter((0.0, 0.0, 5.0, 5.0))
+
+    class Process:
+        pid = 4242
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout: float) -> int:
+            nonlocal reaped
+            assert timeout == 5
+            reaped = True
+            return 0
+
+    def killpg(pid: int, sent_signal: int) -> None:
+        assert pid == 4242
+        if sent_signal == 0 and reaped:
+            raise ProcessLookupError
+        if sent_signal != 0:
+            signals.append(sent_signal)
+
+    monkeypatch.setattr(gate.os, "killpg", killpg)
+    monkeypatch.setattr(gate.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(gate.time, "sleep", lambda duration: None)
+
+    gate._terminate_process(Process())  # type: ignore[arg-type]
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups only")
+def test_posix_termination_reaps_before_clearing_darwin_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaped = False
+
+    class Process:
+        pid = 4242
+
+        def wait(self, timeout: float) -> int:
+            nonlocal reaped
+            assert timeout == 5
+            reaped = True
+            return 0
+
+    def killpg(pid: int, sent_signal: int) -> None:
+        assert pid == 4242
+        if sent_signal == 0:
+            if reaped:
+                raise ProcessLookupError
+            raise PermissionError
+
+    monkeypatch.setattr(gate.os, "killpg", killpg)
+
+    gate._terminate_process(Process())  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups only")
+def test_posix_termination_fails_closed_on_persistent_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monotonic_values = iter((0.0, 0.0, 5.0))
+
+    class Process:
+        pid = 4242
+
+        def wait(self, timeout: float) -> int:
+            assert timeout == 5
+            return 0
+
+    def killpg(pid: int, sent_signal: int) -> None:
+        assert pid == 4242
+        if sent_signal == 0:
+            raise PermissionError
+
+    monkeypatch.setattr(gate.os, "killpg", killpg)
+    monkeypatch.setattr(gate.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(gate.time, "sleep", lambda duration: None)
+
+    with pytest.raises(RuntimeError, match="cleanup could not be verified"):
+        gate._terminate_process(Process())  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process groups only")
+def test_posix_termination_fails_closed_when_group_remains_after_sigkill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reaped = False
+    monotonic_values = iter((0.0, 0.0, 5.0, 5.0, 5.0, 10.0))
+
+    class Process:
+        pid = 4242
+
+        def wait(self, timeout: float) -> int:
+            nonlocal reaped
+            assert timeout == 5
+            reaped = True
+            return 0
+
+    def killpg(pid: int, sent_signal: int) -> None:
+        assert pid == 4242
+        if sent_signal == 0 and reaped:
+            raise PermissionError
+
+    monkeypatch.setattr(gate.os, "killpg", killpg)
+    monkeypatch.setattr(gate.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(gate.time, "sleep", lambda duration: None)
+
+    with pytest.raises(RuntimeError, match="cleanup could not be verified"):
+        gate._terminate_process(Process())  # type: ignore[arg-type]
 
 
 def test_windows_job_abi_layout() -> None:
