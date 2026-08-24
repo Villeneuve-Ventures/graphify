@@ -101,26 +101,21 @@ jobs:
           def _valid_int(value, positive=False):
               return type(value) is int and value >= (1 if positive else 0)
           def _valid_path(path):
-              return (isinstance(path, str) and path and not path.startswith("/") and "\\" not in path
-                      and not any(ord(c) < 32 or ord(c) == 127 for c in path)
+              return (isinstance(path, str) and path and not path.startswith("/") and "\\" not in path and not any(ord(c) < 32 or ord(c) == 127 for c in path)
                       and all(part not in {"", ".", ".."} for part in path.split("/")))
           def _manifest(pull, files):
               count = getattr(pull, "changed_files", None)
-              if not _valid_int(count) or count > 3000 or not files or len(files) != count:
-                  raise RuntimeError("GitHub file manifest is empty, capped, or incomplete")
+              if not _valid_int(count) or count > 3000 or not files or len(files) != count: raise RuntimeError("GitHub file manifest is empty, capped, or incomplete")
               seen = set()
               for file in files:
                   name, status = getattr(file, "filename", None), getattr(file, "status", None)
                   additions, deletions = getattr(file, "additions", None), getattr(file, "deletions", None)
-                  if (not _valid_path(name) or name in seen or status not in
-                          {"added", "modified", "removed", "renamed"}
-                          or not _valid_int(additions) or not _valid_int(deletions)):
-                      raise RuntimeError("Malformed or unsupported GitHub file record")
+                  if (not _valid_path(name) or name in seen or status not in {"added", "modified", "removed", "renamed"}
+                          or not _valid_int(additions) or not _valid_int(deletions)): raise RuntimeError("Malformed or unsupported GitHub file record")
                   seen.add(name)
                   if status == "renamed":
                       old = getattr(file, "previous_filename", None)
-                      if not _valid_path(old) or old == name:
-                          raise RuntimeError("Malformed rename record")
+                      if not _valid_path(old) or old == name: raise RuntimeError("Malformed rename record")
               return files
           def _same_files(expected, actual):
               expected_names, actual_names = ([file.filename for file in files] for files in (expected, actual))
@@ -130,8 +125,7 @@ jobs:
               globs = _setting("IGNORE.GLOB")
               patterns = [patterns] if isinstance(patterns, str) else patterns
               globs = globs.strip("[]").split(",") if isinstance(globs, str) else globs
-              if not isinstance(patterns, (list, tuple)) or not isinstance(globs, (list, tuple)):
-                  raise RuntimeError("Invalid PR-Agent ignore policy type")
+              if not isinstance(patterns, (list, tuple)) or not isinstance(globs, (list, tuple)): raise RuntimeError("Invalid PR-Agent ignore policy type")
               patterns = list(patterns)
               for glob in globs:
                   if not isinstance(glob, str):
@@ -140,51 +134,57 @@ jobs:
                   if glob.startswith("**/"):
                       patterns.append(fnmatch.translate(glob[3:]))
               generators = _setting("CONFIG.IGNORE_LANGUAGE_FRAMEWORK") or []
-              if (not isinstance(generators, (list, tuple))
-                      or any(not isinstance(generator, str) for generator in generators)):
-                  raise RuntimeError("Invalid generated-code ignore policy")
+              if not isinstance(generators, (list, tuple)) or any(not isinstance(generator, str) for generator in generators): raise RuntimeError("Invalid generated-code ignore policy")
               for generator in generators:
                   generated = _setting(f"GENERATED_CODE.{generator}") or []
                   generated = [generated] if isinstance(generated, str) else generated
-                  if not isinstance(generated, (list, tuple)):
-                      raise RuntimeError("Invalid generated-code ignore globs")
+                  if not isinstance(generated, (list, tuple)): raise RuntimeError("Invalid generated-code ignore globs")
                   patterns.extend(fnmatch.translate(glob) for glob in generated)
-              if any(not isinstance(pattern, str) for pattern in patterns):
-                  raise RuntimeError("Invalid PR-Agent ignore regex type")
+              if any(not isinstance(pattern, str) for pattern in patterns): raise RuntimeError("Invalid PR-Agent ignore regex type")
               try:
                   compiled = [re.compile(pattern) for pattern in patterns]
               except re.error as error:
                   raise RuntimeError("Invalid PR-Agent ignore regex") from error
-              return [file for file in files if file.filename
-                      and not any(pattern.match(file.filename) for pattern in compiled)]
+              return [file for file in files if file.filename and not any(pattern.match(file.filename) for pattern in compiled)]
+          def _patch_counts(patch, filename):
+              pattern = re.compile(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@[^\n]*(?:\n|$)(?P<body>(?:(?:[ +\-][^\n]*|\\ No newline at end of file)(?:\n|$))*)")
+              position = plus = minus = delta = 0; previous = ends = None; eof = [False, False]
+              for match in pattern.finditer(patch):
+                  if match.start() != position: raise RuntimeError(f"Malformed unified patch: {filename}")
+                  for index, line in enumerate(body := match.group("body").splitlines()):
+                      if line == r"\ No newline at end of file":
+                          if index == 0 or body[index - 1] == line: raise RuntimeError(f"Malformed unified patch: {filename}")
+                          prefix = body[index - 1][0]; eof[0] |= prefix in " -"; eof[1] |= prefix in " +"
+                      elif (eof[0] and line[0] in " -") or (eof[1] and line[0] in " +"): raise RuntimeError(f"Malformed unified patch: {filename}")
+                  lines = [line for line in body if line != r"\ No newline at end of file"]
+                  starts, counts = tuple(int(match.group(i)) for i in (1, 3)), tuple(int(match.group(i) or 1) for i in (2, 4)); anchors = tuple(start + (count == 0) for start, count in zip(starts, counts))
+                  if any(count and start < 1 for start, count in zip(starts, counts)) or anchors[1] - anchors[0] != delta or (previous and any(anchor <= previous[i] or anchor < ends[i] for i, anchor in enumerate(anchors))): raise RuntimeError(f"Malformed unified patch: {filename}")
+                  old, new = (sum(line[0] != prefix for line in lines) for prefix in ("+", "-"))
+                  if not lines or not any(line[0] in "+-" for line in lines) or (old, new) != counts: raise RuntimeError(f"Malformed unified patch: {filename}")
+                  plus += sum(line.startswith("+") for line in lines); minus += sum(line.startswith("-") for line in lines); previous, ends = anchors, tuple(anchor + count for anchor, count in zip(anchors, counts)); delta += new - old; position = match.end()
+              if not position or position != len(patch): raise RuntimeError(f"Malformed unified patch: {filename}")
+              return plus, minus
           def _raw_diff(files, token_handler, model, numbered=False, max_tokens=get_max_tokens):
               chunks = []
               for file in files:
                   patch = getattr(file, "patch", None)
                   additions, deletions = file.additions, file.deletions
                   metadata = f"## File: '{file.filename}'\nstatus: {file.status}"
-                  if file.status == "renamed":
-                      metadata += f"\nrename from {file.previous_filename}\nrename to {file.filename}"
+                  if file.status == "renamed": metadata += f"\nrename from {file.previous_filename}\nrename to {file.filename}"
                   if file.status == "renamed" and additions == deletions == 0 and not patch:
                       chunks.append(metadata)
                       continue
-                  if not isinstance(patch, str) or not patch.strip():
-                      raise RuntimeError(f"Eligible patch unavailable: {file.filename}")
-                  plus = sum(line.startswith("+") and not line.startswith("+++") for line in patch.splitlines())
-                  minus = sum(line.startswith("-") and not line.startswith("---") for line in patch.splitlines())
-                  if plus != additions or minus != deletions:
-                      raise RuntimeError(f"Eligible patch is clipped or inconsistent: {file.filename}")
+                  if not isinstance(patch, str) or not patch.strip(): raise RuntimeError(f"Eligible patch unavailable: {file.filename}")
+                  plus, minus = _patch_counts(patch, file.filename)
+                  if plus != additions or minus != deletions: raise RuntimeError(f"Eligible patch is clipped or inconsistent: {file.filename}")
                   rendered = patch
                   if numbered and file.status != "removed":
                       rendered = decouple_and_convert_to_hunks_with_lines_numbers(patch, None)
-                      numbered_plus = sum(re.match(r"^\d+ \+", line) is not None for line in rendered.splitlines())
-                      numbered_minus = sum(line.startswith("-") for line in rendered.splitlines())
-                      if numbered_plus != additions or numbered_minus != deletions:
-                          raise RuntimeError(f"Numbered patch is incomplete: {file.filename}")
+                      numbered_plus, numbered_minus = (sum(predicate(line) for line in rendered.splitlines()) for predicate in (lambda line: re.match(r"^\d+ \+", line) is not None, lambda line: line.startswith("-")))
+                      if numbered_plus != additions or numbered_minus != deletions: raise RuntimeError(f"Numbered patch is incomplete: {file.filename}")
                   chunks.append(f"{metadata}\n{rendered}")
               diff = "\n\n".join(chunks)
-              if not diff or token_handler.prompt_tokens + token_handler.count_tokens(diff) + 1500 >= max_tokens(model):
-                  raise RuntimeError("Complete raw comparison exceeds the one-call token budget")
+              if not diff or token_handler.prompt_tokens + token_handler.count_tokens(diff) + 1500 >= max_tokens(model): raise RuntimeError("Complete raw comparison exceeds the one-call token budget")
               return diff
           def _canonical_body(body, marker=None):
               if not isinstance(body, str):

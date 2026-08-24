@@ -34,7 +34,7 @@ def _embedded_python() -> str:
 
 def _helpers(converter=lambda _patch, _file: "@@ -1 +1 @@\n__new hunk__\n1 +new\n__old hunk__\n-old") -> dict:
     tree = ast.parse(_embedded_python())
-    wanted = {"_body_digest", "_canonical_body", "_manifest", "_marker", "_raw_diff", "_same",
+    wanted = {"_body_digest", "_canonical_body", "_manifest", "_marker", "_patch_counts", "_raw_diff", "_same",
               "_same_files", "_substantive", "_valid_int", "_valid_path", "_visible"}
     body = [node for node in tree.body if (
         isinstance(node, ast.Import) and any(alias.name in {"hashlib", "json", "re"} for alias in node.names)
@@ -141,6 +141,94 @@ def test_raw_diff_proves_patch_counts_deletions_renames_and_token_bound() -> Non
     with pytest.raises(RuntimeError):
         raw_diff([_file("new.py", "renamed", 1, 1, None, "old.py")], token_handler,
                  "model", max_tokens=lambda _: 10000)
+    signs = _file(patch="@@ -1,2 +1,2 @@\n context\n---value\n+++value\n\\ No newline at end of file")
+    assert "+++value" in raw_diff([signs], token_handler, "model", max_tokens=lambda _: 10000)
+    sign_converter = _helpers(lambda _patch, _file: "__new hunk__\n1 +++value\n__old hunk__\n---value")["_raw_diff"]
+    assert "+++value" in sign_converter([signs], token_handler, "model", numbered=True,
+                                         max_tokens=lambda _: 10000)
+    with pytest.raises(RuntimeError, match="Malformed unified patch"):
+        raw_diff([_file(patch="-old\n+new")], token_handler, "model",
+                 max_tokens=lambda _: 10000)
+
+
+@pytest.mark.parametrize("file", [
+    _file(additions=2, deletions=2,
+          patch="@@ -1 +1 @@\n-old\n+new\n@@ malformed @@\n-old2\n+new2"),
+    _file(patch="@@ -1,2 +1,2 @@\n-old\n+new"),
+    _file(additions=0, deletions=0, patch="@@ -1,0 +1,0 @@\n"),
+    _file(patch="@@ -1 +1 @@\n-old\n+new\n\\ unexpected control"),
+    _file(additions=2, deletions=2,
+          patch="@@ -3 +3 @@\n-old\n+new\n@@ -1 +1 @@\n-old2\n+new2"),
+    _file(additions=2, deletions=2,
+          patch="@@ -1,2 +1,2 @@\n context\n-old\n+new\n@@ -2 +2 @@\n-old2\n+new2"),
+    _file(additions=2, deletions=2,
+          patch="@@ -1 +1 @@\n-old\n+new\n@@ -1 +1 @@\n-old2\n+new2"),
+    _file(patch="@@ -0 +1 @@\n-old\n+new"),
+    _file(patch="@@ -1 +1 @@\n\\ No newline at end of file\n-old\n+new"),
+    _file(patch="@@ -1 +1 @@\n-old\n\\ No newline at end of file\n\\ No newline at end of file\n+new"),
+    _file(additions=2, deletions=1,
+          patch="@@ -0,0 +1 @@\n+first\n@@ -3 +3 @@\n-old\n+new"),
+    _file(patch="@@ -1,2 +1,2 @@\n context\n\\ No newline at end of file\n-old\n+new"),
+    _file(additions=1, deletions=0,
+          patch="@@ -1,2 +1,3 @@\n context\n+new\n\\ No newline at end of file\n context2"),
+    _file(additions=2, deletions=0,
+          patch="@@ -1 +1,3 @@\n context\n+new\n\\ No newline at end of file\n+later"),
+    _file(additions=0, deletions=2,
+          patch="@@ -1,3 +1 @@\n context\n-old\n\\ No newline at end of file\n-old2"),
+    _file(additions=2, deletions=2,
+          patch="@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n@@ -3 +3 @@\n-old2\n+new2"),
+    _file(additions=2, deletions=2,
+          patch="@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file\n@@ -3 +3 @@\n-old2\n+new2"),
+])
+def test_raw_diff_rejects_malformed_sequential_hunks(file) -> None:
+    with pytest.raises(RuntimeError, match="Malformed unified patch"):
+        _helpers()["_raw_diff"](
+            [file], SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+            max_tokens=lambda _: 10000)
+
+
+def test_raw_diff_accepts_multiple_cardinality_valid_hunks() -> None:
+    patch = "@@ -1 +1 @@\n-old\n+new\n@@ -3 +3 @@\n-old2\n+new2"
+    result = _helpers()["_raw_diff"](
+        [_file(additions=2, deletions=2, patch=patch)],
+        SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+        max_tokens=lambda _: 10000)
+    assert patch in result
+
+
+@pytest.mark.parametrize("file", [
+    _file("new.py", "added", 1, 0, "@@ -0,0 +1 @@\n+new"),
+    _file("old.py", "removed", 0, 1, "@@ -1 +0,0 @@\n-old"),
+    _file(additions=1, deletions=0, patch="@@ -1,0 +2 @@\n+new"),
+    _file(additions=0, deletions=1, patch="@@ -2 +1,0 @@\n-old"),
+])
+def test_raw_diff_accepts_valid_zero_count_range_boundaries(file) -> None:
+    assert file.filename in _helpers()["_raw_diff"](
+        [file], SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+        max_tokens=lambda _: 10000)
+
+
+@pytest.mark.parametrize("patch,additions,deletions", [
+    ("@@ -0,0 +1 @@\n+first\n@@ -3 +4 @@\n-old\n+new", 2, 1),
+    ("@@ -1 +0,0 @@\n-old\n@@ -4 +3 @@\n-old2\n+new", 1, 2),
+])
+def test_raw_diff_accepts_cumulative_anchor_delta(
+        patch, additions, deletions) -> None:
+    assert patch in _helpers()["_raw_diff"](
+        [_file(additions=additions, deletions=deletions, patch=patch)],
+        SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+        max_tokens=lambda _: 10000)
+
+
+@pytest.mark.parametrize("patch", [
+    "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new",
+    "@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file",
+    "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file",
+])
+def test_raw_diff_accepts_valid_single_and_both_side_eof_markers(patch) -> None:
+    assert patch in _helpers()["_raw_diff"](
+        [_file(patch=patch)], SimpleNamespace(prompt_tokens=1, count_tokens=len),
+        "model", max_tokens=lambda _: 10000)
 
 
 def test_numbered_diff_preserves_deletions_renames_counts_and_final_token_bound() -> None:
