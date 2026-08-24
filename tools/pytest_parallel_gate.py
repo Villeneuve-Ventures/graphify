@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import hashlib
 import importlib.metadata
 import json
 import math
 import os
-from pathlib import Path, PureWindowsPath
+from dataclasses import dataclass
+from pathlib import Path
 import platform
 import signal
 import socket
@@ -15,7 +17,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, cast, Iterable, Sequence
 
 import pytest
 
@@ -45,6 +47,23 @@ _OUTER_XDIST_ENV_KEYS = (
     "PYTEST_XDIST_WORKER",
     "PYTEST_XDIST_WORKER_COUNT",
     "PYTEST_XDIST_TESTRUNUID",
+)
+_WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_WINDOWS_PROCESS_TERMINATE = 0x0001
+_WINDOWS_PROCESS_SET_QUOTA = 0x0100
+_WINDOWS_JOB_TERMINATION_EXIT_CODE = 124
+_WINDOWS_JOB_LAUNCHER = (
+    "import json, subprocess, sys\n"
+    "try:\n"
+    "    command = json.loads(sys.stdin.readline())\n"
+    "    if not isinstance(command, list) or not command:\n"
+    "        raise ValueError('invalid command')\n"
+    "    if not all(isinstance(item, str) and item for item in command):\n"
+    "        raise ValueError('invalid command')\n"
+    "except (EOFError, json.JSONDecodeError, ValueError):\n"
+    "    raise SystemExit(125)\n"
+    "raise SystemExit(subprocess.run(command, check=False).returncode)\n"
 )
 _EXCLUDED_DIRECTORY_NAMES = frozenset(
     {
@@ -186,6 +205,49 @@ _LOCAL_GATE_COMMANDS: dict[str, list[list[str]]] = {
     ],
     "graph_refresh": [["graphify", "update", "."]],
 }
+
+
+class _WindowsJobBasicLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _WindowsIoCounters(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _WindowsJobExtendedLimitInformation(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _WindowsJobBasicLimitInformation),
+        ("IoInfo", _WindowsIoCounters),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+@dataclass
+class _WindowsJob:
+    kernel32: Any
+    handle: Any
+    closed: bool = False
 _HOSTED_CI_REPOSITORY = "Villeneuve-Ventures/graphify"
 _HOSTED_CI_WORKFLOW = "CI"
 _HOSTED_CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
@@ -770,35 +832,198 @@ def _validate_measurement_command(
         raise ValueError("serial commands cannot carry xdist scheduler settings")
 
 
-def _terminate_windows_process_tree(process: subprocess.Popen[Any]) -> None:
-    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
-    if not isinstance(system_root, str) or not PureWindowsPath(system_root).is_absolute():
-        raise OSError("Windows process-tree termination requires an absolute SystemRoot")
-    taskkill = str(PureWindowsPath(system_root) / "System32" / "taskkill.exe")
-    try:
-        subprocess.run(
-            [taskkill, "/PID", str(process.pid), "/T", "/F"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise OSError("Windows process-tree termination timed out") from exc
-    except subprocess.CalledProcessError as exc:
-        if process.poll() is not None:
-            return
-        raise OSError("Windows process-tree termination failed") from exc
+def _assert_windows_job_abi() -> None:
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    expected_basic_size = {4: 48, 8: 64}.get(pointer_size)
+    expected_extended_size = {4: 112, 8: 144}.get(pointer_size)
+    if (
+        expected_basic_size is None
+        or expected_extended_size is None
+        or ctypes.sizeof(_WindowsJobBasicLimitInformation) != expected_basic_size
+        or ctypes.sizeof(_WindowsJobExtendedLimitInformation) != expected_extended_size
+        or _WindowsJobBasicLimitInformation.LimitFlags.offset != 16
+    ):
+        raise OSError("unsupported Windows Job Object ABI layout")
+
+
+def _windows_kernel32() -> Any:
+    _assert_windows_job_abi()
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        raise OSError("Windows Job Objects require ctypes.WinDLL")
+    kernel32 = loader("kernel32", use_last_error=True)
+    handle_type = ctypes.c_void_p
+    bool_type = ctypes.c_int32
+    dword_type = ctypes.c_uint32
+
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    kernel32.CreateJobObjectW.restype = handle_type
+    kernel32.SetInformationJobObject.argtypes = [
+        handle_type,
+        ctypes.c_int32,
+        ctypes.c_void_p,
+        dword_type,
+    ]
+    kernel32.SetInformationJobObject.restype = bool_type
+    kernel32.OpenProcess.argtypes = [dword_type, bool_type, dword_type]
+    kernel32.OpenProcess.restype = handle_type
+    kernel32.AssignProcessToJobObject.argtypes = [handle_type, handle_type]
+    kernel32.AssignProcessToJobObject.restype = bool_type
+    kernel32.TerminateJobObject.argtypes = [handle_type, dword_type]
+    kernel32.TerminateJobObject.restype = bool_type
+    kernel32.CloseHandle.argtypes = [handle_type]
+    kernel32.CloseHandle.restype = bool_type
+    return kernel32
+
+
+def _windows_native_error(operation: str) -> OSError:
+    get_last_error = getattr(ctypes, "get_last_error", None)
+    error_code = cast(Callable[[], int], get_last_error)() if callable(get_last_error) else 0
+    return OSError(error_code, f"{operation} failed")
+
+
+def _close_windows_job(job: _WindowsJob) -> None:
+    if job.closed:
+        return
+    if not job.kernel32.CloseHandle(job.handle):
+        raise _windows_native_error("CloseHandle(job)")
+    job.closed = True
+
+
+def _create_windows_job() -> _WindowsJob:
+    kernel32 = _windows_kernel32()
+    handle = kernel32.CreateJobObjectW(None, None)
+    if not handle:
+        raise _windows_native_error("CreateJobObjectW")
+    job = _WindowsJob(kernel32=kernel32, handle=handle)
+    limits = _WindowsJobExtendedLimitInformation()
+    limits.BasicLimitInformation.LimitFlags = _WINDOWS_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(
+        handle,
+        _WINDOWS_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+        ctypes.byref(limits),
+        ctypes.sizeof(limits),
+    ):
+        configuration_error = _windows_native_error("SetInformationJobObject")
+        try:
+            _close_windows_job(job)
+        except OSError as close_error:
+            raise close_error from configuration_error
+        raise configuration_error
+    return job
+
+
+def _assign_windows_process(job: _WindowsJob, process_id: int) -> None:
+    process_handle = job.kernel32.OpenProcess(
+        _WINDOWS_PROCESS_SET_QUOTA | _WINDOWS_PROCESS_TERMINATE,
+        False,
+        process_id,
+    )
+    if not process_handle:
+        raise _windows_native_error("OpenProcess")
+    assignment_error = (
+        None
+        if job.kernel32.AssignProcessToJobObject(job.handle, process_handle)
+        else _windows_native_error("AssignProcessToJobObject")
+    )
+    close_error = (
+        None
+        if job.kernel32.CloseHandle(process_handle)
+        else _windows_native_error("CloseHandle(process)")
+    )
+    if close_error is not None:
+        if assignment_error is not None:
+            raise close_error from assignment_error
+        raise close_error
+    if assignment_error is not None:
+        raise assignment_error
+
+
+def _terminate_windows_job(job: _WindowsJob) -> None:
+    if not job.kernel32.TerminateJobObject(
+        job.handle,
+        _WINDOWS_JOB_TERMINATION_EXIT_CODE,
+    ):
+        raise _windows_native_error("TerminateJobObject")
+
+
+def _wait_for_windows_helper(process: subprocess.Popen[Any]) -> None:
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired as exc:
-        raise OSError("Windows process tree did not terminate") from exc
+        raise OSError("Windows job helper did not terminate") from exc
+
+
+def _stop_unassigned_windows_helper(process: subprocess.Popen[Any]) -> None:
+    stream = process.stdin
+    close_error: BaseException | None = None
+    if stream is not None and not getattr(stream, "closed", False):
+        try:
+            stream.close()
+        except BaseException as exc:
+            close_error = exc
+    try:
+        if process.poll() is None:
+            process.terminate()
+        _wait_for_windows_helper(process)
+    except BaseException as stop_error:
+        if close_error is not None:
+            raise stop_error from close_error
+        raise
+    if close_error is not None:
+        raise close_error
+
+
+def _execute_windows(
+    command: Sequence[str],
+    repo_root: Path,
+    environment: dict[str, str],
+    timeout: float,
+) -> tuple[int, bool]:
+    job = _create_windows_job()
+    process: subprocess.Popen[str] | None = None
+    assigned = False
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", _WINDOWS_JOB_LAUNCHER],
+            cwd=repo_root,
+            env=environment,
+            stdin=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+        _assign_windows_process(job, process.pid)
+        assigned = True
+        if process.stdin is None:
+            raise OSError("Windows job helper stdin is unavailable")
+        try:
+            process.stdin.write(json.dumps(list(command), separators=(",", ":")) + "\n")
+            process.stdin.flush()
+        finally:
+            process.stdin.close()
+        try:
+            return process.wait(timeout=timeout), False
+        except subprocess.TimeoutExpired:
+            _terminate_windows_job(job)
+            _wait_for_windows_helper(process)
+            return 124, True
+    except BaseException as operation_error:
+        if process is not None:
+            try:
+                if assigned:
+                    _terminate_windows_job(job)
+                    _wait_for_windows_helper(process)
+                else:
+                    _stop_unassigned_windows_helper(process)
+            except BaseException as cleanup_error:
+                raise cleanup_error from operation_error
+        raise
+    finally:
+        _close_windows_job(job)
 
 
 def _terminate_process(process: subprocess.Popen[Any]) -> None:
-    if os.name == "nt":
-        _terminate_windows_process_tree(process)
-        return
     if process.poll() is not None:
         return
     os.killpg(process.pid, signal.SIGTERM)
@@ -810,13 +1035,13 @@ def _terminate_process(process: subprocess.Popen[Any]) -> None:
 
 
 def _execute(command: Sequence[str], repo_root: Path, environment: dict[str, str], timeout: float) -> tuple[int, bool]:
-    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+    if os.name == "nt":
+        return _execute_windows(command, repo_root, environment, timeout)
     process = subprocess.Popen(
         list(command),
         cwd=repo_root,
         env=environment,
-        start_new_session=os.name != "nt",
-        creationflags=creationflags,
+        start_new_session=True,
     )
     try:
         return process.wait(timeout=timeout), False

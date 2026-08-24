@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import math
 import os
@@ -7,8 +8,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import subprocess
 import sys
+import time
 import tomllib
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -1449,98 +1451,298 @@ def test_missing_plugin_artifact_is_fail_closed(tmp_path: Path, monkeypatch):
     assert result["complete"] is False
 
 
-def test_windows_timeout_terminates_entire_process_tree(monkeypatch: pytest.MonkeyPatch):
-    parent_pid = 4242
-    child_pid = 4243
-    alive = {parent_pid, child_pid}
+def test_windows_job_abi_layout() -> None:
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    expected_basic_size = 64 if pointer_size == 8 else 48
+    expected_extended_size = 144 if pointer_size == 8 else 112
 
-    class Process:
-        pid = parent_pid
+    assert ctypes.sizeof(gate._WindowsJobBasicLimitInformation) == expected_basic_size
+    assert ctypes.sizeof(gate._WindowsJobExtendedLimitInformation) == expected_extended_size
+    assert gate._WindowsJobBasicLimitInformation.LimitFlags.offset == 16
 
-        def wait(self, timeout: float) -> int:
-            assert timeout == 5
-            assert alive == set()
+
+def test_windows_job_configuration_and_assignment_own_handles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+
+    class Kernel32:
+        def CreateJobObjectW(self, attributes: object, name: object) -> int:
+            assert attributes is None
+            assert name is None
+            events.append("create-job")
+            return 100
+
+        def SetInformationJobObject(
+            self,
+            handle: int,
+            information_class: int,
+            information: Any,
+            size: int,
+        ) -> int:
+            limits = ctypes.cast(
+                information,
+                ctypes.POINTER(gate._WindowsJobExtendedLimitInformation),
+            ).contents
+            assert handle == 100
+            assert information_class == 9
+            assert size == ctypes.sizeof(gate._WindowsJobExtendedLimitInformation)
+            assert limits.BasicLimitInformation.LimitFlags == 0x00002000
+            events.append("configure-job")
             return 1
 
-    def taskkill(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[list[str]]:
-        assert command == [
-            r"C:\Windows\System32\taskkill.exe",
-            "/PID",
-            str(parent_pid),
-            "/T",
-            "/F",
-        ]
-        assert kwargs == {
-            "check": True,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "timeout": 5,
-        }
-        alive.clear()
-        return subprocess.CompletedProcess(command, 0)
+        def OpenProcess(self, access: int, inherit: bool, pid: int) -> int:
+            assert access == 0x0101
+            assert inherit is False
+            assert pid == 4242
+            events.append("open-process")
+            return 200
 
-    monkeypatch.setenv("SystemRoot", r"C:\Windows")
-    monkeypatch.delenv("WINDIR", raising=False)
-    monkeypatch.setattr(gate.subprocess, "run", taskkill)
+        def AssignProcessToJobObject(self, job_handle: int, process_handle: int) -> int:
+            assert (job_handle, process_handle) == (100, 200)
+            events.append("assign-process")
+            return 1
 
-    gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
-    assert alive == set()
+        def CloseHandle(self, handle: int) -> int:
+            events.append(("close", handle))
+            return 1
+
+    kernel32 = Kernel32()
+    monkeypatch.setattr(gate, "_windows_kernel32", lambda: kernel32)
+
+    job = gate._create_windows_job()
+    gate._assign_windows_process(job, 4242)
+    gate._close_windows_job(job)
+
+    assert events == [
+        "create-job",
+        "configure-job",
+        "open-process",
+        "assign-process",
+        ("close", 200),
+        ("close", 100),
+    ]
 
 
-def test_windows_timeout_ignores_missing_exited_launcher(
+def test_windows_timeout_terminates_assigned_job_without_launcher_polling(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-):
-    parent_pid = 4242
+) -> None:
+    events: list[object] = []
+    requested = ["pytest", "tests/", "-q"]
+    job = object()
 
-    class Process:
-        pid = parent_pid
+    class Stdin:
+        def write(self, payload: str) -> int:
+            events.append(("release", json.loads(payload)))
+            return len(payload)
 
-        def poll(self) -> int:
-            return 0
+        def flush(self) -> None:
+            events.append("flush")
 
-    def taskkill(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[list[str]]:
-        raise subprocess.CalledProcessError(128, command)
+        def close(self) -> None:
+            events.append("close-stdin")
 
-    monkeypatch.setenv("SystemRoot", r"C:\Windows")
-    monkeypatch.delenv("WINDIR", raising=False)
-    monkeypatch.setattr(gate.subprocess, "run", taskkill)
-
-    gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
-
-
-def test_windows_timeout_fails_closed_when_taskkill_rejects_live_launcher(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    parent_pid = 4242
-
-    class Process:
-        pid = parent_pid
-
-        def poll(self) -> None:
-            return None
-
-    def taskkill(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[list[str]]:
-        raise subprocess.CalledProcessError(128, command)
-
-    monkeypatch.setenv("SystemRoot", r"C:\Windows")
-    monkeypatch.delenv("WINDIR", raising=False)
-    monkeypatch.setattr(gate.subprocess, "run", taskkill)
-
-    with pytest.raises(OSError, match="termination failed"):
-        gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
-
-
-def test_windows_timeout_fails_closed_without_trusted_taskkill(
-    monkeypatch: pytest.MonkeyPatch,
-):
     class Process:
         pid = 4242
+        stdin = Stdin()
+        wait_calls = 0
 
-    monkeypatch.delenv("SystemRoot", raising=False)
-    monkeypatch.delenv("WINDIR", raising=False)
+        def wait(self, timeout: float) -> int:
+            self.wait_calls += 1
+            events.append(("wait", timeout))
+            if self.wait_calls == 1:
+                raise subprocess.TimeoutExpired("helper", timeout)
+            return 1
 
-    with pytest.raises(OSError, match="SystemRoot"):
-        gate._terminate_windows_process_tree(cast(subprocess.Popen[Any], Process()))
+        def poll(self) -> int:
+            raise AssertionError("launcher polling must not prove job termination")
+
+    def popen(command: list[str], **kwargs: object) -> Process:
+        assert command == [sys.executable, "-c", gate._WINDOWS_JOB_LAUNCHER]
+        assert kwargs["stdin"] == subprocess.PIPE
+        events.append("start-helper")
+        return Process()
+
+    monkeypatch.setattr(gate, "_create_windows_job", lambda: events.append("create-job") or job)
+    monkeypatch.setattr(gate.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        gate,
+        "_assign_windows_process",
+        lambda assigned_job, pid: events.append(("assign", assigned_job, pid)),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_terminate_windows_job",
+        lambda assigned_job: events.append(("terminate-job", assigned_job)),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_close_windows_job",
+        lambda assigned_job: events.append(("close-job", assigned_job)),
+    )
+
+    assert gate._execute_windows(requested, tmp_path, {}, 0.25) == (124, True)
+    assert events == [
+        "create-job",
+        "start-helper",
+        ("assign", job, 4242),
+        ("release", requested),
+        "flush",
+        "close-stdin",
+        ("wait", 0.25),
+        ("terminate-job", job),
+        ("wait", 5),
+        ("close-job", job),
+    ]
+
+
+def test_windows_assignment_failure_never_releases_requested_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[object] = []
+    job = object()
+
+    class Stdin:
+        closed = False
+
+        def write(self, payload: str) -> int:
+            raise AssertionError(f"requested command was released: {payload}")
+
+        def close(self) -> None:
+            self.closed = True
+            events.append("close-stdin")
+
+    class Process:
+        pid = 4242
+        stdin = Stdin()
+
+        def poll(self) -> None:
+            events.append("poll-helper")
+            return None
+
+        def terminate(self) -> None:
+            events.append("terminate-helper")
+
+        def wait(self, timeout: float) -> int:
+            events.append(("wait", timeout))
+            return 1
+
+    def fail_assignment(assigned_job: object, pid: int) -> None:
+        assert assigned_job is job
+        assert pid == 4242
+        raise OSError("assignment failed")
+
+    monkeypatch.setattr(gate, "_create_windows_job", lambda: events.append("create-job") or job)
+    monkeypatch.setattr(gate.subprocess, "Popen", lambda *args, **kwargs: Process())
+    monkeypatch.setattr(gate, "_assign_windows_process", fail_assignment)
+    monkeypatch.setattr(
+        gate,
+        "_close_windows_job",
+        lambda assigned_job: events.append(("close-job", assigned_job)),
+    )
+
+    with pytest.raises(OSError, match="assignment failed"):
+        gate._execute_windows(["pytest", "tests/"], tmp_path, {}, 1)
+
+    assert events == [
+        "create-job",
+        "close-stdin",
+        "poll-helper",
+        "terminate-helper",
+        ("wait", 5),
+        ("close-job", job),
+    ]
+
+
+@pytest.mark.parametrize("payload", ["", "{}\n", '[""]\n'])
+def test_windows_job_launcher_rejects_invalid_payload(payload: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", gate._WINDOWS_JOB_LAUNCHER],
+        input=payload,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 125
+
+
+def test_windows_job_launcher_returns_requested_exit_code() -> None:
+    command = [sys.executable, "-c", "raise SystemExit(7)"]
+    result = subprocess.run(
+        [sys.executable, "-c", gate._WINDOWS_JOB_LAUNCHER],
+        input=json.dumps(command) + "\n",
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 7
+
+
+if os.name == "nt":
+
+    def test_windows_job_timeout_stops_descendant_heartbeat(tmp_path: Path) -> None:
+        heartbeat = tmp_path / "heartbeat.txt"
+        child = (
+            "from pathlib import Path; import sys, time\n"
+            "path = Path(sys.argv[1])\n"
+            "while True:\n"
+            "    path.write_text(str(time.time()), encoding='utf-8')\n"
+            "    time.sleep(0.05)\n"
+        )
+        parent = (
+            "import subprocess, sys, time\n"
+            "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+            "time.sleep(30)\n"
+        )
+
+        assert gate._execute_windows(
+            [sys.executable, "-c", parent, child, str(heartbeat)],
+            tmp_path,
+            os.environ.copy(),
+            1,
+        ) == (124, True)
+        assert heartbeat.exists()
+        stopped_value = heartbeat.read_text(encoding="utf-8")
+        time.sleep(0.3)
+        assert heartbeat.read_text(encoding="utf-8") == stopped_value
+
+
+    def test_windows_job_close_stops_descendant_after_launcher_exit(tmp_path: Path) -> None:
+        heartbeat = tmp_path / "heartbeat.txt"
+        child = (
+            "from pathlib import Path; import sys, time\n"
+            "path = Path(sys.argv[1])\n"
+            "while True:\n"
+            "    path.write_text(str(time.time()), encoding='utf-8')\n"
+            "    time.sleep(0.05)\n"
+        )
+        parent = (
+            "from pathlib import Path; import subprocess, sys, time\n"
+            "heartbeat = Path(sys.argv[2])\n"
+            "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])\n"
+            "deadline = time.monotonic() + 5\n"
+            "while time.monotonic() < deadline:\n"
+            "    try:\n"
+            "        if heartbeat.read_text(encoding='utf-8'):\n"
+            "            break\n"
+            "    except (FileNotFoundError, OSError):\n"
+            "        pass\n"
+            "    time.sleep(0.01)\n"
+            "else:\n"
+            "    raise SystemExit(91)\n"
+        )
+
+        assert gate._execute_windows(
+            [sys.executable, "-c", parent, child, str(heartbeat)],
+            tmp_path,
+            os.environ.copy(),
+            10,
+        ) == (0, False)
+        stopped_value = heartbeat.read_text(encoding="utf-8")
+        time.sleep(0.3)
+        assert heartbeat.read_text(encoding="utf-8") == stopped_value
 
 
 def test_timeout_is_fail_closed(tmp_path: Path):
