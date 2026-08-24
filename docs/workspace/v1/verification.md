@@ -1447,8 +1447,13 @@ Contract review must prove each of the following:
   `full_result_sha256` hashes exactly the inventory/counts/field-results/outcome
   projection without either digest member; the binding carries that digest but
   never its own digest; and external `binding_sha256` hashes the completed
-  canonical binding bytes. Unknown, missing, duplicate, additional, reordered,
-  or alternate-preimage state fails closed;
+  canonical binding bytes. The prerequisite validates self-contained binding,
+  count, and field-result shape, array bounds, digest syntax, and exact digest
+  preimages. Unknown, missing, duplicate, or additional members and
+  alternate-preimage state, or reordering of self-contained normative arrays,
+  fail closed. Request/current-policy/binding selected-profile positional
+  comparison remains the encompassing decision child's gate; repeated digest
+  values alone are not duplicate-coordinate evidence;
 - bindings exclude raw prose, matched substrings, generated explanations,
   confidence scores, public source locations, provider responses, and
   credentials. Private entity/field locators and unkeyed value digests remain
@@ -1711,7 +1716,12 @@ Contract review must prove each of the following:
   entity kind, private entity ID, field name, value digest, category IDs,
   private rule IDs, and disposition. Raw prose, substrings, explanations,
   confidence, public source locations, provider responses, and credentials are
-  absent;
+  absent. Before install it compares every ordered request `selected_profiles`
+  coordinate position-for-position with the stable current policy-authority
+  record and the corresponding binding `selected_profile_sha256s` value;
+  omission, addition, reordering, or coordinate or digest mismatch rejects.
+  Equal digest values alone do not prove duplicate profile coordinates and are
+  neither sorted nor rejected solely for value repetition;
 - the separate prerequisite enforces its fixed binding-count caps independently
   and includes decision-store bytes in existing global/workspace byte ceilings
   and filesystem-reserve calculations while retaining existing durable byte
@@ -1735,8 +1745,10 @@ Contract review must prove each of the following:
 - terminal proof takes shared registry, exclusive workspace, then
   target-generation shared locks; reopens the exact current promotion proof, request,
   stable current `ACTIVE` policy authority, and binding; and revalidates every
-  entry, request, authority, input, result, and binding coordinate before any
-  lock is released. A later
+  entry, request, authority, input, result, and binding coordinate, including
+  exact positional equality across request selected profiles, current policy
+  authority, and binding profile digests, before any lock is released. Digest
+  array shape or digest-value uniqueness alone is insufficient. A later
   pointer or authority change makes the binding historical only. It contains
   only exact coordinates, authority/result/binding digests, bounded counts, and
   outcome; entity/field locators and value digests remain exclusively in the

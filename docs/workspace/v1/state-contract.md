@@ -1292,7 +1292,8 @@ The binding contains only entry and authority digests; bundle and current
 policy-authority coordinates; exact input byte count and digest; the
 eligible-field-inventory digest;
 taxonomy, normalization, classifier/ABI/ruleset, profile, and policy
-coordinates; scanned-field counts; every ordered field-result record; terminal
+digests, including ordered profile digests; scanned-field counts; every ordered
+field-result record; terminal
 outcome; and `full_result_sha256`. A field-result record has entity kind,
 private entity ID, field name, field-value SHA-256, classifier outcome,
 `utf8_lex_v1`-ordered category IDs and private rule IDs, and field disposition.
@@ -1328,6 +1329,15 @@ locks are released. The exclusive registry lock serializes global capacity and
 reserve accounting across workspaces. Any drift discards the computed result.
 It is never rebased onto newer authority.
 
+Before install, the encompassing decision child compares the request's ordered
+selected-profile coordinates position-for-position with the stable current
+policy-authority record and the binding's ordered profile digests. Omission,
+addition, reordering, or coordinate or digest mismatch rejects. For the
+selected-profile array, the store itself validates only the array bound and
+digest syntax because it does not own the request coordinates; equal digest
+values alone do not prove duplicate profile coordinates and are not sorted or
+rejected for value uniqueness.
+
 After install uncertainty, exact reopened bytes adopt the commit. Proven
 absence may retry only while the complete decision request remains exact.
 Different, unreadable, unsafe, partially present, or ambiguous state is
@@ -1357,6 +1367,10 @@ bounded counts and one exact terminal outcome. The proof contains no private
 entity/field locator, field-value digest, category ID, or rule ID; an authorized
 projection consumer must reopen the mode-`0600` binding for omissions. No new
 lease or lifecycle/journal authority participates.
+
+The locked terminal proof repeats the exact positional equality check across
+request selected profiles, stable current policy authority, and binding profile
+digests; digest-array shape or digest-value uniqueness alone is insufficient.
 
 A consumer must name the exact
 `(generation_id, decision_request_sha256, binding_sha256)` tuple and prove the

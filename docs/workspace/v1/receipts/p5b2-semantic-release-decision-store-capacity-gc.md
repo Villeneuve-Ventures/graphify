@@ -1,31 +1,31 @@
-# P5B2 semantic-release decision-store and capacity/GC staged completion receipt proposal
+# P5B2 semantic-release decision-store and capacity/GC accepted completion receipt
 
-Receipt proposal status: `STAGED`
+Receipt status: `ACCEPTED`
 
 Surface: `P5B2 semantic-release decision-store and capacity/GC` (unnumbered
 prerequisite)
 
-Proposed at live refresh: `2026-08-23T21:08:59Z`
+Accepted at live refresh: `2026-08-23T21:08:59Z`
 
-Repository authority state: `STAGED`. This governance-only receipt proposal is
-not accepted evidence. Only a committed copy byte-identical to the final
-independently reviewed nine-document candidate becomes repo-local accepted
-evidence when it is separately published and merged into
-`Villeneuve-Ventures/graphify@workspace/v1`. Any pre-merge content drift
-invalidates the reviewed digest and requires fresh independent review. Until
-that byte-identical merge, the published canonical branch remains authoritative.
+Repository authority state: `STAGED`. This governance-only receipt proposal
+becomes repo-local accepted evidence only when a committed copy byte-identical
+to the final independently reviewed documentation candidate is separately
+published and merged into `Villeneuve-Ventures/graphify@workspace/v1`. Any
+pre-merge content drift invalidates the reviewed digest and requires fresh
+independent review. Until that byte-identical merge, the published canonical
+branch remains authoritative.
 
 ## Frozen scope
 
-This receipt proposes acceptance only of the internal persistence and
+This receipt accepts only the internal persistence and
 shared-capacity boundary frozen in
 [`../semantic-sync.md`](../semantic-sync.md#p5b2-semantic-release-decision-store-and-capacitygc-prerequisite).
-Proposed acceptance requires PR #76's contract freeze, PR #77's implementation
+Acceptance requires PR #76's contract freeze, PR #77's implementation
 delivery, PR #79's held generation-directory correction, and PR #83's
 top-level decision-namespace correction together. PR #77 alone does not
-satisfy the proposed final boundary.
+satisfy the final accepted boundary.
 
-The surface proposed for acceptance is exactly:
+The accepted surface is exactly:
 
 - private `SemanticReleaseDecisionStore` ownership of the request-addressed
   mode-`0600` binding namespace and its bounded non-authoritative publication
@@ -40,7 +40,7 @@ The surface proposed for acceptance is exactly:
 - shared workspace reachability treatment that blocks the GC lifecycle while
   any nonempty decision state exists.
 
-Proposed acceptance provisions no live policy-authority or decision record. It creates
+Acceptance provisions no live policy-authority or decision record. It creates
 no classification composition, omission, projection, public CLI/schema/runtime
 receipt, provider/backend, network, publication, release, canonical-state
 cleanup, binding deletion, repair, quarantine, rollback, GC mutation, parent
@@ -154,8 +154,8 @@ and translated-readme state. PR #80 merged
 `a3e5021fbdfcc3fe8e70fc75b34a0214fc3b03d2`, tree
 `66a601954c64961e6ace08ebe0304b1d2ffc68f9`, and changed only `uv.lock`.
 PR #82 merged `2328f2bf3f5497482accf224ab1320688a43e706` and changed only
-`AGENTS.md`. None changes the selected semantic outcome or proposed acceptance
-proof boundary.
+`AGENTS.md`. None changes the selected semantic outcome or accepted proof
+boundary.
 
 ## Canonical implementation review disposition
 
@@ -190,16 +190,13 @@ Every substantive concern is dispositioned against current canonical tree
 | #77 `PRRT_kwDOTZvP8s6adwH6` | Pre-parent-fsync publication uncertainty could be misreported as committed. | Fixed by PR #77 head `28d204cf66fc4026a8cd631d4a6462d64575063e` and the three post-publication durability regressions. |
 | #77 `PRRT_kwDOTZvP8s6ahsvj` | Capacity and GC scans could validate a detached held generation decision directory after canonical replacement. | Fixed by PR #79 commit `3723a42e1ffb3262764c1c8b5bbe7d3527fbbe2d` and the two exact held-generation-directory regressions. |
 | #81 `PRRT_kwDOTZvP8s6bdODr` | Capacity and GC scans could still accept a byte-identical replacement of the top-level `semantic-release-decisions` namespace. | Fixed by PR #83 head `17bd783cd7707ea34c7d8f831391d80415a17059` and the two exact top-level namespace regressions. |
+| #81 `PRRT_kwDOTZvP8s6bjJba` | The receipt still described itself as a staged proposal while the maintained status documents marked this prerequisite `COMPLETE`. | Fixed by this accepted receipt and the maintained-current accepted closeout. Repository authority remains `STAGED` until the exact reviewed documentation bytes merge into canonical `workspace/v1`. |
+| #81 `PRRT_kwDOTZvP8s6bjJbe` | The store appeared to accept selected-profile digest arrays without proving their request profile-ID order. | Fixed in the maintained contract: the store validates only self-contained binding shape and digest syntax, while the encompassing `WAITING` decision child must prove exact positional request/current-policy/binding equality before install and again in terminal proof. Equal digest values alone do not prove duplicate profile coordinates. |
 
-GitHub's resolved/outdated presentation is historical delivery UI state for
-this closeout, not acceptance evidence. PR #76 remains one resolved/outdated
-plus five unresolved/outdated threads; PR #77 remains nine resolved, six
-current unresolved, and one unresolved/outdated; PR #79 and PR #83 remain
-thread-free. PR #81 has six resolved threads, five of them outdated, and no
-current unresolved thread. Its already-fixed top-level namespace P1 was
-resolved without a reply after merged PR #83 and the current documentation
-evidence were revalidated; that delivery-state mutation does not replace the
-exact repair and review proof above.
+GitHub's resolved/outdated presentation and aggregate thread counts are mutable
+delivery UI state, not acceptance evidence. The durable dispositions above bind
+each reviewed concern by thread ID to exact contract or repair evidence; later
+thread resolution or count changes neither create nor replace that evidence.
 
 ## Staged validation evidence
 
@@ -274,12 +271,12 @@ Final whitespace, exact-manifest, independent-review, and patch-digest evidence
 is reported at the local-diff boundary rather than embedded here, avoiding a
 self-referential receipt digest.
 
-## Proposed accepted disposition
+## Accepted disposition
 
-Only a byte-identical reviewed copy merged into canonical `workspace/v1` would
-transition `P5B2 semantic-release decision-store and capacity/GC` from
-`IN_PROGRESS` to `COMPLETE`. This staged governance proposal does not perform
-that transition. The trust-root
+This receipt accepts `P5B2 semantic-release decision-store and capacity/GC` as
+`COMPLETE` at the reviewed governance boundary. Repository authority remains
+`STAGED` until a byte-identical reviewed copy is separately merged into
+canonical `workspace/v1`. The trust-root
 and policy-authority provisioning prerequisites remain `COMPLETE`. P5 and P5B2
 remain `IN_PROGRESS`; the encompassing semantic-content release/DLP decision,
 live operator-policy selection/provisioning, classification composition,
@@ -288,9 +285,8 @@ P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
 becomes `READY`.
 
 No source, test, schema, fixture, dependency, lockfile, configuration, workflow,
-generated Graphify output, or runtime state is changed by this staged receipt
-proposal. The authorized closeout resolved only the already-fixed PR #81 P1
-thread without a reply; committing and pushing these exact documentation bytes
-and refreshing the PR body are delivery actions only and grant no acceptance.
-Merge, cleanup, broader acceptance, and successor activation remain separate
-reserved actions.
+generated Graphify output, or runtime state is changed by this accepted receipt.
+GitHub thread resolution, committing, pushing, and refreshing the PR body are
+delivery actions only and do not make repository authority canonical. Merge,
+cleanup, broader acceptance, and successor activation remain separate reserved
+actions.

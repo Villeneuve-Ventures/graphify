@@ -2081,6 +2081,17 @@ contains exactly `entity_kind`, `entity_id`, `field_name`,
 order; category and private rule IDs use `utf8_lex_v1`. Unknown, missing,
 duplicated, or additional members reject the candidate.
 
+For `selected_profile_sha256s`, this prerequisite can validate only the array
+bound and each digest's lowercase SHA-256 syntax. It neither owns nor receives
+the canonical request's selected-profile coordinates, so it does not sort digest
+values or infer coordinate uniqueness from them.
+Distinct profile IDs may legitimately identify byte-identical profile artifacts;
+equal digest values alone therefore do not prove duplicate profile coordinates.
+Exact position-for-position equality among the request's ordered selected
+profiles, the stable current policy-authority record, and this digest array is
+owned by the encompassing `WAITING` decision child before install and again in
+its locked terminal proof.
+
 `field_value_sha256` is SHA-256 directly over the exact captured UTF-8 field
 value bytes, without JSON quoting, newline, terminator, salt, domain prefix,
 renormalization, or case conversion. `full_result_sha256` is computed over a
@@ -2706,6 +2717,14 @@ renormalization, or case conversion. `category_ids` and `rule_ids` use
 `utf8_lex_v1`. Unknown, missing, duplicated, or additional binding, count, or
 field-result members reject release.
 
+Before install, the encompassing child must compare each request
+`selected_profiles` entry position-for-position with the stable current
+policy-authority entry and the binding's corresponding
+`selected_profile_sha256s` value. Omission, addition, reordering, or coordinate
+or digest mismatch rejects release. Equal digest values alone do not establish
+duplicate profile coordinates and must not be sorted or rejected on value
+uniqueness alone.
+
 `full_result_sha256` is computed over a canonical result object whose top-level
 member set is exactly `eligible_field_inventory_sha256`, `counts`,
 `field_results`, and `terminal_outcome`, with the exact nested shapes and order
@@ -2823,6 +2842,11 @@ three, it reopens every item above and revalidates all entry, request,
 policy-authority, input, result, and binding coordinates. Any disagreement
 rejects; no proof or allow outcome is exposed before that revalidation completes
 and all three locks are released.
+
+That terminal revalidation repeats the exact position-for-position comparison
+among the request's ordered selected-profile coordinates, the stable current
+policy-authority record, and the binding's ordered profile digests. No terminal
+proof is derived from digest-array shape or digest-value uniqueness alone.
 
 No absent or present artifact alone is success. `REJECTED` is a durable
 decision, not content-release authority. `ALLOW_UNCHANGED` and
