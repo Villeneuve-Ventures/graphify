@@ -252,6 +252,26 @@ def test_numbered_diff_preserves_deletions_renames_counts_and_final_token_bound(
         expanded([_file()], token_handler, "model", numbered=True, max_tokens=lambda _: 1700)
 
 
+def test_numbered_diff_preserves_live_source_mentions_of_eof_marker() -> None:
+    def pinned_shape(patch, _file):
+        lines = [line for line in patch.splitlines()
+                 if "no newline at end of file" not in line.lower()]
+        added = [f"{index} {line}" for index, line in enumerate(lines, 1)
+                 if line.startswith("+")]
+        removed = [line for line in lines if line.startswith("-")]
+        return "__new hunk__\n" + "\n".join(added) + "\n__old hunk__\n" + "\n".join(removed)
+
+    patch = ('@@ -1 +1,3 @@\n-old\n+pattern = r"No newline at end of file"\n'
+             '+if line == r"\\ No newline at end of file": pass\n'
+             '+lines = [line for line in body if line != r"\\ No newline at end of file"]')
+    result = _helpers(pinned_shape)["_raw_diff"](
+        [_file(additions=3, deletions=1, patch=patch)],
+        SimpleNamespace(prompt_tokens=1, count_tokens=len), "model", numbered=True,
+        max_tokens=lambda _: 10000)
+    assert result.count("No newline at end of file") == 3
+    assert "\0" not in result
+
+
 def test_list_policy_comparison_rejects_noniterable_and_mapping_actuals() -> None:
     same = _helpers()["_same"]
     assert not same(1, ["a"])

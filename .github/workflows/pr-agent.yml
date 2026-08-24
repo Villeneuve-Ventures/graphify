@@ -95,9 +95,7 @@ jobs:
           from pr_agent.algo.language_handler import is_valid_file
           from pr_agent.algo.utils import get_max_tokens
           from pr_agent.config_loader import get_settings
-          for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
-              if model not in SUPPORT_REASONING_EFFORT_MODELS:
-                  SUPPORT_REASONING_EFFORT_MODELS.append(model)
+          SUPPORT_REASONING_EFFORT_MODELS.extend(model for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite") if model not in SUPPORT_REASONING_EFFORT_MODELS)
           def _valid_int(value, positive=False):
               return type(value) is int and value >= (1 if positive else 0)
           def _valid_path(path):
@@ -179,7 +177,9 @@ jobs:
                   if plus != additions or minus != deletions: raise RuntimeError(f"Eligible patch is clipped or inconsistent: {file.filename}")
                   rendered = patch
                   if numbered and file.status != "removed":
-                      rendered = decouple_and_convert_to_hunks_with_lines_numbers(patch, None)
+                      if "\0" in patch: raise RuntimeError(f"Unsupported patch content: {file.filename}")
+                      protected = "\n".join(line if line == r"\ No newline at end of file" else re.sub(r"(?i)no newline at end of file", lambda match: match.group().replace(" ", "\0", 1), line) for line in patch.splitlines())
+                      rendered = decouple_and_convert_to_hunks_with_lines_numbers(protected, None).replace("\0", " ")
                       numbered_plus, numbered_minus = (sum(predicate(line) for line in rendered.splitlines()) for predicate in (lambda line: re.match(r"^\d+ \+", line) is not None, lambda line: line.startswith("-")))
                       if numbered_plus != additions or numbered_minus != deletions: raise RuntimeError(f"Numbered patch is incomplete: {file.filename}")
                   chunks.append(f"{metadata}\n{rendered}")
