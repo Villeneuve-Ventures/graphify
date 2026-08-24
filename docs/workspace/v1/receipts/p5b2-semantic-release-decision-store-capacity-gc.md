@@ -159,10 +159,11 @@ proof boundary.
 
 ## Canonical implementation review disposition
 
-GitHub review state was inspected read-only and was not treated as technical
-proof. No comment, reply, review, thread, or other GitHub review state was
-mutated. Every substantive concern is dispositioned against current canonical
-tree `e4838ebac9e07481bb139e4ae330ea34a9f2c338`:
+During the earlier canonical-implementation review, GitHub review state was
+inspected read-only and was not treated as technical proof. No comment, reply,
+review, thread, or other GitHub review state was mutated during that review.
+Every substantive concern is dispositioned against current canonical tree
+`e4838ebac9e07481bb139e4ae330ea34a9f2c338`:
 
 | Pull request / thread | Concern | Exact-current-tree disposition |
 |---|---|---|
@@ -190,12 +191,15 @@ tree `e4838ebac9e07481bb139e4ae330ea34a9f2c338`:
 | #77 `PRRT_kwDOTZvP8s6ahsvj` | Capacity and GC scans could validate a detached held generation decision directory after canonical replacement. | Fixed by PR #79 commit `3723a42e1ffb3262764c1c8b5bbe7d3527fbbe2d` and the two exact held-generation-directory regressions. |
 | #81 `PRRT_kwDOTZvP8s6bdODr` | Capacity and GC scans could still accept a byte-identical replacement of the top-level `semantic-release-decisions` namespace. | Fixed by PR #83 head `17bd783cd7707ea34c7d8f831391d80415a17059` and the two exact top-level namespace regressions. |
 
-GitHub's resolved/outdated presentation is immutable historical UI state for
+GitHub's resolved/outdated presentation is historical delivery UI state for
 this closeout, not acceptance evidence. PR #76 remains one resolved/outdated
 plus five unresolved/outdated threads; PR #77 remains nine resolved, six
 current unresolved, and one unresolved/outdated; PR #79 and PR #83 remain
-thread-free. PR #81's current unresolved threads remain delivery-state work and
-are not mutated by this local repair.
+thread-free. PR #81 has six resolved threads, five of them outdated, and no
+current unresolved thread. Its already-fixed top-level namespace P1 was
+resolved without a reply after merged PR #83 and the current documentation
+evidence were revalidated; that delivery-state mutation does not replace the
+exact repair and review proof above.
 
 ## Staged validation evidence
 
@@ -284,6 +288,9 @@ P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
 becomes `READY`.
 
 No source, test, schema, fixture, dependency, lockfile, configuration, workflow,
-generated Graphify output, runtime state, or GitHub review state is changed by
-this staged receipt proposal. Commit, push, PR mutation, merge, cleanup,
-broader acceptance, and successor activation remain separate reserved actions.
+generated Graphify output, or runtime state is changed by this staged receipt
+proposal. The authorized closeout resolved only the already-fixed PR #81 P1
+thread without a reply; committing and pushing these exact documentation bytes
+and refreshing the PR body are delivery actions only and grant no acceptance.
+Merge, cleanup, broader acceptance, and successor activation remain separate
+reserved actions.
