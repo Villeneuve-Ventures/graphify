@@ -560,12 +560,15 @@ projection, public surfaces, publication, or successor activation.
 
 ## Semantic-release decision-store and capacity/GC threats
 
-This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
-implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
-receipt. Its threat boundary is limited to the private
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` only at its frozen internal boundary. Completion evidence is the
+[`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
+binding PR #76, PR #77, PR #79, and PR #83. PR #79 corrects held
+generation-directory rebinding; PR #83 separately corrects top-level
+`semantic-release-decisions` namespace rebinding. Its threat boundary is limited to the private
 `SemanticReleaseDecisionStore`, bounded
 capacity and filesystem-reserve integration, install-once/replay behavior,
-commit-uncertainty handling, and nonempty-state generation protection. It is not
+commit-uncertainty handling, and workspace-wide pre-plan GC blockade. It is not
 operator policy, classification, terminal release-decision, omission,
 projection, public, provider/backend, network, or publication authority.
 
@@ -631,31 +634,44 @@ different, or ambiguous state is commit-unknown and fails closed.
 Safely observed absence of the top-level namespace is the zero-binding initial
 state; once it or an expected request path is present, unsafe, unreadable,
 ambiguous, missing-after-visibility, or snapshot-drifted state fails closed.
-Nonempty decision state aborts the shared workspace reachability proof before a
-successful GC preview or plan and therefore blocks downstream execute,
-reconcile, and purge. No public protection-reason token is added.
-This retention rule prevents orphaned audit/projection evidence but grants no
-deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation
-authority. No failure or replay path may mutate a binding or any
-semantic input, handoff, generation, receipt, journal, staged record, pointer,
-policy, or other durable state.
+Nonempty decision state aborts shared workspace reachability before a
+successful GC preview or plan. That prevents execute, intent-bearing reconcile,
+and first-time purge from performing reachability-dependent quarantine,
+completion, intent clearing, or purge mutation, including for unrelated
+generations. A blocked intent-bearing reconcile or first-time purge may still
+acquire and release fenced authority or clean permitted residue before the
+reachability failure; the blockade is not a claim that every rejected invocation
+is wholly write-free. Existing no-write exits remain available without
+recomputing reachability: reconcile with no intent, matching current-epoch
+completion recovery, and exact immutable terminal purge replay. No public
+protection-reason token is added. This retention rule prevents orphaned
+audit/projection evidence but grants no deletion, cleanup, quarantine, repair,
+rollback, or compaction authority and no new GC mutation authority.
+Decision-store failure is definite no-commit only when proven to precede
+possible binding visibility. A first install may make exact binding bytes
+visible before a later durability failure; after possible visibility, exact
+reopened bytes may adopt the install, while unsafe, unreadable, different, or
+ambiguous state remains `CommitUnknown` and fails closed. Decision-store failure
+handling and binding replay have no authority to delete, rewrite, quarantine,
+repair, or roll back a binding. This boundary does not constrain existing fenced
+GC-authority transitions or permitted residue cleanup.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite remains `IN_PROGRESS`; live operator policy selection/provisioning,
-the encompassing release/DLP decision, classification composition, omission
-execution, projection, public surfaces, provider/backend, publication, remaining
-P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor
-is `READY`.
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites remain
+`COMPLETE`. Live operator policy selection/provisioning, the encompassing
+release/DLP decision, classification composition, omission execution,
+projection, public surfaces, provider/backend, publication, remaining P5B2
+work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
+`READY`.
 
 ## Semantic-content release/DLP decision threats
 
 The encompassing proposed unnumbered P5B2 semantic-content release/DLP decision
-child is contract-frozen only and remains `WAITING`. The trust-root and
-policy-authority provisioning prerequisites above are accepted, but no stable
-current `ACTIVE` operator record is provisioned; decision-store
-and capacity/GC acceptance, classification composition, and the other decision
-prerequisites also remain absent. The
+child is contract-frozen only and remains `WAITING`. The trust-root,
+policy-authority provisioning, and decision-store/capacity/GC prerequisites
+above are accepted, but no stable current `ACTIVE` operator record is
+provisioned; classification composition and the other decision prerequisites
+remain absent. The
 decision child begins only from the complete
 accepted promotion terminal for the exact visible-current generation. A
 promoted generation, visible pointer, staged marker, receipt, handoff, semantic
@@ -787,10 +803,18 @@ exact; partial, unreadable, different, unsafe, or ambiguous state is
 commit-unknown and fails closed. No new lease, lifecycle state, journal transition,
 cleanup, deletion, rollback, or destructive recovery is introduced.
 
-The separate prerequisite's nonempty decision state protects its generation
-from GC until separately accepted store integration exists. This prevents
-orphaning the audit/projection
-evidence and does not grant the decision child cleanup authority.
+Any nonempty decision state in the workspace aborts shared workspace
+reachability before a successful GC preview or plan. That prevents execute,
+intent-bearing reconcile, and first-time purge from performing
+reachability-dependent quarantine, completion, intent clearing, or purge
+mutation, including for unrelated generations. A blocked intent-bearing
+reconcile or first-time purge may still acquire and release fenced authority or
+clean permitted residue before the reachability failure; the blockade is not a
+claim that every rejected invocation is wholly write-free. Existing no-write
+exits remain available without recomputing reachability: reconcile with no
+intent, matching current-epoch completion recovery, and exact immutable terminal
+purge replay. This prevents orphaning the audit/projection evidence; deletion,
+quarantine, cleanup, repair, and GC mutation remain separately unauthorized.
 
 A later pointer or authority change makes an exact binding historical evidence
 only. It cannot be repaired into current authority. `REJECTED`,
@@ -808,8 +832,8 @@ provisioning prerequisites are accepted `COMPLETE`. The encompassing
 release/DLP decision, live operator-policy selection/provisioning,
 classification composition, omission execution, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
-remain `WAITING`; the decision-store and capacity/GC prerequisite remains
-`IN_PROGRESS`. H3 remains `DEFERRED`; no later successor is `READY`.
+remain `WAITING`; the decision-store and capacity/GC prerequisite is accepted
+`COMPLETE`. H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## Explicit non-claims
 

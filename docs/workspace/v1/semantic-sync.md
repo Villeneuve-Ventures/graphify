@@ -2003,18 +2003,20 @@ automatic policy choice, decision binding, classification composition,
 omission, graph/query projection, provider/backend use, publication, and
 successor activation are not authorized.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites are accepted `COMPLETE`. The decision-store and
-capacity/GC prerequisite, the encompassing release/DLP decision, classification
-composition, omission, projection,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites are accepted `COMPLETE`. The
+encompassing release/DLP decision, classification composition, omission, projection,
 public surfaces, provider/backend, publication, remaining P5B2 work, and P5C
 remain `WAITING`; H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-release decision-store and capacity/GC prerequisite
 
-This separate internal unnumbered P5B2 prerequisite is now an `IN_PROGRESS`
-internal implementation candidate, not `READY` or `COMPLETE`, and has no
-acceptance receipt. It owns only the private
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` only at this frozen internal boundary. Completion evidence is the
+[`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md),
+binding PR #76's contract freeze, PR #77's implementation delivery, PR #79's
+held generation-directory correction, and PR #83's top-level
+decision-namespace correction. It owns only the private
 `SemanticReleaseDecisionStore`, the decision namespace's integration into the
 existing capacity and filesystem-reserve calculations, and the pre-plan
 generation-eligibility blocker in the existing GC planning path. It does
@@ -2079,6 +2081,17 @@ contains exactly `entity_kind`, `entity_id`, `field_name`,
 order; category and private rule IDs use `utf8_lex_v1`. Unknown, missing,
 duplicated, or additional members reject the candidate.
 
+For `selected_profile_sha256s`, this prerequisite can validate only the array
+bound and each digest's lowercase SHA-256 syntax. It neither owns nor receives
+the canonical request's selected-profile coordinates, so it does not sort digest
+values or infer coordinate uniqueness from them.
+Distinct profile IDs may legitimately identify byte-identical profile artifacts;
+equal digest values alone therefore do not prove duplicate profile coordinates.
+Exact position-for-position equality among the request's ordered selected
+profiles, the stable current policy-authority record, and this digest array is
+owned by the encompassing `WAITING` decision child before install and again in
+its locked terminal proof.
+
 `field_value_sha256` is SHA-256 directly over the exact captured UTF-8 field
 value bytes, without JSON quoting, newline, terminator, salt, domain prefix,
 renormalization, or case conversion. `full_result_sha256` is computed over a
@@ -2117,11 +2130,20 @@ unreadable, unsafe, or ambiguous state and any presence, entry, count, or byte
 drift between the two bounded snapshots fail closed. Missing expected binding
 state after possible visibility follows the commit-uncertainty rules below.
 
-Nonempty decision state aborts the shared workspace reachability proof before a
-successful GC preview or plan and therefore blocks downstream execute,
-reconcile, and purge for that generation. This prerequisite adds no token to the
-existing closed `GcPlan.protected` reason vocabulary and authorizes no canonical
-deletion, cleanup, quarantine, repair, rollback, compaction, or GC mutation.
+Any nonempty decision state in the workspace aborts shared workspace
+reachability before a successful GC preview or plan. That prevents execute,
+intent-bearing reconcile, and first-time purge from performing
+reachability-dependent quarantine, completion, intent clearing, or purge
+mutation, including for unrelated generations. A blocked intent-bearing
+reconcile or first-time purge may still acquire and release fenced authority or
+clean permitted residue before the reachability failure; the blockade is not a
+claim that every rejected invocation is wholly write-free. Existing no-write
+exits remain available without recomputing reachability: reconcile with no
+intent, matching current-epoch completion recovery, and exact immutable terminal
+purge replay. This prerequisite adds no token to the existing closed
+`GcPlan.protected` reason vocabulary and authorizes no canonical deletion,
+cleanup, quarantine, repair, rollback, or compaction, and grants no new GC
+mutation authority.
 
 ### Install once, replay, and commit uncertainty
 
@@ -2154,27 +2176,26 @@ deletes, rewrites, quarantines, repairs, or rolls back a binding or any semantic
 input, handoff, generation, receipt, journal, staged record, pointer, policy, or
 other durable state.
 
-This implementation candidate adds the private store, authoritative capacity
+The accepted prerequisite adds the private store, authoritative capacity
 accounting, pre-plan GC blocker, internal runtime dependency, and direct hostile
 and failure-injection tests. It adds no public CLI/schema/runtime receipt,
-workflow, dependency, acceptance receipt, live record, JOS disposition,
+workflow, dependency, live record, JOS disposition,
 provider/backend, network, publication, or release authority. P5 and P5B2 remain
-`IN_PROGRESS`; the trust-root and policy-authority provisioning prerequisites
-remain `COMPLETE`. This decision-store and capacity/GC prerequisite remains
-`IN_PROGRESS`; live operator policy selection/provisioning, the encompassing
-release/DLP decision, classification composition, omission, projection,
-remaining P5B2 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later
-successor is `READY`.
+`IN_PROGRESS`; the trust-root, policy-authority provisioning, and
+decision-store/capacity/GC prerequisites remain `COMPLETE`;
+live operator policy selection/provisioning, the encompassing release/DLP
+decision, classification composition, omission, projection, remaining P5B2
+work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
+`READY`.
 
 ## P5B2 semantic-content release/DLP decision
 
 This encompassing proposed unnumbered P5B2 child is contract-frozen only at the
 private internal decision boundary in this section. It remains `WAITING`, not
 `READY` or `COMPLETE`, and has no implementation or acceptance receipt. It
-consumes the accepted trust-root and policy-authority provisioning prerequisites
-above but still depends on a provisioned stable current `ACTIVE` operator
-policy-authority record, separate acceptance of the implemented decision-store
-and capacity/GC prerequisite above, classification composition,
+consumes the accepted trust-root, policy-authority provisioning, and
+decision-store/capacity/GC prerequisites above but still depends on a provisioned
+stable current `ACTIVE` operator policy-authority record, classification composition,
 and every other prerequisite named below. The freeze grants no execution
 authority and changes
 no parent phase, accepted receipt, JOS row, or later-successor status.
@@ -2655,7 +2676,7 @@ graph construction, or release.
 
 ### Decision-store prerequisite interface and audit evidence
 
-The separate `IN_PROGRESS` decision-store and capacity/GC prerequisite owns the
+The separate accepted `COMPLETE` decision-store and capacity/GC prerequisite owns the
 only durable decision-evidence format: one private canonical
 `graphify.workspace.semantic_release_decision.internal` format-version-1
 binding installed once at
@@ -2703,6 +2724,14 @@ renormalization, or case conversion. `category_ids` and `rule_ids` use
 `utf8_lex_v1`. Unknown, missing, duplicated, or additional binding, count, or
 field-result members reject release.
 
+Before install, the encompassing child must compare each request
+`selected_profiles` entry position-for-position with the stable current
+policy-authority entry and the binding's corresponding
+`selected_profile_sha256s` value. Omission, addition, reordering, or coordinate
+or digest mismatch rejects release. Equal digest values alone do not establish
+duplicate profile coordinates and must not be sorted or rejected on value
+uniqueness alone.
+
 `full_result_sha256` is computed over a canonical result object whose top-level
 member set is exactly `eligible_field_inventory_sha256`, `counts`,
 `field_results`, and `terminal_outcome`, with the exact nested shapes and order
@@ -2725,10 +2754,11 @@ The binding is at most 25 MiB. There are at most 64 bindings for one generation
 and at most 4,096 bindings for one workspace, counted by bounded no-follow
 enumeration before classification and again before install. Decision-store
 bytes count against the existing `CapacityPolicy` global/workspace byte
-ceilings and reserve calculation. The implementation candidate extends the
-authoritative capacity scanner to include this namespace, but this child cannot
-be `READY` before separate acceptance of that integration; insufficient capacity
-or inability to prove counts and bytes rejects release.
+ceilings and reserve calculation. The accepted decision-store/capacity/GC
+prerequisite extends the authoritative capacity scanner to include this
+namespace. Insufficient capacity or inability to prove counts and bytes rejects
+release; the encompassing decision child remains `WAITING` on
+live policy selection and classification composition.
 
 No lifecycle journal transition, staged-build state, generation receipt,
 runtime receipt, public schema, or public result is added by this contract
@@ -2743,13 +2773,21 @@ projection consumer must reopen the private mode-`0600` binding to recover the
 exact omission set; the derived proof is deliberately not a low-entropy value
 oracle.
 
-Neither prerequisite nor decision child deletes a decision binding. Until a
-separately accepted GC contract integrates this store, any nonempty decision
-directory is a pre-plan eligibility blocker that blocks purge of its generation;
-it is not projected into the current closed public protection-reason vocabulary.
-Later GC may remove or quarantine bindings only atomically with the same
-generation under separate operator authority. This retention rule grants no
-cleanup, repair, or GC authority now.
+Neither prerequisite nor decision child deletes a decision binding. Any
+nonempty decision state in the workspace aborts shared workspace reachability
+before a successful GC preview or plan. That prevents execute, intent-bearing
+reconcile, and first-time purge from performing reachability-dependent
+quarantine, completion, intent clearing, or purge mutation, including for
+unrelated generations. A blocked intent-bearing reconcile or first-time purge
+may still acquire and release fenced authority or clean permitted residue before
+the reachability failure; the blockade is not a claim that every rejected
+invocation is wholly write-free. Existing no-write exits remain available
+without recomputing reachability: reconcile with no intent, matching
+current-epoch completion recovery, and exact immutable terminal purge replay.
+This blockade is not projected into the current closed public protection-reason
+vocabulary. Binding deletion, quarantine, cleanup, repair, and GC mutation
+remain separately unauthorized and require later operator authority coordinated
+with the same generation.
 
 ### Decision-store composition, concurrency, commit uncertainty, and replay
 
@@ -2818,6 +2856,11 @@ policy-authority, input, result, and binding coordinates. Any disagreement
 rejects; no proof or allow outcome is exposed before that revalidation completes
 and all three locks are released.
 
+That terminal revalidation repeats the exact position-for-position comparison
+among the request's ordered selected-profile coordinates, the stable current
+policy-authority record, and the binding's ordered profile digests. No terminal
+proof is derived from digest-array shape or digest-value uniqueness alone.
+
 No absent or present artifact alone is success. `REJECTED` is a durable
 decision, not content-release authority. `ALLOW_UNCHANGED` and
 `ALLOW_WITH_OMISSIONS` prove only the exact policy decision at this private
@@ -2839,10 +2882,10 @@ installation, performance/resource qualification, P5C, H3, P6+, parent completio
 implementation of the encompassing child, its readiness, acceptance, execution,
 or later-successor authority.
 `JOS-SEMANTIC-RATIONALE-PROJECTION` remains `OPPORTUNISTIC` with its existing
-trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root
-and policy-authority provisioning prerequisites are accepted `COMPLETE`. This
-decision-store and capacity/GC prerequisite remains `IN_PROGRESS`; this
-encompassing child, live operator policy selection/provisioning, classification
-composition, omission execution, projection, public CLI/schema/receipt,
-provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
-H3 remains `DEFERRED`; no later successor is `READY`.
+trigger unchanged. P5 and P5B2 remain `IN_PROGRESS`; the separate trust-root,
+policy-authority provisioning, and decision-store/capacity/GC prerequisites are
+accepted `COMPLETE`. This encompassing child,
+live operator policy selection/provisioning, classification composition,
+omission execution, projection, public CLI/schema/receipt, provider/backend,
+publication, remaining P5B2 work, and P5C remain `WAITING`; H3 remains
+`DEFERRED`; no later successor is `READY`.

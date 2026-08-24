@@ -1290,10 +1290,9 @@ two-candidate artifact proof, all 34 unresolved-thread dispositions, and the
 PR #69 C1 repair. Delivery alone did not grant acceptance; this separate staged
 governance closeout proposes it.
 
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites are accepted `COMPLETE`. The encompassing
-semantic-content release/DLP decision, the decision-store and capacity/GC
-prerequisite, classification composition, omission execution,
+P5 and P5B2 remain `IN_PROGRESS`; the trust-root, policy-authority provisioning,
+and decision-store/capacity/GC prerequisites are accepted `COMPLETE`. The
+encompassing semantic-content release/DLP decision, classification composition, omission execution,
 projection, public surfaces, provider/backend, publication, remaining P5B2
 work, and P5C remain `WAITING`; H3 remains `DEFERRED`; no later successor is
 `READY`.
@@ -1416,17 +1415,18 @@ P5 and P5B2 remain `IN_PROGRESS`; the trust-root prerequisite remains
 The encompassing release/DLP decision,
 classification composition, omission, projection, public surfaces,
 provider/backend, publication, remaining P5B2 work, and P5C remain `WAITING`;
-the decision-store and capacity/GC prerequisite is an unaccepted `IN_PROGRESS`
-implementation candidate. H3 remains `DEFERRED`; no later successor is `READY`.
+the decision-store and capacity/GC prerequisite is separately accepted
+`COMPLETE`. H3 remains `DEFERRED`; no later successor is `READY`.
 
-## P5B2 semantic-release decision-store and capacity/GC implementation gates
+## P5B2 semantic-release decision-store and capacity/GC acceptance gates
 
-This separate internal unnumbered P5B2 prerequisite is an `IN_PROGRESS` internal
-implementation candidate, not `READY` or `COMPLETE`, and has no acceptance
-receipt. The candidate is coherent only when the private store, authoritative
+This separate internal unnumbered P5B2 prerequisite is implemented and accepted
+as `COMPLETE` only at the frozen boundary and with the
+[`P5B2 semantic-release decision-store and capacity/GC` receipt](receipts/p5b2-semantic-release-decision-store-capacity-gc.md).
+The accepted boundary is coherent only when the private store, authoritative
 capacity scanner, GC pre-plan blocker, internal runtime composition, direct
-tests, and all seven maintained-current documents agree while the diff adds no
-public schema, workflow, dependency, receipt, live runtime state, or JOS
+tests, all seven maintained-current documents, receipt index, and receipt agree
+while the governance diff adds no public schema, workflow, dependency, live runtime state, or JOS
 disposition.
 
 Contract review must prove each of the following:
@@ -1447,8 +1447,13 @@ Contract review must prove each of the following:
   `full_result_sha256` hashes exactly the inventory/counts/field-results/outcome
   projection without either digest member; the binding carries that digest but
   never its own digest; and external `binding_sha256` hashes the completed
-  canonical binding bytes. Unknown, missing, duplicate, additional, reordered,
-  or alternate-preimage state fails closed;
+  canonical binding bytes. The prerequisite validates self-contained binding,
+  count, and field-result shape, array bounds, digest syntax, and exact digest
+  preimages. Unknown, missing, duplicate, or additional members and
+  alternate-preimage state, or reordering of self-contained normative arrays,
+  fail closed. Request/current-policy/binding selected-profile positional
+  comparison remains the encompassing decision child's gate; repeated digest
+  values alone are not duplicate-coordinate evidence;
 - bindings exclude raw prose, matched substrings, generated explanations,
   confidence scores, public source locations, provider responses, and
   credentials. Private entity/field locators and unkeyed value digests remain
@@ -1489,15 +1494,34 @@ Contract review must prove each of the following:
 - safely observed absence of the top-level decision namespace is the canonical
   zero-binding initial state and may be created only at the first final install.
   Once present, unreadable, unsafe, ambiguous, missing-after-visibility, or
-  snapshot-drifted state fails closed. Nonempty state aborts the shared workspace
-  reachability proof before successful GC preview or plan and consequently
-  blocks downstream execute, reconcile, and purge; no token is added to the
-  current public protection-reason vocabulary. No canonical deletion, cleanup,
-  quarantine, repair, rollback, compaction, GC mutation, live policy
+  snapshot-drifted state fails closed. Nonempty state aborts shared workspace
+  reachability before a successful GC preview or plan. That prevents execute,
+  intent-bearing reconcile, and first-time purge from performing
+  reachability-dependent quarantine, completion, intent clearing, or purge
+  mutation, including for unrelated generations. A blocked intent-bearing
+  reconcile or first-time purge may still acquire and release fenced authority
+  or clean permitted residue before the reachability failure; the blockade is
+  not a claim that every rejected invocation is wholly write-free. Existing
+  no-write exits remain available without recomputing reachability: reconcile
+  with no intent, matching current-epoch completion recovery, and exact immutable
+  terminal purge replay; no token is added to the current public
+  protection-reason vocabulary. No canonical decision-state deletion, cleanup,
+  quarantine, repair, rollback, compaction, new GC mutation authority, live policy
   provisioning, decision composition, classification, omission, projection,
   public CLI/schema/runtime receipt, provider/backend, network, publication,
-  release, acceptance, parent completion, or successor
+  release, broader acceptance, parent completion, or successor
   authority is granted.
+
+The exact held generation-directory and top-level decision-namespace correction
+regressions are:
+
+```bash
+uv run --frozen pytest -q \
+  tests/test_workspace_semantic_release_decision.py::test_capacity_scanner_rejects_detached_decision_directory_binding \
+  tests/test_workspace_semantic_release_decision.py::test_gc_plan_rejects_detached_decision_directory_binding_as_unsafe \
+  tests/test_workspace_semantic_release_decision.py::test_capacity_scanner_rejects_rebound_top_level_decision_namespace \
+  tests/test_workspace_semantic_release_decision.py::test_gc_plan_rejects_rebound_top_level_decision_namespace_as_unsafe
+```
 
 The focused checks for the implementation and predecessor policy, trust-root,
 generation-capacity, GC, and runtime behavior are:
@@ -1512,34 +1536,52 @@ uv run --frozen --all-extras pytest -q \
   tests/test_workspace_runtime.py
 ```
 
-Those tests establish implementation-candidate and regression evidence only;
-they are not readiness or acceptance evidence for this prerequisite. The
-candidate additionally requires a targeted repo-configured type check,
-`uv lock --check`, `uv run --frozen python -m tools.skillgen --check`,
+The repository-configured targeted type check is:
+
+```bash
+uv run --frozen pyright \
+  graphify/workspace/composition.py graphify/workspace/contracts.py \
+  graphify/workspace/gc.py graphify/workspace/generations.py \
+  graphify/workspace/persistence.py \
+  graphify/workspace/semantic_release_decision.py \
+  tests/test_workspace_semantic_release_decision.py \
+  tests/test_workspace_semantic_release_policy.py \
+  tests/test_workspace_semantic_release.py \
+  tests/test_workspace_generations.py tests/test_workspace_gc.py \
+  tests/test_workspace_runtime.py
+```
+
+It must complete with zero errors, warnings, or information messages.
+
+Those tests establish implementation and regression evidence; governance
+acceptance additionally requires the exact PR #76/#77/#79/#83 identity, CI,
+manifest, comment/review/thread disposition, and receipt proof. The closeout
+also requires the exact targeted type check above, `uv lock --check`,
+`uv run --frozen python -m tools.skillgen --check`,
 `uv run --frozen pre-commit run --all-files`,
 `uv run --frozen pytest tests/ -q --tb=short`, `git diff --check`, exact
 changed-file manifest verification, a relative Markdown link and heading-anchor
-audit across all seven documents, and the documentation-diff advisory audit.
-After code changes, `uv run --frozen graphify update .` refreshes generated
-Graphify output, which must remain outside the tracked implementation diff.
+audit across all nine changed documents, the documentation-diff advisory audit,
+and independent exact-diff documentation, lifecycle, evidence, and architecture
+review. This governance-only closeout intentionally does not run
+`graphify update .` because no code or test bytes change and generated Graphify
+output must remain outside the tracked diff.
 
-Passing these gates establishes only an `IN_PROGRESS` implementation candidate.
-P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. This decision-store and capacity/GC
-prerequisite remains `IN_PROGRESS`; the encompassing release/DLP decision, live
-operator policy selection/provisioning, classification composition, omission,
-projection, public surfaces, provider/backend, publication, and remaining
-P5B2/P5C work remain `WAITING`; H3 remains `DEFERRED`; no later successor is
-`READY`.
+Passing these gates accepts only this decision-store/capacity/GC prerequisite as
+`COMPLETE`. P5 and P5B2 remain `IN_PROGRESS`; the trust-root and policy-authority
+provisioning prerequisites remain `COMPLETE`. The encompassing release/DLP
+decision, live operator policy selection/provisioning,
+classification composition, omission, projection, public surfaces,
+provider/backend, publication, and remaining P5B2/P5C work remain `WAITING`;
+H3 remains `DEFERRED`; no later successor is `READY`.
 
 ## P5B2 semantic-content release/DLP decision contract-freeze gates
 
 This encompassing proposed unnumbered P5B2 child is documentation-only and
-remains `WAITING`. It consumes the accepted trust-root and policy-authority
-provisioning prerequisites above. This child cannot become `READY` until a
-stable current `ACTIVE` operator policy-authority record, separate acceptance
-of the implemented decision-store and capacity/GC
-prerequisite above, and composition prerequisites exist. The freeze is
+remains `WAITING`. It consumes the accepted trust-root, policy-authority
+provisioning, and decision-store/capacity/GC prerequisites above. This child
+cannot become `READY` until a stable current `ACTIVE` operator policy-authority
+record and composition prerequisites exist. The freeze is
 complete only when all seven maintained-current documents agree and the diff
 changes no code, tests, schemas, fixtures, receipts, generated Graphify output,
 JOS row, or runtime artifact:
@@ -1555,10 +1597,11 @@ JOS row, or runtime artifact:
   the encompassing decision composition;
 - `threat-model.md` covers substitution, incomplete coverage, private-evidence
   leakage, concurrency, stale authority, and fail-closed recovery;
-- `governance.md` records exact PR #66-#76 provenance, the trust-root and
-  policy-authority provisioning prerequisites as `COMPLETE`, the
-  decision-store/capacity/GC prerequisite as `IN_PROGRESS`, and the encompassing
-  child as `WAITING`;
+- `governance.md` records exact PR #66-#83 provenance, including PR #79's held
+  generation-directory correction and PR #83's top-level decision-namespace
+  correction, the trust-root,
+  policy-authority provisioning, and decision-store/capacity/GC prerequisites as
+  `COMPLETE`, and the encompassing child as `WAITING`;
   and
 - this file freezes the evidence and validation gates without creating or
   accepting a receipt.
@@ -1681,13 +1724,27 @@ Contract review must prove each of the following:
   entity kind, private entity ID, field name, value digest, category IDs,
   private rule IDs, and disposition. Raw prose, substrings, explanations,
   confidence, public source locations, provider responses, and credentials are
-  absent;
+  absent. Before install it compares every ordered request `selected_profiles`
+  coordinate position-for-position with the stable current policy-authority
+  record and the corresponding binding `selected_profile_sha256s` value;
+  omission, addition, reordering, or coordinate or digest mismatch rejects.
+  Equal digest values alone do not prove duplicate profile coordinates and are
+  neither sorted nor rejected solely for value repetition;
 - the separate prerequisite enforces its fixed binding-count caps independently
   and includes decision-store bytes in existing global/workspace byte ceilings
   and filesystem-reserve calculations while retaining existing durable byte
   reservations in the arithmetic; inability to prove bounded enumeration,
-  usage, or capacity rejects. Nonempty decision state blocks GC eligibility
-  until separately accepted integration exists;
+  usage, or capacity rejects. Nonempty decision state aborts shared workspace
+  reachability before a successful GC preview or plan, preventing execute,
+  intent-bearing reconcile, and first-time purge from performing
+  reachability-dependent mutation, including for unrelated generations. A
+  blocked intent-bearing reconcile or first-time purge may still acquire and
+  release fenced authority or clean permitted residue before the reachability
+  failure; the blockade does not claim that every rejected invocation is wholly
+  write-free. Reconcile with no intent, matching current-epoch completion
+  recovery, and exact immutable terminal purge replay remain no-write exits
+  without recomputing reachability, while deletion, quarantine, cleanup, repair,
+  and GC mutation remain separately unauthorized;
 - composition with the separate prerequisite captures bounded private bytes
   under shared registry, exclusive workspace,
   then shared target-generation locks and classified outside coordination locks
@@ -1704,8 +1761,10 @@ Contract review must prove each of the following:
 - terminal proof takes shared registry, exclusive workspace, then
   target-generation shared locks; reopens the exact current promotion proof, request,
   stable current `ACTIVE` policy authority, and binding; and revalidates every
-  entry, request, authority, input, result, and binding coordinate before any
-  lock is released. A later
+  entry, request, authority, input, result, and binding coordinate, including
+  exact positional equality across request selected profiles, current policy
+  authority, and binding profile digests, before any lock is released. Digest
+  array shape or digest-value uniqueness alone is insufficient. A later
   pointer or authority change makes the binding historical only. It contains
   only exact coordinates, authority/result/binding digests, bounded counts, and
   outcome; entity/field locators and value digests remain exclusively in the
@@ -1739,11 +1798,11 @@ changed document, and an independent documentation review. Generated Graphify
 output is not refreshed because no code changes and this batch expressly
 excludes generated artifacts.
 
-Passing those gates establishes only documentation consistency. It leaves P5
-and P5B2 `IN_PROGRESS`; the separately accepted trust-root and policy-authority
-provisioning prerequisites remain `COMPLETE`. The decision-store and capacity/GC
-prerequisite, the encompassing decision child, live operator-policy
-selection/provisioning, classification composition, omission execution,
+Passing those gates establishes only documentation consistency for the
+encompassing still-waiting child. It leaves P5 and P5B2 `IN_PROGRESS`; the
+separately accepted trust-root, policy-authority provisioning, and
+decision-store/capacity/GC prerequisites remain `COMPLETE`. The encompassing
+decision child, live operator-policy selection/provisioning, classification composition, omission execution,
 projection,
 public surfaces, provider/backend, publication, and remaining P5B2/P5C work
 remain `WAITING`; H3 remains `DEFERRED`,
