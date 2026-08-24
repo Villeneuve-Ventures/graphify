@@ -254,6 +254,7 @@ def test_numbered_diff_preserves_deletions_renames_counts_and_final_token_bound(
 
 def test_numbered_diff_preserves_live_source_mentions_of_eof_marker() -> None:
     def pinned_shape(patch, _file):
+        assert "\0" in patch  # Shielding happens before the pinned converter sees source text.
         lines = [line for line in patch.splitlines()
                  if "no newline at end of file" not in line.lower()]
         added = [f"{index} {line}" for index, line in enumerate(lines, 1)
@@ -270,6 +271,31 @@ def test_numbered_diff_preserves_live_source_mentions_of_eof_marker() -> None:
         max_tokens=lambda _: 10000)
     assert result.count("No newline at end of file") == 3
     assert "\0" not in result
+
+
+def test_numbered_diff_flushes_pinned_final_deletion_only_hunk() -> None:
+    patch = "@@ -1 +0,0 @@\n-old\n\\ No newline at end of file"
+    calls = []
+
+    def pinned_final_omission(candidate, _file):
+        calls.append(candidate)
+        if not candidate.endswith("\n@@ -0,0 +0,0 @@"):
+            return ""
+        return "@@ -1 +0,0 @@\n__new hunk__\n__old hunk__\n-old"
+
+    assert pinned_final_omission(patch, None) == ""
+    calls.clear()
+    result = _helpers(pinned_final_omission)["_raw_diff"](
+        [_file(additions=0, deletions=1, patch=patch)],
+        SimpleNamespace(prompt_tokens=1, count_tokens=len), "model", numbered=True,
+        max_tokens=lambda _: 10000)
+    assert calls == [patch + "\n@@ -0,0 +0,0 @@"]
+    assert "@@ -1 +0,0 @@\n__new hunk__\n__old hunk__\n-old" in result
+    assert r"\ No newline at end of file" not in result
+    with pytest.raises(RuntimeError, match="Numbered patch is incomplete"):
+        _helpers(lambda _patch, _file: "")["_raw_diff"](
+            [_file(additions=0, deletions=1, patch=patch)],
+            SimpleNamespace(prompt_tokens=1, count_tokens=len), "model", numbered=True)
 
 
 def test_list_policy_comparison_rejects_noniterable_and_mapping_actuals() -> None:
@@ -768,5 +794,5 @@ def test_stubbed_entry_requires_event_specific_outputs(monkeypatch, tmp_path,
 
 def test_embedded_python_compiles_and_stays_lean() -> None:
     compile(_embedded_python(), ".github/workflows/pr-agent.yml", "exec")
-    assert len(_workflow().splitlines()) <= 450
+    assert len(_workflow().splitlines()) <= 451
     assert len((ROOT / ".pr_agent.toml").read_text().splitlines()) <= 125

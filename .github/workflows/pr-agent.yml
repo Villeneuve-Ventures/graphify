@@ -179,6 +179,7 @@ jobs:
                   if numbered and file.status != "removed":
                       if "\0" in patch: raise RuntimeError(f"Unsupported patch content: {file.filename}")
                       protected = "\n".join(line if line == r"\ No newline at end of file" else re.sub(r"(?i)no newline at end of file", lambda match: match.group().replace(" ", "\0", 1), line) for line in patch.splitlines())
+                      protected += "\n@@ -0,0 +0,0 @@" if (final_body := re.split(r"(?m)^@@[^\n]*(?:\n|$)", patch)[-1].splitlines()) and all(line.startswith("-") or line == r"\ No newline at end of file" for line in final_body) else ""
                       rendered = decouple_and_convert_to_hunks_with_lines_numbers(protected, None).replace("\0", " ")
                       numbered_plus, numbered_minus = (sum(predicate(line) for line in rendered.splitlines()) for predicate in (lambda line: re.match(r"^\d+ \+", line) is not None, lambda line: line.startswith("-")))
                       if numbered_plus != additions or numbered_minus != deletions: raise RuntimeError(f"Numbered patch is incomplete: {file.filename}")
