@@ -49,6 +49,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.14"]
@@ -78,7 +79,7 @@ jobs:
         run: uv sync --all-extras --frozen
 
       - name: Run tests
-        run: uv run --frozen pytest tests/ -q --tb=short
+        run: uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0
 
       - name: Verify install works end-to-end
         run: |

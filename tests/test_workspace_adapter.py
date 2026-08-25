@@ -57,6 +57,10 @@ def _stable_metadata(path: Path) -> tuple[int, int, int, int]:
 
 def _init_git_repo(root: Path, *tracked: str) -> None:
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=root, check=True)
+    subprocess.run(["git", "config", "maintenance.autoDetach", "false"], cwd=root, check=True)
+    subprocess.run(["git", "config", "gc.auto", "0"], cwd=root, check=True)
+    subprocess.run(["git", "config", "gc.autoDetach", "false"], cwd=root, check=True)
     subprocess.run(["git", "add", *(tracked or (".",))], cwd=root, check=True)
     subprocess.run(
         [
@@ -72,6 +76,29 @@ def _init_git_repo(root: Path, *tracked: str) -> None:
         cwd=root,
         check=True,
     )
+
+
+def test_git_fixture_disables_automatic_maintenance(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+
+    _init_git_repo(source)
+
+    for key, expected in (
+        ("maintenance.auto", "false"),
+        ("maintenance.autoDetach", "false"),
+        ("gc.auto", "0"),
+        ("gc.autoDetach", "false"),
+    ):
+        result = subprocess.run(
+            ["git", "config", "--get", key],
+            cwd=source,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert result.stdout.strip() == expected
 
 
 def test_supported_tuple_selects_the_only_versioned_adapter() -> None:

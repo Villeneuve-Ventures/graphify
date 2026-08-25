@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 from typing import Any, cast, Iterator
 
@@ -2948,22 +2949,83 @@ def test_status_emits_no_transient_filesystem_write_events(tmp_path: Path) -> No
     events_module = pytest.importorskip("watchdog.events")
     harness = create_harness(tmp_path)
     observed: list[tuple[str, str]] = []
+    control_root = harness.state_root / ".watchdog-test-control"
+    control_root.mkdir()
+    readiness_probe = control_root / "readiness-probe"
+    sentinel = control_root / "sentinel"
+    control_root_key = os.path.normcase(os.path.abspath(control_root))
+    readiness_observed = threading.Event()
+    sentinel_created = threading.Event()
+    sentinel_deleted = threading.Event()
+
+    def normalized_event_path(value: object) -> str | None:
+        if not isinstance(value, (str, bytes, os.PathLike)):
+            return None
+        return os.path.normcase(os.path.abspath(os.fsdecode(value)))
+
+    def is_control_path(value: object) -> bool:
+        candidate = normalized_event_path(value)
+        if candidate is None:
+            return False
+        try:
+            return os.path.commonpath((control_root_key, candidate)) == control_root_key
+        except ValueError:
+            return False
 
     class Handler(events_module.FileSystemEventHandler):  # type: ignore[misc]
         def on_any_event(self, event: Any) -> None:
+            src_path = normalized_event_path(getattr(event, "src_path", None))
+            if event.event_type == "created" and src_path == normalized_event_path(readiness_probe):
+                readiness_observed.set()
+            if event.event_type == "created" and src_path == normalized_event_path(sentinel):
+                sentinel_created.set()
+            if event.event_type == "deleted" and src_path == normalized_event_path(sentinel):
+                sentinel_deleted.set()
+            if is_control_path(getattr(event, "src_path", None)) or is_control_path(
+                getattr(event, "dest_path", None)
+            ):
+                return
             if event.event_type not in {"opened", "closed", "closed_no_write"}:
-                observed.append((event.event_type, event.src_path))
+                observed.append((event.event_type, os.fsdecode(event.src_path)))
 
     observer = watchdog.Observer()
-    observer.schedule(Handler(), str(harness.state_root), recursive=True)
+    handler = Handler()
+    observer.schedule(handler, str(harness.state_root), recursive=True)
     observer.start()
     try:
-        time.sleep(0.1)
+        readiness_deadline = time.monotonic() + 5
+        while not readiness_observed.is_set():
+            readiness_probe.write_bytes(b"")
+            if readiness_observed.wait(timeout=0.05):
+                break
+            readiness_probe.unlink(missing_ok=True)
+            if time.monotonic() >= readiness_deadline:
+                pytest.fail("watchdog did not observe the readiness probe")
+        readiness_probe.unlink(missing_ok=True)
+        sentinel.write_bytes(b"")
+        assert sentinel_created.wait(timeout=5)
+        sentinel.unlink()
+        assert sentinel_deleted.wait(timeout=5)
+        observer.event_queue.join()
         observed.clear()
+        handler.on_any_event(events_module.FileModifiedEvent(str(control_root)))
+        handler.on_any_event(
+            events_module.FileMovedEvent(
+                str(harness.state_root / "outside-control-source"),
+                str(control_root / "delayed-destination"),
+            )
+        )
+        assert observed == []
         inspect_workspace_status(_inputs(harness.state_root))
         time.sleep(0.1)
+        observer.event_queue.join()
     finally:
         observer.stop()
         observer.join(timeout=5)
+        if observer.is_alive():
+            pytest.fail("watchdog observer did not stop")
+        readiness_probe.unlink(missing_ok=True)
+        sentinel.unlink(missing_ok=True)
+        control_root.rmdir()
 
     assert observed == []
