@@ -1,15 +1,10 @@
 name: PR Agent
-
 on:
   pull_request:
     types: [opened, reopened, ready_for_review]
   issue_comment:
     types: [created, edited]
-
 concurrency:
-  # Eligible review requests share a PR-scoped group so /prreview waits for an
-  # in-progress initial summary/review to establish its baseline. Ineligible
-  # events use a run-specific namespace and cannot displace an eligible review.
   group: >-
     pr-agent-${{
       case(
@@ -31,12 +26,10 @@ concurrency:
       )
     }}
   cancel-in-progress: false
-
 jobs:
   review:
-    # Secrets are unavailable to pull_request workflows from forks. Review those
-    # only after a trusted maintainer explicitly comments /prreview, which runs
-    # from the default branch through issue_comment.
+    # Fork pull requests receive no secret. A trusted maintainer can explicitly
+    # request the default-branch issue_comment workflow after inspecting them.
     if: >-
       ${{
         github.event.sender.type != 'Bot' &&
@@ -63,307 +56,433 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
-
     steps:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
-
       - name: Install pinned PR-Agent
         run: >-
           python -m pip install --disable-pip-version-check
           "git+https://github.com/the-pr-agent/pr-agent.git@570f67ed5fc8db5be74c18df070bc20079b64b0d"
-
       - name: Run PR-Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Keep provider-critical settings in the trusted workflow as well as
-          # .pr_agent.toml. This prevents a missing/unreadable repo config from
-          # silently falling back to PR-Agent's default OpenAI model.
           config.model: "gemini/gemini-3.6-flash"
           config.fallback_models: '["gemini/gemini-3.5-flash-lite"]'
           config.reasoning_effort: "high"
           config.max_model_tokens: "65536"
+          config.propagate_tool_errors: "true"
+          config.extra_config_url: ""
+          config.use_global_settings_file: "false"
+          config.use_repo_settings_file: "true"
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "true"
           github_action_config.auto_improve: "false"
-          # Publish the generated summary as its own persistent comment instead
-          # of replacing the maintainer-authored PR title or description.
           pr_description.publish_description_as_comment: "true"
           pr_description.publish_description_as_comment_persistent: "true"
-          # Initial non-draft events run the summary and full review. Later
-          # changes wait for an explicit /prreview incremental review request.
           github_action_config.handle_push_trigger: "false"
           pr_reviewer.publish_output_no_suggestions: "true"
           pr_reviewer.persistent_comment: "true"
           pr_reviewer.final_update_message: "true"
         run: |
           python - <<'PY'
-          import asyncio
-          import hashlib
-          import os
-          import re
-
+          import asyncio, fnmatch, hashlib, json, os, re
+          from github import Github
           from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
-
-          # PR-Agent at the pinned revision does not yet list these stable model
-          # IDs in its reasoning-effort allowlist. LiteLLM 1.93 supports their
-          # reasoning_effort parameter, so extend the in-memory list before
-          # importing the runner and its AI handler. .pr_agent.toml supplies the
-          # corresponding review-context cap.
-          for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
-              if model not in SUPPORT_REASONING_EFFORT_MODELS:
-                  SUPPORT_REASONING_EFFORT_MODELS.append(model)
-
-          REVIEW_MARKER_RE = re.compile(
-              r"<!-- graphify-pr-agent-review:([0-9a-f]{40}):[0-9a-f]{16} -->"
-          )
-
-          def _workflow_comment(comment):
-              login = getattr(getattr(comment, "user", None), "login", "")
-              return login.lower() in {"github-actions", "github-actions[bot]"}
-
-          def _review_marker_sha(body):
-              match = REVIEW_MARKER_RE.search(body or "")
-              return match.group(1) if match else None
-
-          def _set_sha_bound_incremental_commits(provider):
-              commits = list(provider.pr_commits or provider.pr.get_commits())
-              provider.pr_commits = commits
-              comments = list(provider.pr.get_issue_comments())
-              provider.comments = comments
-
-              previous_review = None
-              reviewed_sha = None
-              for comment in reversed(comments):
-                  if not _workflow_comment(comment):
+          from pr_agent.algo.git_patch_processing import decouple_and_convert_to_hunks_with_lines_numbers
+          from pr_agent.algo.language_handler import is_valid_file
+          from pr_agent.algo.utils import get_max_tokens
+          from pr_agent.config_loader import get_settings
+          SUPPORT_REASONING_EFFORT_MODELS.extend(model for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite") if model not in SUPPORT_REASONING_EFFORT_MODELS)
+          def _valid_int(value, positive=False):
+              return type(value) is int and value >= (1 if positive else 0)
+          def _valid_path(path):
+              return (isinstance(path, str) and path and not path.startswith("/") and "\\" not in path and not any(ord(c) < 32 or ord(c) == 127 for c in path)
+                      and all(part not in {"", ".", ".."} for part in path.split("/")))
+          def _manifest(pull, files):
+              count = getattr(pull, "changed_files", None)
+              if not _valid_int(count) or count > 3000 or not files or len(files) != count: raise RuntimeError("GitHub file manifest is empty, capped, or incomplete")
+              seen = set()
+              for file in files:
+                  name, status = getattr(file, "filename", None), getattr(file, "status", None)
+                  additions, deletions = getattr(file, "additions", None), getattr(file, "deletions", None)
+                  if (not _valid_path(name) or name in seen or status not in {"added", "modified", "removed", "renamed"}
+                          or not _valid_int(additions) or not _valid_int(deletions)): raise RuntimeError("Malformed or unsupported GitHub file record")
+                  seen.add(name)
+                  if status == "renamed":
+                      old = getattr(file, "previous_filename", None)
+                      if not _valid_path(old) or old == name: raise RuntimeError("Malformed rename record")
+              return files
+          def _same_files(expected, actual):
+              expected_names, actual_names = ([file.filename for file in files] for files in (expected, actual))
+              return len(actual_names) == len(set(actual_names)) and set(actual_names) == set(expected_names)
+          def _strict_filter(files):
+              patterns = _setting("IGNORE.REGEX")
+              globs = _setting("IGNORE.GLOB")
+              patterns = [patterns] if isinstance(patterns, str) else patterns
+              globs = globs.strip("[]").split(",") if isinstance(globs, str) else globs
+              if not isinstance(patterns, (list, tuple)) or not isinstance(globs, (list, tuple)): raise RuntimeError("Invalid PR-Agent ignore policy type")
+              patterns = list(patterns)
+              for glob in globs:
+                  if not isinstance(glob, str):
+                      raise RuntimeError("Invalid PR-Agent ignore glob")
+                  patterns.append(fnmatch.translate(glob))
+                  if glob.startswith("**/"):
+                      patterns.append(fnmatch.translate(glob[3:]))
+              generators = _setting("CONFIG.IGNORE_LANGUAGE_FRAMEWORK") or []
+              if not isinstance(generators, (list, tuple)) or any(not isinstance(generator, str) for generator in generators): raise RuntimeError("Invalid generated-code ignore policy")
+              for generator in generators:
+                  generated = _setting(f"GENERATED_CODE.{generator}") or []
+                  generated = [generated] if isinstance(generated, str) else generated
+                  if not isinstance(generated, (list, tuple)): raise RuntimeError("Invalid generated-code ignore globs")
+                  patterns.extend(fnmatch.translate(glob) for glob in generated)
+              if any(not isinstance(pattern, str) for pattern in patterns): raise RuntimeError("Invalid PR-Agent ignore regex type")
+              try:
+                  compiled = [re.compile(pattern) for pattern in patterns]
+              except re.error as error:
+                  raise RuntimeError("Invalid PR-Agent ignore regex") from error
+              return [file for file in files if file.filename and not any(pattern.match(file.filename) for pattern in compiled)]
+          def _patch_counts(patch, filename):
+              pattern = re.compile(r"(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@[^\n]*(?:\n|$)(?P<body>(?:(?:[ +\-][^\n]*|\\ No newline at end of file)(?:\n|$))*)")
+              position = plus = minus = delta = 0; previous = ends = None; eof = [False, False]
+              for match in pattern.finditer(patch):
+                  if match.start() != position: raise RuntimeError(f"Malformed unified patch: {filename}")
+                  for index, line in enumerate(body := match.group("body").splitlines()):
+                      if line == r"\ No newline at end of file":
+                          if index == 0 or body[index - 1] == line: raise RuntimeError(f"Malformed unified patch: {filename}")
+                          prefix = body[index - 1][0]; eof[0] |= prefix in " -"; eof[1] |= prefix in " +"
+                      elif (eof[0] and line[0] in " -") or (eof[1] and line[0] in " +"): raise RuntimeError(f"Malformed unified patch: {filename}")
+                  lines = [line for line in body if line != r"\ No newline at end of file"]
+                  starts, counts = tuple(int(match.group(i)) for i in (1, 3)), tuple(int(match.group(i) or 1) for i in (2, 4)); anchors = tuple(start + (count == 0) for start, count in zip(starts, counts))
+                  if any(count and start < 1 for start, count in zip(starts, counts)) or anchors[1] - anchors[0] != delta or (previous and any(anchor <= previous[i] or anchor < ends[i] for i, anchor in enumerate(anchors))): raise RuntimeError(f"Malformed unified patch: {filename}")
+                  old, new = (sum(line[0] != prefix for line in lines) for prefix in ("+", "-"))
+                  if not lines or not any(line[0] in "+-" for line in lines) or (old, new) != counts: raise RuntimeError(f"Malformed unified patch: {filename}")
+                  plus += sum(line.startswith("+") for line in lines); minus += sum(line.startswith("-") for line in lines); previous, ends = anchors, tuple(anchor + count for anchor, count in zip(anchors, counts)); delta += new - old; position = match.end()
+              if not position or position != len(patch): raise RuntimeError(f"Malformed unified patch: {filename}")
+              return plus, minus
+          def _raw_diff(files, token_handler, model, numbered=False, max_tokens=get_max_tokens):
+              chunks = []
+              for file in files:
+                  patch = getattr(file, "patch", None)
+                  additions, deletions = file.additions, file.deletions
+                  metadata = f"## File: '{file.filename}'\nstatus: {file.status}"
+                  if file.status == "renamed": metadata += f"\nrename from {file.previous_filename}\nrename to {file.filename}"
+                  if (file.status == "renamed" and file.filename in verified_renames or file.status in {"added", "removed"} and getattr(file, "sha", None) == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391") and additions == deletions == 0 and not patch:
+                      chunks.append(metadata)
                       continue
-                  reviewed_sha = _review_marker_sha(comment.body)
-                  if reviewed_sha:
-                      previous_review = comment
-                      break
-
-              if previous_review is None:
-                  provider.incremental.is_incremental = False
-                  return
-
-              reviewed_index = next(
-                  (
-                      index
-                      for index, commit in enumerate(commits)
-                      if commit.sha == reviewed_sha
-                  ),
-                  None,
-              )
-              if reviewed_index is None:
-                  provider.incremental.is_incremental = False
-                  return
-
-              provider.previous_review = previous_review
-              provider.incremental.last_seen_commit = commits[reviewed_index]
-              commits_range = commits[reviewed_index + 1 :]
-              provider.incremental.commits_range = commits_range
-              provider.incremental.first_new_commit = (
-                  commits_range[0] if commits_range else None
-              )
-              for commit in commits_range:
-                  provider.unreviewed_files_map.update(
-                      {file.filename: file for file in commit.files}
-                  )
-
-          def _marked_publication(args, kwargs, provider, kind):
-              body = args[0] if args else kwargs.get("pr_comment")
+                  if not isinstance(patch, str) or not patch.strip(): raise RuntimeError(f"Eligible patch unavailable: {file.filename}")
+                  plus, minus = _patch_counts(patch, file.filename)
+                  if plus != additions or minus != deletions: raise RuntimeError(f"Eligible patch is clipped or inconsistent: {file.filename}")
+                  rendered = patch
+                  if numbered and file.status != "removed":
+                      if "\0" in patch: raise RuntimeError(f"Unsupported patch content: {file.filename}")
+                      protected = "\n".join(line if line == r"\ No newline at end of file" else re.sub(r"(?i)no newline at end of file", lambda match: match.group().replace(" ", "\0", 1), line) for line in patch.splitlines())
+                      protected += "\n@@ -0,0 +0,0 @@" if (final_body := re.split(r"(?m)^@@[^\n]*(?:\n|$)", patch)[-1].splitlines()) and all(line.startswith("-") or line == r"\ No newline at end of file" for line in final_body) else ""
+                      rendered = decouple_and_convert_to_hunks_with_lines_numbers(protected, None).replace("\0", " ")
+                      numbered_plus, numbered_minus = (sum(predicate(line) for line in rendered.splitlines()) for predicate in (lambda line: re.match(r"^\d+ \+", line) is not None, lambda line: line.startswith("-")))
+                      if numbered_plus != additions or numbered_minus != deletions: raise RuntimeError(f"Numbered patch is incomplete: {file.filename}")
+                  chunks.append(f"{metadata}\n{rendered}")
+              diff = "\n\n".join(chunks)
+              if not diff or token_handler.prompt_tokens + token_handler.count_tokens(diff) + 1500 >= max_tokens(model): raise RuntimeError("Complete raw comparison exceeds the one-call token budget")
+              return diff
+          def _canonical_body(body, marker=None):
               if not isinstance(body, str):
-                  raise RuntimeError("PR-Agent publication has no text body")
-              head_sha = getattr(
-                  getattr(provider, "last_commit_id", None), "sha", ""
-              )
-              if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
-                  raise RuntimeError("PR-Agent publication has no verified head SHA")
-              digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
-              marker = f"<!-- graphify-pr-agent-{kind}:{head_sha}:{digest} -->"
-              first_line, separator, remainder = body.partition("\n")
-              marked_body = f"{first_line}\n{marker}"
-              if separator:
-                  marked_body += f"\n{remainder}"
-              if args:
-                  args = (marked_body, *args[1:])
+                  return ""
+              lines = body.splitlines()
+              if marker and lines.count(marker) == 1:
+                  fields = marker.removeprefix("<!-- graphify-pr-agent:").removesuffix(" -->").split(":")
+                  update = f"#### ({'Describe' if fields[0] == 'summary' else 'Review'} updated until commit https://github.com/{fields[1]}/commit/{fields[6]})"
+                  index = lines.index(marker)
+                  if index == 1:
+                      del lines[index]
+                  elif index == 4 and lines[1] == lines[3] == "" and lines[2] == update:
+                      del lines[1:5]
+              return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+          def _body_digest(body, marker=None):
+              return hashlib.sha256(_canonical_body(body, marker).encode()).hexdigest()
+          def _substantive(kind, body):
+              if not isinstance(body, str) or not body.strip():
+                  return False
+              lowered = body.strip().lower()
+              rejected = ("preparing review", "preparing pr description", "incremental review skipped",
+                          "no files were changed", "no changes", "no changes to review")
+              if any(lowered == text or lowered.startswith(text + "...") for text in rejected):
+                  return False
+              if kind == "summary":
+                  if not body.startswith("## Title") or "___" not in body:
+                      return False
+                  tail = body.split("___", 1)[1].strip()
               else:
-                  kwargs = {**kwargs, "pr_comment": marked_body}
-              return args, kwargs, marker
-
-          def _publication_visible(provider, marker):
-              return any(
-                  _workflow_comment(comment) and marker in (comment.body or "")
-                  for comment in provider.get_issue_comments()
-              )
-
-          # The pinned tools catch their own exceptions. Wrap both initial tools
-          # so a missing prediction or publication fails the Actions check.
+                  if not body.startswith("## PR Reviewer Guide") or body.startswith("## Incremental"):
+                      return False
+                  tail = body.split("\n", 1)[1].strip() if "\n" in body else ""
+              return bool(tail and (re.search(r"(?m)^#{2,4} ", tail) or "<details" in tail
+                                    or "<table" in tail or "|---" in tail))
+          def _marker(kind, frozen, run_id, attempt, body, policy_digest="policy"):
+              repo, number, base, head = frozen
+              return (f"<!-- graphify-pr-agent:{kind}:{repo}:{number}:{run_id}:{attempt}:"
+                      f"{base}:{head}:{policy_digest}:{_body_digest(body)} -->")
+          def _visible(comments, kind, frozen, run_id, attempt, body, policy_digest="policy"):
+              marker = _marker(kind, frozen, run_id, attempt, body, policy_digest)
+              for comment in comments:
+                  login = getattr(getattr(comment, "user", None), "login", "").lower()
+                  if login in {"github-actions", "github-actions[bot]"} and marker in (comment.body or ""):
+                      if _body_digest(comment.body, marker) == _body_digest(body):
+                          return True
+              return False
+          event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+          run_id, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+          if not run_id.isdigit() or not attempt.isdigit() or int(attempt) < 1:
+              raise RuntimeError("Invalid GitHub run coordinates")
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as event_file:
+              event = json.load(event_file)
+          repo_name = os.environ.get("GITHUB_REPOSITORY", "")
+          if event_name == "pull_request":
+              payload_pr = event.get("pull_request", {})
+              number = payload_pr.get("number")
+              event_base = payload_pr.get("base", {}).get("sha")
+              event_head = payload_pr.get("head", {}).get("sha")
+              pr_url = payload_pr.get("html_url") or payload_pr.get("url")
+              if payload_pr.get("base", {}).get("repo", {}).get("full_name") != repo_name:
+                  raise RuntimeError("Event repository does not match GITHUB_REPOSITORY")
+          elif event_name == "issue_comment" and event.get("comment", {}).get("body") == "/prreview":
+              number = event.get("issue", {}).get("number")
+              event_base = event_head = None
+              links = event.get("issue", {}).get("pull_request", {})
+              pr_url = links.get("html_url") or links.get("url")
+          else:
+              raise RuntimeError("Unsupported review event")
+          if not _valid_int(number, positive=True) or not pr_url:
+              raise RuntimeError("Invalid trusted PR coordinate")
+          github = Github(os.environ["GITHUB_TOKEN"])
+          repo_obj = github.get_repo(repo_name)
+          def _identity(pull):
+              current = (repo_name, getattr(pull, "number", None), pull.base.sha, pull.head.sha)
+              if (not _valid_int(current[1], positive=True)
+                      or re.fullmatch(r"[0-9a-f]{40}", current[2] or "") is None
+                      or re.fullmatch(r"[0-9a-f]{40}", current[3] or "") is None):
+                  raise RuntimeError("Malformed pull request identity")
+              return current
+          pull = repo_obj.get_pull(number)
+          frozen = _identity(pull)
+          if frozen[1] != number or (event_base and frozen[2] != event_base) or (event_head and frozen[3] != event_head):
+              raise RuntimeError("Trusted event and fresh pull identity differ")
+          if not _valid_int(pull.additions) or not _valid_int(pull.deletions):
+              raise RuntimeError("Malformed pull request totals")
+          policy_bytes = repo_obj.get_contents(".pr_agent.toml", ref=frozen[2]).decoded_content
+          if not isinstance(policy_bytes, bytes) or not policy_bytes:
+              raise RuntimeError("Frozen target policy is unavailable")
+          policy_digest = hashlib.sha256(policy_bytes).hexdigest()
+          context_files = ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"]
+          context_text = {}
+          context_lines = 3  # intro, opening tag, and closing tag
+          for path in context_files:
+              try:
+                  content = repo_obj.get_contents(path, ref=frozen[2]).decoded_content
+              except Exception as error:
+                  raise RuntimeError(f"Frozen repository context is unavailable: {path}") from error
+              if not isinstance(content, bytes) or not content:
+                  raise RuntimeError(f"Frozen repository context is unavailable: {path}")
+              try:
+                  rendered = content.decode("utf-8").rstrip()
+              except UnicodeDecodeError as error:
+                  raise RuntimeError(f"Frozen repository context is not UTF-8: {path}") from error
+              if not rendered:
+                  raise RuntimeError(f"Frozen repository context is empty: {path}")
+              context_text[path] = rendered
+              context_lines += len(rendered.splitlines()) + 5  # file header and footer
+          if context_lines > 500:
+              raise RuntimeError("Frozen repository context exceeds the complete-context budget")
+          manifest_files = _manifest(pull, list(pull.get_files()))
+          verified_renames = set()
+          for file in manifest_files:
+              if file.status == "renamed" and file.additions == file.deletions == 0 and not file.patch:
+                  previous_sha = getattr(repo_obj.get_contents(file.previous_filename, ref=frozen[2]), "sha", None)
+                  if re.fullmatch(r"[0-9a-f]{40}", getattr(file, "sha", None) or "") is None or previous_sha != file.sha: raise RuntimeError(f"Patchless rename blob identity mismatch: {file.filename}")
+                  verified_renames.add(file.filename)
+          head_commit = repo_obj.get_commit(frozen[3])
+          if getattr(head_commit, "sha", None) != frozen[3]:
+                  raise RuntimeError("Frozen head commit identity mismatch")
+          def _fresh():
+              if _identity(repo_obj.get_pull(number)) != frozen:
+                  raise RuntimeError("Pull request base or head moved during review")
+          _fresh()
+          policy_attested = False
+          policy_served = False
+          context_served = set()
+          eligible_files = []
           from pr_agent.agent.pr_agent import PRAgent
           from pr_agent.git_providers.github_provider import GithubProvider
+          from pr_agent.git_providers.utils import apply_repo_settings as original_apply
+          from pr_agent.tools import pr_description, pr_reviewer
           from pr_agent.tools.pr_description import PRDescription
           from pr_agent.tools.pr_reviewer import PRReviewer
-
-          # The pinned provider uses review-comment timestamps and commit author
-          # dates for -i. Bind incremental ranges to a workflow-owned reviewed SHA
-          # instead, so old-authored/cherry-picked commits cannot be skipped.
-          GithubProvider._get_incremental_commits = (
-              _set_sha_bound_incremental_commits
-          )
-
-          verification = {
-              "description_completed": False,
-              "review_completed": False,
-              "review_mode": None,
-          }
-
-          original_description = PRDescription.run
-
-          async def run_verified_description(self):
-              description_published = False
-              original_publish = self.git_provider.publish_persistent_comment
-
-              def publish_verified_description(*args, **kwargs):
-                  nonlocal description_published
-                  if kwargs.get("name") != "describe":
-                      return original_publish(*args, **kwargs)
-                  args, kwargs, marker = _marked_publication(
-                      args, kwargs, self.git_provider, "summary"
-                  )
-                  result = original_publish(*args, **kwargs)
-                  description_published = _publication_visible(
-                      self.git_provider, marker
-                  )
+          original_set_pr = GithubProvider.set_pr
+          def frozen_set_pr(provider, url):
+              original_set_pr(provider, url)
+              if _identity(provider.pr) != frozen:
+                  raise RuntimeError("Provider pull identity mismatch")
+              provider.pr.get_commits = lambda: [head_commit]
+          GithubProvider.set_pr = frozen_set_pr
+          def strict_repo_settings(provider):
+              global policy_served
+              if getattr(provider, "repo", None) != repo_name or _identity(provider.pr) != frozen:
+                  raise RuntimeError("Policy provider identity mismatch")
+              policy_served = True
+              return policy_bytes
+          GithubProvider.get_repo_settings = strict_repo_settings
+          def frozen_repo_context(provider, file_path, from_default_branch=False):
+              if (getattr(provider, "repo", None) != repo_name or _identity(provider.pr) != frozen
+                      or from_default_branch or file_path not in context_text):
+                  raise RuntimeError("Repository context provider identity mismatch")
+              context_served.add(file_path)
+              return context_text[file_path]
+          GithubProvider.get_repo_file_content = frozen_repo_context
+          def frozen_files(provider):
+              if _identity(provider.pr) != frozen:
+                  raise RuntimeError("File provider identity mismatch")
+              provider.git_files = manifest_files
+              return manifest_files
+          GithubProvider.get_files = frozen_files
+          def _setting(key):
+              return get_settings().get(key, None)
+          def _same(actual, expected):
+              if isinstance(expected, bool) and isinstance(actual, str): return actual.lower() == str(expected).lower()
+              if isinstance(expected, int) and isinstance(actual, str): return actual.isdigit() and int(actual) == expected
+              if not isinstance(expected, list):
+                  return actual == expected
+              if isinstance(actual, str):
+                  try:
+                      actual = json.loads(actual)
+                  except json.JSONDecodeError:
+                      return False
+              return isinstance(actual, (list, tuple)) and list(actual) == expected
+          def _attest():
+              checks = {
+                  "CONFIG.GIT_PROVIDER": "github", "CONFIG.PUBLISH_OUTPUT": True,
+                  "CONFIG.MODEL": "gemini/gemini-3.6-flash",
+                  "CONFIG.FALLBACK_MODELS": ["gemini/gemini-3.5-flash-lite"],
+                  "CONFIG.REASONING_EFFORT": "high", "CONFIG.MAX_MODEL_TOKENS": 65536,
+                  "CONFIG.PROPAGATE_TOOL_ERRORS": True, "CONFIG.EXTRA_CONFIG_URL": "",
+                  "CONFIG.USE_GLOBAL_SETTINGS_FILE": False, "CONFIG.USE_REPO_SETTINGS_FILE": True,
+                  "CONFIG.RESTRICTED_MODE": True, "CONFIG.REPO_CONTEXT_FROM_DEFAULT_BRANCH": False,
+                  "CONFIG.REPO_CONTEXT_MAX_LINES": 500, "GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER": False,
+                  "GITHUB_ACTION_CONFIG.AUTO_REVIEW": True, "GITHUB_ACTION_CONFIG.AUTO_DESCRIBE": True,
+                  "GITHUB_ACTION_CONFIG.AUTO_IMPROVE": False,
+                  "GITHUB_ACTION_CONFIG.PR_ACTIONS": ["opened", "reopened", "ready_for_review"],
+                  "PR_DESCRIPTION.PUBLISH_DESCRIPTION_AS_COMMENT": True,
+                  "PR_DESCRIPTION.PUBLISH_DESCRIPTION_AS_COMMENT_PERSISTENT": True,
+                  "PR_REVIEWER.PUBLISH_OUTPUT_NO_SUGGESTIONS": True,
+                  "PR_REVIEWER.PERSISTENT_COMMENT": True, "PR_REVIEWER.FINAL_UPDATE_MESSAGE": True,
+                  "PR_REVIEWER.NUM_MAX_FINDINGS": 5, "PR_REVIEWER.REQUIRE_TESTS_REVIEW": True,
+                  "PR_REVIEWER.REQUIRE_SECURITY_REVIEW": True,
+              }
+              if not policy_served or any(not _same(_setting(key), value) for key, value in checks.items()):
+                  raise RuntimeError("Effective PR-Agent policy attestation failed")
+              branch = _setting("CONFIG.CONFIG_BRANCH")
+              if branch not in {None, "", frozen[2]}:
+                  raise RuntimeError("Effective policy coordinate is not the frozen base")
+              if not _same(_setting("CONFIG.REPO_CONTEXT_FILES"), context_files):
+                  raise RuntimeError("Repository context policy mismatch")
+              instructions = str(_setting("PR_REVIEWER.EXTRA_INSTRUCTIONS") or "")
+              if "target branch's requires-python declaration" not in instructions or "SECURITY.md" not in instructions:
+                  raise RuntimeError("Review instruction policy mismatch")
+          def strict_apply(url):
+              global policy_attested, policy_served, context_served, eligible_files
+              policy_attested = policy_served = False
+              context_served.clear()
+              get_settings().set("CONFIG.CONFIG_BRANCH", frozen[2])
+              original_apply(url)
+              _attest()
+              eligible_files = [file for file in _strict_filter(list(manifest_files)) if is_valid_file(file.filename)]
+              if not eligible_files:
+                  raise RuntimeError("No eligible files in complete comparison")
+              policy_attested = True
+          import pr_agent.agent.pr_agent as agent_module
+          import pr_agent.servers.github_action_runner as runner_module
+          agent_module.apply_repo_settings = strict_apply
+          runner_module.apply_repo_settings = strict_apply
+          def _complete_diff(provider, token_handler, model, *args, **kwargs):
+              if not policy_attested or _identity(provider.pr) != frozen:
+                  raise RuntimeError("Diff requested before frozen policy attestation")
+              current_eligible = [file for file in _strict_filter(list(provider.get_files()))
+                                  if is_valid_file(file.filename)]
+              if not _same_files(eligible_files, current_eligible):
+                  raise RuntimeError("Eligible file comparison changed")
+              numbered = kwargs.get("add_line_numbers_to_hunks", False)
+              if type(numbered) is not bool:
+                  raise RuntimeError("Invalid numbered-diff request")
+              return _raw_diff(eligible_files, token_handler, model, numbered=numbered)
+          pr_description.get_pr_diff = _complete_diff
+          pr_reviewer.get_pr_diff = _complete_diff
+          verification = {"summary": False, "review": False}
+          def _guard_constructor(original):
+              def guarded(self, *args, **kwargs):
+                  if not policy_attested:
+                      raise RuntimeError("PR-Agent tool constructed before policy attestation")
+                  result = original(self, *args, **kwargs)
+                  if context_served != set(context_files):
+                      raise RuntimeError("PR-Agent tool constructed without complete frozen repository context")
                   return result
-
-              self.git_provider.publish_persistent_comment = (
-                  publish_verified_description
-              )
-              try:
-                  await original_description(self)
-              finally:
-                  self.git_provider.publish_persistent_comment = original_publish
-
-              if not self.prediction:
-                  raise RuntimeError("PR-Agent did not produce a summary prediction")
-              if not description_published:
-                  raise RuntimeError("PR-Agent did not publish its summary comment")
-              verification["description_completed"] = True
-
-          PRDescription.run = run_verified_description
-
-          original_review = PRReviewer.run
-
-          async def run_verified_review(self):
-              requested_incremental = bool(self.args and self.args[0] == "-i")
-              effective_incremental = bool(self.incremental.is_incremental)
-              persistent_review_published = False
-              incremental_review_published = False
-              original_publish_persistent = (
-                  self.git_provider.publish_persistent_comment
-              )
-              original_publish_comment = self.git_provider.publish_comment
-
-              def publish_verified_persistent_review(*args, **kwargs):
-                  nonlocal persistent_review_published
-                  args, kwargs, marker = _marked_publication(
-                      args, kwargs, self.git_provider, "review"
-                  )
-                  result = original_publish_persistent(*args, **kwargs)
-                  persistent_review_published = _publication_visible(
-                      self.git_provider, marker
-                  )
-                  return result
-
-              def publish_verified_incremental_review(*args, **kwargs):
-                  nonlocal incremental_review_published
-                  is_temporary = kwargs.get(
-                      "is_temporary", args[1] if len(args) > 1 else False
-                  )
-                  body = args[0] if args else kwargs.get("pr_comment", "")
-                  is_incremental_output = isinstance(body, str) and body.startswith(
-                      ("## Incremental PR Reviewer Guide", "Incremental Review Skipped")
-                  )
-                  if effective_incremental and not is_temporary and is_incremental_output:
-                      args, kwargs, marker = _marked_publication(
-                          args, kwargs, self.git_provider, "review"
-                      )
-                      result = original_publish_comment(*args, **kwargs)
-                      incremental_review_published = _publication_visible(
-                          self.git_provider, marker
-                      )
+              return guarded
+          PRDescription.__init__ = _guard_constructor(PRDescription.__init__)
+          PRReviewer.__init__ = _guard_constructor(PRReviewer.__init__)
+          original_prepare_description = PRDescription._prepare_prediction
+          async def prepare_valid_description(self, model):
+              self.prediction = None
+              await original_prepare_description(self, model)
+              parsed = pr_description.load_yaml(self.prediction.strip(), keys_fix_yaml=self.keys_fix) if isinstance(self.prediction, str) else None
+              file_keys = ("filename", "changes_title", "label") + (("changes_summary",) if self.vars.get("include_file_summary_changes", True) else ())
+              strings = isinstance(parsed, dict) and all(isinstance(parsed.get(key), str) and parsed[key].strip() for key in ("title", "description"))
+              types, files = (parsed.get("type"), parsed.get("pr_files")) if strings else (None, None)
+              valid_files = isinstance(files, list) and files and all(isinstance(item, dict) and all(isinstance(item.get(key), str) and item[key].strip() for key in file_keys) for item in files)
+              if (not isinstance(types, list) or not types or not all(isinstance(item, str) and item in {"Bug fix", "Tests", "Enhancement", "Documentation", "Other"} for item in types) or not valid_files):
+                  raise RuntimeError("PR-Agent description prediction is not valid structured YAML")
+          PRDescription._prepare_prediction = prepare_valid_description
+          def _verified_run(kind, original):
+              async def run(self):
+                  published = []
+                  original_publish = self.git_provider.publish_persistent_comment
+                  def publish(body, *args, **kwargs):
+                      if not policy_attested or not _substantive(kind, body):
+                          raise RuntimeError(f"Non-substantive or unattested {kind} publication")
+                      marker = _marker(kind, frozen, run_id, attempt, body, policy_digest)
+                      first, separator, rest = body.partition("\n")
+                      marked = first + "\n" + marker + ("\n" + rest if separator else "")
+                      result = original_publish(marked, *args, **kwargs)
+                      _fresh()
+                      if not _visible(list(repo_obj.get_pull(number).get_issue_comments()), kind,
+                                      frozen, run_id, attempt, body, policy_digest):
+                          raise RuntimeError(f"Current {kind} publication is not visible intact")
+                      published.append(True)
                       return result
-                  result = original_publish_comment(*args, **kwargs)
+                  self.git_provider.publish_persistent_comment = publish
+                  try:
+                      result = await original(self)
+                  finally:
+                      self.git_provider.publish_persistent_comment = original_publish
+                  if not published or not getattr(self, "prediction", None):
+                      raise RuntimeError(f"PR-Agent did not complete a verified {kind}")
+                  verification[kind] = True
                   return result
-
-              self.git_provider.publish_persistent_comment = (
-                  publish_verified_persistent_review
-              )
-              self.git_provider.publish_comment = publish_verified_incremental_review
-              try:
-                  await original_review(self)
-              finally:
-                  self.git_provider.publish_persistent_comment = (
-                      original_publish_persistent
-                  )
-                  self.git_provider.publish_comment = original_publish_comment
-
-              if requested_incremental and effective_incremental:
-                  if not incremental_review_published:
-                      raise RuntimeError(
-                          "PR-Agent did not publish its incremental review"
-                      )
-                  review_mode = "incremental"
-              else:
-                  if not self.prediction:
-                      raise RuntimeError(
-                          "PR-Agent did not produce a review prediction"
-                      )
-                  if not persistent_review_published:
-                      raise RuntimeError(
-                          "PR-Agent did not publish its persistent review"
-                      )
-                  review_mode = (
-                      "baseline_full" if requested_incremental else "initial_full"
-                  )
-
-              verification["review_completed"] = True
-              verification["review_mode"] = review_mode
-
-          PRReviewer.run = run_verified_review
-
-          original_handle_request = PRAgent.handle_request
-
-          async def handle_verified_request(self, pr_url, request, *args, **kwargs):
-              # /prreview is the public GitHub command. Translate it to an
-              # incremental review without exposing /review to other apps.
+              return run
+          PRDescription.run = _verified_run("summary", PRDescription.run)
+          PRReviewer.run = _verified_run("review", PRReviewer.run)
+          original_handle = PRAgent.handle_request
+          async def handle_verified(self, url, request, *args, **kwargs):
               if isinstance(request, str) and request.strip().lower() == "/prreview":
-                  request = "/review -i"
-
-              handled = await original_handle_request(
-                  self, pr_url, request, *args, **kwargs
-              )
+                  request = "/review"
+              handled = await original_handle(self, url, request, *args, **kwargs)
               if handled is False:
-                  raise RuntimeError("PR-Agent did not handle the review command")
+                  raise RuntimeError("PR-Agent swallowed a review failure")
               return handled
-
-          PRAgent.handle_request = handle_verified_request
-
+          PRAgent.handle_request = handle_verified
           from pr_agent.servers.github_action_runner import _run_action_and_drain
-
           asyncio.run(_run_action_and_drain())
-          if not verification["review_completed"]:
-              raise RuntimeError("PR-Agent did not complete a verified review")
-          if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
-              if not verification["description_completed"]:
-                  raise RuntimeError("PR-Agent did not complete a verified summary")
-          if os.environ.get("GITHUB_EVENT_NAME") == "issue_comment":
-              if verification["review_mode"] not in {
-                  "baseline_full",
-                  "incremental",
-              }:
-                  raise RuntimeError("/prreview did not complete a verified review")
+          if (not policy_attested or not verification["review"]
+                  or (event_name == "pull_request" and not verification["summary"])):
+              raise RuntimeError("Required PR-Agent outputs did not complete")
+          _fresh()
           PY
