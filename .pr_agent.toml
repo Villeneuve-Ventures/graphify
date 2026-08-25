@@ -1,13 +1,13 @@
 [config]
-model = "gemini/gemini-3.6-flash"
+model = "gemini/gemini-3.7-flash"
 fallback_models = ["gemini/gemini-3.5-flash-lite"]
 reasoning_effort = "high"
 
 # High-effort reviews and larger diffs need more time and context than the
-# PR-Agent defaults. Gemini 3.6 Flash supports a 1M-token input window; this
-# repository deliberately caps review context at 64K to keep usage bounded.
+# PR-Agent defaults. Gemini 3.7 Flash supports a 1M-token input window; this
+# repository caps complete review comparisons at 262K to keep usage bounded.
 ai_timeout = 300
-max_model_tokens = 65536
+max_model_tokens = 262144
 large_patch_policy = "clip"
 
 patch_extra_lines_before = 5
