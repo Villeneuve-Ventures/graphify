@@ -95,6 +95,7 @@ dev = [
     "patchelf>=0.17.2.4 ; sys_platform != 'win32'",
     "pip-audit>=2.10.0",
     "pre-commit>=4.6.0",
+    "pyyaml>=6.0.3",
     "pyright>=1.1.409",
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
