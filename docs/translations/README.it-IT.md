@@ -1,3 +1,5 @@
+> **Compatibility authority:** This translation may lag behind. The English README is authoritative for current Python requirements, supported platforms, installation commands, and optional dependencies.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/safishamsi/graphify/v4/docs/logo-text.svg" width="260" height="64" alt="Graphify"/>
 </p>

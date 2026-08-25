@@ -1,17 +1,19 @@
-"""Community detection on NetworkX graphs. Uses Leiden (graspologic) if available, falls back to Louvain (networkx). Splits oversized communities. Returns cohesion scores."""
+"""Community detection with native Leiden and a NetworkX Louvain fallback."""
 from __future__ import annotations
 import contextlib
+import importlib
 import inspect
 import io
 import json
-import sys
+import numbers
+from typing import cast
 import networkx as nx
 
 
 def _suppress_output():
     """Context manager to suppress stdout/stderr during library calls.
 
-    graspologic's leiden() emits ANSI escape sequences (progress bars,
+    Leiden implementations may emit ANSI escape sequences (progress bars,
     colored warnings) that corrupt PowerShell 5.1's scroll buffer on
     Windows (see issue #19). Redirecting stdout/stderr to devnull during
     the call prevents this without losing any graphify output.
@@ -19,16 +21,59 @@ def _suppress_output():
     return contextlib.redirect_stdout(io.StringIO())
 
 
-def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
+def _canonical_node_key(node: object) -> str:
+    """Return a stable, type-tagged key for a supported scalar node ID."""
+    if type(node) is str:
+        return f"str:{json.dumps(node, ensure_ascii=False, separators=(',', ':'))}"
+    if type(node) is int:
+        return f"int:{node}"
+    if type(node) is bool:
+        return f"bool:{int(node)}"
+    if type(node) is bytes:
+        return f"bytes:{node.hex()}"
+    if node is None:
+        return "none:"
+    raise TypeError(
+        "Leiden node IDs must be str, exact int, exact bool, bytes, or None; "
+        f"got {type(node).__module__}.{type(node).__qualname__}"
+    )
+
+
+def _native_edges(G: nx.Graph) -> tuple[list[tuple[str, str, float]], dict[str, object]]:
+    """Encode a NetworkX graph as insertion-order-independent native edges."""
+    keyed_nodes: list[tuple[str, object]] = []
+    seen_keys: set[str] = set()
+    for node in G.nodes():
+        key = _canonical_node_key(node)
+        if key in seen_keys:
+            raise ValueError(f"Leiden canonical node-key collision: {key}")
+        seen_keys.add(key)
+        keyed_nodes.append((key, node))
+
+    keyed_nodes.sort(key=lambda item: item[0])
+    native_by_node = {node: str(index) for index, (_, node) in enumerate(keyed_nodes)}
+    original_by_native = {native_id: node for node, native_id in native_by_node.items()}
+    edges: list[tuple[str, str, float]] = []
+    for source, target, attrs in G.edges(data=True):
+        weight = attrs.get("weight", 1.0)
+        if not isinstance(weight, numbers.Real):
+            raise TypeError(f"Leiden edge weight must be numeric, got {type(weight).__name__}")
+        left, right = sorted((native_by_node[source], native_by_node[target]), key=int)
+        edges.append((left, right, float(weight)))
+    edges.sort(key=lambda edge: (int(edge[0]), int(edge[1]), edge[2]))
+    return edges, original_by_native
+
+
+def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[object, int]:
     """Run community detection. Returns {node_id: community_id}.
 
-    Tries Leiden (graspologic) first — best quality.
-    Falls back to Louvain (built into networkx) if graspologic is not installed.
+    Tries native Leiden first — best quality.
+    Falls back to Louvain only if graspologic-native is not installed.
 
     resolution > 1.0 → more, smaller communities.
     resolution < 1.0 → fewer, larger communities.
 
-    Output from graspologic is suppressed to prevent ANSI escape codes
+    Output from Leiden is suppressed to prevent ANSI escape codes
     from corrupting terminal scroll buffers on Windows PowerShell 5.1.
     """
     stable = nx.Graph()
@@ -45,27 +90,26 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[str, int]:
         stable.add_edge(src, tgt, **attrs)
 
     try:
-        from graspologic.partition import leiden
-        lsig = inspect.signature(leiden).parameters
-        kwargs: dict = {}
-        if "random_seed" in lsig:
-            kwargs["random_seed"] = 42
-        if "trials" in lsig:
-            kwargs["trials"] = 1
-        if "resolution" in lsig:
-            kwargs["resolution"] = resolution
-        # Suppress graspologic output to prevent ANSI escape codes from
-        # corrupting PowerShell 5.1 scroll buffer (issue #19)
-        old_stderr = sys.stderr
-        try:
-            sys.stderr = io.StringIO()
-            with _suppress_output():
-                result = leiden(stable, **kwargs)
-        finally:
-            sys.stderr = old_stderr
-        return result
-    except ImportError:
-        pass
+        native_module = importlib.import_module("graspologic_native")
+    except ModuleNotFoundError as error:
+        if error.name != "graspologic_native":
+            raise
+    else:
+        leiden = native_module.leiden
+        edges, original_by_native = _native_edges(stable)
+        with _suppress_output(), contextlib.redirect_stderr(io.StringIO()):
+            _, native_partition = leiden(
+                edges,
+                resolution=resolution,
+                randomness=0.001,
+                iterations=1,
+                use_modularity=True,
+                seed=42,
+                trials=1,
+            )
+        if set(native_partition) != set(original_by_native):
+            raise RuntimeError("Native Leiden returned an incomplete or unknown node mapping")
+        return {original_by_native[node]: int(cid) for node, cid in native_partition.items()}
 
     # Fallback: networkx louvain (available since networkx 2.7).
     # Inspect kwargs to stay compatible across NetworkX versions — max_level
@@ -180,7 +224,7 @@ def cluster(
     if connected.number_of_nodes() > 0:
         partition = _partition(connected, resolution=resolution)
         for node, cid in partition.items():
-            raw.setdefault(cid, []).append(node)
+            raw.setdefault(cid, []).append(cast(str, node))
 
     # Each isolate becomes its own single-node community
     next_cid = max(raw.keys(), default=-1) + 1
@@ -242,16 +286,13 @@ def _split_community(G: nx.Graph, nodes: list[str]) -> list[list[str]]:
     if subgraph.number_of_edges() == 0:
         # No edges - split into individual nodes
         return [[n] for n in sorted(nodes)]
-    try:
-        sub_partition = _partition(subgraph)
-        sub_communities: dict[int, list[str]] = {}
-        for node, cid in sub_partition.items():
-            sub_communities.setdefault(cid, []).append(node)
-        if len(sub_communities) <= 1:
-            return [sorted(nodes)]
-        return [sorted(v) for v in sub_communities.values()]
-    except Exception:
+    sub_partition = _partition(subgraph)
+    sub_communities: dict[int, list[str]] = {}
+    for node, cid in sub_partition.items():
+        sub_communities.setdefault(cid, []).append(cast(str, node))
+    if len(sub_communities) <= 1:
         return [sorted(nodes)]
+    return [sorted(v) for v in sub_communities.values()]
 
 
 def cohesion_score(G: nx.Graph, community_nodes: list[str]) -> float:

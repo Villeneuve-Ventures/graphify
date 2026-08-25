@@ -2,7 +2,10 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/safishamsi/graphify/releases)
 
-## 0.9.17 (unreleased)
+## 0.10.0 (unreleased)
+
+- Breaking: Graphify now requires CPython 3.14.2 through the final 3.14.x release (`>=3.14.2,==3.14.*`); package metadata positively allowlists the 3.14 line instead of relying on prerelease upper-bound interpretation. CI, release graph generation, lint/type targets, Docker, and public installation guidance now declare the same compatibility window.
+- Changed: the optional `leiden` extra now uses `graspologic-native` directly instead of the Python-version-gated `graspologic` wrapper. Graphify preserves deterministic weighted Leiden behavior through a stable scalar node-ID adapter and falls back to NetworkX Louvain only when the top-level native module is genuinely absent.
 
 - Fix: a missing `manifest.json` no longer degrades `graphify extract --code-only` into a full scan that discards the committed semantic layer (#1925). On a fresh clone (or when the manifest is deliberately untracked because its mtimes churn), the incremental gate required both `manifest.json` and `graph.json`; with only the graph present it fell to a full scan, and under `--code-only` that dropped every doc/paper/image node — silently replacing a curated graph with an AST-only skeleton. An existing `graph.json` is now a sufficient incremental baseline: `detect_incremental` already treats an absent manifest as "everything new / nothing deleted", so `build_merge` + `_stale_graph_sources` preserve files that are merely out of this run's scope while still evicting genuinely deleted sources.
 - Fix: hyperedge-only documents are now stamped in the manifest instead of being re-extracted on every run (#1920). `_stamped_manifest_files` (#1897) decided a semantic doc "produced output" by inspecting only `nodes` and `edges`, never `hyperedges`, so a chunk whose only output for a doc was a hyperedge (3+ nodes sharing a concept) left that doc unstamped and perpetually re-queued. Stamping now counts hyperedge output too, mirroring the per-`source_file` keying the semantic cache already uses.
