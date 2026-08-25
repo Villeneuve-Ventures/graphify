@@ -98,7 +98,9 @@ jobs:
           from pr_agent.algo.utils import get_max_tokens
           from pr_agent.config_loader import get_settings
           MAX_TOKENS["gemini/gemini-3.7-flash"] = 1048576
-          NO_SUPPORT_TEMPERATURE_MODELS.extend(model for model in ("gemini/gemini-3.7-flash",) if model not in NO_SUPPORT_TEMPERATURE_MODELS)
+          NO_SUPPORT_TEMPERATURE_MODELS.extend(
+              model for model in ("gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite")
+              if model not in NO_SUPPORT_TEMPERATURE_MODELS)
           SUPPORT_REASONING_EFFORT_MODELS.extend(model for model in ("gemini-3.7-flash", "gemini-3.5-flash-lite") if model not in SUPPORT_REASONING_EFFORT_MODELS)
           def _valid_int(value, positive=False):
               return type(value) is int and value >= (1 if positive else 0)

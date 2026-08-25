@@ -461,6 +461,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     comments = []
     reads = {"pull": 0, "requests": [], "aliases": [], "eager": 0,
              "description_models": [], "description_diffs": [], "tool_diffs": [],
+             "completion_kwargs": [],
              "conversions": [], "published": [], "errors": [],
              "context_fetches": [], "context_served": []}
     if record is not None:
@@ -525,6 +526,11 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
             self.values[key] = value
 
     settings = Settings()
+    def record_completion(model):
+        kwargs = {"model": model}
+        if model not in no_temperature_models:
+            kwargs["temperature"] = 0.2
+        reads["completion_kwargs"].append(kwargs)
     class Provider:
         repo = "owner/repo"
         pr = pull
@@ -552,6 +558,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                 raise RuntimeError("tool failed")
             self.prediction = "prediction"
             alias = description_module.get_pr_diff if self.kind == "summary" else reviewer_module.get_pr_diff
+            record_completion(settings.values["CONFIG.MODEL"])
             diff = alias(self.git_provider, SimpleNamespace(prompt_tokens=1, count_tokens=len),
                          settings.values["CONFIG.MODEL"],
                          add_line_numbers_to_hunks=review_numbered)
@@ -570,6 +577,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                 raise RuntimeError("tool failed")
             if prediction_queue:
                 self.prediction = prediction_queue.pop(0)
+            record_completion(model)
             diff = description_module.get_pr_diff(
                 self.git_provider, SimpleNamespace(prompt_tokens=1, count_tokens=len), model)
             reads["aliases"].append(self.kind)
@@ -730,7 +738,12 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
         "gemini/gemini-3.7-flash": 262144,
         "gemini/gemini-3.5-flash-lite": 262144,
     }
-    assert reads["no_temperature_models"] == ["gemini/gemini-3.7-flash"]
+    assert reads["no_temperature_models"] == [
+        "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
+    assert reads["completion_kwargs"] == [
+        {"model": "gemini/gemini-3.7-flash"},
+        {"model": "gemini/gemini-3.7-flash"},
+    ]
     assert reads["reasoning_models"] == ["gemini-3.7-flash", "gemini-3.5-flash-lite"]
     assert reads["reasoning_effort"] == "high"
     reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment")
@@ -767,6 +780,11 @@ def test_description_malformed_primary_uses_valid_fallback(monkeypatch, tmp_path
         monkeypatch, tmp_path, description_predictions=[malformed, VALID_DESCRIPTION])
     assert reads["description_models"] == [
         "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
+    assert reads["completion_kwargs"] == [
+        {"model": "gemini/gemini-3.7-flash"},
+        {"model": "gemini/gemini-3.5-flash-lite"},
+        {"model": "gemini/gemini-3.7-flash"},
+    ]
     assert reads["aliases"] == ["summary", "summary", "review"]
     assert reads["description_diffs"][0] == reads["description_diffs"][1]
     assert reads["published"] == ["summary", "review"]
