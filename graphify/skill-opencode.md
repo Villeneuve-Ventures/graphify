@@ -67,31 +67,50 @@ Only when the path is one or more `https://github.com/...` URLs, or several loca
 ```bash
 # Detect the correct Python interpreter (handles uv tool, pipx, venv, system installs)
 PYTHON=""
-GRAPHIFY_BIN=$(which graphify 2>/dev/null)
+PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)'
+is_supported_python() {
+    [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1
+}
+is_supported_graphify_python() {
+    is_supported_python "$1" && "$1" -c "import graphify" >/dev/null 2>&1
+}
+GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
 # 1. uv tool installs — most reliable on modern Mac/Linux
 if [ -z "$PYTHON" ] && command -v uv >/dev/null 2>&1; then
-    _UV_PY=$(uv tool run --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
-    if [ -n "$_UV_PY" ]; then PYTHON="$_UV_PY"; fi
+    _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+    if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
 fi
 # 2. Read shebang from graphify binary (pipx and direct pip installs)
 if [ -z "$PYTHON" ] && [ -n "$GRAPHIFY_BIN" ]; then
     _SHEBANG=$(head -1 "$GRAPHIFY_BIN" | tr -d '#!')
     case "$_SHEBANG" in
         *[!a-zA-Z0-9/_.@-]*) ;;
-        *) "$_SHEBANG" -c "import graphify" 2>/dev/null && PYTHON="$_SHEBANG" ;;
+        *) is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;
     esac
 fi
-# 3. Fall back to python3
-if [ -z "$PYTHON" ]; then PYTHON="python3"; fi
-if ! "$PYTHON" -c "import graphify" 2>/dev/null; then
+# 3. Select a supported interpreter for a direct pip install
+if [ -z "$PYTHON" ]; then
+    for _CANDIDATE in python3.14 python3; do
+        _CANDIDATE_PATH=$(command -v "$_CANDIDATE" 2>/dev/null)
+        if is_supported_python "$_CANDIDATE_PATH"; then
+            PYTHON="$_CANDIDATE_PATH"
+            break
+        fi
+    done
+fi
+if ! is_supported_graphify_python "$PYTHON"; then
     if command -v uv >/dev/null 2>&1; then
-        uv tool install --upgrade graphifyy -q 2>&1 | tail -3
-        _UV_PY=$(uv tool run --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
-        if [ -n "$_UV_PY" ]; then PYTHON="$_UV_PY"; fi
+        uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q 2>&1 | tail -3
+        _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+        if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
     else
-        "$PYTHON" -m pip install graphifyy -q 2>/dev/null \
-          || "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3
+        [ -n "$PYTHON" ] && { "$PYTHON" -m pip install graphifyy -q 2>/dev/null \
+          || "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3; }
     fi
+fi
+if ! is_supported_graphify_python "$PYTHON"; then
+    echo "Graphify requires Python 3.14.2 through the final 3.14.x release." >&2
+    exit 1
 fi
 # Write interpreter path for all subsequent steps (persists across invocations)
 mkdir -p graphify-out
@@ -617,19 +636,10 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), check that `.graphify_python` exists. If it's missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:
 
-```bash
-if [ ! -f graphify-out/.graphify_python ]; then
-    GRAPHIFY_BIN=$(which graphify 2>/dev/null)
-    if [ -n "$GRAPHIFY_BIN" ]; then
-        PYTHON=$(head -1 "$GRAPHIFY_BIN" | tr -d '#!')
-        case "$PYTHON" in *[!a-zA-Z0-9/_.@-]*) PYTHON="python3" ;; esac
-    else
-        PYTHON="python3"
-    fi
-    mkdir -p graphify-out
-    "$PYTHON" -c "import sys; open('graphify-out/.graphify_python', 'w', encoding='utf-8').write(sys.executable)"
-fi
-```
+If `graphify-out/.graphify_python` is absent, run this skill's platform-specific
+**Step 1 - Ensure graphify is installed** before the subcommand. Continue only
+after Step 1 writes a validated Python 3.14 interpreter path; never persist a
+bare or unvalidated `python` / `python3` command.
 
 ## For --update and --cluster-only
 

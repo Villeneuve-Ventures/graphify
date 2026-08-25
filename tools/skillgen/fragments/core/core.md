@@ -560,19 +560,10 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), check that `.graphify_python` exists. If it's missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:
 
-```bash
-if [ ! -f graphify-out/.graphify_python ]; then
-    GRAPHIFY_BIN=$(which graphify 2>/dev/null)
-    if [ -n "$GRAPHIFY_BIN" ]; then
-        PYTHON=$(head -1 "$GRAPHIFY_BIN" | tr -d '#!')
-        case "$PYTHON" in *[!a-zA-Z0-9/_.@-]*) PYTHON="python3" ;; esac
-    else
-        PYTHON="python3"
-    fi
-    mkdir -p graphify-out
-    "$PYTHON" -c "import sys; open('graphify-out/.graphify_python', 'w', encoding='utf-8').write(sys.executable)"
-fi
-```
+If `graphify-out/.graphify_python` is absent, run this skill's platform-specific
+**Step 1 - Ensure graphify is installed** before the subcommand. Continue only
+after Step 1 writes a validated Python 3.14 interpreter path; never persist a
+bare or unvalidated `python` / `python3` command.
 
 ## For --update and --cluster-only
 

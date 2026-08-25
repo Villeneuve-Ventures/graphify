@@ -8,6 +8,8 @@ lives only in the references, and no reference duplicates core content.
 """
 from __future__ import annotations
 
+import subprocess
+import shutil
 import sys
 from pathlib import Path
 
@@ -298,6 +300,140 @@ def test_windows_frontmatter_name_and_shell_and_extra():
     # The troubleshooting section sits before Honesty Rules, single separator.
     assert "\n4. **Skip graspologic-native**" in core
     assert core.index("## Troubleshooting") < core.index("## Honesty Rules")
+
+
+def test_every_skill_bootstrap_selects_supported_python314():
+    platforms = gen.load_platforms()
+    for key, platform in platforms.items():
+        body = gen.render(platform)[0].content
+        bootstrap = body[body.index("### Step 1"):body.index("### Step 2")]
+        assert 'uv tool install --python \">=3.14.2,<3.15\" --upgrade graphifyy' in bootstrap or (
+            "uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy" in bootstrap
+        ), key
+        assert "(3, 14, 2) <= sys.version_info < (3, 15)" in bootstrap, key
+        assert 'PYTHON="python3"' not in body, key
+        if "## Interpreter guard for subcommands" in body:
+            assert "never persist a\nbare or unvalidated `python` / `python3` command" in body, key
+        if platform.shell == "powershell":
+            assert "function Get-Python314Candidates" in bootstrap, key
+            assert "function Find-Python314" in bootstrap, key
+            assert "function Test-GraphifyPython" in bootstrap, key
+            assert "Get-Command python3.14" in bootstrap, key
+            assert "$launcher.Source -3.14 -c" in bootstrap, key
+            assert "& $installPython -m pip install graphifyy" in bootstrap, key
+            assert "\n        pip install graphifyy" not in bootstrap, key
+        else:
+            assert "uv tool run --python '>=3.14.2,<3.15' --from graphifyy" in bootstrap, key
+            assert "for _CANDIDATE in python3.14 python3" in bootstrap, key
+            assert "is_supported_graphify_python \"$_SHEBANG\"" in bootstrap, key
+            assert '[ -n "$PYTHON" ] && { "$PYTHON" -m pip install' in bootstrap, key
+
+
+def _posix_bootstrap_script() -> str:
+    platform = gen.load_platforms()["claude"]
+    body = gen.render(platform)[0].content
+    bootstrap = body[body.index("### Step 1"):body.index("### Step 2")]
+    return bootstrap.split("```bash\n", 1)[1].split("\n```", 1)[0].replace("INPUT_PATH", ".")
+
+
+def _isolated_bootstrap_bin(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for utility in ("head", "mkdir", "tail", "tr"):
+        resolved = shutil.which(utility)
+        assert resolved is not None
+        (bin_dir / utility).symlink_to(resolved)
+    return bin_dir
+
+
+@pytest.mark.parametrize("command", ["python3.14", "python3"])
+def test_posix_bootstrap_accepts_only_validated_supported_candidates(tmp_path, monkeypatch, command):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    (bin_dir / command).symlink_to(Path(sys.executable))
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    saved = (tmp_path / "graphify-out" / ".graphify_python").read_text()
+    assert Path(saved).resolve() == Path(sys.executable).resolve()
+
+
+def test_posix_bootstrap_rejects_unsupported_python_before_pip(tmp_path, monkeypatch):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    pip_marker = tmp_path / "pip-was-called"
+    python3 = bin_dir / "python3"
+    python3.write_text(
+        "#!/bin/sh\n"
+        f"case \"$*\" in *'-m pip'*) : > '{pip_marker}';; esac\n"
+        "exit 1\n"
+    )
+    python3.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Graphify requires Python 3.14.2" in result.stderr
+    assert not pip_marker.exists()
+
+
+def test_posix_bootstrap_ignores_unsupported_existing_graphify_shebang(tmp_path, monkeypatch):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    unsupported = bin_dir / "python-old"
+    unsupported.write_text("#!/bin/sh\nexit 1\n")
+    unsupported.chmod(0o755)
+    graphify = bin_dir / "graphify"
+    graphify.write_text(f"#!{unsupported}\nexit 0\n")
+    graphify.chmod(0o755)
+    (bin_dir / "python3.14").symlink_to(Path(sys.executable))
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    saved = (tmp_path / "graphify-out" / ".graphify_python").read_text()
+    assert Path(saved).resolve() == Path(sys.executable).resolve()
+
+
+def test_powershell_bootstrap_validates_every_candidate_and_parses():
+    from tree_sitter import Language, Parser
+    import tree_sitter_powershell
+
+    platform = gen.load_platforms()["windows"]
+    body = gen.render(platform)[0].content
+    bootstrap = body[body.index("### Step 1"):body.index("### Step 2")]
+    script = bootstrap.split("```powershell\n", 1)[1].split("\n```", 1)[0]
+
+    assert script.count("(Test-Path $py) -and (Test-GraphifyPython $py)") == 2
+    assert "foreach ($py in @(Get-Python314Candidates))" in script
+    assert "if (Test-GraphifyPython $py) { return $py }" in script
+    assert script.count("-c $versionCheck") == 3
+    assert script.count('Write-Output ("$resolved".Trim())') == 3
+    assert "& $installPython -m pip install graphifyy" in script
+    assert "if (-not $GRAPHIFY_PYTHON)" in script
+
+    parser = Parser(Language(tree_sitter_powershell.language()))
+    tree = parser.parse(script.encode())
+    assert not tree.root_node.has_error, tree.root_node
 
 
 def test_codex_dispatch_is_agenttask_and_collects_in_memory():

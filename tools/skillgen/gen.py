@@ -902,6 +902,40 @@ def _is_uv_from_interpreter_fix_line(line: str) -> bool:
     return "uv tool run" in line and "graphifyy python" in line
 
 
+def _is_python314_bootstrap_fix_line(line: str) -> bool:
+    """Whether a monolith line explicitly selects the supported Python series.
+
+    The Python 3.14-only package policy made the old unversioned ``python3`` and
+    uv defaults unsafe: they could select an older interpreter even when 3.14
+    was installed. Keep this round-trip exception exact so unrelated bootstrap
+    edits remain unsanctioned.
+    """
+    return line.strip() in {
+        "PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)'",
+        'is_supported_python() { [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1; }',
+        'is_supported_graphify_python() { is_supported_python "$1" && "$1" -c "import graphify" >/dev/null 2>&1; }',
+        "GRAPHIFY_BIN=$(which graphify 2>/dev/null)",
+        "GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)",
+        'if [ -n "$_UV_PY" ]; then PYTHON="$_UV_PY"; fi',
+        'if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi',
+        '*) "$_SHEBANG" -c "import graphify" 2>/dev/null && PYTHON="$_SHEBANG" ;;',
+        '*) is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;',
+        "# 3. Fall back to python3",
+        "# 3. Select a supported interpreter for a direct pip install",
+        'if [ -z "$PYTHON" ]; then PYTHON="python3"; fi',
+        'if [ -z "$PYTHON" ]; then for _CANDIDATE in python3.14 python3; do _CANDIDATE_PATH=$(command -v "$_CANDIDATE" 2>/dev/null); if is_supported_python "$_CANDIDATE_PATH"; then PYTHON="$_CANDIDATE_PATH"; break; fi; done; fi',
+        'if ! "$PYTHON" -c "import graphify" 2>/dev/null; then',
+        'if ! is_supported_graphify_python "$PYTHON"; then',
+        "uv tool install --upgrade graphifyy -q 2>&1 | tail -3",
+        "uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q 2>&1 | tail -3",
+        '"$PYTHON" -m pip install graphifyy -q 2>/dev/null \\',
+        '[ -n "$PYTHON" ] && { "$PYTHON" -m pip install graphifyy -q 2>/dev/null \\',
+        '|| "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3',
+        '|| "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3; }',
+        'is_supported_graphify_python "$PYTHON" || { echo "Graphify requires Python 3.14.2 through the final 3.14.x release." >&2; exit 1; }',
+    }
+
+
 def _is_semantic_cache_scope_fix_line(line: str) -> bool:
     """Whether a line scopes semantic cache writes to dispatched files (#1757).
 
@@ -935,6 +969,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_shebang_allowlist_fix_line,
     _is_obsidian_usage_comment_line,
     _is_uv_from_interpreter_fix_line,
+    _is_python314_bootstrap_fix_line,
     _is_semantic_cache_scope_fix_line,
 )
 
@@ -942,6 +977,32 @@ _SANCTIONED_MONOLITH_DIFFS = (
 def _is_sanctioned_monolith_diff(line: str) -> bool:
     """Whether a single added/removed monolith line is an allowed change."""
     return not line.strip() or any(pred(line) for pred in _SANCTIONED_MONOLITH_DIFFS)
+
+
+_SUBCOMMAND_GUARD_BODY = [
+    "",
+    "If `graphify-out/.graphify_python` is absent, run this skill's platform-specific",
+    "**Step 1 - Ensure graphify is installed** before the subcommand. Continue only",
+    "after Step 1 writes a validated Python 3.14 interpreter path; never persist a",
+    "bare or unvalidated `python` / `python3` command.",
+    "",
+]
+
+
+def _normalise_subcommand_guard(lines: list[str], *, validate_current: bool) -> tuple[list[str], str | None]:
+    """Collapse Devin's intentionally replaced subcommand guard for v8 comparison."""
+    marker = "Before running any subcommand below ("
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith(marker)) + 1
+    except StopIteration:
+        return lines, None
+    try:
+        end = lines.index("---", start)
+    except ValueError:
+        return lines, "subcommand interpreter guard has no closing separator"
+    if validate_current and lines[start:end] != _SUBCOMMAND_GUARD_BODY:
+        return lines, "subcommand interpreter guard drifted from the validated Step 1 handoff"
+    return lines[:start] + ["", "@@VALIDATED_PYTHON_SUBCOMMAND_GUARD@@", ""] + lines[end:], None
 
 
 def monolith_roundtrip(platform: Platform) -> list[str]:
@@ -973,6 +1034,11 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
         l for l in _normalise(_git_show(platform.roundtrip_ref)).splitlines()
         if not _is_trigger_line(l)
     ]
+
+    rendered_lines, guard_error = _normalise_subcommand_guard(rendered_lines, validate_current=True)
+    original_lines, _ = _normalise_subcommand_guard(original_lines, validate_current=False)
+    if guard_error:
+        return [f"[{platform.key}] {guard_error}"]
 
     added = Counter(rendered_lines) - Counter(original_lines)
     removed = Counter(original_lines) - Counter(rendered_lines)
