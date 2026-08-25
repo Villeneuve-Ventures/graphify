@@ -60,3 +60,21 @@ def test_every_linked_translation_defers_compatibility_to_english_readme():
     assert linked == translation_files
     for relative_path in sorted(linked):
         assert (ROOT / relative_path).read_text().startswith(f"{TRANSLATION_NOTICE}\n\n")
+
+
+def test_translations_do_not_publish_obsolete_python_or_leiden_requirements():
+    forbidden = (
+        "3.10+",
+        "۳.۱۰+",
+        "python@3.12",
+        "python3.12",
+        "Python < 3.13",
+    )
+    failures = []
+    for path in sorted((ROOT / "docs/translations").glob("README.*.md")):
+        text = path.read_text()
+        for pattern in forbidden:
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if pattern in line:
+                    failures.append(f"{path.relative_to(ROOT)}:{line_number}: {pattern}")
+    assert not failures, "obsolete translated compatibility guidance:\n" + "\n".join(failures)

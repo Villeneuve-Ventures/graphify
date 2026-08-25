@@ -41,7 +41,7 @@ graphify 分三個階段工作。首先，確定性 AST 遍歷在不使用 LLM �
 
 ## 安裝
 
-**需求：** Python 3.10+ 以及以下之一：[Claude Code](https://claude.ai/code)、[Codex](https://openai.com/codex)、[OpenCode](https://opencode.ai)、[Cursor](https://cursor.com) 等。
+**需求：** CPython 3.14.2 through final 3.14.x releases 以及以下之一：[Claude Code](https://claude.ai/code)、[Codex](https://openai.com/codex)、[OpenCode](https://opencode.ai)、[Cursor](https://cursor.com) 等。
 
 ```bash
 uv tool install graphifyy && graphify install

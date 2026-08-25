@@ -6,8 +6,13 @@ import inspect
 import io
 import json
 import numbers
-from typing import cast
+from collections.abc import Iterable, Mapping, Sequence
+from typing import TypeVar
 import networkx as nx
+
+
+NodeId = str | int | bool | bytes | None
+NodeIdT = TypeVar("NodeIdT", bound=NodeId)
 
 
 def _suppress_output():
@@ -39,9 +44,14 @@ def _canonical_node_key(node: object) -> str:
     )
 
 
-def _native_edges(G: nx.Graph) -> tuple[list[tuple[str, str, float]], dict[str, object]]:
+def _sorted_nodes(nodes: Iterable[NodeIdT]) -> list[NodeIdT]:
+    """Return supported node IDs in their stable, type-tagged order."""
+    return sorted(nodes, key=_canonical_node_key)
+
+
+def _native_edges(G: nx.Graph) -> tuple[list[tuple[str, str, float]], dict[str, NodeId]]:
     """Encode a NetworkX graph as insertion-order-independent native edges."""
-    keyed_nodes: list[tuple[str, object]] = []
+    keyed_nodes: list[tuple[str, NodeId]] = []
     seen_keys: set[str] = set()
     for node in G.nodes():
         key = _canonical_node_key(node)
@@ -64,7 +74,7 @@ def _native_edges(G: nx.Graph) -> tuple[list[tuple[str, str, float]], dict[str, 
     return edges, original_by_native
 
 
-def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[object, int]:
+def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[NodeId, int]:
     """Run community detection. Returns {node_id: community_id}.
 
     Tries native Leiden first — best quality.
@@ -77,12 +87,12 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[object, int]:
     from corrupting terminal scroll buffers on Windows PowerShell 5.1.
     """
     stable = nx.Graph()
-    stable.add_nodes_from(sorted(G.nodes(), key=str))
+    stable.add_nodes_from(_sorted_nodes(G.nodes()))
     edge_rows = sorted(
         G.edges(data=True),
         key=lambda row: (
-            str(row[0]),
-            str(row[1]),
+            _canonical_node_key(row[0]),
+            _canonical_node_key(row[1]),
             json.dumps(row[2], sort_keys=True, ensure_ascii=False, default=str),
         ),
     )
@@ -128,7 +138,7 @@ _COHESION_SPLIT_MIN_SIZE = 50    # only cohesion-split if community has at least
 
 
 def label_communities_by_hub(
-    G: nx.Graph, communities: dict[int, list[str]]
+    G: nx.Graph, communities: dict[int, list[NodeId]]
 ) -> dict[int, str]:
     """Deterministic, LLM-free community labels: name each community after its
     highest-degree member — the structural hub — so a report reads ``auth`` /
@@ -146,7 +156,7 @@ def label_communities_by_hub(
             labels[cid] = f"Community {cid}"
             continue
         # highest degree wins; ties broken by node id (ascending) for determinism
-        hub = min(present, key=lambda n: (-G.degree(n), str(n)))
+        hub = min(present, key=lambda n: (-G.degree(n), _canonical_node_key(n)))
         name = str(G.nodes[hub].get("label") or hub).strip()
         if name.endswith("()"):
             name = name[:-2]
@@ -154,7 +164,7 @@ def label_communities_by_hub(
     return labels
 
 
-def community_member_sigs(communities: dict[int, list[str]]) -> dict[int, str]:
+def community_member_sigs(communities: dict[int, list[NodeId]]) -> dict[int, str]:
     """Per-community membership fingerprints: ``{cid: sha256(sorted member ids)}``.
 
     Persisted next to ``.graphify_labels.json`` so a later ``cluster-only`` can tell
@@ -168,8 +178,12 @@ def community_member_sigs(communities: dict[int, list[str]]) -> dict[int, str]:
     sigs: dict[int, str] = {}
     for cid, members in communities.items():
         h = hashlib.sha256()
-        for nid in sorted(str(n) for n in members):
-            h.update(nid.encode("utf-8", "replace"))
+        if all(type(member) is str for member in members):
+            encoded_members = sorted(member for member in members if isinstance(member, str))
+        else:
+            encoded_members = [_canonical_node_key(member) for member in _sorted_nodes(members)]
+        for encoded_member in encoded_members:
+            h.update(encoded_member.encode("utf-8", "replace"))
             h.update(b"\x00")
         sigs[cid] = h.hexdigest()[:16]
     return sigs
@@ -179,7 +193,7 @@ def cluster(
     G: nx.Graph,
     resolution: float = 1.0,
     exclude_hubs_percentile: float | None = None,
-) -> dict[int, list[str]]:
+) -> dict[int, list[NodeId]]:
     """Run Leiden community detection. Returns {community_id: [node_ids]}.
 
     Community IDs are stable across runs: 0 = largest community after splitting.
@@ -201,10 +215,10 @@ def cluster(
     if G.is_directed():
         G = G.to_undirected()
     if G.number_of_edges() == 0:
-        return {i: [n] for i, n in enumerate(sorted(G.nodes))}
+        return {i: [n] for i, n in enumerate(_sorted_nodes(G.nodes()))}
 
     # Compute hub exclusion set before removing anything so degree is based on full graph
-    hub_nodes: set[str] = set()
+    hub_nodes: set[NodeId] = set()
     if exclude_hubs_percentile is not None:
         degrees = sorted(d for _, d in G.degree())
         if degrees:
@@ -219,16 +233,16 @@ def cluster(
     partition_graph = G.subgraph(partition_nodes)
     isolates = sorted(
         (n for n, degree in partition_graph.degree() if degree == 0),
-        key=str,
+        key=_canonical_node_key,
     )
     connected_nodes = [n for n, degree in partition_graph.degree() if degree > 0]
     connected = partition_graph.subgraph(connected_nodes)
 
-    raw: dict[int, list[str]] = {}
+    raw: dict[int, list[NodeId]] = {}
     if connected.number_of_nodes() > 0:
         partition = _partition(connected, resolution=resolution)
         for node, cid in partition.items():
-            raw.setdefault(cid, []).append(cast(str, node))
+            raw.setdefault(cid, []).append(node)
 
     # Each isolate becomes its own single-node community
     next_cid = max(raw.keys(), default=-1) + 1
@@ -238,8 +252,8 @@ def cluster(
 
     # Reattach excluded hubs by majority-vote neighbour community
     if hub_nodes:
-        node_community: dict[str, int] = {n: cid for cid, nodes in raw.items() for n in nodes}
-        for hub in sorted(hub_nodes):
+        node_community: dict[NodeId, int] = {n: cid for cid, nodes in raw.items() for n in nodes}
+        for hub in _sorted_nodes(hub_nodes):
             votes: dict[int, int] = {}
             for nb in G.neighbors(hub):
                 cid = node_community.get(nb)
@@ -248,7 +262,7 @@ def cluster(
             if votes:
                 best = min(
                     votes,
-                    key=lambda c: (-votes[c], tuple(sorted(map(str, raw[c])))),
+                    key=lambda c: (-votes[c], tuple(map(_canonical_node_key, _sorted_nodes(raw[c])))),
                 )
                 raw.setdefault(best, []).append(hub)
                 node_community[hub] = best
@@ -259,7 +273,7 @@ def cluster(
 
     # Split oversized communities
     max_size = max(_MIN_SPLIT_SIZE, int(G.number_of_nodes() * _MAX_COMMUNITY_FRACTION))
-    final_communities: list[list[str]] = []
+    final_communities: list[list[NodeId]] = []
     for nodes in raw.values():
         if len(nodes) > max_size:
             final_communities.extend(_split_community(G, nodes))
@@ -268,7 +282,7 @@ def cluster(
 
     # Second pass: re-split low-cohesion communities caused by doc-hub nodes
     # that bridge otherwise-unrelated subsystems (e.g. CLAUDE.md connected to everything).
-    second_pass: list[list[str]] = []
+    second_pass: list[list[NodeId]] = []
     for nodes in final_communities:
         if len(nodes) >= _COHESION_SPLIT_MIN_SIZE and cohesion_score(G, nodes) < _COHESION_SPLIT_THRESHOLD:
             splits = _split_community(G, nodes)
@@ -283,26 +297,28 @@ def cluster(
     # partitioner's (not seed-stable) enumeration order, so their integer IDs
     # permute run-to-run - which reads as massive "community churn" in a per-node
     # cid diff even though the actual grouping is reproducible (#1090 follow-up).
-    final_communities.sort(key=lambda nodes: (-len(nodes), tuple(sorted(map(str, nodes)))))
-    return {i: sorted(nodes) for i, nodes in enumerate(final_communities)}
+    final_communities.sort(
+        key=lambda nodes: (-len(nodes), tuple(map(_canonical_node_key, _sorted_nodes(nodes))))
+    )
+    return {i: _sorted_nodes(nodes) for i, nodes in enumerate(final_communities)}
 
 
-def _split_community(G: nx.Graph, nodes: list[str]) -> list[list[str]]:
+def _split_community(G: nx.Graph, nodes: list[NodeId]) -> list[list[NodeId]]:
     """Run a second Leiden pass on a community subgraph to split it further."""
     subgraph = G.subgraph(nodes)
     if subgraph.number_of_edges() == 0:
         # No edges - split into individual nodes
-        return [[n] for n in sorted(nodes)]
+        return [[n] for n in _sorted_nodes(nodes)]
     sub_partition = _partition(subgraph)
-    sub_communities: dict[int, list[str]] = {}
+    sub_communities: dict[int, list[NodeId]] = {}
     for node, cid in sub_partition.items():
-        sub_communities.setdefault(cid, []).append(cast(str, node))
+        sub_communities.setdefault(cid, []).append(node)
     if len(sub_communities) <= 1:
-        return [sorted(nodes)]
-    return [sorted(v) for v in sub_communities.values()]
+        return [_sorted_nodes(nodes)]
+    return [_sorted_nodes(v) for v in sub_communities.values()]
 
 
-def cohesion_score(G: nx.Graph, community_nodes: list[str]) -> float:
+def cohesion_score(G: nx.Graph, community_nodes: list[NodeId]) -> float:
     """Ratio of actual intra-community edges to maximum possible."""
     n = len(community_nodes)
     if n <= 1:
@@ -313,14 +329,14 @@ def cohesion_score(G: nx.Graph, community_nodes: list[str]) -> float:
     return actual / possible if possible > 0 else 0.0
 
 
-def score_all(G: nx.Graph, communities: dict[int, list[str]]) -> dict[int, float]:
+def score_all(G: nx.Graph, communities: dict[int, list[NodeId]]) -> dict[int, float]:
     return {cid: cohesion_score(G, nodes) for cid, nodes in communities.items()}
 
 
 def remap_communities_to_previous(
-    communities: dict[int, list[str]],
-    previous_node_community: dict[str, int],
-) -> dict[int, list[str]]:
+    communities: Mapping[int, Sequence[NodeIdT]],
+    previous_node_community: Mapping[NodeIdT, int],
+) -> dict[int, list[NodeIdT]]:
     """Remap community IDs to maximize overlap with a previous assignment.
 
     Uses greedy one-to-one matching by intersection size, then assigns fresh IDs
@@ -330,7 +346,7 @@ def remap_communities_to_previous(
         return {}
 
     new_sets = {cid: set(nodes) for cid, nodes in communities.items()}
-    old_sets: dict[int, set[str]] = {}
+    old_sets: dict[int, set[NodeIdT]] = {}
     for node, old_cid in previous_node_community.items():
         old_sets.setdefault(old_cid, set()).add(node)
 
@@ -353,7 +369,12 @@ def remap_communities_to_previous(
         matched_new_ids.add(new_cid)
 
     unmatched = [cid for cid in communities if cid not in matched_new_ids]
-    unmatched.sort(key=lambda cid: (-len(communities[cid]), tuple(sorted(communities[cid]))))
+    unmatched.sort(
+        key=lambda cid: (
+            -len(communities[cid]),
+            tuple(map(_canonical_node_key, _sorted_nodes(communities[cid]))),
+        )
+    )
     next_id = 0
     for new_cid in unmatched:
         while next_id in used_old_ids:
@@ -362,7 +383,7 @@ def remap_communities_to_previous(
         used_old_ids.add(next_id)
         next_id += 1
 
-    remapped: dict[int, list[str]] = {}
+    remapped: dict[int, list[NodeIdT]] = {}
     for new_cid, nodes in communities.items():
-        remapped[new_to_final[new_cid]] = sorted(nodes)
+        remapped[new_to_final[new_cid]] = _sorted_nodes(nodes)
     return dict(sorted(remapped.items(), key=lambda kv: kv[0]))

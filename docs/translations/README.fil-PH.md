@@ -41,7 +41,7 @@ Ang bawat relasyon ay may label na `EXTRACTED`, `INFERRED` (may confidence score
 
 ## Pag-install
 
-**Mga Kinakailangan:** Python 3.10+ at isa sa mga sumusunod: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) at iba pa.
+**Mga Kinakailangan:** CPython 3.14.2 through final 3.14.x releases at isa sa mga sumusunod: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) at iba pa.
 
 ```bash
 uv tool install graphifyy && graphify install

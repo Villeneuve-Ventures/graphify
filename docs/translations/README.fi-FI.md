@@ -41,7 +41,7 @@ Jokainen suhde on merkitty `EXTRACTED`, `INFERRED` (luottamuspisteineen) tai `AM
 
 ## Asennus
 
-**Vaatimukset:** Python 3.10+ ja jokin seuraavista: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) ja muut.
+**Vaatimukset:** CPython 3.14.2 through final 3.14.x releases ja jokin seuraavista: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) ja muut.
 
 ```bash
 uv tool install graphifyy && graphify install

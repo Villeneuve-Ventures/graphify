@@ -41,7 +41,7 @@ Fiecare relație este etichetată `EXTRACTED`, `INFERRED` (cu scor de încredere
 
 ## Instalare
 
-**Cerințe:** Python 3.10+ și unul din: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) și altele.
+**Cerințe:** CPython 3.14.2 through final 3.14.x releases și unul din: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) și altele.
 
 ```bash
 uv tool install graphifyy && graphify install

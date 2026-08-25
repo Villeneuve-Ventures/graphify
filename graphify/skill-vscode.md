@@ -67,7 +67,7 @@ Only when the path is one or more `https://github.com/...` URLs, or several loca
 ```bash
 # Detect the correct Python interpreter (handles uv tool, pipx, venv, system installs)
 PYTHON=""
-PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)'
+PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
 is_supported_python() {
     [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1
 }
@@ -77,7 +77,8 @@ is_supported_graphify_python() {
 GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
 # 1. uv tool installs — most reliable on modern Mac/Linux
 if [ -z "$PYTHON" ] && command -v uv >/dev/null 2>&1; then
-    _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+    _UV_TOOL_DIR=$(uv tool dir 2>/dev/null)
+    _UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"
     if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
 fi
 # 2. Read shebang from graphify binary (pipx and direct pip installs)
@@ -101,7 +102,8 @@ fi
 if ! is_supported_graphify_python "$PYTHON"; then
     if command -v uv >/dev/null 2>&1; then
         uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q 2>&1 | tail -3
-        _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+        _UV_TOOL_DIR=$(uv tool dir 2>/dev/null)
+        _UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"
         if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
     else
         [ -n "$PYTHON" ] && { "$PYTHON" -m pip install graphifyy -q 2>/dev/null \
@@ -638,11 +640,11 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 ## Interpreter guard for subcommands
 
-Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), check that `.graphify_python` exists. If it's missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:
+Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), unconditionally re-resolve and overwrite `.graphify_python` first:
 
-If `graphify-out/.graphify_python` is absent, run this skill's platform-specific
-**Step 1 - Ensure graphify is installed** before the subcommand. Continue only
-after Step 1 writes a validated Python 3.14 interpreter path; never persist a
+Run this skill's platform-specific **Step 1 - Ensure graphify is installed**
+before every subcommand. Continue only after Step 1 overwrites
+`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a
 bare or unvalidated `python` / `python3` command.
 
 ## For --update and --cluster-only

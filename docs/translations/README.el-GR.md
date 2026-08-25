@@ -41,7 +41,7 @@ graphify-out/
 
 ## Εγκατάσταση
 
-**Απαιτήσεις:** Python 3.10+ και ένα από: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) και άλλα.
+**Απαιτήσεις:** CPython 3.14.2 through final 3.14.x releases και ένα από: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) και άλλα.
 
 ```bash
 uv tool install graphifyy && graphify install

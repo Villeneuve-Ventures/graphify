@@ -4,7 +4,7 @@ New-Item -ItemType Directory -Force -Path graphify-out | Out-Null
 $GRAPHIFY_PYTHON = $null
 
 function Get-Python314Candidates {
-    $versionCheck = "import sys; ok = (3, 14, 2) <= sys.version_info < (3, 15); print(sys.executable) if ok else sys.exit(1)"
+    $versionCheck = "import sys; ok = sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0); print(sys.executable) if ok else sys.exit(1)"
 
     $py314 = Get-Command python3.14 -ErrorAction SilentlyContinue
     if ($py314) {
@@ -32,7 +32,7 @@ function Find-Python314 {
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
-    & $Candidate -c "import graphify, sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)" 2>$null
+    & $Candidate -c "import graphify, sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
     return $LASTEXITCODE -eq 0
 }
 

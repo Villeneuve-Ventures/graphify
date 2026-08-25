@@ -558,11 +558,11 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 ## Interpreter guard for subcommands
 
-Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), check that `.graphify_python` exists. If it's missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:
+Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), unconditionally re-resolve and overwrite `.graphify_python` first:
 
-If `graphify-out/.graphify_python` is absent, run this skill's platform-specific
-**Step 1 - Ensure graphify is installed** before the subcommand. Continue only
-after Step 1 writes a validated Python 3.14 interpreter path; never persist a
+Run this skill's platform-specific **Step 1 - Ensure graphify is installed**
+before every subcommand. Continue only after Step 1 overwrites
+`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a
 bare or unvalidated `python` / `python3` command.
 
 ## For --update and --cluster-only

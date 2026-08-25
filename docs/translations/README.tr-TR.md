@@ -41,7 +41,7 @@ Her ilişki `EXTRACTED`, `INFERRED` (güven puanıyla) veya `AMBIGUOUS` olarak e
 
 ## Kurulum
 
-**Gereksinimler:** Python 3.10+ ve şunlardan biri: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) ve diğerleri.
+**Gereksinimler:** CPython 3.14.2 through final 3.14.x releases ve şunlardan biri: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) ve diğerleri.
 
 ```bash
 uv tool install graphifyy && graphify install

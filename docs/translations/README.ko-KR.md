@@ -48,7 +48,7 @@ graphify는 두 번의 패스로 실행됩니다. 첫 번째는 결정론적 AST
 
 ## 설치
 
-**필수 요구사항:** Python 3.10+ 및 다음 중 하나: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [OpenClaw](https://openclaw.ai), [Factory Droid](https://factory.ai), 또는 [Trae](https://trae.ai)
+**필수 요구사항:** CPython 3.14.2 through final 3.14.x releases 및 다음 중 하나: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [OpenClaw](https://openclaw.ai), [Factory Droid](https://factory.ai), 또는 [Trae](https://trae.ai)
 
 ```bash
 pip install graphifyy && graphify install

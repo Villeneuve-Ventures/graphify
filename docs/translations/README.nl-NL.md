@@ -41,7 +41,7 @@ Elke relatie is gelabeld als `EXTRACTED`, `INFERRED` (met betrouwbaarheidsscore)
 
 ## Installatie
 
-**Vereisten:** Python 3.10+ en één van: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [Cursor](https://cursor.com), [Aider](https://aider.chat) en andere.
+**Vereisten:** CPython 3.14.2 through final 3.14.x releases en één van: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [Cursor](https://cursor.com), [Aider](https://aider.chat) en andere.
 
 ```bash
 uv tool install graphifyy && graphify install

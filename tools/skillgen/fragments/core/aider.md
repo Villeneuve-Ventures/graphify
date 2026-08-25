@@ -61,13 +61,14 @@ Follow these steps in order. Do not skip steps.
 ```bash
 # Detect the correct Python interpreter (handles uv tool, pipx, venv, system installs)
 PYTHON=""
-PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)'
+PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
 is_supported_python() { [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1; }
 is_supported_graphify_python() { is_supported_python "$1" && "$1" -c "import graphify" >/dev/null 2>&1; }
 GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
 # 1. uv tool installs — most reliable on modern Mac/Linux
 if [ -z "$PYTHON" ] && command -v uv >/dev/null 2>&1; then
-    _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+    _UV_TOOL_DIR=$(uv tool dir 2>/dev/null)
+    _UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"
     if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
 fi
 # 2. Read shebang from graphify binary (pipx and direct pip installs)
@@ -83,7 +84,8 @@ if [ -z "$PYTHON" ]; then for _CANDIDATE in python3.14 python3; do _CANDIDATE_PA
 if ! is_supported_graphify_python "$PYTHON"; then
     if command -v uv >/dev/null 2>&1; then
         uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q 2>&1 | tail -3
-        _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+        _UV_TOOL_DIR=$(uv tool dir 2>/dev/null)
+        _UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"
         if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
     else
         [ -n "$PYTHON" ] && { "$PYTHON" -m pip install graphifyy -q 2>/dev/null \
@@ -633,18 +635,18 @@ print('graph.graphml written - open in Gephi, yEd, or any GraphML tool')
 ### Step 7d - MCP server (only if --mcp flag)
 
 ```bash
-$(cat graphify-out/.graphify_python) -m graphify.serve graphify-out/graph.json
+graphify-mcp graphify-out/graph.json
 ```
 
 This starts a stdio MCP server that exposes tools: `query_graph`, `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`. Add to Claude Desktop or any MCP-compatible agent orchestrator so other agents can query the graph live.
 
-To configure in Claude Desktop, add to `claude_desktop_config.json`. Claude Desktop can't run `$(...)`, so set `command` to the **absolute interpreter path** printed by `cat graphify-out/.graphify_python`:
+To configure in Claude Desktop, add to `claude_desktop_config.json`. Set `command` to the **absolute executable path** printed by `command -v graphify-mcp`:
 ```json
 {
   "mcpServers": {
     "graphify": {
-      "command": "<absolute path from: cat graphify-out/.graphify_python>",
-      "args": ["-m", "graphify.serve", "/absolute/path/to/graphify-out/graph.json"]
+      "command": "<absolute path from: command -v graphify-mcp>",
+      "args": ["/absolute/path/to/graphify-out/graph.json"]
     }
   }
 }
@@ -1212,7 +1214,7 @@ Supported URL types (auto-detected):
 Start a background watcher that monitors a folder and auto-updates the graph when files change.
 
 ```bash
-$(cat graphify-out/.graphify_python) -m graphify.watch INPUT_PATH --debounce 3
+graphify watch INPUT_PATH --debounce 3
 ```
 
 Replace INPUT_PATH with the folder to watch. Behavior depends on what changed:

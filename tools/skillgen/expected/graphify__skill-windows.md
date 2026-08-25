@@ -70,7 +70,7 @@ New-Item -ItemType Directory -Force -Path graphify-out | Out-Null
 $GRAPHIFY_PYTHON = $null
 
 function Get-Python314Candidates {
-    $versionCheck = "import sys; ok = (3, 14, 2) <= sys.version_info < (3, 15); print(sys.executable) if ok else sys.exit(1)"
+    $versionCheck = "import sys; ok = sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0); print(sys.executable) if ok else sys.exit(1)"
 
     $py314 = Get-Command python3.14 -ErrorAction SilentlyContinue
     if ($py314) {
@@ -98,7 +98,7 @@ function Find-Python314 {
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
-    & $Candidate -c "import graphify, sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)" 2>$null
+    & $Candidate -c "import graphify, sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
     return $LASTEXITCODE -eq 0
 }
 
@@ -675,11 +675,11 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 ## Interpreter guard for subcommands
 
-Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), check that `.graphify_python` exists. If it's missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:
+Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), unconditionally re-resolve and overwrite `.graphify_python` first:
 
-If `graphify-out/.graphify_python` is absent, run this skill's platform-specific
-**Step 1 - Ensure graphify is installed** before the subcommand. Continue only
-after Step 1 writes a validated Python 3.14 interpreter path; never persist a
+Run this skill's platform-specific **Step 1 - Ensure graphify is installed**
+before every subcommand. Continue only after Step 1 overwrites
+`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a
 bare or unvalidated `python` / `python3` command.
 
 ## For --update and --cluster-only

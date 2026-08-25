@@ -11,6 +11,8 @@ from graphify.cluster import (
     _split_community,
     cluster,
     cohesion_score,
+    community_member_sigs,
+    label_communities_by_hub,
     remap_communities_to_previous,
     score_all,
 )
@@ -43,6 +45,22 @@ def test_cluster_covers_all_nodes():
     communities = cluster(G)
     all_nodes = {n for nodes in communities.values() for n in nodes}
     assert all_nodes == set(G.nodes)
+
+
+def test_cluster_orders_mixed_edge_less_node_ids_canonically():
+    graph = nx.Graph()
+    graph.add_nodes_from(["1", 1, b"1"])
+
+    assert cluster(graph) == {0: [b"1"], 1: [1], 2: ["1"]}
+
+
+def test_cluster_preserves_connected_mixed_node_ids_and_insertion_order(monkeypatch):
+    monkeypatch.setattr("graphify.cluster._partition", lambda graph, resolution=1.0: {n: 0 for n in graph})
+    forward = nx.Graph([(1, "1"), ("1", b"1")])
+    reverse = nx.Graph([(b"1", "1"), ("1", 1)])
+
+    assert cluster(forward) == {0: [b"1", 1, "1"]}
+    assert cluster(reverse) == cluster(forward)
 
 
 def test_cluster_preserves_spokes_isolated_by_hub_exclusion(monkeypatch):
@@ -126,6 +144,23 @@ def test_canonical_node_keys_are_exact_and_type_tagged():
     assert _canonical_node_key(False) == "bool:0"
     assert _canonical_node_key(b"\x00\xff") == "bytes:00ff"
     assert _canonical_node_key(None) == "none:"
+
+
+def test_hub_label_tie_break_uses_canonical_node_order():
+    graph = nx.Graph([(1, "left"), ("1", "right")])
+    graph.nodes[1]["label"] = "integer"
+    graph.nodes["1"]["label"] = "string"
+
+    assert label_communities_by_hub(graph, {0: ["1", 1]}) == {0: "integer"}
+
+
+def test_community_member_signatures_preserve_legacy_strings_and_tag_mixed_ids():
+    assert community_member_sigs({0: ["b", "a"]}) == {0: "8fb20ef63ced4145"}
+    forward = community_member_sigs({0: ["1", 1, b"1"]})
+    reverse = community_member_sigs({0: [b"1", 1, "1"]})
+
+    assert forward == reverse
+    assert forward != community_member_sigs({0: ["1", "1", "b'1'"]})
 
 
 def test_native_leiden_maps_nodes_weights_and_exact_arguments(monkeypatch, capsys):
@@ -255,6 +290,16 @@ def test_native_call_exceptions_propagate_during_community_split(monkeypatch):
         _split_community(graph, ["a", "b"])
 
 
+def test_split_community_orders_mixed_nodes_and_preserves_identity(monkeypatch):
+    graph = nx.Graph([(1, "1"), ("1", b"1")])
+    monkeypatch.setattr(
+        "graphify.cluster._partition",
+        lambda subgraph: {1: 0, "1": 1, b"1": 1},
+    )
+
+    assert _split_community(graph, ["1", b"1", 1]) == [[1], [b"1", "1"]]
+
+
 def test_native_leiden_rejects_node_loss(monkeypatch):
     _install_native_stub(monkeypatch, lambda edges, **kwargs: (0.0, {"0": 0}))
     with pytest.raises(RuntimeError, match="incomplete or unknown node mapping"):
@@ -304,3 +349,12 @@ def test_remap_communities_to_previous_assigns_deterministic_new_ids():
     assert list(remapped.keys()) == [0, 1]
     assert remapped[0] == ["x", "y", "z"]
     assert remapped[1] == ["m"]
+
+
+def test_remap_communities_to_previous_orders_mixed_nodes_canonically():
+    communities = {7: ["1", b"1", 1], 8: [None]}
+
+    assert remap_communities_to_previous(communities, {}) == {
+        0: [b"1", 1, "1"],
+        1: [None],
+    }

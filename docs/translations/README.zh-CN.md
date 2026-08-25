@@ -35,7 +35,7 @@ graphify 分两轮执行。第一轮是确定性的 AST 提取，对代码文件
 
 ## 安装
 
-**要求：** Python 3.10+，并且使用以下平台之一：[Claude Code](https://claude.ai/code)、[CodeBuddy](https://codebuddy.ai)、[Codex](https://openai.com/codex)、[OpenCode](https://opencode.ai)、[OpenClaw](https://openclaw.ai)、[Factory Droid](https://factory.ai) 或 [Trae](https://trae.ai)
+**要求：** CPython 3.14.2 through final 3.14.x releases，并且使用以下平台之一：[Claude Code](https://claude.ai/code)、[CodeBuddy](https://codebuddy.ai)、[Codex](https://openai.com/codex)、[OpenCode](https://opencode.ai)、[OpenClaw](https://openclaw.ai)、[Factory Droid](https://factory.ai) 或 [Trae](https://trae.ai)
 
 ```bash
 pip install graphifyy && graphify install

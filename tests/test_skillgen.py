@@ -310,9 +310,13 @@ def test_every_skill_bootstrap_selects_supported_python314():
         assert 'uv tool install --python \">=3.14.2,<3.15\" --upgrade graphifyy' in bootstrap or (
             "uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy" in bootstrap
         ), key
-        assert "(3, 14, 2) <= sys.version_info < (3, 15)" in bootstrap, key
+        assert "sys.implementation.name ==" in bootstrap, key
+        assert "sys.version_info.releaselevel ==" in bootstrap, key
+        assert "(3, 14, 2) <= sys.version_info[:3] < (3, 15, 0)" in bootstrap, key
         assert 'PYTHON="python3"' not in body, key
         if "## Interpreter guard for subcommands" in body:
+            assert "unconditionally re-resolve and overwrite `.graphify_python` first" in body, key
+            assert "before every subcommand" in body, key
             assert "never persist a\nbare or unvalidated `python` / `python3` command" in body, key
         if platform.shell == "powershell":
             assert "function Get-Python314Candidates" in bootstrap, key
@@ -323,19 +327,25 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert "& $installPython -m pip install graphifyy" in bootstrap, key
             assert "\n        pip install graphifyy" not in bootstrap, key
         else:
-            assert "uv tool run --python '>=3.14.2,<3.15' --from graphifyy" in bootstrap, key
+            assert "_UV_TOOL_DIR=$(uv tool dir 2>/dev/null)" in bootstrap, key
+            assert '_UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"' in bootstrap, key
+            assert "uv tool run" not in bootstrap, key
             assert "for _CANDIDATE in python3.14 python3" in bootstrap, key
             assert "is_supported_graphify_python \"$_SHEBANG\"" in bootstrap, key
             assert '[ -n "$PYTHON" ] && { "$PYTHON" -m pip install' in bootstrap, key
 
 
 @pytest.mark.parametrize("platform_key", ["aider", "devin"])
-def test_monolithic_skills_route_subcommands_through_saved_python(platform_key):
+def test_monolithic_skills_route_mcp_and_watch_through_entrypoints(platform_key):
     body = gen.render(gen.load_platforms()[platform_key])[0].content
 
-    assert body.count("$(cat graphify-out/.graphify_python) -m graphify.serve") == 1
-    assert body.count("$(cat graphify-out/.graphify_python) -m graphify.watch") == 1
-    assert body.count('"command": "<absolute path from: cat graphify-out/.graphify_python>"') == 1
+    assert body.count("graphify-mcp graphify-out/graph.json") == 1
+    assert body.count("graphify watch INPUT_PATH --debounce 3") == 1
+    assert body.count("command -v graphify-mcp") == 2
+    assert body.count('"command": "<absolute path from: command -v graphify-mcp>"') == 1
+    assert "$(cat graphify-out/.graphify_python) -m graphify.serve" not in body
+    assert "$(cat graphify-out/.graphify_python) -m graphify.watch" not in body
+    assert '"command": "<absolute path from: cat graphify-out/.graphify_python>"' not in body
     assert "python3 -m graphify.serve" not in body
     assert "python3 -m graphify.watch" not in body
     assert '"command": "python3"' not in body
@@ -402,6 +412,37 @@ def test_posix_bootstrap_rejects_unsupported_python_before_pip(tmp_path, monkeyp
     assert not pip_marker.exists()
 
 
+def test_posix_bootstrap_uses_persistent_uv_tool_interpreter(tmp_path, monkeypatch):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    uv_tool_dir = tmp_path / "uv-tools"
+    uv_python = uv_tool_dir / "graphifyy" / "bin" / "python"
+    uv_python.parent.mkdir(parents=True)
+    uv_python.symlink_to(Path(sys.executable))
+    uv = bin_dir / "uv"
+    uv.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1 $2\" = \"tool dir\" ]; then\n"
+        f"  printf '%s\\n' '{uv_tool_dir}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 99\n"
+    )
+    uv.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    saved = (tmp_path / "graphify-out" / ".graphify_python").read_text()
+    assert Path(saved).resolve() == Path(sys.executable).resolve()
+
+
 def test_posix_bootstrap_ignores_unsupported_existing_graphify_shebang(tmp_path, monkeypatch):
     bin_dir = _isolated_bootstrap_bin(tmp_path)
     unsupported = bin_dir / "python-old"
@@ -442,6 +483,8 @@ def test_powershell_bootstrap_validates_every_candidate_and_parses():
     assert script.count('Write-Output ("$resolved".Trim())') == 3
     assert "& $installPython -m pip install graphifyy" in script
     assert "if (-not $GRAPHIFY_PYTHON)" in script
+    assert "sys.implementation.name == 'cpython'" in script
+    assert "sys.version_info.releaselevel == 'final'" in script
 
     parser = Parser(Language(tree_sitter_powershell.language()))
     tree = parser.parse(script.encode())

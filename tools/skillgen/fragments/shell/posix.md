@@ -1,7 +1,7 @@
 ```bash
 # Detect the correct Python interpreter (handles uv tool, pipx, venv, system installs)
 PYTHON=""
-PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)'
+PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
 is_supported_python() {
     [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1
 }
@@ -11,7 +11,8 @@ is_supported_graphify_python() {
 GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
 # 1. uv tool installs — most reliable on modern Mac/Linux
 if [ -z "$PYTHON" ] && command -v uv >/dev/null 2>&1; then
-    _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+    _UV_TOOL_DIR=$(uv tool dir 2>/dev/null)
+    _UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"
     if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
 fi
 # 2. Read shebang from graphify binary (pipx and direct pip installs)
@@ -35,7 +36,8 @@ fi
 if ! is_supported_graphify_python "$PYTHON"; then
     if command -v uv >/dev/null 2>&1; then
         uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q 2>&1 | tail -3
-        _UV_PY=$(uv tool run --python '>=3.14.2,<3.15' --from graphifyy python -c "import sys; print(sys.executable)" 2>/dev/null)
+        _UV_TOOL_DIR=$(uv tool dir 2>/dev/null)
+        _UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"
         if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
     else
         [ -n "$PYTHON" ] && { "$PYTHON" -m pip install graphifyy -q 2>/dev/null \

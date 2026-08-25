@@ -889,15 +889,15 @@ def _is_obsidian_usage_comment_line(line: str) -> bool:
 
 
 def _is_uv_from_interpreter_fix_line(line: str) -> bool:
-    """Whether a line is part of the uv interpreter-detection fix (#1735).
+    """Whether a line is part of the historical uv interpreter-detection fix (#1735).
 
     Step 1's POSIX interpreter probe ran ``uv tool run graphifyy python -c ...``,
     but ``graphifyy`` exposes its executable as ``graphify``, so uv treated
     ``python`` as a missing ``graphifyy`` command and the probe silently failed
     (the ``2>/dev/null`` swallowed uv's "use --from" hint), leaving PYTHON on a
     graphify-less system interpreter. The probe now runs
-    ``uv tool run --from graphifyy python -c ...``. Both the old (removed) and new
-    (added) forms match here.
+    ``uv tool run --from graphifyy python -c ...``. The current persistent
+    ``uv tool dir`` resolution is sanctioned separately by the Python 3.14 guard.
     """
     return "uv tool run" in line and "graphifyy python" in line
 
@@ -912,12 +912,15 @@ def _is_python314_bootstrap_fix_line(line: str) -> bool:
     """
     return line.strip() in {
         "PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)'",
+        "PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == \"cpython\" and sys.version_info.releaselevel == \"final\" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'",
         'is_supported_python() { [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1; }',
         'is_supported_graphify_python() { is_supported_python "$1" && "$1" -c "import graphify" >/dev/null 2>&1; }',
         "GRAPHIFY_BIN=$(which graphify 2>/dev/null)",
         "GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)",
         'if [ -n "$_UV_PY" ]; then PYTHON="$_UV_PY"; fi',
         'if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi',
+        '_UV_TOOL_DIR=$(uv tool dir 2>/dev/null)',
+        '_UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"',
         '*) "$_SHEBANG" -c "import graphify" 2>/dev/null && PYTHON="$_SHEBANG" ;;',
         '*) is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;',
         "# 3. Fall back to python3",
@@ -937,15 +940,15 @@ def _is_python314_bootstrap_fix_line(line: str) -> bool:
 
 
 def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
-    """Whether Aider/Devin route MCP and watch through the validated Python.
+    """Whether Aider/Devin route MCP and watch through installed entry points.
 
-    Their Python 3.14 bootstrap persists the interpreter that successfully
-    imports Graphify, but these three later command forms still bypassed it.
-    Match only the removed bare forms and their saved-interpreter replacements.
+    Match only the historical bare/saved-interpreter forms and their installed
+    entry-point replacements, plus the unconditional Step 1 guard handoff.
     """
     return line.strip() in {
         "python3 -m graphify.serve graphify-out/graph.json",
         "$(cat graphify-out/.graphify_python) -m graphify.serve graphify-out/graph.json",
+        "graphify-mcp graphify-out/graph.json",
         "To configure in Claude Desktop, add to `claude_desktop_config.json`:",
         (
             "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
@@ -953,10 +956,29 @@ def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
             "**absolute interpreter path** printed by "
             "`cat graphify-out/.graphify_python`:"
         ),
+        (
+            "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
+            "Set `command` to the **absolute executable path** printed by "
+            "`command -v graphify-mcp`:"
+        ),
         '"command": "python3",',
         '"command": "<absolute path from: cat graphify-out/.graphify_python>",',
+        '"command": "<absolute path from: command -v graphify-mcp>",',
+        '"args": ["-m", "graphify.serve", "/absolute/path/to/graphify-out/graph.json"]',
+        '"args": ["/absolute/path/to/graphify-out/graph.json"]',
         "python3 -m graphify.watch INPUT_PATH --debounce 3",
         "$(cat graphify-out/.graphify_python) -m graphify.watch INPUT_PATH --debounce 3",
+        "graphify watch INPUT_PATH --debounce 3",
+        (
+            "Before running any subcommand below (`--update`, `--cluster-only`, `query`, "
+            "`path`, `explain`, `add`), check that `.graphify_python` exists. If it's "
+            "missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:"
+        ),
+        (
+            "Before running any subcommand below (`--update`, `--cluster-only`, `query`, "
+            "`path`, `explain`, `add`), unconditionally re-resolve and overwrite "
+            "`.graphify_python` first:"
+        ),
     }
 
 
@@ -1006,9 +1028,9 @@ def _is_sanctioned_monolith_diff(line: str) -> bool:
 
 _SUBCOMMAND_GUARD_BODY = [
     "",
-    "If `graphify-out/.graphify_python` is absent, run this skill's platform-specific",
-    "**Step 1 - Ensure graphify is installed** before the subcommand. Continue only",
-    "after Step 1 writes a validated Python 3.14 interpreter path; never persist a",
+    "Run this skill's platform-specific **Step 1 - Ensure graphify is installed**",
+    "before every subcommand. Continue only after Step 1 overwrites",
+    "`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a",
     "bare or unvalidated `python` / `python3` command.",
     "",
 ]

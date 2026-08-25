@@ -48,7 +48,7 @@ graphify は 2 パスで動作します。まず、決定論的な AST パスが
 
 ## インストール
 
-**必要なもの:** Python 3.10+ および以下のいずれか： [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [OpenClaw](https://openclaw.ai), または [Factory Droid](https://factory.ai)
+**必要なもの:** CPython 3.14.2 through final 3.14.x releases および以下のいずれか： [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [OpenClaw](https://openclaw.ai), または [Factory Droid](https://factory.ai)
 
 ```bash
 pip install graphifyy && graphify install

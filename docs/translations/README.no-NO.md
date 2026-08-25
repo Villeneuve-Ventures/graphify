@@ -41,7 +41,7 @@ Hver relasjon er merket `EXTRACTED`, `INFERRED` (med konfidenspoeng) eller `AMBI
 
 ## Installasjon
 
-**Krav:** Python 3.10+ og én av: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) og andre.
+**Krav:** CPython 3.14.2 through final 3.14.x releases og én av: [Claude Code](https://claude.ai/code), [Codex](https://openai.com/codex), [OpenCode](https://opencode.ai), [Cursor](https://cursor.com) og andre.
 
 ```bash
 uv tool install graphifyy && graphify install
