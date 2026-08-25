@@ -169,7 +169,7 @@ jobs:
                   additions, deletions = file.additions, file.deletions
                   metadata = f"## File: '{file.filename}'\nstatus: {file.status}"
                   if file.status == "renamed": metadata += f"\nrename from {file.previous_filename}\nrename to {file.filename}"
-                  if file.status == "renamed" and additions == deletions == 0 and not patch:
+                  if (file.status == "renamed" and file.filename in verified_renames or file.status in {"added", "removed"} and getattr(file, "sha", None) == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391") and additions == deletions == 0 and not patch:
                       chunks.append(metadata)
                       continue
                   if not isinstance(patch, str) or not patch.strip(): raise RuntimeError(f"Eligible patch unavailable: {file.filename}")
@@ -276,6 +276,12 @@ jobs:
               raise RuntimeError("Frozen target policy is unavailable")
           policy_digest = hashlib.sha256(policy_bytes).hexdigest()
           manifest_files = _manifest(pull, list(pull.get_files()))
+          verified_renames = set()
+          for file in manifest_files:
+              if file.status == "renamed" and file.additions == file.deletions == 0 and not file.patch:
+                  previous_sha = getattr(repo_obj.get_contents(file.previous_filename, ref=frozen[2]), "sha", None)
+                  if re.fullmatch(r"[0-9a-f]{40}", getattr(file, "sha", None) or "") is None or previous_sha != file.sha: raise RuntimeError(f"Patchless rename blob identity mismatch: {file.filename}")
+                  verified_renames.add(file.filename)
           head_commit = repo_obj.get_commit(frozen[3])
           if getattr(head_commit, "sha", None) != frozen[3]:
                   raise RuntimeError("Frozen head commit identity mismatch")

@@ -32,7 +32,8 @@ def _embedded_python() -> str:
     return "\n".join(line[indent:] if line.strip() else "" for line in lines[start:end])
 
 
-def _helpers(converter=lambda _patch, _file: "@@ -1 +1 @@\n__new hunk__\n1 +new\n__old hunk__\n-old") -> dict:
+def _helpers(converter=lambda _patch, _file: "@@ -1 +1 @@\n__new hunk__\n1 +new\n__old hunk__\n-old",
+             verified_renames=()) -> dict:
     tree = ast.parse(_embedded_python())
     wanted = {"_body_digest", "_canonical_body", "_manifest", "_marker", "_patch_counts", "_raw_diff", "_same",
               "_same_files", "_substantive", "_valid_int", "_valid_path", "_visible"}
@@ -40,7 +41,8 @@ def _helpers(converter=lambda _patch, _file: "@@ -1 +1 @@\n__new hunk__\n1 +new\
         isinstance(node, ast.Import) and any(alias.name in {"hashlib", "json", "re"} for alias in node.names)
     ) or (isinstance(node, ast.FunctionDef) and node.name in wanted)]
     namespace: dict = {"get_max_tokens": lambda _model: 65536,
-                       "decouple_and_convert_to_hunks_with_lines_numbers": converter}
+                       "decouple_and_convert_to_hunks_with_lines_numbers": converter,
+                       "verified_renames": set(verified_renames)}
     exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
                  "<pr-agent-policy>", "exec"), namespace)
     return namespace
@@ -52,10 +54,10 @@ def _config() -> dict:
 
 
 def _file(name="src/a.py", status="modified", additions=1, deletions=1,
-          patch="@@ -1 +1 @@\n-old\n+new", previous_filename=None):
+          patch="@@ -1 +1 @@\n-old\n+new", previous_filename=None, sha=None):
     return SimpleNamespace(filename=name, status=status, additions=additions,
                            deletions=deletions, patch=patch,
-                           previous_filename=previous_filename)
+                           previous_filename=previous_filename, sha=sha)
 
 
 def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
@@ -79,14 +81,17 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert config["config"]["repo_context_from_default_branch"] is False
     assert config["config"]["repo_context_max_lines"] == 500
     assert hashlib.sha256((ROOT / ".pr_agent.toml").read_bytes()).hexdigest() == (
-        "eeb22d812ec5e7d2432c442bcad18849fb5ae10b8bef13503dc541325c0fc34d"
+        "63421ad584cc3598269a5a994113f84a30f89b28cc9a406862c2ff769966efd9"
     )
 
 
 def test_prreview_is_an_exact_full_review_without_incremental_state() -> None:
     code = _embedded_python()
+    config_text = (ROOT / ".pr_agent.toml").read_text()
     assert "github.event.comment.body == '/prreview'" in _workflow()
     assert 'request = "/review"' in code
+    assert "regenerates a frozen full review" in config_text
+    assert "incremental diff" not in config_text
     for forbidden in ("/review -i", "REVIEW_MARKER_RE", "pr_commits", "commits_range",
                       "unreviewed_files_map", ".incremental", "is_incremental"):
         assert forbidden not in code
@@ -121,10 +126,10 @@ def test_manifest_requires_complete_supported_unique_files() -> None:
 
 
 def test_raw_diff_proves_patch_counts_deletions_renames_and_token_bound() -> None:
-    raw_diff = _helpers()["_raw_diff"]
+    raw_diff = _helpers(verified_renames={"new.py"})["_raw_diff"]
     files = [_file("gone.py", "removed", 0, 1, "@@ -1 +0,0 @@\n-secret"),
              _file("new.py", "renamed", 0, 0, None, "old.py")]
-    token_handler = SimpleNamespace(prompt_tokens=10, count_tokens=lambda text: len(text))
+    token_handler = SimpleNamespace(prompt_tokens=10, count_tokens=len)
     result = raw_diff(files, token_handler, "model", max_tokens=lambda _: 10000)
     assert "secret" in result
     assert "rename from old.py\nrename to new.py" in result
@@ -141,6 +146,10 @@ def test_raw_diff_proves_patch_counts_deletions_renames_and_token_bound() -> Non
     with pytest.raises(RuntimeError):
         raw_diff([_file("new.py", "renamed", 1, 1, None, "old.py")], token_handler,
                  "model", max_tokens=lambda _: 10000)
+    with pytest.raises(RuntimeError, match="Eligible patch unavailable"):
+        _helpers()["_raw_diff"](
+            [_file("new.py", "renamed", 0, 0, None, "old.py", sha="a" * 40)],
+            token_handler, "model", max_tokens=lambda _: 10000)
     signs = _file(patch="@@ -1,2 +1,2 @@\n context\n---value\n+++value\n\\ No newline at end of file")
     assert "+++value" in raw_diff([signs], token_handler, "model", max_tokens=lambda _: 10000)
     sign_converter = _helpers(lambda _patch, _file: "__new hunk__\n1 +++value\n__old hunk__\n---value")["_raw_diff"]
@@ -149,6 +158,21 @@ def test_raw_diff_proves_patch_counts_deletions_renames_and_token_bound() -> Non
     with pytest.raises(RuntimeError, match="Malformed unified patch"):
         raw_diff([_file(patch="-old\n+new")], token_handler, "model",
                  max_tokens=lambda _: 10000)
+
+
+@pytest.mark.parametrize("status", ["added", "removed"])
+def test_raw_diff_preserves_patchless_empty_source_file_metadata(status) -> None:
+    empty_blob = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    result = _helpers()["_raw_diff"](
+        [_file("empty.py", status, 0, 0, None, sha=empty_blob)],
+        SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+        max_tokens=lambda _: 10000)
+    assert result == f"## File: 'empty.py'\nstatus: {status}"
+    with pytest.raises(RuntimeError, match="Eligible patch unavailable"):
+        _helpers()["_raw_diff"](
+            [_file("binary.py", status, 0, 0, None, sha="a" * 40)],
+            SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+            max_tokens=lambda _: 10000)
 
 
 @pytest.mark.parametrize("file", [
@@ -235,7 +259,7 @@ def test_numbered_diff_preserves_deletions_renames_counts_and_final_token_bound(
     files = [_file(), _file("gone.py", "removed", 0, 1, "@@ -1 +0,0 @@\n-secret"),
              _file("new.py", "renamed", 0, 0, None, "old.py")]
     token_handler = SimpleNamespace(prompt_tokens=10, count_tokens=len)
-    numbered = _helpers()["_raw_diff"](
+    numbered = _helpers(verified_renames={"new.py"})["_raw_diff"](
         files, token_handler, "model", numbered=True, max_tokens=lambda _: 10000)
     assert numbered.count("## File:") == 3
     assert "__new hunk__\n1 +new" in numbered
@@ -313,7 +337,7 @@ def test_eligible_canonical_files_and_ineligible_missing_patch() -> None:
     assert not h["_same_files"](expected, [_file("a.py"), _file("a.py")])
     ignored_binary = _file("asset.png", "modified", 0, 0, None)
     assert h["_manifest"](SimpleNamespace(changed_files=2), [expected[0], ignored_binary])
-    token_handler = SimpleNamespace(prompt_tokens=1, count_tokens=lambda text: len(text))
+    token_handler = SimpleNamespace(prompt_tokens=1, count_tokens=len)
     assert "a.py" in h["_raw_diff"]([expected[0]], token_handler, "model",
                                      max_tokens=lambda _: 10000)
 
@@ -386,17 +410,18 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                        tool_error=False, policy_error=False, event_mutator=None,
                        description_predictions=None, record=None,
                        conversion_loss=False, review_numbered=True,
-                       summary_include_changes=True):
+                       summary_include_changes=True, changed_file=None,
+                       previous_sha=None):
     base, head = "a" * 40, "b" * 40
     policy = (ROOT / ".pr_agent.toml").read_bytes()
     comments = []
     reads = {"pull": 0, "requests": [], "aliases": [], "eager": 0,
              "description_models": [], "description_diffs": [], "tool_diffs": [],
-             "conversions": [], "published": []}
+             "conversions": [], "published": [], "errors": []}
     if record is not None:
         record["reads"] = reads
     prediction_queue = list(description_predictions or [VALID_DESCRIPTION])
-    changed = _file()
+    changed = changed_file or _file()
     pull = SimpleNamespace(number=7, base=SimpleNamespace(sha=base), head=SimpleNamespace(sha=head),
                            additions=1, deletions=1, changed_files=1,
                            get_files=lambda: [changed], get_issue_comments=lambda: comments,
@@ -410,7 +435,9 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     def get_contents(path, ref):
         if policy_error:
             raise RuntimeError("policy API failed")
-        return SimpleNamespace(decoded_content=policy if policy_available else None)
+        if path == ".pr_agent.toml":
+            return SimpleNamespace(decoded_content=policy if policy_available else None)
+        return SimpleNamespace(sha=previous_sha)
     head_commit = SimpleNamespace(sha=head)
     repo = SimpleNamespace(get_pull=get_pull, get_contents=get_contents,
                            get_commit=lambda sha: head_commit)
@@ -509,7 +536,8 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                 if omit != "review":
                     await Reviewer(url).run()
                 return True
-            except Exception:
+            except Exception as error:
+                reads["errors"].append(repr(error))
                 return False
 
     class GithubProvider(Provider):
@@ -564,6 +592,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
             except Exception as error:
                 if index == len(models) - 1:
                     raise RuntimeError("all description models failed") from error
+        raise AssertionError("fallback model list must not be empty")
     description_module = module("pr_agent.tools.pr_description", PRDescription=Description,
                                 get_pr_diff=None, load_yaml=load_yaml,
                                 retry_with_fallback_models=retry_with_fallback_models)
@@ -573,8 +602,8 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         if event_name == "pull_request":
             try:
                 runner_module.apply_repo_settings("https://example/pr/7")
-            except Exception:
-                pass
+            except Exception as error:
+                reads["errors"].append(repr(error))
             if omit != "summary":
                 await Description().run()
             if omit != "review":
@@ -626,6 +655,16 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
     reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment")
     assert reads["requests"] == ["/review"]
     assert reads["aliases"] == ["review"]
+
+
+def test_stubbed_entry_requires_blob_identity_for_patchless_rename(monkeypatch, tmp_path) -> None:
+    rename = _file("new.py", "renamed", 0, 0, None, "old.py", sha="c" * 40)
+    reads, _, _ = _run_stubbed_entry(
+        monkeypatch, tmp_path, changed_file=rename, previous_sha="c" * 40)
+    assert "rename from old.py\nrename to new.py" in reads["tool_diffs"][0]
+    with pytest.raises(RuntimeError, match="Patchless rename blob identity mismatch"):
+        _run_stubbed_entry(
+            monkeypatch, tmp_path, changed_file=rename, previous_sha="d" * 40)
 
 
 def test_description_malformed_primary_uses_valid_fallback(monkeypatch, tmp_path) -> None:
@@ -728,15 +767,38 @@ def test_stubbed_entry_rejects_each_critical_policy_class(monkeypatch, tmp_path,
         _run_stubbed_entry(monkeypatch, tmp_path, setting_updates=setting_updates)
 
 
-def test_stubbed_entry_propagates_settings_tool_and_policy_api_failures(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("setting_updates,expected_error", [
+    ({"IGNORE.REGEX": ["["]}, "Invalid PR-Agent ignore regex"),
+    ({"CONFIG.MODEL": "other"}, "Effective PR-Agent policy attestation failed"),
+    ({"CONFIG.REPO_CONTEXT_FILES": 1}, "Repository context policy mismatch"),
+])
+def test_stubbed_entry_records_swallowed_policy_cause(monkeypatch, tmp_path,
+                                                      setting_updates,
+                                                      expected_error) -> None:
+    record = {}
     with pytest.raises(RuntimeError, match="before policy attestation"):
-        _run_stubbed_entry(monkeypatch, tmp_path, apply_error=True)
-    with pytest.raises(RuntimeError, match="swallowed a review failure"):
-        _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment", apply_error=True)
+        _run_stubbed_entry(
+            monkeypatch, tmp_path, setting_updates=setting_updates, record=record)
+    assert record["reads"]["errors"] == [f"RuntimeError('{expected_error}')"]
+
+
+def test_stubbed_entry_propagates_settings_tool_and_policy_api_failures(monkeypatch, tmp_path) -> None:
+    def recorded_failure(match, **kwargs):
+        record = {}
+        with pytest.raises(RuntimeError, match=match):
+            _run_stubbed_entry(monkeypatch, tmp_path, record=record, **kwargs)
+        return record["reads"]["errors"]
+
+    assert recorded_failure("before policy attestation", apply_error=True) == [
+        "RuntimeError('settings apply failed')"]
+    assert recorded_failure(
+        "swallowed a review failure", event_name="issue_comment", apply_error=True
+    ) == ["RuntimeError('settings apply failed')"]
     with pytest.raises(RuntimeError, match="all description models failed"):
         _run_stubbed_entry(monkeypatch, tmp_path, tool_error=True)
-    with pytest.raises(RuntimeError, match="swallowed a review failure"):
-        _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment", tool_error=True)
+    assert recorded_failure(
+        "swallowed a review failure", event_name="issue_comment", tool_error=True
+    ) == ["RuntimeError('tool failed')"]
     with pytest.raises(RuntimeError, match="policy API failed"):
         _run_stubbed_entry(monkeypatch, tmp_path, policy_error=True)
 
@@ -794,5 +856,5 @@ def test_stubbed_entry_requires_event_specific_outputs(monkeypatch, tmp_path,
 
 def test_embedded_python_compiles_and_stays_lean() -> None:
     compile(_embedded_python(), ".github/workflows/pr-agent.yml", "exec")
-    assert len(_workflow().splitlines()) <= 451
+    assert len(_workflow().splitlines()) <= 457
     assert len((ROOT / ".pr_agent.toml").read_text().splitlines()) <= 125

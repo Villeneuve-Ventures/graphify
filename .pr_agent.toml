@@ -32,8 +32,8 @@ restricted_mode = true
 
 [github_action_config]
 # Run the summary and full review only when a PR first enters non-draft review.
-# Subsequent reviews are requested explicitly with /prreview so they can use
-# PR-Agent's incremental diff rather than regenerating the full review on push.
+# Subsequent reviews are requested explicitly with /prreview. Each request
+# regenerates a frozen full review without waiting for a push.
 pr_actions = ["opened", "reopened", "ready_for_review"]
 handle_push_trigger = false
 
