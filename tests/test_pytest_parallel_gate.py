@@ -196,6 +196,20 @@ def test_inject_plugin_preserves_requested_command():
     ]
 
 
+def test_inject_plugin_accepts_windows_executable_name():
+    requested = ["uv.exe", "run", "--frozen", "pytest.exe", "tests/", "-q"]
+    assert gate._inject_plugin(requested, "pytest_parallel_gate") == [
+        "uv.exe",
+        "run",
+        "--frozen",
+        "pytest.exe",
+        "-p",
+        "pytest_parallel_gate",
+        "tests/",
+        "-q",
+    ]
+
+
 def test_run_rejects_repo_local_artifacts(tmp_path: Path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1401,6 +1415,32 @@ def test_canonical_command_rejects_deselection(tmp_path: Path):
     command = _command(tmp_path, ["tests/"])
     command.extend(["-k", "identical"])
     with pytest.raises(ValueError, match="forbidden"):
+        gate._validate_measurement_command(
+            command,
+            tmp_path,
+            kind="full",
+            cohort_paths=[],
+        )
+
+
+def test_canonical_command_accepts_windows_executable_names(tmp_path: Path):
+    command = _command(tmp_path, ["tests/"])
+    command[0] = "uv.exe"
+    command[3] = "pytest.exe"
+
+    gate._validate_measurement_command(
+        command,
+        tmp_path,
+        kind="full",
+        cohort_paths=[],
+    )
+
+
+def test_canonical_command_rejects_non_executable_suffixes(tmp_path: Path):
+    command = _command(tmp_path, ["tests/"])
+    command[0] = "uv.cmd"
+
+    with pytest.raises(ValueError, match="canonical commands"):
         gate._validate_measurement_command(
             command,
             tmp_path,

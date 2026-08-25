@@ -701,11 +701,15 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int | pytest.ExitC
     _atomic_write_json(Path(artifact_value), payload)
 
 
+def _is_executable_token(token: str, executable: str) -> bool:
+    return Path(token).name in {executable, f"{executable}.exe"}
+
+
 def _inject_plugin(command: Sequence[str], plugin_name: str) -> list[str]:
     result = list(command)
     injected = ["-p", plugin_name]
     for index, token in enumerate(result):
-        if Path(token).name == "pytest":
+        if _is_executable_token(token, "pytest"):
             return [*result[: index + 1], *injected, *result[index + 1 :]]
     raise ValueError("pytest executable/module token not found in command")
 
@@ -735,15 +739,15 @@ def _validate_measurement_command(
     cohort_paths: Sequence[str],
 ) -> None:
     if kind == "integration":
-        if not any(Path(token).name == "pytest" for token in command):
+        if not any(_is_executable_token(token, "pytest") for token in command):
             raise ValueError("integration command must invoke pytest")
         return
-    if len(command) < 4 or [Path(command[0]).name, *command[1:4]] != [
-        "uv",
-        "run",
-        "--frozen",
-        "pytest",
-    ]:
+    if (
+        len(command) < 4
+        or not _is_executable_token(command[0], "uv")
+        or command[1:3] != ["run", "--frozen"]
+        or not _is_executable_token(command[3], "pytest")
+    ):
         raise ValueError("canonical commands must start with: uv run --frozen pytest")
     if any(token.split("=", 1)[0] in _FORBIDDEN_PYTEST_FLAGS for token in command):
         raise ValueError("pytest selectors, early-exit flags, and deselection are forbidden")
@@ -1141,7 +1145,7 @@ def run_pytest(
     environment["PYTHONPATH"] = str(evaluator_path.parent)
     executed_command = _inject_plugin(command, evaluator_path.stem)
     uv_version = None
-    if kind != "integration" and Path(command[0]).name == "uv":
+    if kind != "integration" and _is_executable_token(command[0], "uv"):
         uv_result = subprocess.run(
             [command[0], "--version"],
             cwd=repo_root,
