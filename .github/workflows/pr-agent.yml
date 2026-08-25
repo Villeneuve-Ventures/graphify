@@ -51,7 +51,9 @@ jobs:
         )
       }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Description and review run sequentially and each may try the primary plus
+    # fallback model, so leave headroom beyond their four 300-second timeouts.
+    timeout-minutes: 30
     permissions:
       contents: read
       issues: write

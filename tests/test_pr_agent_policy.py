@@ -66,6 +66,7 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert "types: [opened, reopened, ready_for_review]" in workflow
     assert "synchronize" not in workflow
     assert "github.event.pull_request.draft == false" in workflow
+    assert "timeout-minutes: 30" in workflow
     assert 'python-version: "3.14"' in workflow
     assert "570f67ed5fc8db5be74c18df070bc20079b64b0d" in workflow
     assert 'config.model: "gemini/gemini-3.7-flash"' in workflow
