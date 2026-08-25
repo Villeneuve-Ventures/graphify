@@ -530,6 +530,8 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         kwargs = {"model": model}
         if model not in no_temperature_models:
             kwargs["temperature"] = 0.2
+        if model.rsplit("/", 1)[-1] in algo.SUPPORT_REASONING_EFFORT_MODELS:
+            kwargs["reasoning_effort"] = settings.values["CONFIG.REASONING_EFFORT"]
         reads["completion_kwargs"].append(kwargs)
     class Provider:
         repo = "owner/repo"
@@ -741,8 +743,8 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
     assert reads["no_temperature_models"] == [
         "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
     assert reads["completion_kwargs"] == [
-        {"model": "gemini/gemini-3.7-flash"},
-        {"model": "gemini/gemini-3.7-flash"},
+        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
+        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
     ]
     assert reads["reasoning_models"] == ["gemini-3.7-flash", "gemini-3.5-flash-lite"]
     assert reads["reasoning_effort"] == "high"
@@ -781,9 +783,9 @@ def test_description_malformed_primary_uses_valid_fallback(monkeypatch, tmp_path
     assert reads["description_models"] == [
         "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
     assert reads["completion_kwargs"] == [
-        {"model": "gemini/gemini-3.7-flash"},
-        {"model": "gemini/gemini-3.5-flash-lite"},
-        {"model": "gemini/gemini-3.7-flash"},
+        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
+        {"model": "gemini/gemini-3.5-flash-lite", "reasoning_effort": "high"},
+        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
     ]
     assert reads["aliases"] == ["summary", "summary", "review"]
     assert reads["description_diffs"][0] == reads["description_diffs"][1]
