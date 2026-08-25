@@ -940,7 +940,7 @@ def _is_python314_bootstrap_fix_line(line: str) -> bool:
 
 
 def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
-    """Whether Aider/Devin route MCP and watch through installed entry points.
+    """Whether Aider/Devin route MCP and watch through the saved interpreter.
 
     Match only the historical bare/saved-interpreter forms and their installed
     entry-point replacements, plus the unconditional Step 1 guard handoff.
@@ -948,6 +948,7 @@ def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
     return line.strip() in {
         "python3 -m graphify.serve graphify-out/graph.json",
         "$(cat graphify-out/.graphify_python) -m graphify.serve graphify-out/graph.json",
+        '"$(cat graphify-out/.graphify_python)" -m graphify.serve graphify-out/graph.json',
         "graphify-mcp graphify-out/graph.json",
         "To configure in Claude Desktop, add to `claude_desktop_config.json`:",
         (
@@ -955,6 +956,12 @@ def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
             "Claude Desktop can't run `$(...)`, so set `command` to the "
             "**absolute interpreter path** printed by "
             "`cat graphify-out/.graphify_python`:"
+        ),
+        (
+            "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
+            "Claude Desktop can't run `$(...)`, so set `command` to the "
+            "**absolute interpreter path** printed by "
+            "`cat graphify-out/.graphify_python` after the successful Step 1 rerun:"
         ),
         (
             "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
@@ -968,7 +975,11 @@ def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
         '"args": ["/absolute/path/to/graphify-out/graph.json"]',
         "python3 -m graphify.watch INPUT_PATH --debounce 3",
         "$(cat graphify-out/.graphify_python) -m graphify.watch INPUT_PATH --debounce 3",
+        '"$(cat graphify-out/.graphify_python)" -m graphify.watch INPUT_PATH --debounce 3',
         "graphify watch INPUT_PATH --debounce 3",
+        "Before starting the MCP server, successfully rerun Step 1 so",
+        "Before starting the watcher, successfully rerun Step 1 so",
+        "`graphify-out/.graphify_python` is freshly validated and overwritten.",
         (
             "Before running any subcommand below (`--update`, `--cluster-only`, `query`, "
             "`path`, `explain`, `add`), check that `.graphify_python` exists. If it's "

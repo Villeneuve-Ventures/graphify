@@ -5,11 +5,6 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON_REQUIREMENT = ">=3.14.2,==3.14.*"
-TRANSLATION_NOTICE = (
-    "> **Compatibility authority:** This translation may lag behind. The English README "
-    "is authoritative for current Python requirements, supported platforms, installation "
-    "commands, and optional dependencies."
-)
 
 
 def test_package_metadata_enforces_exact_python314_window():
@@ -44,37 +39,35 @@ def test_docker_and_public_docs_match_python314_policy():
     assert "FROM python:3.14-slim" in (ROOT / "Dockerfile").read_text()
     readme = (ROOT / "README.md").read_text()
     assert "| Python | 3.14.2 through final 3.14.x releases |" in readme
-    assert "uv tool install --python 3.14 graphifyy" in readme
-    assert "uv venv --python 3.14 .venv" in readme
+    assert "uv tool install --python '>=3.14.2,<3.15' graphifyy" in readme
+    assert "uv venv --python '>=3.14.2,<3.15' .venv" in readme
+    assert readme.count("uv python install '>=3.14.2,<3.15'") == 2
+    assert "uvx --python '>=3.14.2,<3.15' --from graphifyy" in readme
+    broad_runtime_requests = (
+        "uv python install 3.14",
+        "uv tool install --python 3.14",
+        "uvx --python 3.14",
+        "uv venv --python 3.14",
+    )
+    assert not any(request in readme for request in broad_runtime_requests)
     assert 'uv pip install --python .venv/bin/python "graphifyy[mcp]"' in readme
     assert 'python3 -m venv .venv && .venv/bin/pip install "graphifyy[mcp]"' not in readme
     assert "| `leiden` | Native Leiden community detection |" in readme
 
 
-def test_every_linked_translation_defers_compatibility_to_english_readme():
+def test_public_readme_is_english_only():
     readme = (ROOT / "README.md").read_text()
-    linked = set(re.findall(r'href="(docs/translations/README\.[^"]+\.md)"', readme))
-    translation_files = set(
-        str(path.relative_to(ROOT)) for path in (ROOT / "docs/translations").glob("README.*.md")
-    )
-    assert linked == translation_files
-    for relative_path in sorted(linked):
-        assert (ROOT / relative_path).read_text().startswith(f"{TRANSLATION_NOTICE}\n\n")
+    assert "Read this in other languages" not in readme
+    assert "docs/translations/README." not in readme
+    assert not list((ROOT / "docs/translations").glob("README.*.md"))
 
 
-def test_translations_do_not_publish_obsolete_python_or_leiden_requirements():
-    forbidden = (
-        "3.10+",
-        "۳.۱۰+",
-        "python@3.12",
-        "python3.12",
-        "Python < 3.13",
-    )
+def test_public_pipx_install_examples_bind_python314():
+    paths = [ROOT / "README.md"]
+    bare_example = re.compile(r"pipx install graphifyy")
     failures = []
-    for path in sorted((ROOT / "docs/translations").glob("README.*.md")):
-        text = path.read_text()
-        for pattern in forbidden:
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                if pattern in line:
-                    failures.append(f"{path.relative_to(ROOT)}:{line_number}: {pattern}")
-    assert not failures, "obsolete translated compatibility guidance:\n" + "\n".join(failures)
+    for path in sorted(paths):
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            if bare_example.search(line):
+                failures.append(f"{path.relative_to(ROOT)}:{line_number}: {line.strip()}")
+    assert not failures, "pipx install examples must bind Python 3.14:\n" + "\n".join(failures)

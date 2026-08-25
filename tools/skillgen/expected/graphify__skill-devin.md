@@ -752,19 +752,22 @@ print('graph.graphml written - open in Gephi, yEd, or any GraphML tool')
 
 ### Step 7d - MCP server (only if --mcp flag)
 
+Before starting the MCP server, successfully rerun Step 1 so
+`graphify-out/.graphify_python` is freshly validated and overwritten.
+
 ```bash
-graphify-mcp graphify-out/graph.json
+"$(cat graphify-out/.graphify_python)" -m graphify.serve graphify-out/graph.json
 ```
 
 This starts a stdio MCP server that exposes tools: `query_graph`, `get_node`, `get_neighbors`, `get_community`, `god_nodes`, `graph_stats`, `shortest_path`. Add to Claude Desktop or any MCP-compatible agent orchestrator so other agents can query the graph live.
 
-To configure in Claude Desktop, add to `claude_desktop_config.json`. Set `command` to the **absolute executable path** printed by `command -v graphify-mcp`:
+To configure in Claude Desktop, add to `claude_desktop_config.json`. Claude Desktop can't run `$(...)`, so set `command` to the **absolute interpreter path** printed by `cat graphify-out/.graphify_python` after the successful Step 1 rerun:
 ```json
 {
   "mcpServers": {
     "graphify": {
-      "command": "<absolute path from: command -v graphify-mcp>",
-      "args": ["/absolute/path/to/graphify-out/graph.json"]
+      "command": "<absolute path from: cat graphify-out/.graphify_python>",
+      "args": ["-m", "graphify.serve", "/absolute/path/to/graphify-out/graph.json"]
     }
   }
 }
@@ -1336,8 +1339,11 @@ Supported URL types (auto-detected):
 
 Start a background watcher that monitors a folder and auto-updates the graph when files change.
 
+Before starting the watcher, successfully rerun Step 1 so
+`graphify-out/.graphify_python` is freshly validated and overwritten.
+
 ```bash
-graphify watch INPUT_PATH --debounce 3
+"$(cat graphify-out/.graphify_python)" -m graphify.watch INPUT_PATH --debounce 3
 ```
 
 Replace INPUT_PATH with the folder to watch. Behavior depends on what changed:

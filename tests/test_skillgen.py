@@ -336,19 +336,30 @@ def test_every_skill_bootstrap_selects_supported_python314():
 
 
 @pytest.mark.parametrize("platform_key", ["aider", "devin"])
-def test_monolithic_skills_route_mcp_and_watch_through_entrypoints(platform_key):
+def test_monolithic_skills_route_mcp_and_watch_through_saved_interpreter(platform_key):
     body = gen.render(gen.load_platforms()[platform_key])[0].content
 
-    assert body.count("graphify-mcp graphify-out/graph.json") == 1
-    assert body.count("graphify watch INPUT_PATH --debounce 3") == 1
-    assert body.count("command -v graphify-mcp") == 2
-    assert body.count('"command": "<absolute path from: command -v graphify-mcp>"') == 1
-    assert "$(cat graphify-out/.graphify_python) -m graphify.serve" not in body
-    assert "$(cat graphify-out/.graphify_python) -m graphify.watch" not in body
-    assert '"command": "<absolute path from: cat graphify-out/.graphify_python>"' not in body
+    assert "graphify-mcp graphify-out/graph.json" not in body
+    assert "graphify watch INPUT_PATH --debounce 3" not in body
+    assert body.count('"$(cat graphify-out/.graphify_python)" -m graphify.serve') == 1
+    assert body.count('"$(cat graphify-out/.graphify_python)" -m graphify.watch') == 1
+    assert body.count("successfully rerun Step 1") == 2
+    assert body.count("is freshly validated and overwritten") == 2
+    assert body.count('"command": "<absolute path from: cat graphify-out/.graphify_python>"') == 1
+    assert body.count('"args": ["-m", "graphify.serve",') == 1
     assert "python3 -m graphify.serve" not in body
     assert "python3 -m graphify.watch" not in body
     assert '"command": "python3"' not in body
+
+
+def test_powershell_troubleshooting_uninstalls_with_saved_interpreter():
+    body = gen.render(gen.load_platforms()["windows"])[0].content
+    command = (
+        "& (Get-Content graphify-out\\.graphify_python) "
+        "-m pip uninstall graspologic-native"
+    )
+    assert command in body
+    assert "(`pip uninstall graspologic-native`)" not in body
 
 
 def _posix_bootstrap_script() -> str:
