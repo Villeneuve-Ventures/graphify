@@ -69,10 +69,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          config.model: "gemini/gemini-3.6-flash"
+          config.model: "gemini/gemini-3.7-flash"
           config.fallback_models: '["gemini/gemini-3.5-flash-lite"]'
           config.reasoning_effort: "high"
-          config.max_model_tokens: "65536"
+          config.max_model_tokens: "262144"
           config.propagate_tool_errors: "true"
           config.extra_config_url: ""
           config.use_global_settings_file: "false"
@@ -90,12 +90,14 @@ jobs:
           python - <<'PY'
           import asyncio, fnmatch, hashlib, json, os, re
           from github import Github
-          from pr_agent.algo import SUPPORT_REASONING_EFFORT_MODELS
+          from pr_agent.algo import MAX_TOKENS, NO_SUPPORT_TEMPERATURE_MODELS, SUPPORT_REASONING_EFFORT_MODELS
           from pr_agent.algo.git_patch_processing import decouple_and_convert_to_hunks_with_lines_numbers
           from pr_agent.algo.language_handler import is_valid_file
           from pr_agent.algo.utils import get_max_tokens
           from pr_agent.config_loader import get_settings
-          SUPPORT_REASONING_EFFORT_MODELS.extend(model for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite") if model not in SUPPORT_REASONING_EFFORT_MODELS)
+          MAX_TOKENS["gemini/gemini-3.7-flash"] = 1048576
+          NO_SUPPORT_TEMPERATURE_MODELS.extend(model for model in ("gemini/gemini-3.7-flash",) if model not in NO_SUPPORT_TEMPERATURE_MODELS)
+          SUPPORT_REASONING_EFFORT_MODELS.extend(model for model in ("gemini-3.7-flash", "gemini-3.5-flash-lite") if model not in SUPPORT_REASONING_EFFORT_MODELS)
           def _valid_int(value, positive=False):
               return type(value) is int and value >= (1 if positive else 0)
           def _valid_path(path):
@@ -362,9 +364,9 @@ jobs:
           def _attest():
               checks = {
                   "CONFIG.GIT_PROVIDER": "github", "CONFIG.PUBLISH_OUTPUT": True,
-                  "CONFIG.MODEL": "gemini/gemini-3.6-flash",
+                  "CONFIG.MODEL": "gemini/gemini-3.7-flash",
                   "CONFIG.FALLBACK_MODELS": ["gemini/gemini-3.5-flash-lite"],
-                  "CONFIG.REASONING_EFFORT": "high", "CONFIG.MAX_MODEL_TOKENS": 65536,
+                  "CONFIG.REASONING_EFFORT": "high", "CONFIG.MAX_MODEL_TOKENS": 262144,
                   "CONFIG.PROPAGATE_TOOL_ERRORS": True, "CONFIG.EXTRA_CONFIG_URL": "",
                   "CONFIG.USE_GLOBAL_SETTINGS_FILE": False, "CONFIG.USE_REPO_SETTINGS_FILE": True,
                   "CONFIG.RESTRICTED_MODE": True, "CONFIG.REPO_CONTEXT_FROM_DEFAULT_BRANCH": False,

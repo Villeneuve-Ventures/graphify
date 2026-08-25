@@ -40,7 +40,7 @@ def _helpers(converter=lambda _patch, _file: "@@ -1 +1 @@\n__new hunk__\n1 +new\
     body = [node for node in tree.body if (
         isinstance(node, ast.Import) and any(alias.name in {"hashlib", "json", "re"} for alias in node.names)
     ) or (isinstance(node, ast.FunctionDef) and node.name in wanted)]
-    namespace: dict = {"get_max_tokens": lambda _model: 65536,
+    namespace: dict = {"get_max_tokens": lambda _model: 262144,
                        "decouple_and_convert_to_hunks_with_lines_numbers": converter,
                        "verified_renames": set(verified_renames)}
     exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
@@ -68,9 +68,14 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert "github.event.pull_request.draft == false" in workflow
     assert 'python-version: "3.14"' in workflow
     assert "570f67ed5fc8db5be74c18df070bc20079b64b0d" in workflow
-    assert 'config.model: "gemini/gemini-3.6-flash"' in workflow
+    assert 'config.model: "gemini/gemini-3.7-flash"' in workflow
     assert 'config.fallback_models: \'["gemini/gemini-3.5-flash-lite"]\'' in workflow
-    assert 'config.max_model_tokens: "65536"' in workflow
+    assert 'config.max_model_tokens: "262144"' in workflow
+    assert config["config"]["model"] == "gemini/gemini-3.7-flash"
+    assert config["config"]["fallback_models"] == ["gemini/gemini-3.5-flash-lite"]
+    assert config["config"]["reasoning_effort"] == "high"
+    assert config["config"]["max_model_tokens"] == 262144
+    assert config["config"]["large_patch_policy"] == "clip"
     assert 'config.propagate_tool_errors: "true"' in workflow
     assert 'config.extra_config_url: ""' in workflow
     assert 'config.use_global_settings_file: "false"' in workflow
@@ -81,7 +86,7 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert config["config"]["repo_context_from_default_branch"] is False
     assert config["config"]["repo_context_max_lines"] == 500
     assert hashlib.sha256((ROOT / ".pr_agent.toml").read_bytes()).hexdigest() == (
-        "63421ad584cc3598269a5a994113f84a30f89b28cc9a406862c2ff769966efd9"
+        "d82aa7f6deb76ada6fa18f141212d5181ddd0f32da18e64e61f1f744d3c9129f"
     )
 
 
@@ -158,6 +163,38 @@ def test_raw_diff_proves_patch_counts_deletions_renames_and_token_bound() -> Non
     with pytest.raises(RuntimeError, match="Malformed unified patch"):
         raw_diff([_file(patch="-old\n+new")], token_handler, "model",
                  max_tokens=lambda _: 10000)
+
+
+@pytest.mark.parametrize("total_tokens", [65537, 262143])
+def test_raw_diff_accepts_complete_comparisons_above_old_and_below_new_boundary(
+        total_tokens) -> None:
+    raw_diff = _helpers()["_raw_diff"]
+    token_handler = SimpleNamespace(prompt_tokens=17, count_tokens=len)
+    empty = _file(status="added", additions=1, deletions=0, patch="@@ -0,0 +1 @@\n+")
+    fixed_tokens = token_handler.prompt_tokens + len(raw_diff(
+        [empty], token_handler, "model", max_tokens=lambda _: 300000)) + 1500
+    payload = "x" * (total_tokens - fixed_tokens)
+    file = _file(status="added", additions=1, deletions=0,
+                 patch=f"@@ -0,0 +1 @@\n+{payload}")
+    result = raw_diff([file], token_handler, "model", max_tokens=lambda _: 262144)
+    assert token_handler.prompt_tokens + len(result) + 1500 == total_tokens
+    assert result.endswith(payload)
+
+
+@pytest.mark.parametrize("total_tokens", [262144, 262145])
+def test_raw_diff_rejects_complete_comparisons_at_or_above_new_boundary(
+        total_tokens) -> None:
+    raw_diff = _helpers()["_raw_diff"]
+    token_handler = SimpleNamespace(prompt_tokens=17, count_tokens=len)
+    empty = _file(status="added", additions=1, deletions=0, patch="@@ -0,0 +1 @@\n+")
+    fixed_tokens = token_handler.prompt_tokens + len(raw_diff(
+        [empty], token_handler, "model", max_tokens=lambda _: 300000)) + 1500
+    payload = "x" * (total_tokens - fixed_tokens)
+    file = _file(status="added", additions=1, deletions=0,
+                 patch=f"@@ -0,0 +1 @@\n+{payload}")
+    with pytest.raises(
+            RuntimeError, match="Complete raw comparison exceeds the one-call token budget"):
+        raw_diff([file], token_handler, "model", max_tokens=lambda _: 262144)
 
 
 @pytest.mark.parametrize("status", ["added", "removed"])
@@ -394,6 +431,8 @@ def test_publication_rejects_wrong_binding_and_canonicalizes_persistent_update()
 
 def test_wiring_attests_policy_before_constructors_and_uses_one_raw_builder() -> None:
     code = _embedded_python()
+    shim = code.index('MAX_TOKENS["gemini/gemini-3.7-flash"] = 1048576')
+    assert shim < code.index("from pr_agent.agent.pr_agent import PRAgent")
     assert code.index("policy_attested = True") < code.index("asyncio.run(_run_action_and_drain())")
     assert "pr_description.get_pr_diff = _complete_diff" in code
     assert "pr_reviewer.get_pr_diff = _complete_diff" in code
@@ -456,9 +495,9 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         def __init__(self):
             self.values = {
             "CONFIG.GIT_PROVIDER": "github", "CONFIG.PUBLISH_OUTPUT": True,
-            "CONFIG.MODEL": "gemini/gemini-3.6-flash",
+            "CONFIG.MODEL": "gemini/gemini-3.7-flash",
             "CONFIG.FALLBACK_MODELS": ["gemini/gemini-3.5-flash-lite"],
-            "CONFIG.REASONING_EFFORT": "high", "CONFIG.MAX_MODEL_TOKENS": 65536,
+            "CONFIG.REASONING_EFFORT": "high", "CONFIG.MAX_MODEL_TOKENS": 262144,
             "CONFIG.PROPAGATE_TOOL_ERRORS": True, "CONFIG.EXTRA_CONFIG_URL": "",
             "CONFIG.USE_GLOBAL_SETTINGS_FILE": False, "CONFIG.USE_REPO_SETTINGS_FILE": True,
             "CONFIG.RESTRICTED_MODE": True, "CONFIG.REPO_CONTEXT_FROM_DEFAULT_BRANCH": False,
@@ -512,7 +551,8 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                 raise RuntimeError("tool failed")
             self.prediction = "prediction"
             alias = description_module.get_pr_diff if self.kind == "summary" else reviewer_module.get_pr_diff
-            diff = alias(self.git_provider, SimpleNamespace(prompt_tokens=1, count_tokens=len), "model",
+            diff = alias(self.git_provider, SimpleNamespace(prompt_tokens=1, count_tokens=len),
+                         settings.values["CONFIG.MODEL"],
                          add_line_numbers_to_hunks=review_numbered)
             reads["aliases"].append(self.kind)
             reads["tool_diffs"].append(diff)
@@ -576,7 +616,11 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
 
     module("github", Github=lambda token: SimpleNamespace(get_repo=lambda name: repo))
     pr_agent = module("pr_agent")
-    algo = module("pr_agent.algo", SUPPORT_REASONING_EFFORT_MODELS=[])
+    max_tokens = {"gemini/gemini-3.5-flash-lite": 1048576}
+    no_temperature_models = []
+    algo = module("pr_agent.algo", MAX_TOKENS=max_tokens,
+                  NO_SUPPORT_TEMPERATURE_MODELS=no_temperature_models,
+                  SUPPORT_REASONING_EFFORT_MODELS=[])
     module("pr_agent.algo.file_filter", filter_ignored=lambda files: files)
     def convert_patch(_patch, file):
         reads["conversions"].append(file)
@@ -585,7 +629,9 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     module("pr_agent.algo.git_patch_processing",
            decouple_and_convert_to_hunks_with_lines_numbers=convert_patch)
     module("pr_agent.algo.language_handler", is_valid_file=lambda name: True)
-    module("pr_agent.algo.utils", get_max_tokens=lambda model: 65536)
+    def stub_get_max_tokens(model):
+        return min(max_tokens[model], settings.values["CONFIG.MAX_MODEL_TOKENS"])
+    module("pr_agent.algo.utils", get_max_tokens=stub_get_max_tokens)
     module("pr_agent.config_loader", get_settings=lambda: settings)
     module("pr_agent.git_providers")
     github_provider_module = module("pr_agent.git_providers.github_provider", GithubProvider=GithubProvider)
@@ -602,7 +648,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         except yaml.YAMLError:
             return None
     async def retry_with_fallback_models(function, _model_type):
-        models = ["gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite"]
+        models = ["gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
         for index, model in enumerate(models):
             try:
                 return await function(model)
@@ -656,6 +702,13 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                                         review.split("\n", 1)[1],
                                         user=SimpleNamespace(login="github-actions[bot]")))
     exec(compile(_embedded_python(), "<embedded-entry>", "exec"), {})
+    reads["effective_tokens"] = {
+        model: stub_get_max_tokens(model) for model in (
+            "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite")
+    }
+    reads["no_temperature_models"] = list(no_temperature_models)
+    reads["reasoning_models"] = list(algo.SUPPORT_REASONING_EFFORT_MODELS)
+    reads["reasoning_effort"] = settings.values["CONFIG.REASONING_EFFORT"]
     return reads, description_module, reviewer_module
 
 
@@ -672,6 +725,13 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
     assert reads["eager"] >= 3
     assert reads["context_fetches"] == [(path, "a" * 40) for path in context_files]
     assert {path for path, _content in reads["context_served"]} == set(context_files)
+    assert reads["effective_tokens"] == {
+        "gemini/gemini-3.7-flash": 262144,
+        "gemini/gemini-3.5-flash-lite": 262144,
+    }
+    assert reads["no_temperature_models"] == ["gemini/gemini-3.7-flash"]
+    assert reads["reasoning_models"] == ["gemini-3.7-flash", "gemini-3.5-flash-lite"]
+    assert reads["reasoning_effort"] == "high"
     reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment")
     assert reads["requests"] == ["/review"]
     assert reads["aliases"] == ["review"]
@@ -705,7 +765,7 @@ def test_description_malformed_primary_uses_valid_fallback(monkeypatch, tmp_path
     reads, _, _ = _run_stubbed_entry(
         monkeypatch, tmp_path, description_predictions=[malformed, VALID_DESCRIPTION])
     assert reads["description_models"] == [
-        "gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite"]
+        "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
     assert reads["aliases"] == ["summary", "summary", "review"]
     assert reads["description_diffs"][0] == reads["description_diffs"][1]
     assert reads["published"] == ["summary", "review"]
@@ -727,14 +787,14 @@ def test_description_all_invalid_attempts_publish_nothing(
         _run_stubbed_entry(
             monkeypatch, tmp_path, description_predictions=predictions, record=record)
     assert record["reads"]["description_models"] == [
-        "gemini/gemini-3.6-flash", "gemini/gemini-3.5-flash-lite"]
+        "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
     assert record["reads"]["published"] == []
 
 
 def test_description_valid_primary_is_single_attempt(monkeypatch, tmp_path) -> None:
     reads, _, _ = _run_stubbed_entry(
         monkeypatch, tmp_path, description_predictions=[VALID_DESCRIPTION])
-    assert reads["description_models"] == ["gemini/gemini-3.6-flash"]
+    assert reads["description_models"] == ["gemini/gemini-3.7-flash"]
     assert reads["aliases"] == ["summary", "review"]
     assert reads["published"] == ["summary", "review"]
 
@@ -746,7 +806,7 @@ def test_description_changes_summary_is_required_only_when_prompt_includes_it(
     reads, _, _ = _run_stubbed_entry(
         monkeypatch, tmp_path, description_predictions=[prediction],
         summary_include_changes=False)
-    assert reads["description_models"] == ["gemini/gemini-3.6-flash"]
+    assert reads["description_models"] == ["gemini/gemini-3.7-flash"]
 
 
 def test_stubbed_entry_rejects_numbered_conversion_loss_and_invalid_flag(
