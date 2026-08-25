@@ -411,13 +411,18 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                        description_predictions=None, record=None,
                        conversion_loss=False, review_numbered=True,
                        summary_include_changes=True, changed_file=None,
-                       previous_sha=None):
+                       previous_sha=None, context_overrides=None,
+                       context_error=None):
     base, head = "a" * 40, "b" * 40
     policy = (ROOT / ".pr_agent.toml").read_bytes()
+    context_files = ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"]
+    context = {path: f"frozen {path}\n".encode() for path in context_files}
+    context.update(context_overrides or {})
     comments = []
     reads = {"pull": 0, "requests": [], "aliases": [], "eager": 0,
              "description_models": [], "description_diffs": [], "tool_diffs": [],
-             "conversions": [], "published": [], "errors": []}
+             "conversions": [], "published": [], "errors": [],
+             "context_fetches": [], "context_served": []}
     if record is not None:
         record["reads"] = reads
     prediction_queue = list(description_predictions or [VALID_DESCRIPTION])
@@ -437,6 +442,11 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
             raise RuntimeError("policy API failed")
         if path == ".pr_agent.toml":
             return SimpleNamespace(decoded_content=policy if policy_available else None)
+        if path in context_files:
+            reads["context_fetches"].append((path, ref))
+            if path == context_error:
+                raise RuntimeError("context API failed")
+            return SimpleNamespace(decoded_content=context[path])
         return SimpleNamespace(sha=previous_sha)
     head_commit = SimpleNamespace(sha=head)
     repo = SimpleNamespace(get_pull=get_pull, get_contents=get_contents,
@@ -489,7 +499,14 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         def __init__(self, *args, **kwargs):
             self.git_provider = GithubProvider("https://example/pull/7")
             self.prediction = None
-            self.vars = {"include_file_summary_changes": summary_include_changes}
+            repo_context = []
+            for path in settings.values["CONFIG.REPO_CONTEXT_FILES"]:
+                value = self.git_provider.get_repo_file_content(
+                    path, from_default_branch=False)
+                reads["context_served"].append((path, value))
+                repo_context.append(value)
+            self.vars = {"include_file_summary_changes": summary_include_changes,
+                         "repo_context": "\n".join(repo_context)}
         async def run(self):
             if tool_error:
                 raise RuntimeError("tool failed")
@@ -644,6 +661,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
 
 def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_path) -> None:
     reads, description, reviewer = _run_stubbed_entry(monkeypatch, tmp_path)
+    context_files = ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"]
     assert reads["pull"] >= 6
     assert description.get_pr_diff is reviewer.get_pr_diff
     assert reads["aliases"] == ["summary", "review"]
@@ -652,9 +670,24 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
     assert "__new hunk__\n1 +new" in reads["tool_diffs"][0]
     assert reads["conversions"] == [None]
     assert reads["eager"] >= 3
+    assert reads["context_fetches"] == [(path, "a" * 40) for path in context_files]
+    assert {path for path, _content in reads["context_served"]} == set(context_files)
     reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment")
     assert reads["requests"] == ["/review"]
     assert reads["aliases"] == ["review"]
+
+
+@pytest.mark.parametrize(("kwargs", "message"), [
+    ({"context_error": "SECURITY.md"}, "context is unavailable"),
+    ({"context_overrides": {"SECURITY.md": None}}, "context is unavailable"),
+    ({"context_overrides": {"SECURITY.md": b" \n"}}, "context is empty"),
+    ({"context_overrides": {"SECURITY.md": b"\xff"}}, "context is not UTF-8"),
+    ({"context_overrides": {"AGENTS.md": b"line\n" * 480}}, "exceeds the complete-context budget"),
+])
+def test_stubbed_entry_requires_complete_frozen_repo_context(
+        monkeypatch, tmp_path, kwargs, message) -> None:
+    with pytest.raises(RuntimeError, match=message):
+        _run_stubbed_entry(monkeypatch, tmp_path, **kwargs)
 
 
 def test_stubbed_entry_requires_blob_identity_for_patchless_rename(monkeypatch, tmp_path) -> None:
@@ -856,5 +889,5 @@ def test_stubbed_entry_requires_event_specific_outputs(monkeypatch, tmp_path,
 
 def test_embedded_python_compiles_and_stays_lean() -> None:
     compile(_embedded_python(), ".github/workflows/pr-agent.yml", "exec")
-    assert len(_workflow().splitlines()) <= 457
+    assert len(_workflow().splitlines()) <= 500
     assert len((ROOT / ".pr_agent.toml").read_text().splitlines()) <= 125
