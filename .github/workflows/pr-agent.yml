@@ -275,6 +275,26 @@ jobs:
           if not isinstance(policy_bytes, bytes) or not policy_bytes:
               raise RuntimeError("Frozen target policy is unavailable")
           policy_digest = hashlib.sha256(policy_bytes).hexdigest()
+          context_files = ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"]
+          context_text = {}
+          context_lines = 3  # intro, opening tag, and closing tag
+          for path in context_files:
+              try:
+                  content = repo_obj.get_contents(path, ref=frozen[2]).decoded_content
+              except Exception as error:
+                  raise RuntimeError(f"Frozen repository context is unavailable: {path}") from error
+              if not isinstance(content, bytes) or not content:
+                  raise RuntimeError(f"Frozen repository context is unavailable: {path}")
+              try:
+                  rendered = content.decode("utf-8").rstrip()
+              except UnicodeDecodeError as error:
+                  raise RuntimeError(f"Frozen repository context is not UTF-8: {path}") from error
+              if not rendered:
+                  raise RuntimeError(f"Frozen repository context is empty: {path}")
+              context_text[path] = rendered
+              context_lines += len(rendered.splitlines()) + 5  # file header and footer
+          if context_lines > 500:
+              raise RuntimeError("Frozen repository context exceeds the complete-context budget")
           manifest_files = _manifest(pull, list(pull.get_files()))
           verified_renames = set()
           for file in manifest_files:
@@ -291,6 +311,7 @@ jobs:
           _fresh()
           policy_attested = False
           policy_served = False
+          context_served = set()
           eligible_files = []
           from pr_agent.agent.pr_agent import PRAgent
           from pr_agent.git_providers.github_provider import GithubProvider
@@ -312,6 +333,13 @@ jobs:
               policy_served = True
               return policy_bytes
           GithubProvider.get_repo_settings = strict_repo_settings
+          def frozen_repo_context(provider, file_path, from_default_branch=False):
+              if (getattr(provider, "repo", None) != repo_name or _identity(provider.pr) != frozen
+                      or from_default_branch or file_path not in context_text):
+                  raise RuntimeError("Repository context provider identity mismatch")
+              context_served.add(file_path)
+              return context_text[file_path]
+          GithubProvider.get_repo_file_content = frozen_repo_context
           def frozen_files(provider):
               if _identity(provider.pr) != frozen:
                   raise RuntimeError("File provider identity mismatch")
@@ -356,15 +384,15 @@ jobs:
               branch = _setting("CONFIG.CONFIG_BRANCH")
               if branch not in {None, "", frozen[2]}:
                   raise RuntimeError("Effective policy coordinate is not the frozen base")
-              context_files = ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"]
               if not _same(_setting("CONFIG.REPO_CONTEXT_FILES"), context_files):
                   raise RuntimeError("Repository context policy mismatch")
               instructions = str(_setting("PR_REVIEWER.EXTRA_INSTRUCTIONS") or "")
               if "target branch's requires-python declaration" not in instructions or "SECURITY.md" not in instructions:
                   raise RuntimeError("Review instruction policy mismatch")
           def strict_apply(url):
-              global policy_attested, policy_served, eligible_files
+              global policy_attested, policy_served, context_served, eligible_files
               policy_attested = policy_served = False
+              context_served.clear()
               get_settings().set("CONFIG.CONFIG_BRANCH", frozen[2])
               original_apply(url)
               _attest()
@@ -394,7 +422,10 @@ jobs:
               def guarded(self, *args, **kwargs):
                   if not policy_attested:
                       raise RuntimeError("PR-Agent tool constructed before policy attestation")
-                  return original(self, *args, **kwargs)
+                  result = original(self, *args, **kwargs)
+                  if context_served != set(context_files):
+                      raise RuntimeError("PR-Agent tool constructed without complete frozen repository context")
+                  return result
               return guarded
           PRDescription.__init__ = _guard_constructor(PRDescription.__init__)
           PRReviewer.__init__ = _guard_constructor(PRReviewer.__init__)
