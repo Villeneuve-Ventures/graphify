@@ -476,7 +476,8 @@ docker run -p 8080:8080 -v "$(pwd)/graphify-out:/data" graphify \
 
 > **WSL / Linux note:** Ubuntu ships `python3`, not `python`. Use a venv to avoid conflicts:
 > ```bash
-> python3 -m venv .venv && .venv/bin/pip install "graphifyy[mcp]"
+> uv venv --python 3.14 .venv
+> uv pip install --python .venv/bin/python "graphifyy[mcp]"
 > ```
 
 ---

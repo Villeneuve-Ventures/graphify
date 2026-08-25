@@ -45,6 +45,9 @@ def test_docker_and_public_docs_match_python314_policy():
     readme = (ROOT / "README.md").read_text()
     assert "| Python | 3.14.2 through final 3.14.x releases |" in readme
     assert "uv tool install --python 3.14 graphifyy" in readme
+    assert "uv venv --python 3.14 .venv" in readme
+    assert 'uv pip install --python .venv/bin/python "graphifyy[mcp]"' in readme
+    assert 'python3 -m venv .venv && .venv/bin/pip install "graphifyy[mcp]"' not in readme
     assert "| `leiden` | Native Leiden community detection |" in readme
 
 

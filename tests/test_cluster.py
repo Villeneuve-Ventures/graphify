@@ -44,6 +44,26 @@ def test_cluster_covers_all_nodes():
     all_nodes = {n for nodes in communities.values() for n in nodes}
     assert all_nodes == set(G.nodes)
 
+
+def test_cluster_preserves_spokes_isolated_by_hub_exclusion(monkeypatch):
+    edges = [("hub", f"leaf-{index}") for index in range(4)]
+    forward = nx.Graph(edges)
+    reverse = nx.Graph(reversed(edges))
+
+    def unexpected_partition(*args, **kwargs):
+        pytest.fail("edge-less spokes must not be sent to Leiden")
+
+    monkeypatch.setattr("graphify.cluster._partition", unexpected_partition)
+    forward_communities = cluster(forward, exclude_hubs_percentile=80)
+    reverse_communities = cluster(reverse, exclude_hubs_percentile=80)
+    forward_membership = {frozenset(nodes) for nodes in forward_communities.values()}
+    reverse_membership = {frozenset(nodes) for nodes in reverse_communities.values()}
+
+    assert {node for nodes in forward_communities.values() for node in nodes} == set(forward)
+    assert sorted(map(len, forward_communities.values())) == [1, 1, 1, 2]
+    assert forward_membership == reverse_membership
+    assert frozenset({"hub", "leaf-0"}) in forward_membership
+
 def test_cohesion_score_complete_graph():
     G = nx.complete_graph(4)
     G = nx.relabel_nodes(G, {i: str(i) for i in G.nodes})

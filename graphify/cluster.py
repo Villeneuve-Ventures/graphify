@@ -215,10 +215,14 @@ def cluster(
     # Leiden warns and drops isolates - handle them separately
     # Also exclude hub nodes from partitioning so they don't pull unrelated
     # subsystems into the same community
-    excluded = hub_nodes
-    isolates = [n for n in G.nodes() if G.degree(n) == 0 and n not in excluded]
-    connected_nodes = [n for n in G.nodes() if G.degree(n) > 0 and n not in excluded]
-    connected = G.subgraph(connected_nodes)
+    partition_nodes = [n for n in G.nodes() if n not in hub_nodes]
+    partition_graph = G.subgraph(partition_nodes)
+    isolates = sorted(
+        (n for n, degree in partition_graph.degree() if degree == 0),
+        key=str,
+    )
+    connected_nodes = [n for n, degree in partition_graph.degree() if degree > 0]
+    connected = partition_graph.subgraph(connected_nodes)
 
     raw: dict[int, list[str]] = {}
     if connected.number_of_nodes() > 0:
@@ -242,7 +246,10 @@ def cluster(
                 if cid is not None:
                     votes[cid] = votes.get(cid, 0) + 1
             if votes:
-                best = min(votes, key=lambda c: (-votes[c], c))
+                best = min(
+                    votes,
+                    key=lambda c: (-votes[c], tuple(sorted(map(str, raw[c])))),
+                )
                 raw.setdefault(best, []).append(hub)
                 node_community[hub] = best
             else:
