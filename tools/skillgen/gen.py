@@ -13,7 +13,7 @@ Usage (from the repo root)::
     python -m tools.skillgen --check         # byte-diff render vs committed + expected/, exit 1 on drift
     python -m tools.skillgen --audit-coverage# per host: assert every heading of that host's own v8 body single-homes in its render
     python -m tools.skillgen --schema-singleton  # assert the file_type enum is byte-identical everywhere
-    python -m tools.skillgen --monolith-roundtrip# assert each monolith == v8 modulo the enum unification
+    python -m tools.skillgen --monolith-roundtrip# assert each monolith == v8 modulo sanctioned migrations
     python -m tools.skillgen --always-on-roundtrip# assert each always_on/*.md reproduces its former constant
     python -m tools.skillgen --bless         # rewrite expected/ from the current render
 
@@ -936,6 +936,30 @@ def _is_python314_bootstrap_fix_line(line: str) -> bool:
     }
 
 
+def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
+    """Whether Aider/Devin route MCP and watch through the validated Python.
+
+    Their Python 3.14 bootstrap persists the interpreter that successfully
+    imports Graphify, but these three later command forms still bypassed it.
+    Match only the removed bare forms and their saved-interpreter replacements.
+    """
+    return line.strip() in {
+        "python3 -m graphify.serve graphify-out/graph.json",
+        "$(cat graphify-out/.graphify_python) -m graphify.serve graphify-out/graph.json",
+        "To configure in Claude Desktop, add to `claude_desktop_config.json`:",
+        (
+            "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
+            "Claude Desktop can't run `$(...)`, so set `command` to the "
+            "**absolute interpreter path** printed by "
+            "`cat graphify-out/.graphify_python`:"
+        ),
+        '"command": "python3",',
+        '"command": "<absolute path from: cat graphify-out/.graphify_python>",',
+        "python3 -m graphify.watch INPUT_PATH --debounce 3",
+        "$(cat graphify-out/.graphify_python) -m graphify.watch INPUT_PATH --debounce 3",
+    }
+
+
 def _is_semantic_cache_scope_fix_line(line: str) -> bool:
     """Whether a line scopes semantic cache writes to dispatched files (#1757).
 
@@ -970,6 +994,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_obsidian_usage_comment_line,
     _is_uv_from_interpreter_fix_line,
     _is_python314_bootstrap_fix_line,
+    _is_saved_interpreter_subcommand_fix_line,
     _is_semantic_cache_scope_fix_line,
 )
 
@@ -1015,7 +1040,8 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     unification, the unified frontmatter description, the chunk-cleanup rewrite
     (#1172), the four #1392 runbook fixes (directed propagation, content-only
     semantic scope, stale-cache unlink, and the zero-node/shrink-guard ordering),
-    and semantic-cache source scoping (#1757).
+    semantic-cache source scoping (#1757), and saved-interpreter routing for
+    Aider/Devin MCP and watch commands.
 
     The comparison is a multiset diff, not a positional zip: a line whose text is
     unchanged but merely *moved* (the report-write line shifted below ``to_json``
@@ -1121,7 +1147,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--check", action="store_true", help="byte-diff render vs committed + expected/, exit 1 on drift")
     p.add_argument("--audit-coverage", action="store_true", help="per host: assert every heading of that host's own v8 body single-homes in its render")
     p.add_argument("--schema-singleton", action="store_true", help="assert the file_type enum is byte-identical everywhere")
-    p.add_argument("--monolith-roundtrip", action="store_true", help="assert each monolith == v8 modulo the enum unification")
+    p.add_argument(
+        "--monolith-roundtrip",
+        action="store_true",
+        help="assert each monolith == v8 modulo narrowly enumerated sanctioned migrations",
+    )
     p.add_argument("--always-on-roundtrip", action="store_true", help="assert each always_on/*.md reproduces its former __main__.py constant byte for byte")
     p.add_argument("--bless", action="store_true", help="rewrite expected/ from the current render")
     return p.parse_args(argv)
@@ -1181,7 +1211,7 @@ def main(argv: list[str] | None = None) -> int:
             for m in all_problems:
                 print(f"  {m}", file=sys.stderr)
             return 1
-        print("monolith-roundtrip OK: each monolith matches v8 modulo the enum unification.")
+        print("monolith-roundtrip OK: each monolith matches v8 modulo sanctioned migrations.")
         return 0
 
     if args.always_on_roundtrip:

@@ -329,6 +329,18 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert '[ -n "$PYTHON" ] && { "$PYTHON" -m pip install' in bootstrap, key
 
 
+@pytest.mark.parametrize("platform_key", ["aider", "devin"])
+def test_monolithic_skills_route_subcommands_through_saved_python(platform_key):
+    body = gen.render(gen.load_platforms()[platform_key])[0].content
+
+    assert body.count("$(cat graphify-out/.graphify_python) -m graphify.serve") == 1
+    assert body.count("$(cat graphify-out/.graphify_python) -m graphify.watch") == 1
+    assert body.count('"command": "<absolute path from: cat graphify-out/.graphify_python>"') == 1
+    assert "python3 -m graphify.serve" not in body
+    assert "python3 -m graphify.watch" not in body
+    assert '"command": "python3"' not in body
+
+
 def _posix_bootstrap_script() -> str:
     platform = gen.load_platforms()["claude"]
     body = gen.render(platform)[0].content
@@ -610,7 +622,7 @@ def test_monoliths_render_inline_single_file_no_references():
 
 
 def test_monolith_roundtrip_passes_for_aider_and_devin():
-    """Each monolith is diff-clean vs v8 except the file_type enum unification."""
+    """Each monolith is diff-clean vs v8 except sanctioned migrations."""
     platforms = gen.load_platforms()
     for key in ("aider", "devin"):
         problems = gen.monolith_roundtrip(platforms[key])
@@ -622,9 +634,9 @@ def test_monoliths_change_only_sanctioned_lines():
 
     The round-trip (multiset diff vs the pinned v8 blob) must come back clean:
     each added/removed line matches one of the documented sanctioned predicates
-    in gen — the enum unification, the unified description, the chunk-cleanup
-    rewrite (#1172), the four #1392 runbook fixes, and semantic-cache source
-    scoping (#1757). Anything else is drift.
+    in gen — the enum unification, unified description, chunk-cleanup rewrite
+    (#1172), the four #1392 runbook fixes, semantic-cache source scoping (#1757),
+    and saved-interpreter subcommand routing. Anything else is drift.
     """
     platforms = gen.load_platforms()
     for key in ("aider", "devin"):

@@ -30,7 +30,7 @@
 #   extra_sections ordered list of extra tail fragments (under fragments/extra/),
 #                 inserted before Honesty Rules.
 #   monolith      core fragment basename for a monolith (monolith only).
-#   roundtrip_ref git ref the monolith must match modulo the enum (monolith only).
+#   roundtrip_ref git ref the monolith must match modulo sanctioned migrations.
 
 [platform.claude]
 bucket = "split"
@@ -189,8 +189,8 @@ extraction = "verbose"
 
 # Monoliths: rendered inline as a single body, no split, no references/. The
 # render must be diff-clean against the v8 blob in roundtrip_ref except for the
-# file_type enum unification (5-value -> 6-value superset). monolith-roundtrip
-# guards that.
+# narrowly enumerated migrations in _SANCTIONED_MONOLITH_DIFFS.
+# monolith-roundtrip guards that boundary.
 
 [platform.aider]
 bucket = "monolith"
