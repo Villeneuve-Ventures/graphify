@@ -78,6 +78,27 @@ jobs:
           uv run --frozen graphify --help
           uv run --frozen graphify install
 
+  powershell-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # PowerShell skill tests read immutable pre-split baselines from Git.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Run PowerShell skill tests
+        run: >-
+          uv run --frozen pytest tests/test_skillgen.py -q --tb=short
+          -k "powershell or user_site"
+
   security-scan:
     # The dev deps include bandit and pip-audit. Run them in CI so a new
     # HIGH-severity finding or vulnerable dependency is caught on the PR that

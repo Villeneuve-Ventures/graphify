@@ -6,13 +6,13 @@ import inspect
 import io
 import json
 import numbers
-from collections.abc import Iterable, Mapping, Sequence
-from typing import TypeVar
+import uuid
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from typing import Any, TypeVar
 import networkx as nx
 
 
-NodeId = str | int | bool | bytes | None
-NodeIdT = TypeVar("NodeIdT", bound=NodeId)
+NodeIdT = TypeVar("NodeIdT", bound=Hashable)
 
 
 def _suppress_output():
@@ -27,7 +27,12 @@ def _suppress_output():
 
 
 def _canonical_node_key(node: object) -> str:
-    """Return a stable, type-tagged key for a supported scalar node ID."""
+    """Return the ordering key for a node ID.
+
+    Supported structural values have cross-run deterministic encodings. Other
+    hashables use a type-qualified ``repr`` and are only as stable as that repr;
+    duplicate keys are rejected by :func:`_validated_keyed_nodes`.
+    """
     if type(node) is str:
         return f"str:{json.dumps(node, ensure_ascii=False, separators=(',', ':'))}"
     if type(node) is int:
@@ -38,29 +43,56 @@ def _canonical_node_key(node: object) -> str:
         return f"bytes:{node.hex()}"
     if node is None:
         return "none:"
-    raise TypeError(
-        "Leiden node IDs must be str, exact int, exact bool, bytes, or None; "
-        f"got {type(node).__module__}.{type(node).__qualname__}"
+    if isinstance(node, numbers.Integral):
+        type_name = f"{type(node).__module__}.{type(node).__qualname__}"
+        return f"integral:{type_name}:{int(node)}"
+    if type(node) is float:
+        return f"float:{node.hex()}"
+    if type(node) is tuple:
+        parts = [_canonical_node_key(part) for part in node]
+        return f"tuple:{json.dumps(parts, ensure_ascii=False, separators=(',', ':'))}"
+    if isinstance(node, uuid.UUID):
+        return f"uuid:{node.hex}"
+    if not isinstance(node, Hashable):
+        raise TypeError(
+            "Community-detection node IDs must be hashable; "
+            f"got {type(node).__module__}.{type(node).__qualname__}"
+        )
+    type_name = f"{type(node).__module__}.{type(node).__qualname__}"
+    return (
+        f"opaque:{type_name}:"
+        f"{json.dumps(repr(node), ensure_ascii=False, separators=(',', ':'))}"
     )
 
 
-def _sorted_nodes(nodes: Iterable[NodeIdT]) -> list[NodeIdT]:
-    """Return supported node IDs in their stable, type-tagged order."""
-    return sorted(nodes, key=_canonical_node_key)
-
-
-def _native_edges(G: nx.Graph) -> tuple[list[tuple[str, str, float]], dict[str, NodeId]]:
-    """Encode a NetworkX graph as insertion-order-independent native edges."""
-    keyed_nodes: list[tuple[str, NodeId]] = []
-    seen_keys: set[str] = set()
-    for node in G.nodes():
+def _validated_keyed_nodes(nodes: Iterable[NodeIdT]) -> list[tuple[str, NodeIdT]]:
+    """Return canonical node keys after rejecting ambiguous encodings."""
+    keyed_nodes: list[tuple[str, NodeIdT]] = []
+    original_by_key: dict[str, NodeIdT] = {}
+    for node in nodes:
         key = _canonical_node_key(node)
-        if key in seen_keys:
-            raise ValueError(f"Leiden canonical node-key collision: {key}")
-        seen_keys.add(key)
+        if key in original_by_key:
+            other = original_by_key[key]
+            raise ValueError(
+                "Community-detection canonical node-key collision: "
+                f"{key} represents both {other!r} and {node!r}"
+            )
+        original_by_key[key] = node
         keyed_nodes.append((key, node))
-
     keyed_nodes.sort(key=lambda item: item[0])
+    return keyed_nodes
+
+
+def _sorted_nodes(nodes: Iterable[NodeIdT]) -> list[NodeIdT]:
+    """Order node IDs by their structural or type-qualified opaque keys."""
+    return [node for _, node in _validated_keyed_nodes(nodes)]
+
+
+def _native_edges(
+    G: nx.Graph[NodeIdT, Any, Any],
+) -> tuple[list[tuple[str, str, float]], dict[str, NodeIdT]]:
+    """Encode a NetworkX graph as insertion-order-independent native edges."""
+    keyed_nodes = _validated_keyed_nodes(G.nodes())
     native_by_node = {node: str(index) for index, (_, node) in enumerate(keyed_nodes)}
     original_by_native = {native_id: node for node, native_id in native_by_node.items()}
     edges: list[tuple[str, str, float]] = []
@@ -74,7 +106,9 @@ def _native_edges(G: nx.Graph) -> tuple[list[tuple[str, str, float]], dict[str, 
     return edges, original_by_native
 
 
-def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[NodeId, int]:
+def _partition(
+    G: nx.Graph[NodeIdT, Any, Any], resolution: float = 1.0
+) -> dict[NodeIdT, int]:
     """Run community detection. Returns {node_id: community_id}.
 
     Tries native Leiden first — best quality.
@@ -86,17 +120,25 @@ def _partition(G: nx.Graph, resolution: float = 1.0) -> dict[NodeId, int]:
     Output from Leiden is suppressed to prevent ANSI escape codes
     from corrupting terminal scroll buffers on Windows PowerShell 5.1.
     """
+    keyed_nodes = _validated_keyed_nodes(G.nodes())
     stable = nx.Graph()
-    stable.add_nodes_from(_sorted_nodes(G.nodes()))
-    edge_rows = sorted(
-        G.edges(data=True),
+    stable.add_nodes_from(node for _, node in keyed_nodes)
+    edge_rows = []
+    for src, tgt, attrs in G.edges(data=True):
+        src_key = _canonical_node_key(src)
+        tgt_key = _canonical_node_key(tgt)
+        if tgt_key < src_key:
+            src, tgt = tgt, src
+            src_key, tgt_key = tgt_key, src_key
+        edge_rows.append((src_key, tgt_key, src, tgt, attrs))
+    edge_rows.sort(
         key=lambda row: (
-            _canonical_node_key(row[0]),
-            _canonical_node_key(row[1]),
-            json.dumps(row[2], sort_keys=True, ensure_ascii=False, default=str),
-        ),
+            row[0],
+            row[1],
+            json.dumps(row[4], sort_keys=True, ensure_ascii=False, default=str),
+        )
     )
-    for src, tgt, attrs in edge_rows:
+    for _src_key, _tgt_key, src, tgt, attrs in edge_rows:
         stable.add_edge(src, tgt, **attrs)
 
     try:
@@ -138,13 +180,16 @@ _COHESION_SPLIT_MIN_SIZE = 50    # only cohesion-split if community has at least
 
 
 def label_communities_by_hub(
-    G: nx.Graph, communities: dict[int, list[NodeId]]
+    G: nx.Graph[NodeIdT, Any, Any],
+    communities: Mapping[int, Sequence[NodeIdT]],
 ) -> dict[int, str]:
-    """Deterministic, LLM-free community labels: name each community after its
+    """LLM-free community labels: name each community after its
     highest-degree member — the structural hub — so a report reads ``auth`` /
     ``log_action`` instead of ``Community 70``. Degree is measured on the full graph
-    ``G``; ties break by node id for run-to-run stability. A community whose members
-    are all absent from ``G`` falls back to ``Community {cid}``.
+    ``G``; ties break by the canonical node key. This is cross-run deterministic for
+    structural node IDs; opaque hashables are only as stable as their type-qualified
+    repr. A community whose members are all absent from ``G`` falls back to
+    ``Community {cid}``.
 
     Used as the default (no-backend) labeler; an LLM naming pass, when configured,
     overrides these with richer names.
@@ -155,7 +200,8 @@ def label_communities_by_hub(
         if not present:
             labels[cid] = f"Community {cid}"
             continue
-        # highest degree wins; ties broken by node id (ascending) for determinism
+        # Highest degree wins. Structural IDs have deterministic canonical ties;
+        # opaque IDs inherit the stability of their distinct type-qualified repr.
         hub = min(present, key=lambda n: (-G.degree(n), _canonical_node_key(n)))
         name = str(G.nodes[hub].get("label") or hub).strip()
         if name.endswith("()"):
@@ -164,14 +210,17 @@ def label_communities_by_hub(
     return labels
 
 
-def community_member_sigs(communities: dict[int, list[NodeId]]) -> dict[int, str]:
+def community_member_sigs(
+    communities: Mapping[int, Sequence[NodeIdT]],
+) -> dict[int, str]:
     """Per-community membership fingerprints: ``{cid: sha256(sorted member ids)}``.
 
     Persisted next to ``.graphify_labels.json`` so a later ``cluster-only`` can tell
     which communities actually changed since labeling. A cid whose members no longer
     hash the same is a different community — reusing its old (LLM) label there is the
-    "stale label after re-scoping" bug this guards against. Deterministic; independent
-    of cid index, node order, and machine.
+    "stale label after re-scoping" bug this guards against. Structural IDs produce
+    fingerprints independent of cid index, node order, and machine. Opaque hashables
+    inherit the stability of their distinct type-qualified repr.
     """
     import hashlib
 
@@ -190,13 +239,15 @@ def community_member_sigs(communities: dict[int, list[NodeId]]) -> dict[int, str
 
 
 def cluster(
-    G: nx.Graph,
+    G: nx.Graph[NodeIdT, Any, Any],
     resolution: float = 1.0,
     exclude_hubs_percentile: float | None = None,
-) -> dict[int, list[NodeId]]:
+) -> dict[int, list[NodeIdT]]:
     """Run Leiden community detection. Returns {community_id: [node_ids]}.
 
-    Community IDs are stable across runs: 0 = largest community after splitting.
+    Community IDs are stable across runs for structural node IDs: 0 = largest
+    community after splitting. Opaque hashables are only as stable as their distinct
+    type-qualified repr; canonical-key collisions fail explicitly.
     Oversized communities (> 25% of graph nodes, min 10) are split by running
     a second Leiden pass on the subgraph.
 
@@ -212,13 +263,14 @@ def cluster(
     """
     if G.number_of_nodes() == 0:
         return {}
+    keyed_nodes = _validated_keyed_nodes(G.nodes())
     if G.is_directed():
         G = G.to_undirected()
     if G.number_of_edges() == 0:
-        return {i: [n] for i, n in enumerate(_sorted_nodes(G.nodes()))}
+        return {i: [node] for i, (_, node) in enumerate(keyed_nodes)}
 
     # Compute hub exclusion set before removing anything so degree is based on full graph
-    hub_nodes: set[NodeId] = set()
+    hub_nodes: set[NodeIdT] = set()
     if exclude_hubs_percentile is not None:
         degrees = sorted(d for _, d in G.degree())
         if degrees:
@@ -238,7 +290,7 @@ def cluster(
     connected_nodes = [n for n, degree in partition_graph.degree() if degree > 0]
     connected = partition_graph.subgraph(connected_nodes)
 
-    raw: dict[int, list[NodeId]] = {}
+    raw: dict[int, list[NodeIdT]] = {}
     if connected.number_of_nodes() > 0:
         partition = _partition(connected, resolution=resolution)
         for node, cid in partition.items():
@@ -252,7 +304,9 @@ def cluster(
 
     # Reattach excluded hubs by majority-vote neighbour community
     if hub_nodes:
-        node_community: dict[NodeId, int] = {n: cid for cid, nodes in raw.items() for n in nodes}
+        node_community: dict[NodeIdT, int] = {
+            n: cid for cid, nodes in raw.items() for n in nodes
+        }
         for hub in _sorted_nodes(hub_nodes):
             votes: dict[int, int] = {}
             for nb in G.neighbors(hub):
@@ -273,7 +327,7 @@ def cluster(
 
     # Split oversized communities
     max_size = max(_MIN_SPLIT_SIZE, int(G.number_of_nodes() * _MAX_COMMUNITY_FRACTION))
-    final_communities: list[list[NodeId]] = []
+    final_communities: list[list[NodeIdT]] = []
     for nodes in raw.values():
         if len(nodes) > max_size:
             final_communities.extend(_split_community(G, nodes))
@@ -282,7 +336,7 @@ def cluster(
 
     # Second pass: re-split low-cohesion communities caused by doc-hub nodes
     # that bridge otherwise-unrelated subsystems (e.g. CLAUDE.md connected to everything).
-    second_pass: list[list[NodeId]] = []
+    second_pass: list[list[NodeIdT]] = []
     for nodes in final_communities:
         if len(nodes) >= _COHESION_SPLIT_MIN_SIZE and cohesion_score(G, nodes) < _COHESION_SPLIT_THRESHOLD:
             splits = _split_community(G, nodes)
@@ -291,8 +345,9 @@ def cluster(
             second_pass.append(nodes)
     final_communities = second_pass
 
-    # Re-index by size descending. The tuple(sorted(nodes)) tiebreak makes this a
-    # TOTAL order, so an identical grouping always gets identical community IDs.
+    # Re-index by size descending. For structural IDs, the canonical-key tiebreak
+    # makes this a cross-run total order. Opaque IDs inherit repr stability and
+    # duplicate canonical keys fail before the graph is partitioned.
     # Without it, the hundreds of equal-sized small communities are ordered by the
     # partitioner's (not seed-stable) enumeration order, so their integer IDs
     # permute run-to-run - which reads as massive "community churn" in a per-node
@@ -303,14 +358,16 @@ def cluster(
     return {i: _sorted_nodes(nodes) for i, nodes in enumerate(final_communities)}
 
 
-def _split_community(G: nx.Graph, nodes: list[NodeId]) -> list[list[NodeId]]:
+def _split_community(
+    G: nx.Graph[NodeIdT, Any, Any], nodes: Sequence[NodeIdT]
+) -> list[list[NodeIdT]]:
     """Run a second Leiden pass on a community subgraph to split it further."""
     subgraph = G.subgraph(nodes)
     if subgraph.number_of_edges() == 0:
         # No edges - split into individual nodes
         return [[n] for n in _sorted_nodes(nodes)]
     sub_partition = _partition(subgraph)
-    sub_communities: dict[int, list[NodeId]] = {}
+    sub_communities: dict[int, list[NodeIdT]] = {}
     for node, cid in sub_partition.items():
         sub_communities.setdefault(cid, []).append(node)
     if len(sub_communities) <= 1:
@@ -318,7 +375,9 @@ def _split_community(G: nx.Graph, nodes: list[NodeId]) -> list[list[NodeId]]:
     return [_sorted_nodes(v) for v in sub_communities.values()]
 
 
-def cohesion_score(G: nx.Graph, community_nodes: list[NodeId]) -> float:
+def cohesion_score(
+    G: nx.Graph[NodeIdT, Any, Any], community_nodes: Sequence[NodeIdT]
+) -> float:
     """Ratio of actual intra-community edges to maximum possible."""
     n = len(community_nodes)
     if n <= 1:
@@ -329,7 +388,10 @@ def cohesion_score(G: nx.Graph, community_nodes: list[NodeId]) -> float:
     return actual / possible if possible > 0 else 0.0
 
 
-def score_all(G: nx.Graph, communities: dict[int, list[NodeId]]) -> dict[int, float]:
+def score_all(
+    G: nx.Graph[NodeIdT, Any, Any],
+    communities: Mapping[int, Sequence[NodeIdT]],
+) -> dict[int, float]:
     return {cid: cohesion_score(G, nodes) for cid, nodes in communities.items()}
 
 
@@ -340,7 +402,8 @@ def remap_communities_to_previous(
     """Remap community IDs to maximize overlap with a previous assignment.
 
     Uses greedy one-to-one matching by intersection size, then assigns fresh IDs
-    to unmatched communities in deterministic order (size desc, lexical tie-break).
+    to unmatched communities in structural-key order (size desc, canonical-key
+    tie-break). Opaque hashables inherit the stability of their distinct repr.
     """
     if not communities:
         return {}

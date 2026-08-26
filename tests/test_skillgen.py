@@ -8,6 +8,8 @@ lives only in the references, and no reference duplicates core content.
 """
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import shutil
 import sys
@@ -22,6 +24,30 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tools.skillgen import gen  # noqa: E402
+
+
+_WINDOWS_POWERSHELL = sys.platform == "win32" and (
+    shutil.which("pwsh") is not None or shutil.which("powershell") is not None
+)
+
+
+def _run_powershell_script(
+    executable: str,
+    script: str,
+    tmp_path: Path,
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    script_path = tmp_path / "test-script.ps1"
+    script_path.write_bytes(script.encode("utf-8"))
+    return subprocess.run(
+        [executable, "-NoProfile", "-NonInteractive", "-File", str(script_path)],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
 
 
 def test_audit_coverage_passes():
@@ -318,13 +344,16 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert "unconditionally re-resolve and overwrite `.graphify_python` first" in body, key
             assert "before every subcommand" in body, key
             assert "never persist a\nbare or unvalidated `python` / `python3` command" in body, key
+        assert "trusted inputs outside the" in body, key
+        assert "inspected-corpus boundary" in body, key
+        assert "time-of-check/time-of-use hardening" in body, key
         if platform.shell == "powershell":
             assert "function Get-Python314Candidates" in bootstrap, key
             assert "function Find-Python314" in bootstrap, key
             assert "function Test-GraphifyPython" in bootstrap, key
             assert "Get-Command python3.14" in bootstrap, key
-            assert "$launcher.Source -3.14 -c" in bootstrap, key
-            assert "& $installPython -m pip install graphifyy" in bootstrap, key
+            assert "$launcher.Source -3.14 -E -P -B -c" in bootstrap, key
+            assert "& $installPython -E -P -B -m pip install graphifyy" in bootstrap, key
             assert "\n        pip install graphifyy" not in bootstrap, key
         else:
             assert "_UV_TOOL_DIR=$(uv tool dir 2>/dev/null)" in bootstrap, key
@@ -332,7 +361,7 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert "uv tool run" not in bootstrap, key
             assert "for _CANDIDATE in python3.14 python3" in bootstrap, key
             assert "is_supported_graphify_python \"$_SHEBANG\"" in bootstrap, key
-            assert '[ -n "$PYTHON" ] && { "$PYTHON" -m pip install' in bootstrap, key
+            assert '[ -n "$PYTHON" ] && { "$PYTHON" -E -P -B -m pip install' in bootstrap, key
 
 
 @pytest.mark.parametrize("platform_key", ["aider", "devin"])
@@ -340,13 +369,13 @@ def test_monolithic_skills_route_mcp_and_watch_through_saved_interpreter(platfor
     body = gen.render(gen.load_platforms()[platform_key])[0].content
 
     assert "graphify-mcp graphify-out/graph.json" not in body
-    assert "graphify watch INPUT_PATH --debounce 3" not in body
-    assert body.count('"$(cat graphify-out/.graphify_python)" -m graphify.serve') == 1
-    assert body.count('"$(cat graphify-out/.graphify_python)" -m graphify.watch') == 1
+    assert not re.search(r"^graphify watch INPUT_PATH --debounce 3$", body, re.MULTILINE)
+    assert body.count('"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify.serve') == 1
+    assert body.count('"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify watch') == 1
     assert body.count("successfully rerun Step 1") == 2
     assert body.count("is freshly validated and overwritten") == 2
     assert body.count('"command": "<absolute path from: cat graphify-out/.graphify_python>"') == 1
-    assert body.count('"args": ["-m", "graphify.serve",') == 1
+    assert body.count('"args": ["-E", "-P", "-B", "-m", "graphify.serve",') == 1
     assert "python3 -m graphify.serve" not in body
     assert "python3 -m graphify.watch" not in body
     assert '"command": "python3"' not in body
@@ -356,9 +385,13 @@ def test_powershell_troubleshooting_uninstalls_with_saved_interpreter():
     body = gen.render(gen.load_platforms()["windows"])[0].content
     command = (
         "& (Get-Content graphify-out\\.graphify_python) "
-        "-m pip uninstall graspologic-native"
+        "-E -P -B -m pip uninstall graspologic-native"
     )
     assert command in body
+    assert (
+        "& (Get-Content graphify-out\\.graphify_python) "
+        "-E -P -B -m pip install --upgrade graphifyy"
+    ) in body
     assert "(`pip uninstall graspologic-native`)" not in body
 
 
@@ -369,14 +402,116 @@ def _posix_bootstrap_script() -> str:
     return bootstrap.split("```bash\n", 1)[1].split("\n```", 1)[0].replace("INPUT_PATH", ".")
 
 
+def _powershell_step1_scripts() -> tuple[str, str]:
+    platform = gen.load_platforms()["windows"]
+    body = gen.render(platform)[0].content
+    step1 = body[body.index("### Step 1"):body.index("### Step 2")]
+    scripts = re.findall(r"```powershell\n(.*?)\n```", step1, flags=re.DOTALL)
+    assert len(scripts) == 2
+    bootstrap, root_persistence = scripts
+    assert step1.index(bootstrap) < step1.index(root_persistence)
+    return bootstrap, root_persistence
+
+
+def _powershell_bootstrap_script() -> str:
+    return _powershell_step1_scripts()[0]
+
+
+def _powershell_root_persistence_script() -> str:
+    return _powershell_step1_scripts()[1].replace("INPUT_PATH", ".")
+
+
 def _isolated_bootstrap_bin(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for utility in ("head", "mkdir", "tail", "tr"):
+    for utility in ("cat", "head", "mkdir", "tail", "tr"):
         resolved = shutil.which(utility)
         assert resolved is not None
         (bin_dir / utility).symlink_to(resolved)
     return bin_dir
+
+
+def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, Path]:
+    environment = tmp_path / "offline-python"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(environment)],
+        check=True,
+        capture_output=True,
+    )
+    python = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    site_packages = Path(
+        subprocess.check_output(
+            [
+                str(python),
+                "-E",
+                "-P",
+                "-B",
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
+            text=True,
+        ).strip()
+    )
+    pip_marker = tmp_path / "trusted-pip-ran"
+    graphify_marker = tmp_path / "trusted-graphify-ran"
+    pip_package = site_packages / "pip"
+    pip_package.mkdir()
+    (pip_package / "__init__.py").write_text("", encoding="utf-8")
+    graphify_main = (
+        "from pathlib import Path\n"
+        f"Path({str(graphify_marker)!r}).touch()\n"
+    )
+    (pip_package / "__main__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(pip_marker)!r}).write_text(' '.join(__import__('sys').argv[1:]))\n"
+        f"package = Path({str(site_packages)!r}) / 'graphify'\n"
+        "if 'install' in __import__('sys').argv:\n"
+        "    package.mkdir(exist_ok=True)\n"
+        "    (package / '__init__.py').write_text('TRUSTED = True\\n')\n"
+        f"    (package / '__main__.py').write_text({graphify_main!r})\n",
+        encoding="utf-8",
+    )
+    return python, pip_marker, graphify_marker
+
+
+def _write_python_shadows(tmp_path: Path) -> tuple[Path, list[Path]]:
+    markers = [
+        tmp_path / "cwd-pip-shadow-ran",
+        tmp_path / "cwd-graphify-shadow-ran",
+        tmp_path / "cwd-sitecustomize-ran",
+        tmp_path / "pythonpath-pip-shadow-ran",
+        tmp_path / "pythonpath-graphify-shadow-ran",
+        tmp_path / "pythonpath-sitecustomize-ran",
+    ]
+    roots = (tmp_path, tmp_path / "pythonpath-shadow")
+    for root, marker_offset in zip(roots, (0, 3), strict=True):
+        root.mkdir(exist_ok=True)
+        (root / "pip.py").write_text(
+            f"from pathlib import Path\nPath({str(markers[marker_offset])!r}).touch()\n",
+            encoding="utf-8",
+        )
+        package = root / "graphify"
+        package.mkdir()
+        for module in ("__init__.py", "__main__.py"):
+            (package / module).write_text(
+                f"from pathlib import Path\nPath({str(markers[marker_offset + 1])!r}).touch()\n",
+                encoding="utf-8",
+            )
+        (root / "sitecustomize.py").write_text(
+            f"from pathlib import Path\nPath({str(markers[marker_offset + 2])!r}).touch()\n",
+            encoding="utf-8",
+        )
+    return roots[1], markers
+
+
+def _executable_blocks(body: str) -> list[tuple[str, str]]:
+    return re.findall(r"```(bash|sh|powershell)\n(.*?)\n```", body, flags=re.DOTALL)
+
+
+def _block_containing(body: str, needle: str) -> str:
+    matches = [block for _, block in _executable_blocks(body) if needle in block]
+    assert len(matches) == 1, (needle, len(matches))
+    return matches[0]
 
 
 @pytest.mark.parametrize("command", ["python3.14", "python3"])
@@ -478,28 +613,646 @@ def test_posix_bootstrap_ignores_unsupported_existing_graphify_shebang(tmp_path,
     assert Path(saved).resolve() == Path(sys.executable).resolve()
 
 
+def test_posix_missing_package_install_uses_trusted_pip_under_shadows(tmp_path, monkeypatch):
+    python, pip_marker, graphify_marker = _offline_python_with_trusted_fake_pip(tmp_path)
+    pythonpath_shadow, shadow_markers = _write_python_shadows(tmp_path)
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    candidate = bin_dir / "python3.14"
+    candidate.write_text(f'#!/bin/sh\nexec "{python}" "$@"\n', encoding="utf-8")
+    candidate.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("PYTHONPATH", str(pythonpath_shadow))
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "install graphifyy" in pip_marker.read_text(encoding="utf-8")
+    saved = (tmp_path / "graphify-out" / ".graphify_python").read_text(encoding="utf-8")
+    assert Path(saved).resolve() == python.resolve()
+
+    core, _ = _platform_artifacts("claude")
+    query = subprocess.run(
+        ["/bin/bash", "-c", _block_containing(core, '-m graphify query "<question>"')],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert query.returncode == 0, query.stderr
+    assert graphify_marker.exists()
+    assert not any(marker.exists() for marker in shadow_markers)
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
+def test_troubleshooting_pip_commands_use_trusted_module_under_shadows(tmp_path):
+    python, pip_marker, _ = _offline_python_with_trusted_fake_pip(tmp_path)
+    pythonpath_shadow, shadow_markers = _write_python_shadows(tmp_path)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(pythonpath_shadow)
+    for arguments in (
+        ["install", "--upgrade", "graphifyy"],
+        ["uninstall", "graspologic-native"],
+    ):
+        result = subprocess.run(
+            [str(python), "-E", "-P", "-B", "-m", "pip", *arguments],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert " ".join(arguments) in pip_marker.read_text(encoding="utf-8")
+    assert not any(marker.exists() for marker in shadow_markers)
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
+def test_startup_policy_preserves_disposable_user_site_and_rejects_shadows(tmp_path):
+    base_python = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    home = tmp_path / "home"
+    home.mkdir()
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["APPDATA"] = str(home / "AppData" / "Roaming")
+    pythonpath_shadow, shadow_markers = _write_python_shadows(tmp_path)
+    env["PYTHONPATH"] = str(pythonpath_shadow)
+    user_site = Path(
+        subprocess.check_output(
+            [str(base_python), "-E", "-P", "-B", "-c", "import site; print(site.getusersitepackages())"],
+            cwd=tmp_path,
+            env=env,
+            text=True,
+        ).strip()
+    )
+    package = user_site / "graphify"
+    package.mkdir(parents=True)
+    import_marker = tmp_path / "trusted-user-site-imported"
+    module_marker = tmp_path / "trusted-user-site-module-ran"
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(import_marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    (package / "__main__.py").write_text(
+        f"from pathlib import Path\nPath({str(module_marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    for arguments in (
+        ["-c", "import graphify"],
+        ["-m", "graphify"],
+    ):
+        result = subprocess.run(
+            [str(base_python), "-E", "-P", "-B", *arguments],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+    assert import_marker.exists()
+    assert module_marker.exists()
+    assert not any(marker.exists() for marker in shadow_markers)
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
+def test_fast_path_bootstraps_interpreter_without_overwriting_scan_root(tmp_path, monkeypatch):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    (bin_dir / "python3.14").symlink_to(Path(sys.executable))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    graphify_out = tmp_path / "graphify-out"
+    graphify_out.mkdir()
+    root_marker = graphify_out / ".graphify_root"
+    root_marker.write_text("preserve-this-root", encoding="utf-8")
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert root_marker.read_text(encoding="utf-8") == "preserve-this-root"
+    assert "run only the interpreter-bootstrap block" in _platform_artifacts("claude")[0]
+
+
+def test_rendered_executable_blocks_reject_ambient_graphify_commands():
+    platforms = gen.load_platforms()
+    bare_graphify = re.compile(r"^\s*(?:[A-Za-z_]\w*=\$\()?graphify(?:\s|$)", re.MULTILINE)
+    bare_python_module = re.compile(
+        r"^\s*(?:python|python3|python3\.\d+)\s+-m\s+graphify(?:\s|\.)",
+        re.MULTILINE,
+    )
+    unquoted_saved_module = re.compile(
+        r"^\s*\$\(cat graphify-out/\.graphify_python\)\s+-m\s+graphify(?:\s|\.)",
+        re.MULTILINE,
+    )
+    checked = 0
+    for key, platform in platforms.items():
+        for artifact in gen.render(platform):
+            for _, block in _executable_blocks(artifact.content):
+                checked += 1
+                assert not bare_graphify.search(block), f"{key}:{artifact.path}\n{block}"
+                assert not bare_python_module.search(block), f"{key}:{artifact.path}\n{block}"
+                assert not unquoted_saved_module.search(block), f"{key}:{artifact.path}\n{block}"
+                operational = [
+                    line
+                    for line in block.splitlines()
+                    if not line.lstrip().startswith("#")
+                    and (" -m graphify " in line or " -m graphify." in line)
+                ]
+                if not operational:
+                    continue
+                assert "graphify interpreter" in block.lower(), f"{key}:{artifact.path}\n{block}"
+                if platform.shell == "powershell":
+                    assert all(
+                        line.lstrip().startswith(
+                            "& (Get-Content graphify-out\\.graphify_python) "
+                            "-E -P -B -m graphify"
+                        )
+                        for line in operational
+                    ), f"{key}:{artifact.path}\n{block}"
+                else:
+                    assert all(
+                        line.lstrip().startswith(
+                            '"$(cat graphify-out/.graphify_python)" '
+                            "-E -P -B -m graphify"
+                        )
+                        for line in operational
+                    ), f"{key}:{artifact.path}\n{block}"
+    assert checked > 100
+
+
+def test_rendered_python_launches_require_exact_startup_policy():
+    checked = 0
+    for key, platform in gen.load_platforms().items():
+        for artifact in gen.render(platform):
+            content = artifact.content
+            assert " -I " not in content
+            assert '"-I"' not in content
+            assert '"args": ["-m", "graphify.serve"' not in content, (
+                key,
+                artifact.path,
+            )
+            for _, block in _executable_blocks(content):
+                for line in block.splitlines():
+                    if line.lstrip().startswith("#"):
+                        continue
+                    python_launch = any(
+                        marker in line
+                        for marker in (
+                            '"$(cat graphify-out/.graphify_python)"', '"$_GRAPHIFY_SAVED"',
+                            '"$1"', '"$PYTHON"', "& $Candidate", "& $GraphifySaved",
+                            "& $installPython", "& $py314.Source", "& $python.Source",
+                            "& $launcher.Source -3.14", "& (Get-Content graphify-out\\.graphify_python)",
+                        )
+                    )
+                    if python_launch and (" -c " in line or " -m " in line):
+                        checked += 1
+                        assert " -E -P -B -c " in line or " -E -P -B -m " in line, (
+                            f"{key}:{artifact.path}:{line}"
+                        )
+            if '"graphify.serve"' in content:
+                assert '"args": ["-E", "-P", "-B", "-m", "graphify.serve"' in content, (
+                    key,
+                    artifact.path,
+                )
+    assert checked > 100
+
+
+def test_posix_path_shadow_flows_use_saved_interpreter(tmp_path, monkeypatch):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    ambient_marker = tmp_path / "ambient-command-ran"
+    for name in ("graphify", "python3"):
+        shadow = bin_dir / name
+        shadow.write_text(f"#!/bin/sh\n: > '{ambient_marker}'\nexit 97\n", encoding="utf-8")
+        shadow.chmod(0o755)
+    (bin_dir / "python3.14").symlink_to(Path(sys.executable))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    cwd_shadow_marker = tmp_path / "cwd-shadow-imported"
+    cwd_shadow = tmp_path / "graphify"
+    cwd_shadow.mkdir()
+    for module in ("__init__.py", "__main__.py"):
+        (cwd_shadow / module).write_text(
+            f"from pathlib import Path\nPath({str(cwd_shadow_marker)!r}).touch()\n",
+            encoding="utf-8",
+        )
+    pythonpath_shadow_marker = tmp_path / "pythonpath-shadow-imported"
+    pythonpath_root = tmp_path / "pythonpath-shadow"
+    pythonpath_shadow = pythonpath_root / "graphify"
+    pythonpath_shadow.mkdir(parents=True)
+    for module in ("__init__.py", "__main__.py"):
+        (pythonpath_shadow / module).write_text(
+            f"from pathlib import Path\nPath({str(pythonpath_shadow_marker)!r}).touch()\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setenv("PYTHONPATH", str(pythonpath_root))
+
+    bootstrap = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert bootstrap.returncode == 0, bootstrap.stderr
+
+    saved_log = tmp_path / "saved-interpreter.log"
+    saved = tmp_path / "saved-python"
+    saved.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> '{saved_log}'\n"
+        "case \"$*\" in\n"
+        "  *'-c import graphify'*) exec " + str(Path(sys.executable)) + " \"$@\";;\n"
+        "  *'-m graphify.serve'*) exec "
+        + str(Path(sys.executable))
+        + " -E -P -B -m graphify.serve --help;;\n"
+        "  *'-m graphify'*) exec "
+        + str(Path(sys.executable))
+        + " -E -P -B -m graphify --help;;\n"
+        "esac\n"
+        "exit 98\n",
+        encoding="utf-8",
+    )
+    saved.chmod(0o755)
+    (tmp_path / "graphify-out" / ".graphify_python").write_text(str(saved), encoding="utf-8")
+
+    core, refs = _platform_artifacts("claude")
+    flows = [
+        _block_containing(core, '-m graphify query "<question>"'),
+        _block_containing(refs["query.md"], '-m graphify path "NODE_A"'),
+        _block_containing(refs["query.md"], '-m graphify explain "NODE_NAME"'),
+        _block_containing(refs["update.md"], "-m graphify update INPUT_PATH"),
+        _block_containing(refs["exports.md"], "-m graphify export wiki"),
+        _block_containing(refs["add-watch.md"], "-m graphify watch INPUT_PATH"),
+        _block_containing(refs["exports.md"], "-m graphify.serve graphify-out/graph.json"),
+        _block_containing(refs["hooks.md"], "-m graphify claude install"),
+        _block_containing(refs["hooks.md"], "-m graphify hook install"),
+    ]
+    for block in flows:
+        result = subprocess.run(
+            ["/bin/bash", "-c", block],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    log = saved_log.read_text(encoding="utf-8")
+    for expected in (
+        "-E -P -B -m graphify query",
+        "-E -P -B -m graphify path",
+        "-E -P -B -m graphify explain",
+        "-E -P -B -m graphify update",
+        "-E -P -B -m graphify export wiki",
+        "-E -P -B -m graphify watch",
+        "-E -P -B -m graphify.serve",
+        "-E -P -B -m graphify claude install",
+        "-E -P -B -m graphify hook install",
+    ):
+        assert expected in log
+    assert not ambient_marker.exists()
+    assert not cwd_shadow_marker.exists()
+    assert not pythonpath_shadow_marker.exists()
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
 def test_powershell_bootstrap_validates_every_candidate_and_parses():
     from tree_sitter import Language, Parser
     import tree_sitter_powershell
 
-    platform = gen.load_platforms()["windows"]
-    body = gen.render(platform)[0].content
-    bootstrap = body[body.index("### Step 1"):body.index("### Step 2")]
-    script = bootstrap.split("```powershell\n", 1)[1].split("\n```", 1)[0]
+    script, root_persistence = _powershell_step1_scripts()
 
     assert script.count("(Test-Path $py) -and (Test-GraphifyPython $py)") == 2
     assert "foreach ($py in @(Get-Python314Candidates))" in script
     assert "if (Test-GraphifyPython $py) { return $py }" in script
-    assert script.count("-c $versionCheck") == 3
+    assert script.count("-E -P -B -c $versionCheck") == 3
     assert script.count('Write-Output ("$resolved".Trim())') == 3
-    assert "& $installPython -m pip install graphifyy" in script
+    assert "& $installPython -E -P -B -m pip install graphifyy" in script
     assert "if (-not $GRAPHIFY_PYTHON)" in script
+    assert "& $Candidate -E -P -B -c \"import graphify, sys" in script
     assert "sys.implementation.name == 'cpython'" in script
     assert "sys.version_info.releaselevel == 'final'" in script
+    assert "graphify-out\\.graphify_python" in script
+    assert ".graphify_root" not in script
+    assert ".graphify_python" not in root_persistence
+    assert "graphify-out\\.graphify_root" in root_persistence
+    assert "Resolve-Path INPUT_PATH" in root_persistence
 
     parser = Parser(Language(tree_sitter_powershell.language()))
-    tree = parser.parse(script.encode())
-    assert not tree.root_node.has_error, tree.root_node
+    for source in (script, root_persistence):
+        tree = parser.parse(source.encode())
+        assert not tree.root_node.has_error, tree.root_node
+
+
+@pytest.mark.skipif(
+    not _WINDOWS_POWERSHELL,
+    reason="Runtime test requires Windows and PowerShell; hosted Windows CI covers it",
+)
+def test_powershell_missing_package_install_uses_trusted_pip_under_shadows(tmp_path):
+    executable = shutil.which("pwsh") or shutil.which("powershell")
+    assert executable is not None
+    python, pip_marker, graphify_marker = _offline_python_with_trusted_fake_pip(tmp_path)
+    pythonpath_shadow, shadow_markers = _write_python_shadows(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3.14.cmd").write_text(
+        f'@echo off\r\n"{python}" %*\r\n', encoding="utf-8", newline=""
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env["PYTHONPATH"] = str(pythonpath_shadow)
+    env.pop("UV_TOOL_DIR", None)
+    env.pop("PIPX_HOME", None)
+
+    bootstrap = _run_powershell_script(
+        executable,
+        _powershell_bootstrap_script(),
+        tmp_path,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert bootstrap.returncode == 0, bootstrap.stderr.decode(errors="replace")
+    assert "install graphifyy" in pip_marker.read_text(encoding="utf-8")
+    saved = (tmp_path / "graphify-out" / ".graphify_python").read_text(encoding="utf-8-sig")
+    assert Path(saved).resolve() == python.resolve()
+
+    core, _ = _platform_artifacts("windows")
+    query = _run_powershell_script(
+        executable,
+        _block_containing(core, '-m graphify query "<question>"'),
+        tmp_path,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert query.returncode == 0, query.stderr.decode(errors="replace")
+    assert graphify_marker.exists()
+    assert not any(marker.exists() for marker in shadow_markers)
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
+@pytest.mark.skipif(
+    not _WINDOWS_POWERSHELL,
+    reason="Runtime test requires Windows and PowerShell; hosted Windows CI covers it",
+)
+def test_powershell_troubleshooting_pip_uses_trusted_module_under_shadows(tmp_path):
+    executable = shutil.which("pwsh") or shutil.which("powershell")
+    assert executable is not None
+    python, pip_marker, _ = _offline_python_with_trusted_fake_pip(tmp_path)
+    pythonpath_shadow, shadow_markers = _write_python_shadows(tmp_path)
+    graphify_out = tmp_path / "graphify-out"
+    graphify_out.mkdir()
+    (graphify_out / ".graphify_python").write_text(str(python), encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(pythonpath_shadow)
+    body = gen.render(gen.load_platforms()["windows"])[0].content
+    commands = [
+        re.search(
+            r"`(& \(Get-Content graphify-out\\\.graphify_python\) -E -P -B -m pip install --upgrade graphifyy)`",
+            body,
+        ),
+        re.search(
+            r"`(& \(Get-Content graphify-out\\\.graphify_python\) -E -P -B -m pip uninstall graspologic-native)`",
+            body,
+        ),
+    ]
+    for match, expected in zip(
+        commands,
+        ("install --upgrade graphifyy", "uninstall graspologic-native"),
+        strict=True,
+    ):
+        assert match is not None
+        result = _run_powershell_script(
+            executable,
+            match.group(1),
+            tmp_path,
+            cwd=tmp_path,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert expected in pip_marker.read_text(encoding="utf-8")
+    assert not any(marker.exists() for marker in shadow_markers)
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
+@pytest.mark.skipif(
+    not _WINDOWS_POWERSHELL,
+    reason="Runtime test requires Windows and PowerShell; hosted Windows CI covers it",
+)
+@pytest.mark.parametrize("reject_first_candidate", [False, True])
+def test_powershell_fast_path_bootstrap_preserves_existing_root_without_network(
+    tmp_path, reject_first_candidate
+):
+    executable = shutil.which("pwsh") or shutil.which("powershell")
+    assert executable is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    rejected = tmp_path / "unsupported-python-was-rejected"
+    supported_name = "python.cmd" if reject_first_candidate else "python3.14.cmd"
+    supported = bin_dir / supported_name
+    supported.write_text(
+        f'@echo off\r\n"{sys.executable}" %*\r\n', encoding="utf-8", newline=""
+    )
+    if reject_first_candidate:
+        (bin_dir / "python3.14.cmd").write_text(
+            f'@echo off\r\n>>"{rejected}" echo rejected\r\nexit /b 1\r\n',
+            encoding="utf-8",
+            newline="",
+        )
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env.pop("UV_TOOL_DIR", None)
+    env.pop("PIPX_HOME", None)
+    graphify_out = tmp_path / "graphify-out"
+    graphify_out.mkdir()
+    root_marker = graphify_out / ".graphify_root"
+    original_root_bytes = b"preserve-this-root\x00\xff"
+    root_marker.write_bytes(original_root_bytes)
+    result = _run_powershell_script(
+        executable,
+        _powershell_bootstrap_script(),
+        tmp_path,
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    saved_python = (graphify_out / ".graphify_python").read_text(
+        encoding="utf-8-sig"
+    )
+    assert Path(saved_python).resolve() == Path(sys.executable).resolve()
+    assert root_marker.read_bytes() == original_root_bytes
+    assert rejected.exists() is reject_first_candidate
+
+
+@pytest.mark.skipif(
+    not _WINDOWS_POWERSHELL,
+    reason="Runtime test requires Windows and PowerShell; hosted Windows CI covers it",
+)
+@pytest.mark.parametrize("reject_first_candidate", [False, True])
+def test_powershell_full_build_persists_resolved_root_without_network(
+    tmp_path, reject_first_candidate
+):
+    executable = shutil.which("pwsh") or shutil.which("powershell")
+    assert executable is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    rejected = tmp_path / "unsupported-python-was-rejected"
+    supported_name = "python.cmd" if reject_first_candidate else "python3.14.cmd"
+    (bin_dir / supported_name).write_text(
+        f'@echo off\r\n"{sys.executable}" %*\r\n', encoding="utf-8", newline=""
+    )
+    if reject_first_candidate:
+        (bin_dir / "python3.14.cmd").write_text(
+            f'@echo off\r\n>>"{rejected}" echo rejected\r\nexit /b 1\r\n',
+            encoding="utf-8",
+            newline="",
+        )
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env.pop("UV_TOOL_DIR", None)
+    env.pop("PIPX_HOME", None)
+    bootstrap = _run_powershell_script(
+        executable,
+        _powershell_bootstrap_script(),
+        tmp_path,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert bootstrap.returncode == 0, bootstrap.stderr.decode(errors="replace")
+    persist_root = _run_powershell_script(
+        executable,
+        _powershell_root_persistence_script(),
+        tmp_path,
+        cwd=tmp_path,
+        env=env,
+    )
+
+    assert persist_root.returncode == 0, persist_root.stderr.decode(errors="replace")
+    saved_python = (tmp_path / "graphify-out" / ".graphify_python").read_text(
+        encoding="utf-8-sig"
+    )
+    assert Path(saved_python).resolve() == Path(sys.executable).resolve()
+    saved_root = (tmp_path / "graphify-out" / ".graphify_root").read_text(
+        encoding="utf-8-sig"
+    )
+    assert Path(saved_root).resolve() == tmp_path.resolve()
+    assert rejected.exists() is reject_first_candidate
+
+
+@pytest.mark.skipif(
+    not _WINDOWS_POWERSHELL,
+    reason="Runtime test requires Windows and PowerShell; hosted Windows CI covers it",
+)
+def test_powershell_path_shadow_flows_use_saved_interpreter(tmp_path):
+    executable = shutil.which("pwsh") or shutil.which("powershell")
+    assert executable is not None
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ambient_marker = tmp_path / "ambient-command-ran"
+    for name in ("graphify.cmd", "python.cmd"):
+        (bin_dir / name).write_text(
+            f'@echo off\r\n>>"{ambient_marker}" echo ambient\r\nexit /b 97\r\n',
+            encoding="utf-8",
+            newline="",
+        )
+
+    saved_log = tmp_path / "saved-interpreter.log"
+    saved = tmp_path / "saved-python.cmd"
+    saved.write_text(
+        "@echo off\r\n"
+        f'>>"{saved_log}" echo %*\r\n'
+        "if \"%1\"==\"-E\" if \"%2\"==\"-P\" if \"%3\"==\"-B\" "
+        "if \"%4\"==\"-c\" (\r\n"
+        f'  "{sys.executable}" %*\r\n'
+        "  exit /b %ERRORLEVEL%\r\n"
+        ")\r\n"
+        "if \"%1\"==\"-E\" if \"%2\"==\"-P\" if \"%3\"==\"-B\" "
+        "if \"%4\"==\"-m\" if \"%5\"==\"graphify.serve\" (\r\n"
+        f'  "{sys.executable}" -E -P -B -m graphify.serve --help\r\n'
+        "  exit /b %ERRORLEVEL%\r\n"
+        ")\r\n"
+        "if \"%1\"==\"-E\" if \"%2\"==\"-P\" if \"%3\"==\"-B\" "
+        "if \"%4\"==\"-m\" if \"%5\"==\"graphify\" (\r\n"
+        f'  "{sys.executable}" -E -P -B -m graphify --help\r\n'
+        "  exit /b %ERRORLEVEL%\r\n"
+        ")\r\n"
+        "exit /b 98\r\n",
+        encoding="utf-8",
+        newline="",
+    )
+    graphify_out = tmp_path / "graphify-out"
+    graphify_out.mkdir()
+    (graphify_out / ".graphify_python").write_text(str(saved), encoding="utf-8")
+
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    cwd_shadow_marker = tmp_path / "cwd-shadow-imported"
+    cwd_shadow = tmp_path / "graphify"
+    cwd_shadow.mkdir()
+    for module in ("__init__.py", "__main__.py"):
+        (cwd_shadow / module).write_text(
+            f"from pathlib import Path\nPath({str(cwd_shadow_marker)!r}).touch()\n",
+            encoding="utf-8",
+        )
+    pythonpath_shadow_marker = tmp_path / "pythonpath-shadow-imported"
+    pythonpath_root = tmp_path / "pythonpath-shadow"
+    pythonpath_shadow = pythonpath_root / "graphify"
+    pythonpath_shadow.mkdir(parents=True)
+    for module in ("__init__.py", "__main__.py"):
+        (pythonpath_shadow / module).write_text(
+            f"from pathlib import Path\nPath({str(pythonpath_shadow_marker)!r}).touch()\n",
+            encoding="utf-8",
+        )
+    env["PYTHONPATH"] = str(pythonpath_root)
+    core, refs = _platform_artifacts("windows")
+    flows = [
+        _block_containing(core, '-m graphify query "<question>"'),
+        _block_containing(refs["query.md"], '-m graphify path "NODE_A"'),
+        _block_containing(refs["query.md"], '-m graphify explain "NODE_NAME"'),
+        _block_containing(refs["update.md"], "-m graphify update INPUT_PATH"),
+        _block_containing(refs["exports.md"], "-m graphify export wiki"),
+        _block_containing(refs["add-watch.md"], "-m graphify watch INPUT_PATH"),
+        _block_containing(refs["exports.md"], "-m graphify.serve graphify-out/graph.json"),
+        _block_containing(refs["hooks.md"], "-m graphify claude install"),
+        _block_containing(refs["hooks.md"], "-m graphify hook install"),
+    ]
+    for block in flows:
+        result = _run_powershell_script(
+            executable,
+            block,
+            tmp_path,
+            cwd=tmp_path,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+    log = saved_log.read_text(encoding="utf-8")
+    for expected in (
+        "-E -P -B -m graphify query",
+        "-E -P -B -m graphify path",
+        "-E -P -B -m graphify explain",
+        "-E -P -B -m graphify update",
+        "-E -P -B -m graphify export wiki",
+        "-E -P -B -m graphify watch",
+        "-E -P -B -m graphify.serve",
+        "-E -P -B -m graphify claude install",
+        "-E -P -B -m graphify hook install",
+    ):
+        assert expected in log
+    assert not ambient_marker.exists()
+    assert not cwd_shadow_marker.exists()
+    assert not pythonpath_shadow_marker.exists()
+    assert not list(tmp_path.rglob("__pycache__"))
 
 
 def test_codex_dispatch_is_agenttask_and_collects_in_memory():

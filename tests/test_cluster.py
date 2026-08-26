@@ -1,6 +1,8 @@
 import json
 import sys
 import types
+import uuid
+from enum import IntEnum
 import networkx as nx
 import pytest
 from pathlib import Path
@@ -18,6 +20,18 @@ from graphify.cluster import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class IntegralNode(IntEnum):
+    SEVEN = 7
+
+
+class OpaqueNode:
+    def __init__(self, value):
+        self.value = value
+
+    def __repr__(self):
+        return f"OpaqueNode({self.value!r})"
 
 def make_graph():
     return build_from_json(json.loads((FIXTURES / "extraction.json").read_text()))
@@ -61,6 +75,42 @@ def test_cluster_preserves_connected_mixed_node_ids_and_insertion_order(monkeypa
 
     assert cluster(forward) == {0: [b"1", 1, "1"]}
     assert cluster(reverse) == cluster(forward)
+
+
+def test_cluster_rejects_duplicate_nan_isolates_before_partition(monkeypatch):
+    called = False
+
+    def unexpected_partition(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("graphify.cluster._partition", unexpected_partition)
+    graph = nx.Graph()
+    graph.add_nodes_from([float("nan"), float("nan")])
+
+    with pytest.raises(ValueError, match="float:nan"):
+        cluster(graph)
+    assert not called
+
+
+def test_cluster_rejects_connected_isolate_collision_before_partition(monkeypatch):
+    called = False
+
+    def unexpected_partition(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("graphify.cluster._partition", unexpected_partition)
+    connected = OpaqueNode("same")
+    isolate = OpaqueNode("same")
+    graph = nx.Graph([(connected, "neighbor")])
+    graph.add_node(isolate)
+
+    with pytest.raises(ValueError, match=r"opaque:tests\.test_cluster\.OpaqueNode"):
+        cluster(graph)
+    assert not called
 
 
 def test_cluster_preserves_spokes_isolated_by_hub_exclusion(monkeypatch):
@@ -144,6 +194,15 @@ def test_canonical_node_keys_are_exact_and_type_tagged():
     assert _canonical_node_key(False) == "bool:0"
     assert _canonical_node_key(b"\x00\xff") == "bytes:00ff"
     assert _canonical_node_key(None) == "none:"
+    assert _canonical_node_key(1.5) == "float:0x1.8000000000000p+0"
+    assert _canonical_node_key(IntegralNode.SEVEN) == "integral:tests.test_cluster.IntegralNode:7"
+    assert _canonical_node_key(uuid.UUID(int=1)) == "uuid:00000000000000000000000000000001"
+    assert _canonical_node_key(("1", 1, (None, b"1"))) == (
+        'tuple:["str:\\"1\\"","int:1","tuple:[\\"none:\\",\\"bytes:31\\"]"]'
+    )
+    assert _canonical_node_key(OpaqueNode("x")) == (
+        'opaque:tests.test_cluster.OpaqueNode:"OpaqueNode(\'x\')"'
+    )
 
 
 def test_hub_label_tie_break_uses_canonical_node_order():
@@ -215,28 +274,136 @@ def test_native_leiden_is_insertion_order_invariant(monkeypatch):
     assert calls[0] == calls[1]
 
 
-def test_native_leiden_rejects_unsupported_node_before_call(monkeypatch):
+def test_louvain_fallback_is_insertion_order_invariant(monkeypatch):
+    def missing_native(name):
+        raise ModuleNotFoundError("missing", name=name)
+
+    monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+    monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+    nodes = ["left", 1, b"right", ("tail", 2)]
+    edges = [
+        ("left", 1, 10.0),
+        (1, b"right", 0.01),
+        (b"right", ("tail", 2), 10.0),
+    ]
+    variants = [
+        (nodes, edges),
+        (list(reversed(nodes)), list(reversed(edges))),
+        (nodes[2:] + nodes[:2], [(target, source, weight) for source, target, weight in edges]),
+    ]
+
+    memberships = []
+    for node_order, edge_order in variants:
+        graph = nx.Graph()
+        graph.add_nodes_from(node_order)
+        for source, target, weight in edge_order:
+            graph.add_edge(source, target, weight=weight)
+        memberships.append(_normalized_membership(_partition(graph)))
+
+    assert memberships[1:] == memberships[:-1]
+
+
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_preserves_extended_hashable_node_ids(monkeypatch, backend):
+    opaque = OpaqueNode("x")
+    node_ids = [1.5, ("nested", 2), uuid.UUID(int=1), IntegralNode.SEVEN, opaque]
+    graph = nx.path_graph(node_ids)
+
+    if backend == "native":
+        def leiden(edges, **kwargs):
+            native_nodes = {node for edge in edges for node in edge[:2]}
+            return 0.0, {node: 0 for node in native_nodes}
+
+        _install_native_stub(monkeypatch, leiden)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
+
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(
+            nx.community,
+            "louvain_communities",
+            lambda stable, **kwargs: [set(stable.nodes())],
+        )
+
+    assert set(_partition(graph)) == set(node_ids)
+
+
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_rejects_canonical_key_collisions_before_backend(monkeypatch, backend):
     called = False
 
-    def leiden(edges, **kwargs):
+    def fail_if_called(*args, **kwargs):
         nonlocal called
         called = True
         return 0.0, {}
 
-    _install_native_stub(monkeypatch, leiden)
-    graph = nx.Graph()
-    graph.add_edge(object(), "supported")
+    if backend == "native":
+        _install_native_stub(monkeypatch, fail_if_called)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
 
-    with pytest.raises(TypeError, match="Leiden node IDs must be"):
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(nx.community, "louvain_communities", fail_if_called)
+    monkeypatch.setattr("graphify.cluster._canonical_node_key", lambda node: "same:key")
+    with pytest.raises(ValueError, match="canonical node-key collision"):
+        _partition(nx.Graph([("a", "b")]))
+    assert not called
+
+
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_rejects_duplicate_nan_before_backend(monkeypatch, backend):
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        return 0.0, {}
+
+    if backend == "native":
+        _install_native_stub(monkeypatch, fail_if_called)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
+
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(nx.community, "louvain_communities", fail_if_called)
+
+    graph = nx.Graph()
+    graph.add_edge(float("nan"), float("nan"))
+    with pytest.raises(ValueError, match="float:nan"):
         _partition(graph)
     assert not called
 
 
-def test_native_leiden_rejects_canonical_key_collisions(monkeypatch):
-    _install_native_stub(monkeypatch, lambda edges, **kwargs: (0.0, {}))
-    monkeypatch.setattr("graphify.cluster._canonical_node_key", lambda node: "same:key")
-    with pytest.raises(ValueError, match="canonical node-key collision"):
-        _partition(nx.Graph([("a", "b")]))
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_rejects_opaque_repr_collisions_before_backend(monkeypatch, backend):
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        return 0.0, {}
+
+    if backend == "native":
+        _install_native_stub(monkeypatch, fail_if_called)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
+
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(nx.community, "louvain_communities", fail_if_called)
+
+    graph = nx.Graph()
+    graph.add_edge(OpaqueNode("same"), OpaqueNode("same"))
+    with pytest.raises(ValueError, match=r"opaque:tests\.test_cluster\.OpaqueNode"):
+        _partition(graph)
+    assert not called
 
 
 def test_louvain_fallback_only_for_missing_top_level_native_module(monkeypatch):

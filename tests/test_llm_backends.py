@@ -18,6 +18,7 @@ def _clear_backend_env(monkeypatch):
         "DEEPSEEK_API_KEY",
         "AZURE_OPENAI_API_KEY",
         "AZURE_OPENAI_ENDPOINT",
+        "GRAPHIFY_GEMINI_MODEL",
     ):
         monkeypatch.delenv(env_key, raising=False)
 

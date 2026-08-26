@@ -3,10 +3,10 @@
 PYTHON=""
 PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
 is_supported_python() {
-    [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1
+    [ -n "$1" ] && "$1" -E -P -B -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1
 }
 is_supported_graphify_python() {
-    is_supported_python "$1" && "$1" -c "import graphify" >/dev/null 2>&1
+    is_supported_python "$1" && "$1" -E -P -B -c "import graphify" >/dev/null 2>&1
 }
 GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
 # 1. uv tool installs — most reliable on modern Mac/Linux
@@ -40,8 +40,8 @@ if ! is_supported_graphify_python "$PYTHON"; then
         _UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"
         if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi
     else
-        [ -n "$PYTHON" ] && { "$PYTHON" -m pip install graphifyy -q 2>/dev/null \
-          || "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3; }
+        [ -n "$PYTHON" ] && { "$PYTHON" -E -P -B -m pip install graphifyy -q 2>/dev/null \
+          || "$PYTHON" -E -P -B -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3; }
     fi
 fi
 if ! is_supported_graphify_python "$PYTHON"; then
@@ -50,11 +50,23 @@ if ! is_supported_graphify_python "$PYTHON"; then
 fi
 # Write interpreter path for all subsequent steps (persists across invocations)
 mkdir -p graphify-out
-"$PYTHON" -c "import sys; open('graphify-out/.graphify_python', 'w', encoding='utf-8').write(sys.executable)"
-# Save scan root so `graphify update` (no args) knows where to look next time
-echo "$(cd INPUT_PATH && pwd)" > graphify-out/.graphify_root
+"$PYTHON" -E -P -B -c "import sys; open('graphify-out/.graphify_python', 'w', encoding='utf-8').write(sys.executable)"
 ```
 
 If the import succeeds, print nothing and move straight to Step 2.
 
-**In every subsequent bash block, replace `python3` with `$(cat graphify-out/.graphify_python)` to use the correct interpreter.**
+For a full build with an explicit `INPUT_PATH`, persist the scan root in a separate block:
+
+```bash
+echo "$(cd INPUT_PATH && pwd)" > graphify-out/.graphify_root
+```
+
+Do not run that scan-root block for no-path subcommands such as `query`, `path`,
+`explain`, hooks, installs, or exports. The interpreter bootstrap and
+`.graphify_python` persistence are independent of `.graphify_root`.
+
+**In every subsequent bash block, replace `python3` with `"$(cat graphify-out/.graphify_python)" -E -P -B` to use the correct interpreter without importing project-local or `PYTHONPATH` shadows or writing bytecode.**
+
+The saved interpreter and its user-site packages are trusted inputs outside the
+inspected-corpus boundary. Pointer symlink and time-of-check/time-of-use hardening
+remain separate work; these startup flags do not provide that identity guarantee.

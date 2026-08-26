@@ -8,19 +8,19 @@ function Get-Python314Candidates {
 
     $py314 = Get-Command python3.14 -ErrorAction SilentlyContinue
     if ($py314) {
-        $resolved = (& $py314.Source -c $versionCheck 2>$null)
+        $resolved = (& $py314.Source -E -P -B -c $versionCheck 2>$null)
         if ($LASTEXITCODE -eq 0 -and $resolved) { Write-Output ("$resolved".Trim()) }
     }
 
     $launcher = Get-Command py -ErrorAction SilentlyContinue
     if ($launcher) {
-        $resolved = (& $launcher.Source -3.14 -c $versionCheck 2>$null)
+        $resolved = (& $launcher.Source -3.14 -E -P -B -c $versionCheck 2>$null)
         if ($LASTEXITCODE -eq 0 -and $resolved) { Write-Output ("$resolved".Trim()) }
     }
 
     $python = Get-Command python -ErrorAction SilentlyContinue
     if ($python) {
-        $resolved = (& $python.Source -c $versionCheck 2>$null)
+        $resolved = (& $python.Source -E -P -B -c $versionCheck 2>$null)
         if ($LASTEXITCODE -eq 0 -and $resolved) { Write-Output ("$resolved".Trim()) }
     }
 }
@@ -32,7 +32,7 @@ function Find-Python314 {
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
-    & $Candidate -c "import graphify, sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
+    & $Candidate -E -P -B -c "import graphify, sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
     return $LASTEXITCODE -eq 0
 }
 
@@ -72,7 +72,7 @@ if (-not $GRAPHIFY_PYTHON) {
         if (-not $installPython) {
             throw "Graphify requires Python 3.14.2 through the final 3.14.x release."
         }
-        & $installPython -m pip install graphifyy -q 2>&1 | Select-Object -Last 3
+        & $installPython -E -P -B -m pip install graphifyy -q 2>&1 | Select-Object -Last 3
     }
     $GRAPHIFY_PYTHON = Find-GraphifyPython
 }
@@ -82,10 +82,22 @@ if (-not $GRAPHIFY_PYTHON) {
 
 # Save interpreter path — all subsequent steps read this
 $GRAPHIFY_PYTHON | Out-File -FilePath graphify-out\.graphify_python -Encoding utf8 -NoNewline
-# Save scan root so `graphify update` (no args) knows where to look next time
-(Resolve-Path INPUT_PATH).Path | Out-File -FilePath graphify-out\.graphify_root -Encoding utf8 -NoNewline
 ```
 
 If the import succeeds, print nothing and move straight to Step 2.
 
-**In every subsequent block, run Python through the saved interpreter — `& (Get-Content graphify-out\.graphify_python)` in place of a bare `python3` — so every step uses the interpreter that actually has graphify.**
+For a full build with an explicit `INPUT_PATH`, persist the scan root in a separate block:
+
+```powershell
+(Resolve-Path INPUT_PATH).Path | Out-File -FilePath graphify-out\.graphify_root -Encoding utf8 -NoNewline
+```
+
+Do not run that scan-root block for no-path subcommands such as `query`, `path`,
+`explain`, hooks, installs, or exports. The interpreter bootstrap and
+`.graphify_python` persistence are independent of `.graphify_root`.
+
+**In every subsequent block, run Python through the saved interpreter — `& (Get-Content graphify-out\.graphify_python) -E -P -B` in place of a bare `python3` — so every step uses the interpreter that actually has graphify without importing project-local or `PYTHONPATH` shadows or writing bytecode.**
+
+The saved interpreter and its user-site packages are trusted inputs outside the
+inspected-corpus boundary. Pointer symlink and time-of-check/time-of-use hardening
+remain separate work; these startup flags do not provide that identity guarantee.

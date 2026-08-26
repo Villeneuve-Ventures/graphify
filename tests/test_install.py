@@ -222,12 +222,15 @@ def test_codex_skill_uses_graphify_with_existing_graph():
 
     The progressive-disclosure split drops codex's old monolith-only "dirty
     graph output" blurb; the graph-first intent now lives in the shared core's
-    fast-path block, which jumps straight to the query flow when a graph exists.
+    fast-path block, which validates the saved interpreter before querying an
+    existing graph without rerunning extraction.
     """
     import graphify
     skill = (Path(graphify.__file__).parent / "skill-codex.md").read_text()
     assert "Fast path — existing graph" in skill
-    assert "skip Steps 1–5 entirely and jump straight to `## For /graphify query`" in skill
+    assert "run only the interpreter-bootstrap block" in skill
+    assert "Do not run Step 1's separate scan-root persistence block" in skill
+    assert "Skip Steps 2–5" in skill
     assert "graphify query" in skill
     assert "graphify explain" in skill
     assert "graphify path" in skill
