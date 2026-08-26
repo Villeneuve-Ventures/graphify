@@ -30,7 +30,7 @@ Type `/graphify` in your AI coding assistant and it maps your entire project (co
 **Get started** (30 seconds):
 
 ```bash
-uv tool install graphifyy      # install the CLI (or: pipx install --python python3.14 graphifyy)
+uv tool install graphifyy      # install the CLI
 graphify install               # register the skill with your AI assistant
 ```
 
@@ -150,8 +150,9 @@ uv python install '>=3.14.2,<3.15'
 # Recommended (isolated env; if 'graphify' isn't found after, run: uv tool update-shell):
 uv tool install --python '>=3.14.2,<3.15' graphifyy
 
-# Alternatives:
-pipx install --python python3.14 graphifyy
+# Alternatives (pipx requires a validated interpreter path rather than a version range):
+python3.14 -c 'import sys; ok = sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0); raise SystemExit(0 if ok else "Graphify requires final CPython 3.14.2 through 3.14.x.")' \
+  && pipx install --python python3.14 graphifyy
 python3.14 -m pip install graphifyy  # may need PATH setup — see note below
 ```
 
@@ -531,7 +532,7 @@ These are only needed for **headless / CI extraction** (`graphify extract`). Whe
 **`graphify: command not found` after installing**
 The CLI is installed but its bin directory isn't on your shell's `PATH`. Pick the fix for how you installed:
 - **uv** (`uv tool install graphifyy`): the command lands in uv's tool bin dir (`~/.local/bin`), which a fresh macOS/zsh setup often doesn't have on `PATH`. Run `uv tool update-shell`, then open a new terminal. (Find the dir with `uv tool dir --bin`.)
-- **pipx** (`pipx install --python python3.14 graphifyy`): run `pipx ensurepath`, then open a new terminal.
+- **pipx**: after using the validated install command in [Step 1](#install), run `pipx ensurepath`, then open a new terminal.
 - **pip** (`pip install graphifyy`): pip installs scripts to a user bin dir that may not be on `PATH` — add `~/Library/Python/3.x/bin` (macOS) or `~/.local/bin` (Linux) to your `PATH` in `~/.zshrc`/`~/.bashrc`, or just run `python -m graphify`.
 
 **`uvx graphify …` or `uv tool run graphify …` fails to resolve `graphify`**

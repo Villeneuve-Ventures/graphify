@@ -130,8 +130,10 @@ jobs:
           "import networkx as nx;
           from graspologic_native import leiden;
           from graphify.cluster import _partition;
-          graph = nx.Graph([('0', '1', {'weight': 2.0}), ('1', '2', {'weight': 0.5})]);
-          assert callable(leiden) and set(_partition(graph)) == {'0', '1', '2'}"
+          graph = nx.Graph([('0', '1', {'weight': 10.0}), ('2', '3', {'weight': 10.0}), ('1', '2', {'weight': 0.01})]);
+          partition = _partition(graph);
+          communities = {frozenset(node for node, cid in partition.items() if cid == community) for community in set(partition.values())};
+          assert callable(leiden) and communities == {frozenset({'0', '1'}), frozenset({'2', '3'})}"
 
   docker-build:
     runs-on: ubuntu-latest

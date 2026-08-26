@@ -32,6 +32,7 @@ def test_workflows_run_executable_python_on_314_only():
     assert re.findall(r'python-version: "([0-9.]+)"', release) == ["3.14"]
     assert 'uv pip install --only-binary=graspologic-native ".[leiden]"' in ci
     assert "ubuntu-latest, macos-latest, windows-latest" in ci
+    assert "communities == {frozenset({'0', '1'}), frozenset({'2', '3'})}" in ci
     assert "docker build --tag graphify-python314 ." in ci
 
 
@@ -62,12 +63,16 @@ def test_public_readme_is_english_only():
     assert not list((ROOT / "docs/translations").glob("README.*.md"))
 
 
-def test_public_pipx_install_examples_bind_python314():
-    paths = [ROOT / "README.md"]
-    bare_example = re.compile(r"pipx install graphifyy")
-    failures = []
-    for path in sorted(paths):
-        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
-            if bare_example.search(line):
-                failures.append(f"{path.relative_to(ROOT)}:{line_number}: {line.strip()}")
-    assert not failures, "pipx install examples must bind Python 3.14:\n" + "\n".join(failures)
+def test_public_pipx_install_validates_python314_patch_window():
+    readme = (ROOT / "README.md").read_text()
+    install = "pipx install --python python3.14 graphifyy"
+    guard = (
+        "python3.14 -c 'import sys; ok = sys.implementation.name == \"cpython\" and "
+        "sys.version_info.releaselevel == \"final\" and "
+        "(3, 14, 2) <= sys.version_info[:3] < (3, 15, 0); "
+        "raise SystemExit(0 if ok else \"Graphify requires final CPython 3.14.2 through "
+        "3.14.x.\")' \\\n  && "
+    )
+    assert readme.count(install) == 1
+    assert f"{guard}{install}" in readme
+    assert "pipx install graphifyy" not in readme
