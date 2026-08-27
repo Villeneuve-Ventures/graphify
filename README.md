@@ -185,7 +185,7 @@ for example `graphify claude install --project` or `graphify codex install --pro
 
 > **Running with `uvx` / `uv tool run` instead of installing?** Name the package, not the command: `uvx --python '>=3.14.2,<3.15' --from graphifyy graphify install`. Plain `uvx graphify …` fails (`No solution found … no versions of graphify`) because `uv tool run` reads the first word as a *package*, and the package is `graphifyy` — the `graphify` command lives inside it.
 
-> **Avoid `pip install` on Mac/Windows** if possible. The skill resolves Python at runtime from `graphify-out/.graphify_python`; if that points to a different environment than where `pip` installed the package, you'll get `ModuleNotFoundError: No module named 'graphify'`. `uv tool install` and `pipx install` isolate the package in their own env and avoid this entirely.
+> **Avoid `pip install` on Mac/Windows** if possible. Fresh generated-skill commands discover and validate their runtime instead of executing the advisory `graphify-out/.graphify_python` pointer. Git hooks separately pin the already-running Graphify interpreter when you run `graphify hook install`; `uv tool install` and `pipx install` keep that interpreter and package together in an isolated environment.
 
 > **Git hooks and uv tool / pipx:** `graphify hook install` embeds the current interpreter path directly into the hook scripts at install time, so the post-commit hook fires correctly even in GUI git clients and CI runners where `~/.local/bin` is not on PATH. If you reinstall or upgrade graphify, re-run `graphify hook install` to refresh the embedded path.
 

@@ -2,8 +2,9 @@
 import os
 import shutil
 import subprocess
-from types import SimpleNamespace
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 from graphify.hooks import install, uninstall, status, _hooks_dir, _HOOK_MARKER, _CHECKOUT_MARKER
 
@@ -200,6 +201,239 @@ def test_install_fallback_is_loud_not_silent(tmp_path):
     )
 
 
+def test_hook_discovery_never_reads_workspace_interpreter_pointer():
+    """A valid-looking pointer naming an attacker must not be a hook fallback."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    assert ".graphify_python" not in _PYTHON_DETECT
+    assert "_FROM_FILE" not in _PYTHON_DETECT
+
+
+def test_hook_probe_and_detached_launch_both_use_isolation_flags():
+    """The value accepted by the isolated probe remains bound for isolated launch."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    probe_lines = [line for line in _PYTHON_DETECT.splitlines() if '"$_GFY_PROBE"' in line]
+    assert probe_lines
+    assert all(" -E -P -B -c " in line for line in probe_lines)
+    launch = _detached_launch(_REBUILD_BODY_COMMIT)
+    assert launch.startswith('"$GRAPHIFY_PYTHON" -E -P -B -c "')
+
+
+def test_hook_discovery_uses_no_path_resolved_parser_or_symlink_helpers():
+    """Interpreter provenance must be established without ambient helper tools."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    assert "command -v readlink" not in _PYTHON_DETECT
+    assert "$(readlink " not in _PYTHON_DETECT
+    assert "head -" not in _PYTHON_DETECT
+    assert "tr -" not in _PYTHON_DETECT
+    assert "sed '" not in _PYTHON_DETECT
+    assert "/usr/bin/readlink" in _PYTHON_DETECT
+    assert "/bin/readlink" in _PYTHON_DETECT
+
+
+def test_hostile_path_resolver_helpers_are_never_executed(tmp_path):
+    """PATH sentinels cannot intercept shebang or symlink inspection."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    hostile = tmp_path / "hostile-bin"
+    workspace.mkdir()
+    hostile.mkdir()
+    launcher = hostile / "launcher"
+    launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    (hostile / "graphify").symlink_to(launcher)
+    sentinel = tmp_path / "ambient-helper-ran"
+    for helper in ("head", "tr", "sed", "readlink"):
+        path = hostile / helper
+        path.write_text('#!/bin/sh\n: > "$SENTINEL"\nexit 99\n', encoding="utf-8")
+        path.chmod(0o755)
+
+    script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        cwd=workspace,
+        env={
+            **os.environ,
+            "PATH": f"{hostile}:/usr/bin:/bin",
+            "SENTINEL": str(sentinel),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("command", ["graphify", "python3", "python"])
+@pytest.mark.parametrize("selected_root", ["input", "output"])
+def test_hook_dynamic_fallback_rejects_explicit_external_roots(
+    tmp_path, command, selected_root
+):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    controlled = tmp_path / f"controlled-{selected_root}"
+    bin_dir = controlled / "bin"
+    bin_dir.mkdir(parents=True)
+    marker = tmp_path / f"hook-{selected_root}-{command}-ran"
+    candidate = bin_dir / command
+    candidate.write_text(
+        f"#!/bin/sh\n: > '{marker}'\nexec '{sys.executable}' \"$@\"\n",
+        encoding="utf-8",
+    )
+    candidate.chmod(0o755)
+    selected_alias = tmp_path / f"hook-selected-{selected_root}"
+    selected_alias.symlink_to(controlled, target_is_directory=True)
+    other = tmp_path / f"hook-other-{selected_root}"
+    other.mkdir()
+    env = {
+        **os.environ,
+        "PATH": str(bin_dir),
+        "GRAPHIFY_INPUT_PATH": str(selected_alias if selected_root == "input" else other),
+        "GRAPHIFY_OUTPUT_ROOT": str(selected_alias if selected_root == "output" else other),
+    }
+    script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0
+    assert not marker.exists(), f"hook executed {selected_root}-controlled {command}"
+
+
+@pytest.mark.parametrize("selected_root", ["input", "output"])
+def test_hook_root_deny_rejects_every_dynamic_absolute_path(tmp_path, selected_root):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bin_dir = tmp_path / "ambient-bin"
+    bin_dir.mkdir()
+    marker = tmp_path / f"hook-root-{selected_root}-ran"
+    candidate = bin_dir / "python3"
+    candidate.write_text(
+        f"#!/bin/sh\n: > '{marker}'\nexec '{sys.executable}' \"$@\"\n",
+        encoding="utf-8",
+    )
+    candidate.chmod(0o755)
+    env = {**os.environ, "PATH": str(bin_dir)}
+    env["GRAPHIFY_INPUT_PATH" if selected_root == "input" else "GRAPHIFY_OUTPUT_ROOT"] = "/"
+    script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0
+    assert not marker.exists()
+
+
+def test_hook_external_lexical_venv_symlink_preserves_invocation_semantics(tmp_path):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    environment = tmp_path / "hook-external-venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(environment)],
+        check=True,
+        capture_output=True,
+    )
+    candidate = environment / "bin" / "python3"
+    assert candidate.is_symlink()
+    site_packages = Path(
+        subprocess.check_output(
+            [str(candidate), "-E", "-P", "-B", "-c", "import site; print(site.getsitepackages()[0])"],
+            text=True,
+        ).strip()
+    )
+    marker = tmp_path / "hook-lexical-venv-imported"
+    package = site_packages / "graphify"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    dist_info = site_packages / "graphifyy-0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: graphifyy\nVersion: 0\n",
+        encoding="utf-8",
+    )
+    canonical = candidate.resolve()
+    marker.unlink(missing_ok=True)
+    subprocess.run(
+        [str(canonical), "-E", "-P", "-B", "-c", "import graphify"],
+        cwd=workspace,
+        capture_output=True,
+        check=False,
+    )
+    assert not marker.exists()
+    script = (
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
+        + '\n[ -n "$GRAPHIFY_PYTHON" ] && "$GRAPHIFY_PYTHON" -E -P -B -c \'import graphify\'\n'
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        cwd=workspace,
+        env={**os.environ, "PATH": str(candidate.parent)},
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+
+
+def test_hook_corpus_local_symlink_to_external_interpreter_is_rejected(tmp_path):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    corpus = tmp_path / "corpus"
+    bin_dir = corpus / "bin"
+    bin_dir.mkdir(parents=True)
+    marker = tmp_path / "hook-corpus-symlink-ran"
+    target = tmp_path / "hook-external-python"
+    target.write_text(
+        f"#!/bin/sh\n: > '{marker}'\nexec '{sys.executable}' \"$@\"\n",
+        encoding="utf-8",
+    )
+    target.chmod(0o755)
+    (bin_dir / "python3").symlink_to(target)
+    script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        cwd=workspace,
+        env={**os.environ, "PATH": str(bin_dir), "GRAPHIFY_INPUT_PATH": str(corpus)},
+        capture_output=True,
+        text=True,
+        timeout=3,
+    )
+
+    assert result.returncode == 0
+    assert not marker.exists()
+
+
 def test_hook_check_no_additionalContext(tmp_path):
     """graphify hook-check must not emit additionalContext — Codex Desktop rejects it."""
     import sys
@@ -334,7 +568,7 @@ def test_detached_launch_targets_graphify_python():
     """The launcher must run via the resolved $GRAPHIFY_PYTHON, not a bare
     `python`, so it uses the same interpreter the detection block selected."""
     snippet = _detached_launch(_REBUILD_BODY_COMMIT)
-    assert snippet.startswith('"$GRAPHIFY_PYTHON" -c "')
+    assert snippet.startswith('"$GRAPHIFY_PYTHON" -E -P -B -c "')
     assert "nohup" not in snippet
 
 
@@ -409,11 +643,13 @@ def test_probes_use_find_spec_not_full_import():
 def test_shebang_read_is_null_byte_safe():
     """On Windows, `command -v graphify` can return the launcher path WITHOUT its
     .exe suffix, so the `*.exe)` guard misses and the shebang probe reads a
-    BINARY: the shell then warns 'ignored null byte in input' on every commit and
-    the extracted garbage always falls through to the slow fallbacks. The read
-    must strip NULs before the command substitution sees them."""
+    BINARY: the shell then warns 'ignored null byte in input' if binary bytes go
+    through command substitution. Use the shell read builtin and accept only a
+    real #! line, without any PATH-resolved parsing process."""
     from graphify.hooks import _PYTHON_DETECT
-    assert "tr -d '\\000'" in _PYTHON_DETECT, "shebang read is not NUL-safe"
+    assert 'IFS= read -r _GFY_FIRST_LINE < "$GRAPHIFY_BIN"' in _PYTHON_DETECT
+    assert "_SHEBANG=$(" not in _PYTHON_DETECT
+    assert "'#'!*)" in _PYTHON_DETECT
 
 
 def test_probe_prefers_sibling_python_exe_on_windows_layouts():

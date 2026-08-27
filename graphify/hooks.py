@@ -17,84 +17,175 @@ _CHECKOUT_MARKER_END = "# graphify-checkout-hook-end"
 # minimal PATH that omits ~/.local/bin.  Pinning sys.executable at install time
 # makes the hook work regardless of PATH at git-trigger time.
 _PYTHON_DETECT = """\
-# Detect the correct Python interpreter (handles uv tool, pipx, venv, system installs).
-# _PINNED was recorded at hook-install time; tried first so the hook works even
-# when the graphify launcher is not on PATH (common in GUI clients and CI).
-#
-# Probes check availability with importlib.util.find_spec instead of importing
-# the package: a probe that imports graphify wholesale executes the full package
-# import (10s+ cold on machines with AV-scanned or large site-packages) and used
-# to run up to FOUR times synchronously, stalling every commit before the
-# detached launch even started. find_spec locates the package without executing
-# it, so each probe costs interpreter startup only. The detached rebuild still
-# fails loudly in the log if the package is broken under that interpreter.
-_GFY_PROBE="import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('graphify') else 1)"
+# Detect a trusted Python interpreter (uv tool, pipx, venv, system installs).
+# The install-time pin has trusted provenance: it is the interpreter already
+# running graphify hook install. Dynamic fallbacks are lower-authority and may
+# not come from the repository being processed.
+_GFY_PROBE="import importlib.metadata as m, importlib.util as u, json, os, sys, urllib.parse as p, urllib.request as r; v=sys.version_info; s=u.find_spec('graphify'); d=m.distribution('graphifyy'); actual=os.path.realpath(s.origin or '') if s else ''; installed=os.path.realpath(str(d.locate_file('graphify/__init__.py'))); direct=json.loads(d.read_text('direct_url.json') or '{}'); editable=direct.get('dir_info', {}).get('editable') is True and direct.get('url', '').startswith('file:'); editable_init=os.path.realpath(os.path.join(r.url2pathname(p.urlparse(direct['url']).path), 'graphify', '__init__.py')) if editable else ''; ok=sys.implementation.name == 'cpython' and v.releaselevel == 'final' and (3, 14, 2) <= v[:3] < (3, 15, 0) and actual in (installed, editable_init); sys.exit(0 if ok else 1)"
 GRAPHIFY_PYTHON=""
 _PINNED='__PINNED_PYTHON__'
-if [ -n "$_PINNED" ] && [ -x "$_PINNED" ] && "$_PINNED" -c "$_GFY_PROBE" 2>/dev/null; then
+if [ -n "$_PINNED" ] && [ -x "$_PINNED" ] && "$_PINNED" -E -P -B -c "$_GFY_PROBE" 2>/dev/null; then
     GRAPHIFY_PYTHON="$_PINNED"
 fi
-# Second probe: read graphify-out/.graphify_python (written by the skill and
-# CLI; survives uv-tool reinstalls and is the same source the README documents).
-if [ -z "$GRAPHIFY_PYTHON" ]; then
-    _GFY_PYTHON_FILE="graphify-out/.graphify_python"
-    if [ -f "$_GFY_PYTHON_FILE" ]; then
-        _FROM_FILE=$(cat "$_GFY_PYTHON_FILE" 2>/dev/null | tr -d '[:space:]')
-        case "$_FROM_FILE" in
-            *[!a-zA-Z0-9/_.@:\\-]*) _FROM_FILE="" ;;  # allowlist (covers Windows paths)
-        esac
-        if [ -n "$_FROM_FILE" ] && [ -x "$_FROM_FILE" ] && "$_FROM_FILE" -c "$_GFY_PROBE" 2>/dev/null; then
-            GRAPHIFY_PYTHON="$_FROM_FILE"
-        fi
+
+# Capture an absolute lexical invocation path. Resolve its symlinks only for
+# the containment check so a venv's lexical Python path keeps venv semantics.
+_GFY_WORKSPACE=$(pwd -P 2>/dev/null)
+_gfy_canonical_root() {
+    _GFY_ROOT_RAW=$1
+    [ -n "$_GFY_ROOT_RAW" ] || return 1
+    case "$_GFY_ROOT_RAW" in /*) ;; *) _GFY_ROOT_RAW=$_GFY_WORKSPACE/$_GFY_ROOT_RAW ;; esac
+    [ -d "$_GFY_ROOT_RAW" ] || return 1
+    cd -P "$_GFY_ROOT_RAW" 2>/dev/null && pwd
+}
+_GFY_INPUT_ROOT=$(_gfy_canonical_root "${GRAPHIFY_INPUT_PATH-}") || _GFY_INPUT_ROOT=""
+_GFY_OUTPUT_ROOT=$(_gfy_canonical_root "${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}") || _GFY_OUTPUT_ROOT=""
+_gfy_path_denied() {
+    _GFY_DENY_PATH=$1
+    [ "$_GFY_WORKSPACE" = / ] && return 0
+    case "$_GFY_DENY_PATH" in "$_GFY_WORKSPACE"|"$_GFY_WORKSPACE"/*) return 0 ;; esac
+    if [ -n "$_GFY_INPUT_ROOT" ]; then
+        [ "$_GFY_INPUT_ROOT" = / ] && return 0
+        case "$_GFY_DENY_PATH" in "$_GFY_INPUT_ROOT"|"$_GFY_INPUT_ROOT"/*) return 0 ;; esac
     fi
+    if [ -n "$_GFY_OUTPUT_ROOT" ]; then
+        [ "$_GFY_OUTPUT_ROOT" = / ] && return 0
+        case "$_GFY_DENY_PATH" in "$_GFY_OUTPUT_ROOT"|"$_GFY_OUTPUT_ROOT"/*) return 0 ;; esac
+    fi
+    return 1
+}
+_gfy_normalize_path() {
+    _GFY_RAW=$1
+    case "$_GFY_RAW" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    _GFY_DIR=${_GFY_RAW%/*}
+    _GFY_BASE=${_GFY_RAW##*/}
+    _GFY_DIR=$(cd -P "$_GFY_DIR" 2>/dev/null && pwd) || return 1
+    printf '%s/%s\n' "$_GFY_DIR" "$_GFY_BASE"
+}
+_gfy_capture_command() {
+    _GFY_FOUND=$(command -v "$1" 2>/dev/null) || return 1
+    case "$_GFY_FOUND" in
+        /*) ;;
+        *) _GFY_FOUND="$(pwd -P)/$_GFY_FOUND" ;;
+    esac
+    printf '%s\n' "$_GFY_FOUND"
+}
+if [ -x /usr/bin/readlink ]; then
+    _GFY_READLINK=/usr/bin/readlink
+elif [ -x /bin/readlink ]; then
+    _GFY_READLINK=/bin/readlink
+else
+    _GFY_READLINK=""
 fi
-# Third probe: resolve via the graphify launcher on PATH.
+_gfy_policy_path() {
+    _GFY_POLICY=$1
+    _GFY_LINKS=0
+    while [ -L "$_GFY_POLICY" ]; do
+        [ "$_GFY_LINKS" -lt 40 ] || return 1
+        [ -n "$_GFY_READLINK" ] || return 1
+        _GFY_TARGET=$("$_GFY_READLINK" "$_GFY_POLICY" 2>/dev/null) || return 1
+        case "$_GFY_TARGET" in
+            /*) _GFY_POLICY=$_GFY_TARGET ;;
+            *) _GFY_POLICY="${_GFY_POLICY%/*}/$_GFY_TARGET" ;;
+        esac
+        _GFY_POLICY=$(_gfy_normalize_path "$_GFY_POLICY") || return 1
+        _GFY_LINKS=$((_GFY_LINKS + 1))
+    done
+    printf '%s\n' "$_GFY_POLICY"
+}
+_gfy_accept_dynamic() {
+    _GFY_CANDIDATE=$1
+    case "$_GFY_CANDIDATE" in /*) ;; *) return 1 ;; esac
+    _gfy_path_denied "$_GFY_CANDIDATE" && return 1
+    _GFY_POLICY=$(_gfy_policy_path "$_GFY_CANDIDATE") || return 1
+    _gfy_path_denied "$_GFY_POLICY" && return 1
+    [ -x "$_GFY_CANDIDATE" ] || return 1
+    printf '%s\n' "$_GFY_CANDIDATE"
+}
+
+# Resolve via the graphify launcher on PATH. The generated-output interpreter
+# pointer is advisory state and is deliberately never a hook input.
 if [ -z "$GRAPHIFY_PYTHON" ]; then
-    GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
+    GRAPHIFY_BIN=$(_gfy_capture_command graphify) || GRAPHIFY_BIN=""
     if [ -n "$GRAPHIFY_BIN" ]; then
-        # Windows pip layout: Scripts/graphify(.exe) sits beside ..\\python.exe
-        # (or .\\python.exe inside a venv's Scripts dir). NOTE: command -v may
-        # return the launcher path WITHOUT the .exe suffix, so this cannot key
-        # on the extension.
-        _GFY_BINDIR=$(dirname "$GRAPHIFY_BIN")
-        if [ -x "$_GFY_BINDIR/../python.exe" ] && "$_GFY_BINDIR/../python.exe" -c "$_GFY_PROBE" 2>/dev/null; then
-            GRAPHIFY_PYTHON="$_GFY_BINDIR/../python.exe"
-        elif [ -x "$_GFY_BINDIR/python.exe" ] && "$_GFY_BINDIR/python.exe" -c "$_GFY_PROBE" 2>/dev/null; then
-            GRAPHIFY_PYTHON="$_GFY_BINDIR/python.exe"
+        GRAPHIFY_BIN=$(_gfy_accept_dynamic "$GRAPHIFY_BIN") || GRAPHIFY_BIN=""
+    fi
+    if [ -n "$GRAPHIFY_BIN" ]; then
+        # Windows pip layout: Scripts/graphify(.exe) sits beside ../python.exe
+        # (or ./python.exe inside a venv's Scripts dir).
+        _GFY_BINDIR=${GRAPHIFY_BIN%/*}
+        _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_BINDIR/../python.exe") || _GFY_CANDIDATE=""
+        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_PROBE" 2>/dev/null; then
+            GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
+        else
+            _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_BINDIR/python.exe") || _GFY_CANDIDATE=""
+            if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_PROBE" 2>/dev/null; then
+                GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
+            fi
         fi
     fi
     if [ -z "$GRAPHIFY_PYTHON" ] && [ -n "$GRAPHIFY_BIN" ]; then
-        # POSIX launcher: parse the shebang. head -c + tr strip NUL bytes first —
-        # when the launcher is a Windows binary reached without its .exe suffix,
-        # a raw `head -1` reads binary into the command substitution and the
-        # shell warns about ignored null bytes on every commit.
+        # POSIX launcher: parse only a real shebang with the shell's read
+        # builtin. This avoids PATH-resolved parsing helpers and avoids putting
+        # binary NUL bytes through command substitution when command -v returns
+        # a Windows launcher without its .exe suffix.
         case "$GRAPHIFY_BIN" in
             *.exe) _SHEBANG="" ;;
-            *)     _SHEBANG=$(head -c 256 "$GRAPHIFY_BIN" 2>/dev/null | tr -d '\\000' | head -n 1 | sed 's/^#![[:space:]]*//') ;;
+            *) _SHEBANG=""
+               IFS= read -r _GFY_FIRST_LINE < "$GRAPHIFY_BIN" || true
+               case "$_GFY_FIRST_LINE" in
+                   '#'!*) _SHEBANG=${_GFY_FIRST_LINE#??}
+                        while :; do
+                            case "$_SHEBANG" in
+                                [[:space:]]*) _SHEBANG=${_SHEBANG#?} ;;
+                                *) break ;;
+                            esac
+                        done ;;
+               esac ;;
         esac
         case "$_SHEBANG" in
-            */env\\ *) GRAPHIFY_PYTHON="${_SHEBANG#*/env }" ;;
-            *)         GRAPHIFY_PYTHON="$_SHEBANG" ;;
+            */env\\ *) _GFY_SHEBANG_COMMAND="${_SHEBANG#*/env }" ;;
+            *) _GFY_SHEBANG_COMMAND="$_SHEBANG" ;;
         esac
-        # Allowlist: only keep characters valid in a filesystem path to prevent
-        # injection if the shebang contains shell metacharacters.
-        case "$GRAPHIFY_PYTHON" in
-            *[!a-zA-Z0-9/_.@-]*) GRAPHIFY_PYTHON="" ;;
+        case "$_GFY_SHEBANG_COMMAND" in
+            *[!a-zA-Z0-9/_.@-]*) _GFY_SHEBANG_COMMAND="" ;;
         esac
-        if [ -n "$GRAPHIFY_PYTHON" ] && ! "$GRAPHIFY_PYTHON" -c "$_GFY_PROBE" 2>/dev/null; then
-            GRAPHIFY_PYTHON=""
+        case "$_GFY_SHEBANG_COMMAND" in
+            /*) _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_SHEBANG_COMMAND") || _GFY_CANDIDATE="" ;;
+            "") _GFY_CANDIDATE="" ;;
+            *) _GFY_CANDIDATE=$(_gfy_capture_command "$_GFY_SHEBANG_COMMAND") || _GFY_CANDIDATE=""
+               if [ -n "$_GFY_CANDIDATE" ]; then
+                   _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
+               fi ;;
+        esac
+        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_PROBE" 2>/dev/null; then
+            GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
         fi
     fi
 fi
-# Last resort: try python3 / python (works for system/venv installs on PATH).
+
+# Last resort: resolve python3 / python from PATH before the first execution.
 if [ -z "$GRAPHIFY_PYTHON" ]; then
-    if command -v python3 >/dev/null 2>&1 && python3 -c "$_GFY_PROBE" 2>/dev/null; then
-        GRAPHIFY_PYTHON="python3"
-    elif command -v python >/dev/null 2>&1 && python -c "$_GFY_PROBE" 2>/dev/null; then
-        GRAPHIFY_PYTHON="python"
+    _GFY_CANDIDATE=$(_gfy_capture_command python3) || _GFY_CANDIDATE=""
+    if [ -n "$_GFY_CANDIDATE" ]; then
+        _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
+    fi
+    if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_PROBE" 2>/dev/null; then
+        GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
     else
-        echo "[graphify hook] could not locate a Python with graphify installed. Add the graphify bin dir to PATH or re-run 'graphify hook install' from the env where graphify lives." >&2
-        exit 0
+        _GFY_CANDIDATE=$(_gfy_capture_command python) || _GFY_CANDIDATE=""
+        if [ -n "$_GFY_CANDIDATE" ]; then
+            _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
+        fi
+        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_PROBE" 2>/dev/null; then
+            GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
+        else
+            echo "[graphify hook] could not locate a trusted final CPython 3.14.2+ with graphify installed. Re-run 'graphify hook install' from the environment where graphify lives." >&2
+            exit 0
+        fi
     fi
 fi
 """
@@ -214,7 +305,7 @@ try:
 except OSError:
     _out = subprocess.DEVNULL
 _kw = dict(stdout=_out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=os.getcwd(), close_fds=True)
-_cmd = [sys.executable, '-c', _src]
+_cmd = [sys.executable, '-E', '-P', '-B', '-c', _src]
 if os.name == 'nt':
     _flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
     try:
@@ -236,7 +327,7 @@ def _detached_launch(rebuild_body: str) -> str:
     returns the instant the child is spawned, so the git hook never blocks.
     """
     launcher = _LAUNCHER_TEMPLATE.replace("__REBUILD_BODY__", rebuild_body)
-    return '"$GRAPHIFY_PYTHON" -c "' + launcher + '"\n'
+    return '"$GRAPHIFY_PYTHON" -E -P -B -c "' + launcher + '"\n'
 
 
 # Skip the rebuild inside a linked worktree (git worktree add), shared by both
@@ -490,7 +581,9 @@ def _pinned_python() -> str:
     and '\\' so Windows paths (C:\\...) are accepted. An empty return means
     callers must fall back to the `graphify` launcher on PATH — safe degradation.
     """
-    if re.search(r"[^a-zA-Z0-9/_.@:\\-]", sys.executable):
+    if not sys.executable or re.search(r"[^a-zA-Z0-9/_.@:\\-]", sys.executable):
+        return ""
+    if not Path(sys.executable).is_absolute() and not _WINDOWS_DRIVE_RE.match(sys.executable):
         return ""
     return sys.executable
 
@@ -535,7 +628,7 @@ def _register_merge_driver(root: Path) -> str:
     import subprocess as _sp
     pinned = _pinned_python()
     if pinned:
-        driver = f"{pinned} -m graphify merge-driver %O %A %B"
+        driver = f"{pinned} -E -P -B -m graphify merge-driver %O %A %B"
     else:
         driver = "graphify merge-driver %O %A %B"
     try:

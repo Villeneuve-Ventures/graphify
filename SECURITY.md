@@ -38,7 +38,42 @@ graphify is a **local development tool**. It runs as a Claude Code skill and opt
 | YAML frontmatter injection | `_yaml_str()` escapes backslashes, double quotes, and newlines before embedding user-controlled strings (webpage titles, query questions) in YAML frontmatter. |
 | Encoding crashes on source files | All tree-sitter byte slices decoded with `errors="replace"` - non-UTF-8 source files degrade gracefully instead of crashing extraction. |
 | Symlink traversal | `os.walk(..., followlinks=False)` is explicit throughout `detect.py`. |
+| Saved Python interpreter pointer | `graphify-out/.graphify_python` is advisory compatibility state, not execution authority. Generated commands rediscover and validate a final CPython 3.14.2+ runtime containing the installed `graphifyy` distribution; installed Git hooks trust only the interpreter already running `graphify hook install`, then use isolated `-E -P -B` probes and launches. |
 | Corrupted graph.json | `_load_graph()` in `serve.py` wraps `json.JSONDecodeError` and prints a clear recovery message instead of crashing. |
+
+### Interpreter selection trust boundary
+
+The atomic interpreter-pointer writer prevents partial updates and rejects
+unsafe pointer parents, destinations, symlinks, and non-regular files. The
+pointer remains advisory: readers do not execute the pathname stored there.
+Fresh generated commands discover a candidate from the active installed
+Graphify environment and validate final CPython `>=3.14.2,<3.15` plus the
+installed `graphifyy` distribution before use. `graphify hook install` has a
+separate authority class: the Python process already running the install is a
+trusted user-selected input, so its lexical invocation path is embedded in the
+hook, including project-local virtual environments. Launcher, shebang, and
+`PATH` fallbacks are lower-authority and reject candidates contained in the
+current workspace, explicitly selected corpus (`GRAPHIFY_INPUT_PATH`), or
+selected output root (`GRAPHIFY_OUTPUT_ROOT`, with `GRAPHIFY_OUT` retained for
+hook compatibility) before their first execution. Generated blocks containing
+`INPUT_PATH` bind that corpus before discovery. These roots only widen denial
+and never select an interpreter.
+
+On POSIX, pointer creation enforces regular-file, symlink, ownership, and
+writable-permission assumptions with directory-handle-relative atomic
+replacement. Publication is atomic to filesystem observers, but Graphify does
+not fsync the parent directory, so advisory rename durability across abrupt
+power loss is not guaranteed. The Python standard library does not provide an equivalent
+handle-relative, reparse-point-safe Windows namespace write. Graphify therefore
+fails closed and does not publish `.graphify_python` on Windows. Windows
+bootstrap remains operational through its freshly discovered and validated
+`$GraphifyPython`; it emits an explicit warning because the pointer is optional
+advisory state and never execution authority. Atomic replacement also cannot
+prevent the same user, an administrator, or a process with equivalent filesystem
+rights from replacing an explicitly trusted virtual environment or installed
+interpreter after installation. Protect those environments with normal OS
+ownership and ACL controls, and rerun `graphify hook install` after reinstalling
+or moving Graphify.
 
 ### What graphify does NOT do
 

@@ -81,7 +81,8 @@ if (-not $GRAPHIFY_PYTHON) {
 }
 
 # Save interpreter path — all subsequent steps read this
-$GRAPHIFY_PYTHON | Out-File -FilePath graphify-out\.graphify_python -Encoding utf8 -NoNewline
+& $GRAPHIFY_PYTHON -E -P -B -m graphify.interpreter_pointer write graphify-out\.graphify_python
+if ($LASTEXITCODE -ne 0) { throw "Failed to publish the Graphify interpreter pointer." }
 ```
 
 If the import succeeds, print nothing and move straight to Step 2.
