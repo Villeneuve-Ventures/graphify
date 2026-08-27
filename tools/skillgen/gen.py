@@ -24,7 +24,9 @@ timestamp or version is ever written into a generated file.
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import shlex
 import subprocess
 import sys
 from collections import Counter
@@ -298,14 +300,79 @@ class Platform:
         return _HOOKS_TARGET[self.hooks_variant]
 
 
+_GRAPHIFY_IDENTITY_SOURCE = r'''import importlib.metadata
+import importlib.util
+import json
+import os
+import sys
+import urllib.parse
+import urllib.request
+
+def contained(path, root):
+    try:
+        normalized_root = os.path.normcase(root)
+        return os.path.commonpath((os.path.normcase(path), normalized_root)) == normalized_root
+    except (OSError, ValueError):
+        return False
+
+try:
+    distribution = importlib.metadata.distribution("graphifyy")
+    if distribution.metadata.get("Name") != "graphifyy":
+        raise ValueError
+    spec = importlib.util.find_spec("graphify")
+    if spec is None or not spec.origin:
+        raise ValueError
+    origin = os.path.abspath(spec.origin)
+    real_origin = os.path.realpath(origin)
+    direct_url_text = distribution.read_text("direct_url.json")
+    editable = False
+    if direct_url_text is not None:
+        direct_url = json.loads(direct_url_text)
+        parsed = urllib.parse.urlparse(direct_url["url"])
+        if direct_url.get("dir_info", {}).get("editable") is True:
+            editable = True
+            if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):
+                raise ValueError
+            package_root = os.path.abspath(
+                urllib.request.url2pathname(parsed.path)
+            )
+    if editable:
+        real_package_root = os.path.realpath(package_root)
+        if not contained(origin, package_root) or not contained(real_origin, real_package_root):
+            raise ValueError
+    else:
+        owned = [
+            entry
+            for entry in (distribution.files or ())
+            if str(entry) == "graphify/__init__.py"
+        ]
+        if len(owned) != 1:
+            raise ValueError
+        recorded_origin = os.path.abspath(distribution.locate_file(owned[0]))
+        if os.path.normcase(recorded_origin) != os.path.normcase(origin):
+            raise ValueError
+    arguments = sys.argv[1:]
+    if arguments[0] == "ambient":
+        for root_arg in arguments[1:]:
+            if not root_arg:
+                continue
+            root = os.path.abspath(root_arg)
+            real_root = os.path.realpath(root)
+            if contained(origin, root) or contained(real_origin, real_root):
+                raise ValueError
+except (Exception, SystemExit):
+    raise SystemExit(1)
+'''
+_GRAPHIFY_IDENTITY_COMMAND = f"exec({json.dumps(_GRAPHIFY_IDENTITY_SOURCE)})"
+_GRAPHIFY_IDENTITY_COMMAND_POWERSHELL = f"exec({_GRAPHIFY_IDENTITY_SOURCE!r})"
+
+
 _POSIX_DISCOVERY = r'''GRAPHIFY_PYTHON=""
+GRAPHIFY_PYTHON_EXPLICIT=0
 _GRAPHIFY_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
+_GRAPHIFY_IDENTITY_CHECK='@@GRAPHIFY_IDENTITY_CHECK@@'
 _GRAPHIFY_WORKSPACE=$(/bin/pwd -P) || exit 1
-_graphify_canonical_root() {
-    _gfy_root=$1; [ -n "$_gfy_root" ] || return 1
-    case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac
-    [ -d "$_gfy_root" ] && CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && /bin/pwd -P
-}
+_graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; [ -d "$_gfy_root" ] && CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && /bin/pwd -P; }
 _GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_INPUT_PATH-}") || _GRAPHIFY_INPUT_ROOT=""; _GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}") || _GRAPHIFY_OUTPUT_ROOT=""
 _graphify_path_denied() { _gfy_policy_path=$1; [ "$_GRAPHIFY_WORKSPACE" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_WORKSPACE"|"$_GRAPHIFY_WORKSPACE"/*) return 0 ;; esac; [ -z "$_GRAPHIFY_INPUT_ROOT" ] || { [ "$_GRAPHIFY_INPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_INPUT_ROOT"|"$_GRAPHIFY_INPUT_ROOT"/*) return 0 ;; esac; }; [ -z "$_GRAPHIFY_OUTPUT_ROOT" ] || { [ "$_GRAPHIFY_OUTPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_OUTPUT_ROOT"|"$_GRAPHIFY_OUTPUT_ROOT"/*) return 0 ;; esac; }; return 1; }
 _graphify_resolve_ambient() {
@@ -329,21 +396,15 @@ _graphify_resolve_ambient() {
     [ -x "$_gfy_lexical" ] || return 1
     GRAPHIFY_RESOLVED=$_gfy_lexical
 }
-_graphify_command() {
-    _gfy_found=$(command -v "$1" 2>/dev/null) || return 1
-    _graphify_resolve_ambient "$_gfy_found"
-}
-_graphify_supported() {
-    [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1
-}
-_graphify_usable() {
-    _graphify_supported "$1" && "$1" -E -P -B -c 'import graphify' >/dev/null 2>&1
-}
+_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _graphify_resolve_ambient "$_gfy_found"; }
+_graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
+_graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
+_graphify_ambient_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" ambient "$_GRAPHIFY_WORKSPACE" "$_GRAPHIFY_INPUT_ROOT" "$_GRAPHIFY_OUTPUT_ROOT" >/dev/null 2>&1; }
 # An explicit absolute active environment is caller-selected, including a
 # project-local venv. Keep its lexical path for invocation.
 case "${VIRTUAL_ENV-}" in
     /*) _gfy_venv_python=$VIRTUAL_ENV/bin/python
-        _graphify_usable "$_gfy_venv_python" && GRAPHIFY_PYTHON=$_gfy_venv_python ;;
+        _graphify_usable "$_gfy_venv_python" && { GRAPHIFY_PYTHON=$_gfy_venv_python; GRAPHIFY_PYTHON_EXPLICIT=1; } ;;
 esac
 # Trusted uv and pipx metadata, then trusted candidates derived from it.
 if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command uv; then
@@ -351,7 +412,7 @@ if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command uv; then
     _gfy_uv_dir=$("$_gfy_uv" tool dir 2>/dev/null)
     _gfy_candidate=${_gfy_uv_dir:+$_gfy_uv_dir/graphifyy/bin/python}
     if _graphify_resolve_ambient "$_gfy_candidate"; then
-        _graphify_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED
+        _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED
     fi
 fi
 if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command pipx; then
@@ -359,7 +420,7 @@ if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command pipx; then
     _gfy_pipx_home=$("$_gfy_pipx" environment --value PIPX_LOCAL_VENVS 2>/dev/null)
     _gfy_candidate=${_gfy_pipx_home:+$_gfy_pipx_home/graphifyy/bin/python}
     if _graphify_resolve_ambient "$_gfy_candidate"; then
-        _graphify_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED
+        _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED
     fi
 fi
 # Console-script shebang covers direct and pipx installs without executing the launcher.
@@ -377,58 +438,62 @@ if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command graphify; then
         *[!a-zA-Z0-9/_.@+-]*) _gfy_shebang="" ;;
         *) if _graphify_resolve_ambient "$_gfy_shebang"; then _gfy_shebang=$GRAPHIFY_RESOLVED; else _gfy_shebang=""; fi ;;
     esac
-    _graphify_usable "$_gfy_shebang" && GRAPHIFY_PYTHON=$_gfy_shebang
+    _graphify_ambient_usable "$_gfy_shebang" && GRAPHIFY_PYTHON=$_gfy_shebang
 fi
 if [ -z "$GRAPHIFY_PYTHON" ]; then
     for _gfy_name in python3.14 python3 python; do
         if _graphify_command "$_gfy_name"; then
-            _graphify_usable "$GRAPHIFY_RESOLVED" && { GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; break; }
+            _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && { GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; break; }
         fi
     done
 fi
 if [ -z "$GRAPHIFY_PYTHON" ] && [ "${GRAPHIFY_DISCOVERY_OPTIONAL-0}" != 1 ]; then
     echo "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." >&2
     exit 1
-fi'''
+fi'''.replace("@@GRAPHIFY_IDENTITY_CHECK@@", _GRAPHIFY_IDENTITY_COMMAND)
 
 _POSIX_BOOTSTRAP = f'''# Installation is the only discovery path allowed to mutate the environment.
 GRAPHIFY_DISCOVERY_OPTIONAL=1
 {_POSIX_DISCOVERY}
 unset GRAPHIFY_DISCOVERY_OPTIONAL
 PYTHON=$GRAPHIFY_PYTHON
+_GRAPHIFY_PYTHON_EXPLICIT=$GRAPHIFY_PYTHON_EXPLICIT
 if [ -z "$PYTHON" ]; then
     case "${{VIRTUAL_ENV-}}" in
         /*) _gfy_candidate=$VIRTUAL_ENV/bin/python
-            _graphify_supported "$_gfy_candidate" && PYTHON=$_gfy_candidate ;;
+            _graphify_supported "$_gfy_candidate" && {{ PYTHON=$_gfy_candidate; _GRAPHIFY_PYTHON_EXPLICIT=1; }} ;;
     esac
 fi
 if [ -z "$PYTHON" ]; then
     for _gfy_name in python3.14 python3 python; do
         if _graphify_command "$_gfy_name"; then
-            _graphify_supported "$GRAPHIFY_RESOLVED" && {{ PYTHON=$GRAPHIFY_RESOLVED; break; }}
+            _graphify_supported "$GRAPHIFY_RESOLVED" && {{ PYTHON=$GRAPHIFY_RESOLVED; _GRAPHIFY_PYTHON_EXPLICIT=0; break; }}
         fi
     done
 fi
-if ! _graphify_usable "$PYTHON"; then
+_graphify_selected_usable() {{ if [ "$_GRAPHIFY_PYTHON_EXPLICIT" = 1 ]; then _graphify_usable "$1"; else _graphify_ambient_usable "$1"; fi; }}
+if ! _graphify_selected_usable "$PYTHON"; then
     if _graphify_command uv; then
         _gfy_uv=$GRAPHIFY_RESOLVED
         "$_gfy_uv" tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q
         _gfy_uv_dir=$("$_gfy_uv" tool dir 2>/dev/null)
         _gfy_candidate=${{_gfy_uv_dir:+$_gfy_uv_dir/graphifyy/bin/python}}
-        if _graphify_resolve_ambient "$_gfy_candidate" && _graphify_usable "$GRAPHIFY_RESOLVED"; then
+        if _graphify_resolve_ambient "$_gfy_candidate" && _graphify_ambient_usable "$GRAPHIFY_RESOLVED"; then
             PYTHON=$GRAPHIFY_RESOLVED
+            _GRAPHIFY_PYTHON_EXPLICIT=0
         fi
     elif [ -n "$PYTHON" ]; then
         "$PYTHON" -E -P -B -m pip install graphifyy -q 2>/dev/null \
           || "$PYTHON" -E -P -B -m pip install graphifyy -q --break-system-packages
     fi
 fi
-_graphify_usable "$PYTHON" || {{ echo "Graphify requires CPython 3.14.2 through the final 3.14.x release." >&2; exit 1; }}
+_graphify_selected_usable "$PYTHON" || {{ echo "Graphify requires CPython 3.14.2 through the final 3.14.x release." >&2; exit 1; }}
 "$PYTHON" -E -P -B -c 'from pathlib import Path; Path("graphify-out").mkdir(parents=True, exist_ok=True)' || exit 1
-"$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python || exit 1
+if ! "$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python; then echo "Graphify cannot safely publish the advisory interpreter pointer; continuing with the freshly discovered interpreter." >&2; fi
 export PYTHONUTF8=1'''
 
 _POWERSHELL_DISCOVERY = r'''$GraphifyPython = $null
+$GraphifyPythonExplicit = $false
 $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
@@ -500,11 +565,21 @@ function Resolve-GraphifyAmbientCommand {
     if (Test-GraphifyWorkspacePath $path) { return $null }
     return $path
 }
+$GraphifyIdentityCheck = @'
+@@GRAPHIFY_IDENTITY_CHECK@@
+'@
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
-    & $Candidate -E -P -B -c "import graphify" 2>$null
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
+    return $LASTEXITCODE -eq 0
+}
+function Test-GraphifyAmbientPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
     return $LASTEXITCODE -eq 0
 }
 function Test-GraphifySupportedPython {
@@ -516,7 +591,7 @@ function Test-GraphifySupportedPython {
 if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
-    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv }
+    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
 }
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
@@ -524,7 +599,7 @@ if (-not $GraphifyPython) {
         $uvDir = (& $uv tool dir 2>$null).Trim()
         $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -533,7 +608,7 @@ if (-not $GraphifyPython) {
         $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
         $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -541,7 +616,7 @@ if (-not $GraphifyPython) {
     if ($graphify) {
         $bindir = Split-Path -Parent $graphify
         foreach ($candidate in @((Join-Path $bindir "python.exe"), (Join-Path $bindir "../python.exe"))) {
-            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
         }
     }
 }
@@ -551,21 +626,24 @@ if (-not $GraphifyPython) {
         if (-not $candidate) { continue }
         if ($name -eq "py") {
             $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
-        } elseif (Test-GraphifyPython $candidate) { $GraphifyPython = $candidate; break }
+            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+        } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }
-if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }'''
+if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }'''.replace(
+    "@@GRAPHIFY_IDENTITY_CHECK@@", _GRAPHIFY_IDENTITY_COMMAND_POWERSHELL
+)
 
 _POWERSHELL_BOOTSTRAP = rf'''# Installation is the only discovery path allowed to mutate the environment.
 $GraphifyDiscoveryOptional = $true
 {_POWERSHELL_DISCOVERY}
 Remove-Variable GraphifyDiscoveryOptional -ErrorAction SilentlyContinue
 $installPython = $GraphifyPython
+$installPythonExplicit = $GraphifyPythonExplicit
 if (-not $installPython -and [IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {{
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) {{ $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }}
-    if (Test-GraphifySupportedPython $activeVenv) {{ $installPython = $activeVenv }}
+    if (Test-GraphifySupportedPython $activeVenv) {{ $installPython = $activeVenv; $installPythonExplicit = $true }}
 }}
 if (-not $installPython) {{
     foreach ($name in @("python3.14", "python3", "py", "python")) {{
@@ -573,11 +651,12 @@ if (-not $installPython) {{
         if (-not $candidate) {{ continue }}
         if ($name -eq "py") {{
             $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifySupportedPython $resolved)) {{ $installPython = [IO.Path]::GetFullPath($resolved); break }}
-        }} elseif (Test-GraphifySupportedPython $candidate) {{ $installPython = $candidate; break }}
+            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifySupportedPython $resolved)) {{ $installPython = [IO.Path]::GetFullPath($resolved); $installPythonExplicit = $false; break }}
+        }} elseif (Test-GraphifySupportedPython $candidate) {{ $installPython = $candidate; $installPythonExplicit = $false; break }}
     }}
 }}
-if (-not (Test-GraphifyPython $installPython)) {{
+$installPythonUsable = if ($installPythonExplicit) {{ Test-GraphifyPython $installPython }} else {{ Test-GraphifyAmbientPython $installPython }}
+if (-not $installPythonUsable) {{
     $uv = Resolve-GraphifyAmbientCommand uv
     if ($uv) {{
         & $uv tool install --python ">=3.14.2,<3.15" --upgrade graphifyy -q
@@ -585,17 +664,20 @@ if (-not (Test-GraphifyPython $installPython)) {{
         $uvDir = (& $uv tool dir 2>$null).Trim()
         $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) {{ $candidate = Join-Path $uvDir "graphifyy/bin/python" }}
-        if (-not (Test-GraphifyWorkspacePath $candidate) -and (Test-GraphifyPython $candidate)) {{ $GraphifyPython = [IO.Path]::GetFullPath($candidate) }}
+        if (-not (Test-GraphifyWorkspacePath $candidate) -and (Test-GraphifyAmbientPython $candidate)) {{ $GraphifyPython = [IO.Path]::GetFullPath($candidate); $GraphifyPythonExplicit = $false }}
     }} elseif ($installPython) {{
         & $installPython -E -P -B -m pip install graphifyy -q
         if ($LASTEXITCODE -ne 0) {{ throw "Graphify pip installation failed." }}
-        if (Test-GraphifyPython $installPython) {{ $GraphifyPython = $installPython }}
+        $installedPythonUsable = if ($installPythonExplicit) {{ Test-GraphifyPython $installPython }} else {{ Test-GraphifyAmbientPython $installPython }}
+        if ($installedPythonUsable) {{ $GraphifyPython = $installPython; $GraphifyPythonExplicit = $installPythonExplicit }}
     }}
 }} else {{
     $GraphifyPython = $installPython
+    $GraphifyPythonExplicit = $installPythonExplicit
 }}
-if (-not (Test-GraphifyPython $GraphifyPython)) {{ throw "Graphify requires CPython 3.14.2 through the final 3.14.x release." }}
-New-Item -ItemType Directory -Force -Path graphify-out | Out-Null
+$GraphifyPythonUsable = if ($GraphifyPythonExplicit) {{ Test-GraphifyPython $GraphifyPython }} else {{ Test-GraphifyAmbientPython $GraphifyPython }}
+if (-not $GraphifyPythonUsable) {{ throw "Graphify requires CPython 3.14.2 through the final 3.14.x release." }}
+New-Item -ItemType Directory -Force -Path graphify-out -ErrorAction Stop | Out-Null
 & $GraphifyPython -E -P -B -m graphify.interpreter_pointer write graphify-out\.graphify_python
 if ($LASTEXITCODE -ne 0) {{
     Write-Warning "Graphify cannot safely publish the advisory interpreter pointer on Windows; continuing with the freshly discovered interpreter."
@@ -603,16 +685,26 @@ if ($LASTEXITCODE -ne 0) {{
 
 
 def _compact_posix_guard(script: str) -> str:
-    """Encode a self-contained discovery guard on one generated line.
-
-    Every operational snippet must rediscover its interpreter, while the
-    progressive SKILL.md must remain small enough to load eagerly. ``printf
-    %b`` reconstructs the exact multiline program before ``eval`` parses it.
-    Quote and backslash escaping happens in this trusted generator, so corpus
-    text and the advisory pointer never participate in command construction.
-    """
-    escaped = script.replace("\\", "\\\\").replace("'", "'\"'\"'").replace("\n", "\\n")
-    return f'eval "$(printf \'%b\' \'{escaped}\')"'
+    """Run discovery in a privileged absolute shell and capture its result."""
+    compact_parts: list[str] = []
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        compact_parts.append(line)
+        continues = line.endswith(("{", " then", " do", " else", " in", "*)", ";;", ";", "\\"))
+        compact_parts.append(" " if continues else "; ")
+    compact_script = "".join(compact_parts).removesuffix("; ")
+    child = (
+        compact_script
+        + '; [ -n "$GRAPHIFY_PYTHON" ] || exit 1'
+        + '; printf "%sx" "$GRAPHIFY_PYTHON"'
+    )
+    return (
+        f"GRAPHIFY_PYTHON=$(/bin/sh -p -c {shlex.quote(child)}); "
+        'GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON%x}; '
+        'GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON:?Graphify interpreter discovery failed}'
+    )
 
 
 _POSIX_OPERATION_GUARD = _compact_posix_guard(_POSIX_DISCOVERY)

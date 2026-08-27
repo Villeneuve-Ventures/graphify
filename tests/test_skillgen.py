@@ -369,7 +369,7 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert '"/usr/bin/env "*)' in bootstrap, key
             assert '_gfy_env_command=${_gfy_shebang#"/usr/bin/env "}' in bootstrap, key
             assert '""|*[!a-zA-Z0-9_.@+-]*) _gfy_shebang="" ;;' in bootstrap, key
-            assert '_graphify_usable "$_gfy_shebang"' in bootstrap, key
+            assert '_graphify_ambient_usable "$_gfy_shebang"' in bootstrap, key
             assert '"$PYTHON" -E -P -B -m pip install graphifyy' in bootstrap, key
             assert "head -1" not in bootstrap and "tr -d" not in bootstrap, key
 
@@ -477,7 +477,17 @@ def _posix_bootstrap_script() -> str:
     platform = gen.load_platforms()["claude"]
     body = gen.render(platform)[0].content
     bootstrap = body[body.index("### Step 1"):body.index("### Step 2")]
-    return bootstrap.split("```bash\n", 1)[1].split("\n```", 1)[0].replace("INPUT_PATH", ".")
+    return bootstrap.split("```bash\n", 1)[1].split("\n```", 1)[0].replace(
+        "GRAPHIFY_INPUT_PATH='INPUT_PATH'", "GRAPHIFY_INPUT_PATH='.'"
+    )
+
+
+def test_posix_bootstrap_helper_replaces_only_standalone_input_placeholder():
+    script = _posix_bootstrap_script()
+
+    assert script.startswith("GRAPHIFY_INPUT_PATH='.'\n")
+    assert '${GRAPHIFY_INPUT_PATH-}' in script
+    assert '_GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_INPUT_PATH-}")' in script
 
 
 def _powershell_step1_scripts() -> tuple[str, str]:
@@ -509,8 +519,8 @@ def _isolated_bootstrap_bin(tmp_path: Path) -> Path:
     return bin_dir
 
 
-def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, Path]:
-    environment = tmp_path / "offline-python"
+def _isolated_python(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    environment = tmp_path / name
     subprocess.run(
         [sys.executable, "-m", "venv", "--without-pip", str(environment)],
         check=True,
@@ -530,6 +540,11 @@ def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, P
             text=True,
         ).strip()
     )
+    return python, site_packages
+
+
+def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, Path]:
+    python, site_packages = _isolated_python(tmp_path, "offline-python")
     pip_marker = tmp_path / "trusted-pip-ran"
     graphify_marker = tmp_path / "trusted-graphify-ran"
     pip_package = site_packages / "pip"
@@ -543,8 +558,14 @@ def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, P
         "from pathlib import Path\n"
         f"Path({str(pip_marker)!r}).write_text(' '.join(__import__('sys').argv[1:]))\n"
         f"package = Path({str(site_packages)!r}) / 'graphify'\n"
+        f"dist_info = Path({str(site_packages)!r}) / 'graphifyy-0.10.0.dist-info'\n"
         "if 'install' in __import__('sys').argv:\n"
         "    package.mkdir(exist_ok=True)\n"
+        "    dist_info.mkdir(exist_ok=True)\n"
+        "    (dist_info / 'METADATA').write_text(\n"
+        "        'Metadata-Version: 2.1\\nName: graphifyy\\nVersion: 0.10.0\\n'\n"
+        "    )\n"
+        "    (dist_info / 'RECORD').write_text('graphify/__init__.py,,\\n')\n"
         "    (package / '__init__.py').write_text('TRUSTED = True\\n')\n"
         f"    (package / '__main__.py').write_text({graphify_main!r})\n"
         "    (package / 'interpreter_pointer.py').write_text(\n"
@@ -553,6 +574,110 @@ def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, P
         encoding="utf-8",
     )
     return python, pip_marker, graphify_marker
+
+
+def _disposable_graphify_python(
+    tmp_path: Path,
+    name: str,
+    *,
+    package_root: Path | None = None,
+    distribution: bool = True,
+    metadata_name: str = "graphifyy",
+    direct_url: dict[str, object] | str | None = None,
+    namespace_package: bool = False,
+    owns_graphify_package: bool = True,
+) -> tuple[Path, Path]:
+    python, site_packages = _isolated_python(tmp_path, name)
+    source_root = package_root or site_packages
+    package = source_root / "graphify"
+    package.mkdir(parents=True)
+    marker = tmp_path / f"{name}-graphify-ran"
+    if not namespace_package:
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    if source_root != site_packages:
+        (site_packages / f"{name}.pth").write_text(f"{source_root}\n", encoding="utf-8")
+    if distribution:
+        dist_info = site_packages / "graphifyy-0.10.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {metadata_name}\nVersion: 0.10.0\n",
+            encoding="utf-8",
+        )
+        owned_files = "graphify/__init__.py,,\n" if owns_graphify_package else ""
+        (dist_info / "RECORD").write_text(owned_files, encoding="utf-8")
+        if direct_url is not None:
+            payload = direct_url if isinstance(direct_url, str) else json.dumps(direct_url)
+            (dist_info / "direct_url.json").write_text(payload, encoding="utf-8")
+    return python, marker
+
+
+def _run_posix_query_with_python(
+    tmp_path: Path,
+    python: Path,
+    *,
+    cwd: Path,
+    trusted: bool,
+    discovery_source: str = "path",
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    bin_dir = tmp_path / f"candidate-bin-{python.parent.parent.name}-{discovery_source}"
+    bin_dir.mkdir(exist_ok=True)
+    delegate = f'#!/bin/sh\nexec "{python}" "$@"\n'
+    if discovery_source == "path":
+        candidate = bin_dir / "python3.14"
+        candidate.write_text(delegate, encoding="utf-8")
+        candidate.chmod(0o755)
+    elif discovery_source == "launcher":
+        launcher = bin_dir / "graphify"
+        launcher.write_text(f"#!{python}\n", encoding="utf-8")
+        launcher.chmod(0o755)
+    elif discovery_source == "uv":
+        tool_dir = tmp_path / f"uv-tools-{python.parent.parent.name}"
+        candidate = tool_dir / "graphifyy" / "bin" / "python"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text(delegate, encoding="utf-8")
+        candidate.chmod(0o755)
+        uv = bin_dir / "uv"
+        uv.write_text(
+            "#!/bin/sh\n"
+            f"[ \"$1 $2\" = \"tool dir\" ] && printf '%s\\n' '{tool_dir}' && exit 0\n"
+            "exit 97\n",
+            encoding="utf-8",
+        )
+        uv.chmod(0o755)
+    elif discovery_source == "pipx":
+        venvs = tmp_path / f"pipx-venvs-{python.parent.parent.name}"
+        candidate = venvs / "graphifyy" / "bin" / "python"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_text(delegate, encoding="utf-8")
+        candidate.chmod(0o755)
+        pipx = bin_dir / "pipx"
+        pipx.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' '{venvs}'\n",
+            encoding="utf-8",
+        )
+        pipx.chmod(0o755)
+    else:
+        raise AssertionError(discovery_source)
+    env = {**os.environ, "PATH": str(bin_dir), **(extra_env or {})}
+    if trusted:
+        env["VIRTUAL_ENV"] = str(python.parent.parent)
+    else:
+        env.pop("VIRTUAL_ENV", None)
+    return subprocess.run(
+        ["/bin/bash", "-c", _query_block_as_help()],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _write_python_shadows(tmp_path: Path) -> tuple[Path, list[Path]]:
@@ -637,23 +762,59 @@ def test_posix_bootstrap_never_executes_workspace_path_mkdir(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("existing_pointer", [False, True])
-def test_posix_bootstrap_pointer_failure_is_terminal_and_preserves_state(
+def test_posix_bootstrap_pointer_refusal_warns_once_and_continues_under_umask_0002(
     tmp_path, monkeypatch, existing_pointer
 ):
     bin_dir = _isolated_bootstrap_bin(tmp_path)
     (bin_dir / "python3.14").symlink_to(Path(sys.executable))
     monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("VIRTUAL_ENV", str(Path(sys.executable).parent.parent))
     graphify_out = tmp_path / "graphify-out"
-    graphify_out.mkdir(mode=0o700)
     pointer = graphify_out / ".graphify_python"
     old_pointer = "/preserved/old/python"
     if existing_pointer:
+        graphify_out.mkdir(mode=0o775)
+        graphify_out.chmod(0o775)
         pointer.write_text(old_pointer, encoding="utf-8")
         pointer.chmod(0o600)
-    graphify_out.chmod(0o777)
+    retained_python = tmp_path / "retained-python"
+    script = (
+        "umask 0002\n"
+        + _posix_bootstrap_script()
+        + f'\nprintf "%s" "$GRAPHIFY_PYTHON" > "{retained_python}"\n'
+        + _query_block_as_help()
+    )
 
     result = subprocess.run(
-        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        ["/bin/bash", "-c", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    warning = "cannot safely publish the advisory interpreter pointer"
+    assert result.stderr.lower().count(warning) == 1
+    assert retained_python.read_text(encoding="utf-8") == str(Path(sys.executable))
+    assert (graphify_out.stat().st_mode & 0o777) == 0o775
+    if existing_pointer:
+        assert pointer.read_text(encoding="utf-8") == old_pointer
+    else:
+        assert not pointer.exists()
+
+
+def test_posix_bootstrap_directory_creation_failure_remains_terminal(tmp_path, monkeypatch):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    (bin_dir / "python3.14").symlink_to(Path(sys.executable))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("VIRTUAL_ENV", str(Path(sys.executable).parent.parent))
+    graphify_out = tmp_path / "graphify-out"
+    original = b"not-a-directory\x00\xff"
+    graphify_out.write_bytes(original)
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", "umask 0002\n" + _posix_bootstrap_script()],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -661,10 +822,8 @@ def test_posix_bootstrap_pointer_failure_is_terminal_and_preserves_state(
     )
 
     assert result.returncode != 0
-    if existing_pointer:
-        assert pointer.read_text(encoding="utf-8") == old_pointer
-    else:
-        assert not pointer.exists()
+    assert graphify_out.read_bytes() == original
+    assert "cannot safely publish the advisory interpreter pointer" not in result.stderr.lower()
 
 
 def test_posix_bootstrap_rejects_unsupported_python_before_pip(tmp_path, monkeypatch):
@@ -1099,6 +1258,75 @@ def _query_block_as_help() -> str:
     return replaced
 
 
+@pytest.mark.parametrize("guard_source", ["owner", "rendered-query"])
+def test_posix_operation_guard_ignores_exported_hostile_bash_functions(
+    tmp_path, guard_source
+):
+    guard = (
+        gen._POSIX_OPERATION_GUARD
+        if guard_source == "owner"
+        else _query_block_as_help()
+    )
+    control_marker = tmp_path / f"{guard_source}-control"
+    hostile_markers = {
+        name: tmp_path / f"{guard_source}-{name}-ran"
+        for name in ("printf", "eval", "command", "unset", "bracket", "exit")
+    }
+    child = tmp_path / f"{guard_source}-guard.sh"
+    child.write_text(
+        guard
+        + "\n"
+        + '"$GRAPHIFY_PYTHON" -E -P -B -c '
+        + "'from pathlib import Path; import sys; "
+        + "assert sys.executable == sys.argv[1]; Path(sys.argv[2]).touch()' "
+        + '"$GFY_EXPECTED_PYTHON" "$GFY_CONTROL_MARKER"\n',
+        encoding="utf-8",
+    )
+    parent = """
+function printf { : > "$GFY_PRINTF_MARKER"; return 97; }
+function eval { : > "$GFY_EVAL_MARKER"; return 97; }
+function command { : > "$GFY_COMMAND_MARKER"; return 97; }
+function unset { : > "$GFY_UNSET_MARKER"; return 97; }
+function [ { : > "$GFY_BRACKET_MARKER"; return 97; }
+function exit { : > "$GFY_EXIT_MARKER"; return 97; }
+export -f printf eval command unset [ exit
+exec /bin/bash "$1"
+"""
+    env = {
+        **os.environ,
+        "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        "GFY_EXPECTED_PYTHON": str(Path(sys.executable)),
+        "GFY_CONTROL_MARKER": str(control_marker),
+        **{
+            f"GFY_{name.upper()}_MARKER": str(marker)
+            for name, marker in hostile_markers.items()
+        },
+    }
+
+    def run_child(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            args,
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    clean = run_child("/bin/bash", str(child))
+    assert clean.returncode == 0, clean.stderr
+    assert control_marker.exists()
+    control_marker.unlink()
+
+    result = run_child(
+        "/bin/bash", "-c", parent, "hostile-function-parent", str(child)
+    )
+
+    assert not [name for name, marker in hostile_markers.items() if marker.exists()]
+    assert result.returncode == 0, result.stderr
+    assert control_marker.exists()
+
+
 def _write_executable_sentinel(path: Path, marker: Path, *, delegate: Path | None = None) -> None:
     tail = f'exec "{delegate}" "$@"\n' if delegate is not None else "exit 97\n"
     path.write_text(
@@ -1241,6 +1469,13 @@ def test_posix_external_lexical_venv_symlink_preserves_invocation_semantics(tmp_
     marker = tmp_path / "lexical-venv-imported"
     package = site_packages / "graphify"
     package.mkdir()
+    dist_info = site_packages / "graphifyy-0.10.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: graphifyy\nVersion: 0.10.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "RECORD").write_text("graphify/__init__.py,,\n", encoding="utf-8")
     for module in ("__init__.py", "__main__.py"):
         (package / module).write_text(
             f"from pathlib import Path\nPath({str(marker)!r}).touch()\n",
@@ -1419,6 +1654,255 @@ def test_posix_discovery_rejects_symlink_cycles_within_timeout(tmp_path, command
     assert result.returncode != 0
 
 
+@pytest.mark.parametrize(
+    ("identity_case", "accepted"),
+    [
+        ("wheel", True),
+        ("editable", True),
+        ("missing-distribution", False),
+        ("wrong-distribution-name", False),
+        ("missing-spec-origin", False),
+        ("installed-origin-mismatch", False),
+        ("malformed-direct-url", False),
+        ("non-file-direct-url", False),
+        ("non-editable-direct-url", False),
+        ("editable-origin-mismatch", False),
+    ],
+)
+def test_posix_trusted_candidate_requires_exact_graphifyy_identity_and_origin(
+    tmp_path, identity_case, accepted
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    source = tmp_path / f"source-{identity_case}"
+    other_source = tmp_path / f"other-source-{identity_case}"
+    package_root: Path | None = None
+    distribution = True
+    metadata_name = "graphifyy"
+    direct_url: dict[str, object] | str | None = None
+    namespace_package = False
+    if identity_case == "editable":
+        package_root = source
+        direct_url = {"url": source.as_uri(), "dir_info": {"editable": True}}
+    elif identity_case == "missing-distribution":
+        distribution = False
+    elif identity_case == "wrong-distribution-name":
+        metadata_name = "graphify-impostor"
+    elif identity_case == "missing-spec-origin":
+        namespace_package = True
+    elif identity_case == "installed-origin-mismatch":
+        package_root = source
+    elif identity_case == "malformed-direct-url":
+        package_root = source
+        direct_url = "{"
+    elif identity_case == "non-file-direct-url":
+        package_root = source
+        direct_url = {
+            "url": "https://example.invalid/graphify",
+            "dir_info": {"editable": True},
+        }
+    elif identity_case == "non-editable-direct-url":
+        package_root = source
+        direct_url = {"url": source.as_uri(), "dir_info": {"editable": False}}
+    elif identity_case == "editable-origin-mismatch":
+        package_root = source
+        direct_url = {
+            "url": other_source.as_uri(),
+            "dir_info": {"editable": True},
+        }
+    python, marker = _disposable_graphify_python(
+        tmp_path,
+        f"identity-{identity_case}",
+        package_root=package_root,
+        distribution=distribution,
+        metadata_name=metadata_name,
+        direct_url=direct_url,
+        namespace_package=namespace_package,
+    )
+
+    result = _run_posix_query_with_python(
+        tmp_path, python, cwd=project, trusted=True
+    )
+
+    assert (result.returncode == 0) is accepted, result.stderr
+    assert marker.exists() is accepted
+
+
+@pytest.mark.parametrize("trusted", [False, True], ids=["ambient", "explicit-trusted"])
+def test_posix_candidate_rejects_forged_metadata_without_graphify_ownership(
+    tmp_path, trusted
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    python, marker = _disposable_graphify_python(
+        tmp_path,
+        f"forged-metadata-{trusted}",
+        owns_graphify_package=False,
+    )
+
+    result = _run_posix_query_with_python(
+        tmp_path, python, cwd=project, trusted=trusted
+    )
+
+    assert not marker.exists(), "unowned graphify package reached generated execution"
+    assert result.returncode != 0
+
+
+@pytest.mark.parametrize("layout", ["wheel", "editable"])
+@pytest.mark.parametrize("discovery_source", ["uv", "pipx", "launcher", "path"])
+def test_posix_ambient_candidate_accepts_external_identity_valid_origin(
+    tmp_path, layout, discovery_source
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    package_root = None
+    direct_url = None
+    if layout == "editable":
+        source = tmp_path / "external-source"
+        package_root = source
+        direct_url = {"url": source.as_uri(), "dir_info": {"editable": True}}
+    python, marker = _disposable_graphify_python(
+        tmp_path,
+        f"external-{layout}",
+        package_root=package_root,
+        direct_url=direct_url,
+    )
+
+    result = _run_posix_query_with_python(
+        tmp_path,
+        python,
+        cwd=project,
+        trusted=False,
+        discovery_source=discovery_source,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+
+
+@pytest.mark.parametrize("deny_root", ["workspace", "input", "output"])
+@pytest.mark.parametrize(
+    "origin_shape",
+    ["inside", "lexical-inside-real-outside", "lexical-outside-real-inside"],
+)
+@pytest.mark.parametrize("discovery_source", ["uv", "pipx", "launcher", "path"])
+def test_posix_ambient_candidate_rejects_lexical_or_resolved_origin_under_deny_root(
+    tmp_path, deny_root, origin_shape, discovery_source
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    selected_input = tmp_path / "selected-input"
+    selected_input.mkdir()
+    selected_output = tmp_path / "selected-output"
+    selected_output.mkdir()
+    controlled = {
+        "workspace": project,
+        "input": selected_input,
+        "output": selected_output,
+    }[deny_root]
+    if origin_shape == "inside":
+        source = controlled / "source"
+    elif origin_shape == "lexical-inside-real-outside":
+        real_source = tmp_path / f"real-external-{deny_root}"
+        real_source.mkdir()
+        source = controlled / "source-alias"
+        source.symlink_to(real_source, target_is_directory=True)
+    else:
+        real_source = controlled / "real-source"
+        real_source.mkdir()
+        source = tmp_path / f"external-alias-{deny_root}"
+        source.symlink_to(real_source, target_is_directory=True)
+    python, marker = _disposable_graphify_python(
+        tmp_path,
+        f"denied-{deny_root}-{origin_shape}",
+        package_root=source,
+        direct_url={"url": source.as_uri(), "dir_info": {"editable": True}},
+    )
+
+    result = _run_posix_query_with_python(
+        tmp_path,
+        python,
+        cwd=project,
+        trusted=False,
+        discovery_source=discovery_source,
+        extra_env={
+            "GRAPHIFY_INPUT_PATH": str(selected_input),
+            "GRAPHIFY_OUTPUT_ROOT": str(selected_output),
+        },
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists(), "denied package origin reached generated operation"
+
+
+@pytest.mark.parametrize("deny_root", ["workspace", "input", "output"])
+@pytest.mark.parametrize("layout", ["wheel", "editable"])
+def test_posix_explicit_virtualenv_accepts_identity_valid_origin_under_deny_root(
+    tmp_path, deny_root, layout
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    selected_input = tmp_path / "selected-input"
+    selected_input.mkdir()
+    selected_output = tmp_path / "selected-output"
+    selected_output.mkdir()
+    controlled = {
+        "workspace": project,
+        "input": selected_input,
+        "output": selected_output,
+    }[deny_root]
+    if layout == "wheel":
+        python, marker = _disposable_graphify_python(
+            controlled, f"trusted-{deny_root}-wheel"
+        )
+    else:
+        source = controlled / "editable-source"
+        python, marker = _disposable_graphify_python(
+            tmp_path,
+            f"trusted-{deny_root}-editable",
+            package_root=source,
+            direct_url={"url": source.as_uri(), "dir_info": {"editable": True}},
+        )
+
+    result = _run_posix_query_with_python(
+        tmp_path,
+        python,
+        cwd=project,
+        trusted=True,
+        extra_env={
+            "GRAPHIFY_INPUT_PATH": str(selected_input),
+            "GRAPHIFY_OUTPUT_ROOT": str(selected_output),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+
+
+def test_posix_literal_percent_escape_editable_root_respects_trust_mode(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "editable%2Fsource"
+    python, marker = _disposable_graphify_python(
+        tmp_path,
+        "literal-percent-editable",
+        package_root=source,
+        direct_url={"url": source.as_uri(), "dir_info": {"editable": True}},
+    )
+
+    ambient = _run_posix_query_with_python(
+        tmp_path, python, cwd=project, trusted=False
+    )
+    assert ambient.returncode != 0
+    assert not marker.exists(), "ambient denied-root package origin reached execution"
+
+    trusted = _run_posix_query_with_python(
+        tmp_path, python, cwd=project, trusted=True
+    )
+    assert trusted.returncode == 0, trusted.stderr
+    assert marker.exists()
+
+
 def test_powershell_mcp_configuration_uses_native_json_serialization():
     body = "\n".join(
         artifact.content for artifact in gen.render(gen.load_platforms()["windows"])
@@ -1462,7 +1946,11 @@ def test_powershell_bootstrap_validates_every_candidate_and_parses():
     assert "Test-GraphifySupportedPython" in script
     assert "& $installPython -E -P -B -m pip install graphifyy" in script
     assert "& $uv tool install" in script
-    assert "& $Candidate -E -P -B -c \"import graphify\"" in script
+    assert "& $Candidate -E -P -B -c $GraphifyIdentityCheck trusted" in script
+    assert (
+        "& $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots"
+        in script
+    )
     assert "sys.implementation.name == 'cpython'" in script
     assert "sys.version_info.releaselevel == 'final'" in script
     assert "graphify-out\\.graphify_python" in script
@@ -1480,6 +1968,35 @@ def test_powershell_bootstrap_validates_every_candidate_and_parses():
     for source in (script, root_persistence):
         tree = parser.parse(source.encode())
         assert not tree.root_node.has_error, tree.root_node
+
+
+def test_powershell_bootstrap_separates_trusted_identity_from_ambient_origin_policy():
+    script = _powershell_bootstrap_script()
+
+    assert "function Test-GraphifyPython" in script
+    assert "function Test-GraphifyAmbientPython" in script
+    assert "importlib.metadata" in script
+    assert "importlib.util" in script
+    assert "distribution('graphifyy')" in script or 'distribution("graphifyy")' in script
+    assert "find_spec('graphify')" in script or 'find_spec("graphify")' in script
+    assert "sys.argv[1:]" in script
+    assert "@GraphifyDenyRoots" in script
+    assert "if (Test-GraphifyPython $activeVenv)" in script
+    assert script.count("Test-GraphifyAmbientPython $candidate") >= 5
+    assert not re.search(r"\$\w*[Oo]rigin\s*=\s*\(&\s*\$Candidate", script)
+    assert "print(origin" not in script and "print(real_origin" not in script
+    assert "Resolve-Path -LiteralPath $command.Source" not in script
+
+
+def test_powershell_bootstrap_directory_creation_failure_is_terminating():
+    script = _powershell_bootstrap_script()
+
+    directory_creation = (
+        "New-Item -ItemType Directory -Force -Path graphify-out "
+        "-ErrorAction Stop | Out-Null"
+    )
+    assert directory_creation in script
+    assert script.index(directory_creation) < script.index("graphify.interpreter_pointer write")
 
 
 @pytest.mark.skipif(

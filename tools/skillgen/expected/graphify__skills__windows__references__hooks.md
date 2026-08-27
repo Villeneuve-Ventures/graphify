@@ -9,6 +9,7 @@ Install a post-commit hook that auto-rebuilds the graph after every commit. No b
 ```powershell
 $env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"
 $GraphifyPython = $null
+$GraphifyPythonExplicit = $false
 $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
@@ -80,11 +81,21 @@ function Resolve-GraphifyAmbientCommand {
     if (Test-GraphifyWorkspacePath $path) { return $null }
     return $path
 }
+$GraphifyIdentityCheck = @'
+exec('import importlib.metadata\nimport importlib.util\nimport json\nimport os\nimport sys\nimport urllib.parse\nimport urllib.request\n\ndef contained(path, root):\n    try:\n        normalized_root = os.path.normcase(root)\n        return os.path.commonpath((os.path.normcase(path), normalized_root)) == normalized_root\n    except (OSError, ValueError):\n        return False\n\ntry:\n    distribution = importlib.metadata.distribution("graphifyy")\n    if distribution.metadata.get("Name") != "graphifyy":\n        raise ValueError\n    spec = importlib.util.find_spec("graphify")\n    if spec is None or not spec.origin:\n        raise ValueError\n    origin = os.path.abspath(spec.origin)\n    real_origin = os.path.realpath(origin)\n    direct_url_text = distribution.read_text("direct_url.json")\n    editable = False\n    if direct_url_text is not None:\n        direct_url = json.loads(direct_url_text)\n        parsed = urllib.parse.urlparse(direct_url["url"])\n        if direct_url.get("dir_info", {}).get("editable") is True:\n            editable = True\n            if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):\n                raise ValueError\n            package_root = os.path.abspath(\n                urllib.request.url2pathname(parsed.path)\n            )\n    if editable:\n        real_package_root = os.path.realpath(package_root)\n        if not contained(origin, package_root) or not contained(real_origin, real_package_root):\n            raise ValueError\n    else:\n        owned = [\n            entry\n            for entry in (distribution.files or ())\n            if str(entry) == "graphify/__init__.py"\n        ]\n        if len(owned) != 1:\n            raise ValueError\n        recorded_origin = os.path.abspath(distribution.locate_file(owned[0]))\n        if os.path.normcase(recorded_origin) != os.path.normcase(origin):\n            raise ValueError\n    arguments = sys.argv[1:]\n    if arguments[0] == "ambient":\n        for root_arg in arguments[1:]:\n            if not root_arg:\n                continue\n            root = os.path.abspath(root_arg)\n            real_root = os.path.realpath(root)\n            if contained(origin, root) or contained(real_origin, real_root):\n                raise ValueError\nexcept (Exception, SystemExit):\n    raise SystemExit(1)\n')
+'@
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
-    & $Candidate -E -P -B -c "import graphify" 2>$null
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
+    return $LASTEXITCODE -eq 0
+}
+function Test-GraphifyAmbientPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
     return $LASTEXITCODE -eq 0
 }
 function Test-GraphifySupportedPython {
@@ -96,7 +107,7 @@ function Test-GraphifySupportedPython {
 if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
-    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv }
+    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
 }
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
@@ -104,7 +115,7 @@ if (-not $GraphifyPython) {
         $uvDir = (& $uv tool dir 2>$null).Trim()
         $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -113,7 +124,7 @@ if (-not $GraphifyPython) {
         $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
         $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -121,7 +132,7 @@ if (-not $GraphifyPython) {
     if ($graphify) {
         $bindir = Split-Path -Parent $graphify
         foreach ($candidate in @((Join-Path $bindir "python.exe"), (Join-Path $bindir "../python.exe"))) {
-            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
         }
     }
 }
@@ -131,8 +142,8 @@ if (-not $GraphifyPython) {
         if (-not $candidate) { continue }
         if ($name -eq "py") {
             $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
-        } elseif (Test-GraphifyPython $candidate) { $GraphifyPython = $candidate; break }
+            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+        } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
@@ -154,6 +165,7 @@ Run once per project to make graphify always-on in Claude Code sessions:
 ```powershell
 $env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"
 $GraphifyPython = $null
+$GraphifyPythonExplicit = $false
 $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
@@ -225,11 +237,21 @@ function Resolve-GraphifyAmbientCommand {
     if (Test-GraphifyWorkspacePath $path) { return $null }
     return $path
 }
+$GraphifyIdentityCheck = @'
+exec('import importlib.metadata\nimport importlib.util\nimport json\nimport os\nimport sys\nimport urllib.parse\nimport urllib.request\n\ndef contained(path, root):\n    try:\n        normalized_root = os.path.normcase(root)\n        return os.path.commonpath((os.path.normcase(path), normalized_root)) == normalized_root\n    except (OSError, ValueError):\n        return False\n\ntry:\n    distribution = importlib.metadata.distribution("graphifyy")\n    if distribution.metadata.get("Name") != "graphifyy":\n        raise ValueError\n    spec = importlib.util.find_spec("graphify")\n    if spec is None or not spec.origin:\n        raise ValueError\n    origin = os.path.abspath(spec.origin)\n    real_origin = os.path.realpath(origin)\n    direct_url_text = distribution.read_text("direct_url.json")\n    editable = False\n    if direct_url_text is not None:\n        direct_url = json.loads(direct_url_text)\n        parsed = urllib.parse.urlparse(direct_url["url"])\n        if direct_url.get("dir_info", {}).get("editable") is True:\n            editable = True\n            if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):\n                raise ValueError\n            package_root = os.path.abspath(\n                urllib.request.url2pathname(parsed.path)\n            )\n    if editable:\n        real_package_root = os.path.realpath(package_root)\n        if not contained(origin, package_root) or not contained(real_origin, real_package_root):\n            raise ValueError\n    else:\n        owned = [\n            entry\n            for entry in (distribution.files or ())\n            if str(entry) == "graphify/__init__.py"\n        ]\n        if len(owned) != 1:\n            raise ValueError\n        recorded_origin = os.path.abspath(distribution.locate_file(owned[0]))\n        if os.path.normcase(recorded_origin) != os.path.normcase(origin):\n            raise ValueError\n    arguments = sys.argv[1:]\n    if arguments[0] == "ambient":\n        for root_arg in arguments[1:]:\n            if not root_arg:\n                continue\n            root = os.path.abspath(root_arg)\n            real_root = os.path.realpath(root)\n            if contained(origin, root) or contained(real_origin, real_root):\n                raise ValueError\nexcept (Exception, SystemExit):\n    raise SystemExit(1)\n')
+'@
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
-    & $Candidate -E -P -B -c "import graphify" 2>$null
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
+    return $LASTEXITCODE -eq 0
+}
+function Test-GraphifyAmbientPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
     return $LASTEXITCODE -eq 0
 }
 function Test-GraphifySupportedPython {
@@ -241,7 +263,7 @@ function Test-GraphifySupportedPython {
 if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
-    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv }
+    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
 }
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
@@ -249,7 +271,7 @@ if (-not $GraphifyPython) {
         $uvDir = (& $uv tool dir 2>$null).Trim()
         $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -258,7 +280,7 @@ if (-not $GraphifyPython) {
         $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
         $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -266,7 +288,7 @@ if (-not $GraphifyPython) {
     if ($graphify) {
         $bindir = Split-Path -Parent $graphify
         foreach ($candidate in @((Join-Path $bindir "python.exe"), (Join-Path $bindir "../python.exe"))) {
-            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
         }
     }
 }
@@ -276,8 +298,8 @@ if (-not $GraphifyPython) {
         if (-not $candidate) { continue }
         if ($name -eq "py") {
             $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
-        } elseif (Test-GraphifyPython $candidate) { $GraphifyPython = $candidate; break }
+            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+        } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
@@ -289,6 +311,7 @@ This writes a `## graphify` section to the local `CLAUDE.md` that instructs Clau
 ```powershell
 $env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"
 $GraphifyPython = $null
+$GraphifyPythonExplicit = $false
 $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
@@ -360,11 +383,21 @@ function Resolve-GraphifyAmbientCommand {
     if (Test-GraphifyWorkspacePath $path) { return $null }
     return $path
 }
+$GraphifyIdentityCheck = @'
+exec('import importlib.metadata\nimport importlib.util\nimport json\nimport os\nimport sys\nimport urllib.parse\nimport urllib.request\n\ndef contained(path, root):\n    try:\n        normalized_root = os.path.normcase(root)\n        return os.path.commonpath((os.path.normcase(path), normalized_root)) == normalized_root\n    except (OSError, ValueError):\n        return False\n\ntry:\n    distribution = importlib.metadata.distribution("graphifyy")\n    if distribution.metadata.get("Name") != "graphifyy":\n        raise ValueError\n    spec = importlib.util.find_spec("graphify")\n    if spec is None or not spec.origin:\n        raise ValueError\n    origin = os.path.abspath(spec.origin)\n    real_origin = os.path.realpath(origin)\n    direct_url_text = distribution.read_text("direct_url.json")\n    editable = False\n    if direct_url_text is not None:\n        direct_url = json.loads(direct_url_text)\n        parsed = urllib.parse.urlparse(direct_url["url"])\n        if direct_url.get("dir_info", {}).get("editable") is True:\n            editable = True\n            if parsed.scheme != "file" or parsed.netloc not in ("", "localhost"):\n                raise ValueError\n            package_root = os.path.abspath(\n                urllib.request.url2pathname(parsed.path)\n            )\n    if editable:\n        real_package_root = os.path.realpath(package_root)\n        if not contained(origin, package_root) or not contained(real_origin, real_package_root):\n            raise ValueError\n    else:\n        owned = [\n            entry\n            for entry in (distribution.files or ())\n            if str(entry) == "graphify/__init__.py"\n        ]\n        if len(owned) != 1:\n            raise ValueError\n        recorded_origin = os.path.abspath(distribution.locate_file(owned[0]))\n        if os.path.normcase(recorded_origin) != os.path.normcase(origin):\n            raise ValueError\n    arguments = sys.argv[1:]\n    if arguments[0] == "ambient":\n        for root_arg in arguments[1:]:\n            if not root_arg:\n                continue\n            root = os.path.abspath(root_arg)\n            real_root = os.path.realpath(root)\n            if contained(origin, root) or contained(real_origin, real_root):\n                raise ValueError\nexcept (Exception, SystemExit):\n    raise SystemExit(1)\n')
+'@
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
-    & $Candidate -E -P -B -c "import graphify" 2>$null
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
+    return $LASTEXITCODE -eq 0
+}
+function Test-GraphifyAmbientPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
     return $LASTEXITCODE -eq 0
 }
 function Test-GraphifySupportedPython {
@@ -376,7 +409,7 @@ function Test-GraphifySupportedPython {
 if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
-    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv }
+    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
 }
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
@@ -384,7 +417,7 @@ if (-not $GraphifyPython) {
         $uvDir = (& $uv tool dir 2>$null).Trim()
         $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -393,7 +426,7 @@ if (-not $GraphifyPython) {
         $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
         $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
     }
 }
 if (-not $GraphifyPython) {
@@ -401,7 +434,7 @@ if (-not $GraphifyPython) {
     if ($graphify) {
         $bindir = Split-Path -Parent $graphify
         foreach ($candidate in @((Join-Path $bindir "python.exe"), (Join-Path $bindir "../python.exe"))) {
-            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
         }
     }
 }
@@ -411,8 +444,8 @@ if (-not $GraphifyPython) {
         if (-not $candidate) { continue }
         if ($name -eq "py") {
             $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
-        } elseif (Test-GraphifyPython $candidate) { $GraphifyPython = $candidate; break }
+            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+        } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }

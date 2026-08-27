@@ -1,5 +1,7 @@
 """Tests for hooks.py - git hook install/uninstall."""
+import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -376,6 +378,7 @@ def test_hook_external_lexical_venv_symlink_preserves_invocation_semantics(tmp_p
         "Metadata-Version: 2.1\nName: graphifyy\nVersion: 0\n",
         encoding="utf-8",
     )
+    (dist_info / "RECORD").write_text("graphify/__init__.py,,\n", encoding="utf-8")
     canonical = candidate.resolve()
     marker.unlink(missing_ok=True)
     subprocess.run(
@@ -825,3 +828,478 @@ def test_uninstall_removes_merge_driver_keeps_other_attrs(tmp_path):
     content = (repo / ".gitattributes").read_text(encoding="utf-8")
     assert "*.png binary" in content
     assert "merge=graphify" not in content
+
+
+# ── PR #90: interpreter pins and ambient package origins are data, not shell ──
+
+_SPECIAL_PIN_NAMES = (
+    "python with spaces",
+    "python$cash",
+    "python;semi",
+    "python(paren)",
+    "python[brackets]",
+    "python'quote",
+)
+
+
+@pytest.mark.parametrize("name", _SPECIAL_PIN_NAMES)
+def test_pinned_python_preserves_valid_absolute_special_paths(tmp_path, monkeypatch, name):
+    """An absolute interpreter path is shell data; punctuation is not invalidity."""
+    import graphify.hooks as hooks
+
+    pinned = str(tmp_path / name)
+    monkeypatch.setattr(hooks.sys, "executable", pinned)
+
+    assert hooks._pinned_python() == pinned
+    assert shlex.split(shlex.quote(hooks._pinned_python())) == [pinned]
+
+
+@pytest.mark.parametrize(
+    "value", ["python", "bin/python", "./python", "../python", "C:python", r"C:bin\python.exe"]
+)
+def test_pinned_python_still_rejects_relative_paths(monkeypatch, value):
+    import graphify.hooks as hooks
+
+    monkeypatch.setattr(hooks.sys, "executable", value)
+
+    assert hooks._pinned_python() == ""
+
+
+def _write_capturing_executable(path: Path, argv_log: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {shlex.quote(str(argv_log))}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook quoting contract")
+def test_installed_hooks_quote_special_pin_and_execute_exact_token(tmp_path, monkeypatch):
+    """The installed hook must neither split nor evaluate the trusted pin."""
+    import graphify.hooks as hooks
+
+    repo = _make_git_repo(tmp_path / "repo")
+    sentinel = repo / "hook-pin-injected"
+    argv_log = tmp_path / "hook-pin-argv.log"
+    pinned = tmp_path / "python'; touch hook-pin-injected; #'"
+    _write_capturing_executable(pinned, argv_log)
+    monkeypatch.setattr(hooks, "_pinned_python", lambda: str(pinned))
+
+    install(repo)
+    (repo / "graphify-out").mkdir()
+    for hook_name in ("post-commit", "post-checkout"):
+        hook = repo / ".git" / "hooks" / hook_name
+        syntax = subprocess.run(["/bin/sh", "-n", str(hook)], capture_output=True, text=True)
+        assert syntax.returncode == 0, syntax.stderr
+
+    result = subprocess.run(
+        ["/bin/sh", str(repo / ".git" / "hooks" / "post-checkout"), "old", "new", "1"],
+        cwd=repo,
+        env={**os.environ, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists()
+    assert argv_log.exists(), "the exact pinned executable was not selected"
+    assert argv_log.read_text(encoding="utf-8").splitlines()[:4] == ["-E", "-P", "-B", "-c"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Git invokes merge drivers through POSIX sh here")
+def test_configured_merge_driver_keeps_special_executable_and_arguments_distinct(
+    tmp_path, monkeypatch
+):
+    """Exercise Git's stored driver command without a brittle content merge.
+
+    Git itself expands ``%O/%A/%B`` before passing the stored command to the
+    shell. Invoking the configured value through that same shell boundary keeps
+    this focused on executable quoting and argv separation; a full graph merge
+    would additionally couple the regression to graph fixture validity.
+    """
+    import graphify.hooks as hooks
+
+    repo = _make_git_repo(tmp_path / "repo")
+    argv_log = tmp_path / "merge-driver-argv.log"
+    sentinel = repo / "merge-driver-injected"
+    pinned = tmp_path / "capture; touch merge-driver-injected; #"
+    _write_capturing_executable(pinned, argv_log)
+    monkeypatch.setattr(hooks, "_pinned_python", lambda: str(pinned))
+    install(repo)
+    driver = subprocess.check_output(
+        ["git", "-C", str(repo), "config", "--get", "merge.graphify.driver"],
+        text=True,
+    ).strip()
+    base, current, other = (tmp_path / name for name in ("base graph", "current graph", "other graph"))
+    command = driver.replace("%O", shlex.quote(str(base))).replace(
+        "%A", shlex.quote(str(current))
+    ).replace("%B", shlex.quote(str(other)))
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=repo,
+        env={**os.environ, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not sentinel.exists()
+    assert argv_log.read_text(encoding="utf-8").splitlines() == [
+        "-E", "-P", "-B", "-m", "graphify", "merge-driver",
+        str(base), str(current), str(other),
+    ]
+
+
+def _isolated_interpreter(tmp_path: Path) -> tuple[Path, Path]:
+    environment = tmp_path / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(environment)],
+        check=True,
+        capture_output=True,
+    )
+    interpreter = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
+    site_packages = Path(
+        subprocess.check_output(
+            [str(interpreter), "-E", "-P", "-B", "-c", "import site; print(site.getsitepackages()[0])"],
+            text=True,
+        ).strip()
+    )
+    return interpreter, site_packages
+
+
+def _editable_interpreter(tmp_path: Path, origin: Path) -> Path:
+    interpreter, site_packages = _isolated_interpreter(tmp_path)
+    (site_packages / "graphify-origin.pth").write_text(str(origin) + "\n", encoding="utf-8")
+    dist_info = site_packages / "graphifyy-0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: graphifyy\nVersion: 0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "direct_url.json").write_text(
+        json.dumps({"url": origin.as_uri(), "dir_info": {"editable": True}}),
+        encoding="utf-8",
+    )
+    return interpreter
+
+
+def _wheel_interpreter(
+    tmp_path: Path,
+    *,
+    record_state: str = "valid",
+    marker: Path | None = None,
+) -> Path:
+    interpreter, site_packages = _isolated_interpreter(tmp_path)
+    _write_graphify_package(site_packages, marker)
+    dist_info = site_packages / "graphifyy-0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: graphifyy\nVersion: 0\n",
+        encoding="utf-8",
+    )
+    record = dist_info / "RECORD"
+    record_contents = {
+        "valid": "graphify/__init__.py,,\n",
+        "empty": "",
+        "duplicate": "graphify/__init__.py,,\ngraphify/__init__.py,,\n",
+        "unowned": "graphify/other.py,,\n",
+    }
+    if record_state in record_contents:
+        record.write_text(record_contents[record_state], encoding="utf-8")
+    elif record_state == "origin-mismatch":
+        impostor = tmp_path / "impostor"
+        _write_graphify_package(impostor, marker)
+        (site_packages / "00-impostor.pth").write_text(
+            f"import sys; sys.path.insert(0, {str(impostor)!r})\n",
+            encoding="utf-8",
+        )
+        record.write_text("graphify/__init__.py,,\n", encoding="utf-8")
+    elif record_state != "missing":
+        raise AssertionError(f"unknown RECORD state: {record_state}")
+    return interpreter
+
+
+def _write_graphify_package(origin: Path, marker: Path | None = None) -> None:
+    package = origin / "graphify"
+    package.mkdir(parents=True)
+    content = "\n"
+    if marker is not None:
+        content = f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    (package / "__init__.py").write_text(content, encoding="utf-8")
+
+
+def _run_python_detect(
+    script: str,
+    *,
+    cwd: Path,
+    interpreter: Path | None = None,
+    input_root: Path | None = None,
+    output_root: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "PATH": str(interpreter.parent) if interpreter else "/nonexistent"}
+    if input_root is not None:
+        env["GRAPHIFY_INPUT_PATH"] = str(input_root)
+    if output_root is not None:
+        env["GRAPHIFY_OUTPUT_ROOT"] = str(output_root)
+    return subprocess.run(
+        ["/bin/sh", "-c", script + '\nprintf \'SELECTED=%s\\n\' "$GRAPHIFY_PYTHON"\n'],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_trusted_pin_allows_identity_valid_project_local_editable_origin(tmp_path):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_graphify_package(workspace)
+    interpreter = _editable_interpreter(tmp_path / "trusted", workspace)
+    script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", str(interpreter))
+
+    result = _run_python_detect(script, cwd=workspace)
+
+    assert result.returncode == 0, result.stderr
+    assert f"SELECTED={interpreter}" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_dynamic_probe_rejects_denied_origins_and_symlink_crossings(tmp_path):
+    """Ambient interpreters are rejected when either origin spelling is denied."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    external = tmp_path / "external"
+    for root in (workspace, input_root, output_root, external):
+        root.mkdir()
+
+    cases: list[tuple[str, Path, bool]] = []
+    for label, root in (("workspace", workspace), ("input", input_root), ("output", output_root)):
+        origin = root / f"{label}-origin"
+        _write_graphify_package(origin)
+        cases.append((label, origin, False))
+
+    external_origin = external / "editable-origin"
+    _write_graphify_package(external_origin)
+    cases.append(("external", external_origin, True))
+
+    lexical_inside = workspace / "lexical-inside-real-outside"
+    lexical_inside.symlink_to(external_origin, target_is_directory=True)
+    cases.append(("lexical-inside", lexical_inside, False))
+
+    real_inside = workspace / "real-inside"
+    _write_graphify_package(real_inside)
+    lexical_outside = external / "lexical-outside-real-inside"
+    lexical_outside.symlink_to(real_inside, target_is_directory=True)
+    cases.append(("real-inside", lexical_outside, False))
+
+    for label, origin, accepted in cases:
+        interpreter = _editable_interpreter(tmp_path / f"env-{label}", origin)
+        result = _run_python_detect(
+            _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+            cwd=workspace,
+            interpreter=interpreter,
+            input_root=input_root,
+            output_root=output_root,
+        )
+        selected = f"SELECTED={interpreter}" in result.stdout
+        assert selected is accepted, f"{label}: stdout={result.stdout!r} stderr={result.stderr!r}"
+        assert str(origin) not in result.stdout + result.stderr
+
+    wheel = _wheel_interpreter(tmp_path / "env-external-wheel")
+    wheel_result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=workspace,
+        interpreter=wheel,
+        input_root=input_root,
+        output_root=output_root,
+    )
+    assert f"SELECTED={wheel}" in wheel_result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+@pytest.mark.parametrize("source", ["trusted-pin", "dynamic"], ids=str)
+@pytest.mark.parametrize(
+    "record_state",
+    ["valid", "missing", "empty", "duplicate", "unowned", "origin-mismatch"],
+)
+def test_hook_wheel_identity_requires_exact_record_ownership(tmp_path, source, record_state):
+    """Wheel identity owns graphify/__init__.py only through one exact RECORD row."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / f"impostor-executed-{source}-{record_state}"
+    interpreter = _wheel_interpreter(
+        tmp_path / "candidate",
+        record_state=record_state,
+        marker=None if record_state == "valid" else marker,
+    )
+    pin = str(interpreter) if source == "trusted-pin" else ""
+    script = (
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", pin)
+        + '\n[ -z "$GRAPHIFY_PYTHON" ] || "$GRAPHIFY_PYTHON" -E -P -B -c \'import graphify\'\n'
+    )
+
+    result = _run_python_detect(
+        script,
+        cwd=workspace,
+        interpreter=interpreter if source == "dynamic" else None,
+    )
+
+    assert result.returncode == 0, result.stderr
+    if record_state == "valid":
+        assert f"SELECTED={interpreter}" in result.stdout
+    else:
+        assert not marker.exists(), f"{record_state} impostor package executed"
+        assert f"SELECTED={interpreter}" not in result.stdout
+
+
+def test_dynamic_probe_receives_roots_as_argv_without_origin_reparse():
+    from graphify.hooks import _PYTHON_DETECT
+
+    probe_lines = [line for line in _PYTHON_DETECT.splitlines() if '"$_GFY_PROBE"' in line]
+    assert probe_lines
+    assert all('"$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT"' in line for line in probe_lines)
+    assert "sys.argv" in _PYTHON_DETECT
+    assert "_GFY_ORIGIN=$(" not in _PYTHON_DETECT
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_dynamic_failure_diagnostic_is_single_and_only_after_all_candidates_fail(tmp_path):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    reject = bin_dir / "reject"
+    reject.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    reject.chmod(0o755)
+    for name in ("graphify", "python3", "python"):
+        (bin_dir / name).symlink_to(reject)
+
+    failed = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=workspace,
+        interpreter=bin_dir / "python3",
+    )
+    assert failed.stderr.count("could not locate a trusted final CPython") == 1
+
+    accept = bin_dir / "python3"
+    accept.unlink()
+    accept.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    accept.chmod(0o755)
+    succeeded = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=workspace,
+        interpreter=accept,
+    )
+    assert "could not locate a trusted final CPython" not in succeeded.stderr
+    assert f"SELECTED={accept}" in succeeded.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_dynamic_candidate_rejects_parent_symlink_into_workspace(tmp_path):
+    """Canonicalize the full candidate, including symlinks in parent directories."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    controlled_bin = workspace / "controlled" / "bin"
+    controlled_bin.mkdir(parents=True)
+    marker = tmp_path / "parent-symlink-candidate-executed"
+    controlled_python = controlled_bin / "python3"
+    controlled_python.write_text(
+        "#!/bin/sh\n"
+        f": > {shlex.quote(str(marker))}\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    controlled_python.chmod(0o755)
+    external_alias = tmp_path / "external-alias"
+    external_alias.symlink_to(workspace / "controlled", target_is_directory=True)
+    lexical_candidate = external_alias / "bin" / "python3"
+
+    result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=workspace,
+        interpreter=lexical_candidate,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "workspace-controlled candidate reached probe execution"
+    assert f"SELECTED={lexical_candidate}" not in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Git merge-driver shell contract is POSIX here")
+@pytest.mark.parametrize(
+    "hostile_printf", [False, True], ids=["clean-env", "hostile-exported-printf"]
+)
+def test_real_git_merge_preserves_percent_in_pinned_executable(
+    tmp_path, monkeypatch, hostile_printf
+):
+    """Git placeholder expansion must not rewrite ``%O`` inside the executable."""
+    import graphify.hooks as hooks
+
+    repo = _make_git_repo(tmp_path / "repo")
+    argv_log = tmp_path / "percent-driver-argv.log"
+    pinned = tmp_path / "python%O pin"
+    _write_capturing_executable(pinned, argv_log)
+    monkeypatch.setattr(hooks, "_pinned_python", lambda: str(pinned))
+
+    hostile_marker = repo / "hostile-printf-executed"
+    git_env = {**os.environ, "GRAPHIFY_SKIP_HOOK": "1"}
+    if hostile_printf:
+        git_env.update(
+            {
+                "HOSTILE_PRINTF_MARKER": str(hostile_marker),
+                "BASH_FUNC_printf%%": (
+                    '() { : > "$HOSTILE_PRINTF_MARKER"; builtin printf "$@"; }'
+                ),
+            }
+        )
+
+    def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=check,
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+
+    git("config", "user.email", "hook-tests@example.invalid")
+    git("config", "user.name", "Graphify Hook Tests")
+    install(repo)
+    graph = repo / "graphify-out" / "graph.json"
+    graph.parent.mkdir()
+    graph.write_text("base\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "base")
+    base_branch = git("branch", "--show-current").stdout.strip()
+
+    git("checkout", "-b", "percent-driver-side")
+    graph.write_text("side\n", encoding="utf-8")
+    git("commit", "-am", "side")
+    git("checkout", base_branch)
+    graph.write_text("main\n", encoding="utf-8")
+    git("commit", "-am", "main")
+
+    merged = git("merge", "--no-edit", "percent-driver-side", check=False)
+
+    assert not hostile_marker.exists(), "ambient exported printf function executed before driver"
+    assert merged.returncode == 0, merged.stderr
+    argv = argv_log.read_text(encoding="utf-8").splitlines()
+    assert argv[:6] == ["-E", "-P", "-B", "-m", "graphify", "merge-driver"]
+    assert len(argv) == 9
+    assert len(set(argv[6:])) == 3
