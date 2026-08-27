@@ -88,6 +88,19 @@ fi
 if [ -z "$PYTHON" ] && [ -n "$GRAPHIFY_BIN" ]; then
     _SHEBANG=$(head -1 "$GRAPHIFY_BIN" | tr -d '#!')
     case "$_SHEBANG" in
+        "/usr/bin/env "*)
+            _ENV_COMMAND=${_SHEBANG#"/usr/bin/env "}
+            case "$_ENV_COMMAND" in
+                ""|*[!a-zA-Z0-9_.@+-]*) _SHEBANG="" ;;
+                *) # Resolve exactly one allowlisted command name to an absolute path.
+                    _ENV_PATH=$(command -v "$_ENV_COMMAND" 2>/dev/null)
+                    case "$_ENV_PATH" in
+                        /*) _SHEBANG="$_ENV_PATH" ;;
+                        *) _SHEBANG="" ;;
+                    esac # resolved /usr/bin/env interpreter path
+                    ;; # accepted /usr/bin/env command
+            esac # /usr/bin/env command allowlist
+            is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;
         *[!a-zA-Z0-9/_.@-]*) ;;
         *) is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;
     esac

@@ -935,6 +935,31 @@ def _is_shebang_allowlist_fix_line(line: str) -> bool:
     return "[!a-zA-Z0-9/_." in line
 
 
+def _is_env_shebang_fix_line(line: str) -> bool:
+    """Whether a line safely resolves a simple ``/usr/bin/env`` shebang.
+
+    Console-script wrappers normally use an absolute interpreter path, but valid
+    wrappers may delegate through ``/usr/bin/env``. Accept exactly one allowlisted
+    command name, resolve it to an absolute path, and leave flags, assignments, and
+    shell syntax rejected.
+    """
+    return line.strip() in {
+        '"/usr/bin/env "*)',
+        '_ENV_COMMAND=${_SHEBANG#"/usr/bin/env "}',
+        'case "$_ENV_COMMAND" in',
+        '""|*[!a-zA-Z0-9_.@+-]*) _SHEBANG="" ;;',
+        '*) # Resolve exactly one allowlisted command name to an absolute path.',
+        '_ENV_PATH=$(command -v "$_ENV_COMMAND" 2>/dev/null)',
+        'case "$_ENV_PATH" in',
+        '/*) _SHEBANG="$_ENV_PATH" ;;',
+        '*) _SHEBANG="" ;;',
+        'esac # resolved /usr/bin/env interpreter path',
+        ';; # accepted /usr/bin/env command',
+        'esac # /usr/bin/env command allowlist',
+        'is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;',
+    }
+
+
 def _is_obsidian_usage_comment_line(line: str) -> bool:
     """Whether a line is part of the ``/graphify`` usage-comment fix (#1681).
 
@@ -1128,6 +1153,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_manifest_root_fix_line,
     _is_no_api_key_fix_line,
     _is_shebang_allowlist_fix_line,
+    _is_env_shebang_fix_line,
     _is_obsidian_usage_comment_line,
     _is_uv_from_interpreter_fix_line,
     _is_python314_bootstrap_fix_line,

@@ -360,6 +360,9 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert '_UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"' in bootstrap, key
             assert "uv tool run" not in bootstrap, key
             assert "for _CANDIDATE in python3.14 python3" in bootstrap, key
+            assert '"/usr/bin/env "*)' in bootstrap, key
+            assert '_ENV_COMMAND=${_SHEBANG#"/usr/bin/env "}' in bootstrap, key
+            assert '""|*[!a-zA-Z0-9_.@+-]*) _SHEBANG="" ;;' in bootstrap, key
             assert "is_supported_graphify_python \"$_SHEBANG\"" in bootstrap, key
             assert '[ -n "$PYTHON" ] && { "$PYTHON" -E -P -B -m pip install' in bootstrap, key
 
@@ -611,6 +614,53 @@ def test_posix_bootstrap_ignores_unsupported_existing_graphify_shebang(tmp_path,
     assert result.returncode == 0, result.stderr
     saved = (tmp_path / "graphify-out" / ".graphify_python").read_text()
     assert Path(saved).resolve() == Path(sys.executable).resolve()
+
+
+def test_posix_bootstrap_resolves_supported_env_shebang(tmp_path, monkeypatch):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    env_python = bin_dir / "python-graphify"
+    env_python.symlink_to(Path(sys.executable))
+    graphify = bin_dir / "graphify"
+    graphify.write_text("#!/usr/bin/env python-graphify\n", encoding="utf-8")
+    graphify.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    saved = (tmp_path / "graphify-out" / ".graphify_python").read_text()
+    assert Path(saved).resolve() == Path(sys.executable).resolve()
+
+
+@pytest.mark.parametrize(
+    "env_suffix",
+    ["python-graphify -I", "PYTHONPATH=/tmp python-graphify"],
+)
+def test_posix_bootstrap_rejects_env_shebang_arguments(tmp_path, monkeypatch, env_suffix):
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    (bin_dir / "python-graphify").symlink_to(Path(sys.executable))
+    graphify = bin_dir / "graphify"
+    graphify.write_text(f"#!/usr/bin/env {env_suffix}\n", encoding="utf-8")
+    graphify.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_bootstrap_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Graphify requires Python 3.14.2" in result.stderr
+    assert not (tmp_path / "graphify-out" / ".graphify_python").exists()
 
 
 def test_posix_missing_package_install_uses_trusted_pip_under_shadows(tmp_path, monkeypatch):
