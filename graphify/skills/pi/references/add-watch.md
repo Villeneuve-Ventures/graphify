@@ -7,7 +7,7 @@ Load this when the user ran `/graphify add <url>` or passed `--watch`. Neither i
 Fetch a URL and add it to the corpus, then update the graph.
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys
 from graphify.ingest import ingest
 from pathlib import Path
@@ -41,7 +41,24 @@ Supported URL types (auto-detected):
 Start a background watcher that monitors a folder and auto-updates the graph when files change.
 
 ```bash
-$(cat graphify-out/.graphify_python) -m graphify.watch INPUT_PATH --debounce 3
+if [ ! -f graphify-out/.graphify_python ]; then
+    echo "Missing graphify-out/.graphify_python; rerun Step 1 interpreter bootstrap." >&2
+    exit 1
+fi
+_GRAPHIFY_SAVED=$(cat graphify-out/.graphify_python)
+case "$_GRAPHIFY_SAVED" in
+    /*) ;;
+    *) echo "Invalid graphify interpreter pointer." >&2; exit 1 ;;
+esac
+if [ ! -x "$_GRAPHIFY_SAVED" ]; then
+    echo "Saved graphify interpreter is not executable." >&2
+    exit 1
+fi
+"$_GRAPHIFY_SAVED" -E -P -B -c 'import graphify, sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)' >/dev/null 2>&1 || {
+    echo "Saved graphify interpreter is unsupported or cannot import graphify." >&2
+    exit 1
+}
+"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify watch INPUT_PATH --debounce 3
 ```
 
 Replace INPUT_PATH with the folder to watch. Behavior depends on what changed:

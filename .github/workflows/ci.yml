@@ -27,7 +27,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       # --frozen keeps uv from re-resolving and rewriting uv.lock as a side
       # effect of `uv run`; the lock is committed and must not churn in CI.
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.12"]
+        python-version: ["3.14"]
 
     steps:
       - uses: actions/checkout@v6
@@ -92,7 +92,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
 
       - name: Install dependencies
         run: uv sync --frozen
@@ -104,3 +104,30 @@ jobs:
       - name: pip-audit (dependency vulnerabilities)
         continue-on-error: true
         run: uv run --frozen pip-audit --strict
+
+  leiden-binary-smoke:
+    name: Leiden binary smoke (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv and Python 3.14
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Install Graphify with the native Leiden wheel only
+        run: |
+          uv venv --python 3.14
+          uv pip install --only-binary=graspologic-native ".[leiden]"
+
+      - name: Run a tiny weighted partition
+        run: >-
+          uv run --no-project python -c
+          "import networkx as nx;
+          from graspologic_native import leiden;
+          from graphify.cluster import _partition;
+          graph = nx.Graph([('0', '1', {'weight': 10.0}), ('2', '3', {'weight': 10.0}), ('1', '2', {'weight': 0.01})]);
+          partition = _partition(graph);
+          communities = {frozenset(node for node, cid in partition.items() if cid == community) for community in set(partition.values())};
+          assert callable(leiden) and communities == {frozenset({'0', '1'}), frozenset({'2', '3'})}"

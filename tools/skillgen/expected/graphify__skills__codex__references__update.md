@@ -6,8 +6,34 @@ Load this only when the user passed `--update` or `--cluster-only`. A first-time
 
 Use when you've added or modified files since the last run. Only re-extracts changed files - saves tokens and time.
 
+For an explicitly code-only update, use the public CLI through the saved interpreter:
+
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+if [ ! -f graphify-out/.graphify_python ]; then
+    echo "Missing graphify-out/.graphify_python; rerun Step 1 interpreter bootstrap." >&2
+    exit 1
+fi
+_GRAPHIFY_SAVED=$(cat graphify-out/.graphify_python)
+case "$_GRAPHIFY_SAVED" in
+    /*) ;;
+    *) echo "Invalid graphify interpreter pointer." >&2; exit 1 ;;
+esac
+if [ ! -x "$_GRAPHIFY_SAVED" ]; then
+    echo "Saved graphify interpreter is not executable." >&2
+    exit 1
+fi
+"$_GRAPHIFY_SAVED" -E -P -B -c 'import graphify, sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)' >/dev/null 2>&1 || {
+    echo "Saved graphify interpreter is unsupported or cannot import graphify." >&2
+    exit 1
+}
+"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify update INPUT_PATH
+```
+
+When documents, papers, images, or video require the semantic runbook, continue with the
+incremental detection and merge steps below instead.
+
+```bash
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
 from graphify.detect import detect_incremental, save_manifest
 from pathlib import Path
@@ -30,7 +56,7 @@ if new_total > 0:
 Then populate `.graphify_detect.json` so Steps 3A–6 (which read it unconditionally) see the right state for an incremental run. `files` carries the changed subset (drives Step 3A AST + Step 3B0 cache check on only what changed); `all_files` carries the full corpus for any step that needs corpus-wide context:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 r = json.loads(Path('graphify-out/.graphify_incremental.json').read_text(encoding=\"utf-8\"))
@@ -48,7 +74,7 @@ Path('graphify-out/.graphify_detect.json').write_text(json.dumps({
 If new files exist, first check whether all changed files are code files:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 
@@ -71,7 +97,7 @@ If no new files exist (only deletions), create an empty extraction so the merge 
 ```bash
 if [ ! -f graphify-out/.graphify_extract.json ]; then
     echo '[graphify update] Only deletions -- creating empty extraction for merge.'
-    $(cat graphify-out/.graphify_python) -c "
+    "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 Path('graphify-out/.graphify_extract.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
@@ -83,7 +109,7 @@ fi
 Then:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 from graphify.build import build_merge
@@ -152,7 +178,7 @@ Then run Steps 4–8 on the merged graph as normal.
 After Step 4, show the graph diff:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from graphify.analyze import graph_diff
 from graphify.build import build_from_json
@@ -186,7 +212,24 @@ Clean up after: `rm -f graphify-out/.graphify_old.json`
 Skip Steps 1–3. Re-run clustering on the existing graph:
 
 ```bash
-graphify cluster-only .
+if [ ! -f graphify-out/.graphify_python ]; then
+    echo "Missing graphify-out/.graphify_python; rerun Step 1 interpreter bootstrap." >&2
+    exit 1
+fi
+_GRAPHIFY_SAVED=$(cat graphify-out/.graphify_python)
+case "$_GRAPHIFY_SAVED" in
+    /*) ;;
+    *) echo "Invalid graphify interpreter pointer." >&2; exit 1 ;;
+esac
+if [ ! -x "$_GRAPHIFY_SAVED" ]; then
+    echo "Saved graphify interpreter is not executable." >&2
+    exit 1
+fi
+"$_GRAPHIFY_SAVED" -E -P -B -c 'import graphify, sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)' >/dev/null 2>&1 || {
+    echo "Saved graphify interpreter is unsupported or cannot import graphify." >&2
+    exit 1
+}
+"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify cluster-only .
 ```
 
 `graphify cluster-only .` is **self-contained**: it re-clusters, names communities, and regenerates `GRAPH_REPORT.md`, `graph.json`, and `graph.html` from the existing graph. **Do not re-run Steps 5–9** — they read intermediate files (`.graphify_extract.json`, `.graphify_detect.json`, `.graphify_analysis.json`) that a prior build's cleanup (Step 9) already deleted, so they raise `FileNotFoundError` (#1392). When it finishes, present the refreshed `GRAPH_REPORT.md` summary as usual.

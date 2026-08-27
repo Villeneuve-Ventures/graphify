@@ -13,7 +13,7 @@ Usage (from the repo root)::
     python -m tools.skillgen --check         # byte-diff render vs committed + expected/, exit 1 on drift
     python -m tools.skillgen --audit-coverage# per host: assert every heading of that host's own v8 body single-homes in its render
     python -m tools.skillgen --schema-singleton  # assert the file_type enum is byte-identical everywhere
-    python -m tools.skillgen --monolith-roundtrip# assert each monolith == v8 modulo the enum unification
+    python -m tools.skillgen --monolith-roundtrip# assert each monolith == v8 modulo sanctioned migrations
     python -m tools.skillgen --always-on-roundtrip# assert each always_on/*.md reproduces its former constant
     python -m tools.skillgen --bless         # rewrite expected/ from the current render
 
@@ -169,15 +169,15 @@ _AGENTS_MD_HOOKS: dict[str, dict[str, str]] = {
     "trae": {
         "heading_suffix": " (Trae)",
         "host_display": "Trae",
-        "install_block": "graphify trae install       # or: graphify trae-cn install",
-        "uninstall_block": "graphify trae uninstall     # or: graphify trae-cn uninstall   # remove the section",
+        "install_block": "@@GRAPHIFY_CMD@@ trae install       # or: @@GRAPHIFY_CMD@@ trae-cn install",
+        "uninstall_block": "@@GRAPHIFY_CMD@@ trae uninstall     # or: @@GRAPHIFY_CMD@@ trae-cn uninstall   # remove the section",
         "pretooluse_note": _TRAE_PRETOOLUSE_NOTE,
     },
     "amp": {
         "heading_suffix": "",
         "host_display": "Amp",
-        "install_block": "graphify amp install",
-        "uninstall_block": "graphify amp uninstall  # remove the section",
+        "install_block": "@@GRAPHIFY_CMD@@ amp install",
+        "uninstall_block": "@@GRAPHIFY_CMD@@ amp uninstall  # remove the section",
         "pretooluse_note": "",
     },
     "agents": {
@@ -186,8 +186,8 @@ _AGENTS_MD_HOOKS: dict[str, dict[str, str]] = {
         # pointing at `graphify agents install` (which wires AGENTS.md, like amp).
         "heading_suffix": "",
         "host_display": "your agent",
-        "install_block": "graphify agents install",
-        "uninstall_block": "graphify agents uninstall  # remove the section",
+        "install_block": "@@GRAPHIFY_CMD@@ agents install",
+        "uninstall_block": "@@GRAPHIFY_CMD@@ agents uninstall  # remove the section",
         "pretooluse_note": "",
     },
 }
@@ -298,6 +298,61 @@ class Platform:
         return _HOOKS_TARGET[self.hooks_variant]
 
 
+_SAVED_INTERPRETER_SHELL = {
+    "posix": {
+        "fence": "bash",
+        "guard": """if [ ! -f graphify-out/.graphify_python ]; then
+    echo "Missing graphify-out/.graphify_python; rerun Step 1 interpreter bootstrap." >&2
+    exit 1
+fi
+_GRAPHIFY_SAVED=$(cat graphify-out/.graphify_python)
+case "$_GRAPHIFY_SAVED" in
+    /*) ;;
+    *) echo "Invalid graphify interpreter pointer." >&2; exit 1 ;;
+esac
+if [ ! -x "$_GRAPHIFY_SAVED" ]; then
+    echo "Saved graphify interpreter is not executable." >&2
+    exit 1
+fi
+"$_GRAPHIFY_SAVED" -E -P -B -c 'import graphify, sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)' >/dev/null 2>&1 || {
+    echo "Saved graphify interpreter is unsupported or cannot import graphify." >&2
+    exit 1
+}""",
+        "command": '"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify',
+        "python": '"$(cat graphify-out/.graphify_python)" -E -P -B',
+    },
+    "powershell": {
+        "fence": "powershell",
+        "guard": """if (-not (Test-Path -LiteralPath graphify-out\\.graphify_python -PathType Leaf)) {
+    throw "Missing graphify-out\\.graphify_python; rerun Step 1 interpreter bootstrap."
+}
+$GraphifySaved = (Get-Content -LiteralPath graphify-out\\.graphify_python -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($GraphifySaved) -or
+    -not [IO.Path]::IsPathFullyQualified($GraphifySaved) -or
+    $GraphifySaved -match "[\\r\\n]") {
+    throw "Invalid graphify interpreter pointer."
+}
+& $GraphifySaved -E -P -B -c "import graphify, sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    throw "Saved graphify interpreter is unsupported or cannot import graphify."
+}""",
+        "command": "& (Get-Content graphify-out\\.graphify_python) -E -P -B -m graphify",
+        "python": "& (Get-Content graphify-out\\.graphify_python) -E -P -B",
+    },
+}
+
+
+def _render_saved_interpreter_commands(body: str, platform: Platform) -> str:
+    """Fill operational-command slots with the platform's saved interpreter contract."""
+    shell = _SAVED_INTERPRETER_SHELL[platform.shell]
+    return (
+        body.replace("@@GRAPHIFY_SHELL@@", shell["fence"])
+        .replace("@@GRAPHIFY_GUARD@@", shell["guard"])
+        .replace("@@GRAPHIFY_CMD@@", shell["command"])
+        .replace("@@GRAPHIFY_PYTHON@@", shell["python"])
+    )
+
+
 def load_platforms() -> dict[str, Platform]:
     """Parse platforms.toml into Platform records, keyed by platform name."""
     data = tomllib.loads(PLATFORMS_TOML.read_text(encoding="utf-8"))
@@ -384,6 +439,7 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
+    body = _render_saved_interpreter_commands(body, platform)
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
         raise ValueError(f"unfilled core slots for '{platform.key}': {leftover}")
@@ -414,6 +470,7 @@ def _render_agents_md_hooks(platform: Platform) -> str:
         .replace("@@AGENTS_UNINSTALL_BLOCK@@", slots["uninstall_block"])
         .replace("@@AGENTS_PRETOOLUSE_NOTE@@", slots["pretooluse_note"])
     )
+    body = _render_saved_interpreter_commands(body, platform)
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
         raise ValueError(f"unfilled agents-md hooks slots for '{platform.key}': {leftover}")
@@ -450,6 +507,7 @@ def render(platform: Platform) -> list[RenderedArtifact]:
             body = _render_agents_md_hooks(platform)
         else:
             body = _read_fragment(references[name])
+        body = _render_saved_interpreter_commands(body, platform)
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))
     return artifacts
@@ -877,6 +935,31 @@ def _is_shebang_allowlist_fix_line(line: str) -> bool:
     return "[!a-zA-Z0-9/_." in line
 
 
+def _is_env_shebang_fix_line(line: str) -> bool:
+    """Whether a line safely resolves a simple ``/usr/bin/env`` shebang.
+
+    Console-script wrappers normally use an absolute interpreter path, but valid
+    wrappers may delegate through ``/usr/bin/env``. Accept exactly one allowlisted
+    command name, resolve it to an absolute path, and leave flags, assignments, and
+    shell syntax rejected.
+    """
+    return line.strip() in {
+        '"/usr/bin/env "*)',
+        '_ENV_COMMAND=${_SHEBANG#"/usr/bin/env "}',
+        'case "$_ENV_COMMAND" in',
+        '""|*[!a-zA-Z0-9_.@+-]*) _SHEBANG="" ;;',
+        '*) # Resolve exactly one allowlisted command name to an absolute path.',
+        '_ENV_PATH=$(command -v "$_ENV_COMMAND" 2>/dev/null)',
+        'case "$_ENV_PATH" in',
+        '/*) _SHEBANG="$_ENV_PATH" ;;',
+        '*) _SHEBANG="" ;;',
+        'esac # resolved /usr/bin/env interpreter path',
+        ';; # accepted /usr/bin/env command',
+        'esac # /usr/bin/env command allowlist',
+        'is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;',
+    }
+
+
 def _is_obsidian_usage_comment_line(line: str) -> bool:
     """Whether a line is part of the ``/graphify`` usage-comment fix (#1681).
 
@@ -889,17 +972,154 @@ def _is_obsidian_usage_comment_line(line: str) -> bool:
 
 
 def _is_uv_from_interpreter_fix_line(line: str) -> bool:
-    """Whether a line is part of the uv interpreter-detection fix (#1735).
+    """Whether a line is part of the historical uv interpreter-detection fix (#1735).
 
     Step 1's POSIX interpreter probe ran ``uv tool run graphifyy python -c ...``,
     but ``graphifyy`` exposes its executable as ``graphify``, so uv treated
     ``python`` as a missing ``graphifyy`` command and the probe silently failed
     (the ``2>/dev/null`` swallowed uv's "use --from" hint), leaving PYTHON on a
     graphify-less system interpreter. The probe now runs
-    ``uv tool run --from graphifyy python -c ...``. Both the old (removed) and new
-    (added) forms match here.
+    ``uv tool run --from graphifyy python -c ...``. The current persistent
+    ``uv tool dir`` resolution is sanctioned separately by the Python 3.14 guard.
     """
     return "uv tool run" in line and "graphifyy python" in line
+
+
+def _is_python314_bootstrap_fix_line(line: str) -> bool:
+    """Whether a monolith line explicitly selects the supported Python series.
+
+    The Python 3.14-only package policy made the old unversioned ``python3`` and
+    uv defaults unsafe: they could select an older interpreter even when 3.14
+    was installed. Keep this round-trip exception exact so unrelated bootstrap
+    edits remain unsanctioned.
+    """
+    return line.strip() in {
+        "PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if (3, 14, 2) <= sys.version_info < (3, 15) else 1)'",
+        "PYTHON_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == \"cpython\" and sys.version_info.releaselevel == \"final\" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'",
+        'is_supported_python() { [ -n "$1" ] && "$1" -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1; }',
+        'is_supported_python() { [ -n "$1" ] && "$1" -E -P -B -c "$PYTHON_VERSION_CHECK" >/dev/null 2>&1; }',
+        'is_supported_graphify_python() { is_supported_python "$1" && "$1" -c "import graphify" >/dev/null 2>&1; }',
+        'is_supported_graphify_python() { is_supported_python "$1" && "$1" -E -P -B -c "import graphify" >/dev/null 2>&1; }',
+        "GRAPHIFY_BIN=$(which graphify 2>/dev/null)",
+        "GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)",
+        'if [ -n "$_UV_PY" ]; then PYTHON="$_UV_PY"; fi',
+        'if is_supported_graphify_python "$_UV_PY"; then PYTHON="$_UV_PY"; fi',
+        '_UV_TOOL_DIR=$(uv tool dir 2>/dev/null)',
+        '_UV_PY="${_UV_TOOL_DIR:+$_UV_TOOL_DIR/graphifyy/bin/python}"',
+        '*) "$_SHEBANG" -c "import graphify" 2>/dev/null && PYTHON="$_SHEBANG" ;;',
+        '*) is_supported_graphify_python "$_SHEBANG" && PYTHON="$_SHEBANG" ;;',
+        "# 3. Fall back to python3",
+        "# 3. Select a supported interpreter for a direct pip install",
+        'if [ -z "$PYTHON" ]; then PYTHON="python3"; fi',
+        'if [ -z "$PYTHON" ]; then for _CANDIDATE in python3.14 python3; do _CANDIDATE_PATH=$(command -v "$_CANDIDATE" 2>/dev/null); if is_supported_python "$_CANDIDATE_PATH"; then PYTHON="$_CANDIDATE_PATH"; break; fi; done; fi',
+        'if ! "$PYTHON" -c "import graphify" 2>/dev/null; then',
+        'if ! is_supported_graphify_python "$PYTHON"; then',
+        "uv tool install --upgrade graphifyy -q 2>&1 | tail -3",
+        "uv tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q 2>&1 | tail -3",
+        '"$PYTHON" -m pip install graphifyy -q 2>/dev/null \\',
+        '[ -n "$PYTHON" ] && { "$PYTHON" -m pip install graphifyy -q 2>/dev/null \\',
+        '|| "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3',
+        '|| "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3; }',
+        '[ -n "$PYTHON" ] && { "$PYTHON" -E -P -B -m pip install graphifyy -q 2>/dev/null \\',
+        '|| "$PYTHON" -E -P -B -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3; }',
+        '"$PYTHON" -c "import sys; open(\'graphify-out/.graphify_python\', \'w\', encoding=\'utf-8\').write(sys.executable)"',
+        '"$PYTHON" -E -P -B -c "import sys; open(\'graphify-out/.graphify_python\', \'w\', encoding=\'utf-8\').write(sys.executable)"',
+        'is_supported_graphify_python "$PYTHON" || { echo "Graphify requires Python 3.14.2 through the final 3.14.x release." >&2; exit 1; }',
+    }
+
+
+def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
+    """Whether Aider/Devin route MCP and watch through the saved interpreter.
+
+    Match only the historical bare/saved-interpreter forms and their installed
+    entry-point replacements, plus the unconditional Step 1 guard handoff.
+    """
+    stripped = line.strip()
+    if stripped.startswith("**Fast path — existing graph:** If `graphify-out/graph.json` exists"):
+        return True
+    if stripped.startswith("test -f graphify-out/.graphify_python && _GRAPHIFY_SAVED="):
+        return "Invalid saved graphify interpreter; rerun Step 1." in stripped
+    saved_python_snippet = re.fullmatch(
+        r'"?\$\(cat graphify-out/\.graphify_python\)"? (?:-E -P -B )?-c ".*',
+        stripped,
+    )
+    if saved_python_snippet:
+        return True
+    public_command = re.fullmatch(
+        r'"?\$\(cat graphify-out/\.graphify_python\)"? (?:-E -P -B )?-m graphify(?:\.serve)? '
+        r'(?:save-result|watch|hook|claude|devin)(?:\s.*)?',
+        stripped,
+    )
+    if public_command:
+        return True
+    old_public_command = re.fullmatch(
+        r"graphify (?:hook|claude|devin)(?:\s.*)?",
+        stripped,
+    )
+    if old_public_command:
+        return True
+    return stripped in {
+        "python3 -m graphify.serve graphify-out/graph.json",
+        "$(cat graphify-out/.graphify_python) -m graphify.serve graphify-out/graph.json",
+        '"$(cat graphify-out/.graphify_python)" -m graphify.serve graphify-out/graph.json',
+        '"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify.serve graphify-out/graph.json',
+        "graphify-mcp graphify-out/graph.json",
+        "To configure in Claude Desktop, add to `claude_desktop_config.json`:",
+        (
+            "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
+            "Claude Desktop can't run `$(...)`, so set `command` to the "
+            "**absolute interpreter path** printed by "
+            "`cat graphify-out/.graphify_python`:"
+        ),
+        (
+            "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
+            "Claude Desktop can't run `$(...)`, so set `command` to the "
+            "**absolute interpreter path** printed by "
+            "`cat graphify-out/.graphify_python` after the successful Step 1 rerun:"
+        ),
+        (
+            "To configure in Claude Desktop, add to `claude_desktop_config.json`. "
+            "Set `command` to the **absolute executable path** printed by "
+            "`command -v graphify-mcp`:"
+        ),
+        '"command": "python3",',
+        '"command": "<absolute path from: cat graphify-out/.graphify_python>",',
+        '"command": "<absolute path from: command -v graphify-mcp>",',
+        '"args": ["-m", "graphify.serve", "/absolute/path/to/graphify-out/graph.json"]',
+        '"args": ["-I", "-B", "-m", "graphify.serve", "/absolute/path/to/graphify-out/graph.json"]',
+        '"args": ["-E", "-P", "-B", "-m", "graphify.serve", "/absolute/path/to/graphify-out/graph.json"]',
+        '"args": ["/absolute/path/to/graphify-out/graph.json"]',
+        "python3 -m graphify.watch INPUT_PATH --debounce 3",
+        "$(cat graphify-out/.graphify_python) -m graphify.watch INPUT_PATH --debounce 3",
+        '"$(cat graphify-out/.graphify_python)" -m graphify.watch INPUT_PATH --debounce 3',
+        '"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify.watch INPUT_PATH --debounce 3',
+        "graphify watch INPUT_PATH --debounce 3",
+        "Before starting the MCP server, successfully rerun Step 1 so",
+        "Before starting the watcher, successfully rerun Step 1 so",
+        "`graphify-out/.graphify_python` is freshly validated and overwritten.",
+        (
+            "Before running any subcommand below (`--update`, `--cluster-only`, `query`, "
+            "`path`, `explain`, `add`), check that `.graphify_python` exists. If it's "
+            "missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:"
+        ),
+        (
+            "Before running any subcommand below (`--update`, `--cluster-only`, `query`, "
+            "`path`, `explain`, `add`), unconditionally re-resolve and overwrite "
+            "`.graphify_python` first:"
+        ),
+        "**In every subsequent bash block, replace `python3` with `$(cat graphify-out/.graphify_python)` to use the correct interpreter.**",
+        (
+            "**In every subsequent bash block, replace `python3` with "
+            "`\"$(cat graphify-out/.graphify_python)\" -E -P -B` to use the validated "
+            "interpreter, ignore Python environment injection and unsafe corpus paths, suppress "
+            "bytecode, and retain user-site compatibility.**"
+        ),
+        (
+            "The saved interpreter and its user-site packages are trusted inputs outside the "
+            "inspected-corpus boundary. Pointer symlink and time-of-check/time-of-use hardening "
+            "remain separate work; these startup flags do not provide that identity guarantee."
+        ),
+    }
 
 
 def _is_semantic_cache_scope_fix_line(line: str) -> bool:
@@ -933,8 +1153,11 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_manifest_root_fix_line,
     _is_no_api_key_fix_line,
     _is_shebang_allowlist_fix_line,
+    _is_env_shebang_fix_line,
     _is_obsidian_usage_comment_line,
     _is_uv_from_interpreter_fix_line,
+    _is_python314_bootstrap_fix_line,
+    _is_saved_interpreter_subcommand_fix_line,
     _is_semantic_cache_scope_fix_line,
 )
 
@@ -942,6 +1165,32 @@ _SANCTIONED_MONOLITH_DIFFS = (
 def _is_sanctioned_monolith_diff(line: str) -> bool:
     """Whether a single added/removed monolith line is an allowed change."""
     return not line.strip() or any(pred(line) for pred in _SANCTIONED_MONOLITH_DIFFS)
+
+
+_SUBCOMMAND_GUARD_BODY = [
+    "",
+    "Run this skill's platform-specific **Step 1 - Ensure graphify is installed**",
+    "before every subcommand. Continue only after Step 1 overwrites",
+    "`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a",
+    "bare or unvalidated `python` / `python3` command.",
+    "",
+]
+
+
+def _normalise_subcommand_guard(lines: list[str], *, validate_current: bool) -> tuple[list[str], str | None]:
+    """Collapse Devin's intentionally replaced subcommand guard for v8 comparison."""
+    marker = "Before running any subcommand below ("
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith(marker)) + 1
+    except StopIteration:
+        return lines, None
+    try:
+        end = lines.index("---", start)
+    except ValueError:
+        return lines, "subcommand interpreter guard has no closing separator"
+    if validate_current and lines[start:end] != _SUBCOMMAND_GUARD_BODY:
+        return lines, "subcommand interpreter guard drifted from the validated Step 1 handoff"
+    return lines[:start] + ["", "@@VALIDATED_PYTHON_SUBCOMMAND_GUARD@@", ""] + lines[end:], None
 
 
 def monolith_roundtrip(platform: Platform) -> list[str]:
@@ -954,7 +1203,8 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     unification, the unified frontmatter description, the chunk-cleanup rewrite
     (#1172), the four #1392 runbook fixes (directed propagation, content-only
     semantic scope, stale-cache unlink, and the zero-node/shrink-guard ordering),
-    and semantic-cache source scoping (#1757).
+    semantic-cache source scoping (#1757), and saved-interpreter routing for
+    Aider/Devin MCP and watch commands.
 
     The comparison is a multiset diff, not a positional zip: a line whose text is
     unchanged but merely *moved* (the report-write line shifted below ``to_json``
@@ -973,6 +1223,11 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
         l for l in _normalise(_git_show(platform.roundtrip_ref)).splitlines()
         if not _is_trigger_line(l)
     ]
+
+    rendered_lines, guard_error = _normalise_subcommand_guard(rendered_lines, validate_current=True)
+    original_lines, _ = _normalise_subcommand_guard(original_lines, validate_current=False)
+    if guard_error:
+        return [f"[{platform.key}] {guard_error}"]
 
     added = Counter(rendered_lines) - Counter(original_lines)
     removed = Counter(original_lines) - Counter(rendered_lines)
@@ -1055,7 +1310,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--check", action="store_true", help="byte-diff render vs committed + expected/, exit 1 on drift")
     p.add_argument("--audit-coverage", action="store_true", help="per host: assert every heading of that host's own v8 body single-homes in its render")
     p.add_argument("--schema-singleton", action="store_true", help="assert the file_type enum is byte-identical everywhere")
-    p.add_argument("--monolith-roundtrip", action="store_true", help="assert each monolith == v8 modulo the enum unification")
+    p.add_argument(
+        "--monolith-roundtrip",
+        action="store_true",
+        help="assert each monolith == v8 modulo narrowly enumerated sanctioned migrations",
+    )
     p.add_argument("--always-on-roundtrip", action="store_true", help="assert each always_on/*.md reproduces its former __main__.py constant byte for byte")
     p.add_argument("--bless", action="store_true", help="rewrite expected/ from the current render")
     return p.parse_args(argv)
@@ -1115,7 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
             for m in all_problems:
                 print(f"  {m}", file=sys.stderr)
             return 1
-        print("monolith-roundtrip OK: each monolith matches v8 modulo the enum unification.")
+        print("monolith-roundtrip OK: each monolith matches v8 modulo sanctioned migrations.")
         return 0
 
     if args.always_on_roundtrip:

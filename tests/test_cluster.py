@@ -1,14 +1,53 @@
 import json
 import sys
+import types
+import uuid
+from enum import IntEnum
 import networkx as nx
+import pytest
 from pathlib import Path
 from graphify.build import build_from_json
-from graphify.cluster import cluster, cohesion_score, remap_communities_to_previous, score_all
+from graphify.cluster import (
+    _canonical_node_key,
+    _partition,
+    _split_community,
+    cluster,
+    cohesion_score,
+    community_member_sigs,
+    label_communities_by_hub,
+    remap_communities_to_previous,
+    score_all,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+
+class IntegralNode(IntEnum):
+    SEVEN = 7
+
+
+class OpaqueNode:
+    def __init__(self, value):
+        self.value = value
+
+    def __repr__(self):
+        return f"OpaqueNode({self.value!r})"
+
 def make_graph():
     return build_from_json(json.loads((FIXTURES / "extraction.json").read_text()))
+
+
+def _install_native_stub(monkeypatch, leiden):
+    module = types.ModuleType("graspologic_native")
+    setattr(module, "leiden", leiden)
+    monkeypatch.setitem(sys.modules, "graspologic_native", module)
+
+
+def _normalized_membership(partition):
+    communities = {}
+    for node, cid in partition.items():
+        communities.setdefault(cid, set()).add(node)
+    return {frozenset(nodes) for nodes in communities.values()}
 
 def test_cluster_returns_dict():
     G = make_graph()
@@ -20,6 +59,78 @@ def test_cluster_covers_all_nodes():
     communities = cluster(G)
     all_nodes = {n for nodes in communities.values() for n in nodes}
     assert all_nodes == set(G.nodes)
+
+
+def test_cluster_orders_mixed_edge_less_node_ids_canonically():
+    graph = nx.Graph()
+    graph.add_nodes_from(["1", 1, b"1"])
+
+    assert cluster(graph) == {0: [b"1"], 1: [1], 2: ["1"]}
+
+
+def test_cluster_preserves_connected_mixed_node_ids_and_insertion_order(monkeypatch):
+    monkeypatch.setattr("graphify.cluster._partition", lambda graph, resolution=1.0: {n: 0 for n in graph})
+    forward = nx.Graph([(1, "1"), ("1", b"1")])
+    reverse = nx.Graph([(b"1", "1"), ("1", 1)])
+
+    assert cluster(forward) == {0: [b"1", 1, "1"]}
+    assert cluster(reverse) == cluster(forward)
+
+
+def test_cluster_rejects_duplicate_nan_isolates_before_partition(monkeypatch):
+    called = False
+
+    def unexpected_partition(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("graphify.cluster._partition", unexpected_partition)
+    graph = nx.Graph()
+    graph.add_nodes_from([float("nan"), float("nan")])
+
+    with pytest.raises(ValueError, match="float:nan"):
+        cluster(graph)
+    assert not called
+
+
+def test_cluster_rejects_connected_isolate_collision_before_partition(monkeypatch):
+    called = False
+
+    def unexpected_partition(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {}
+
+    monkeypatch.setattr("graphify.cluster._partition", unexpected_partition)
+    connected = OpaqueNode("same")
+    isolate = OpaqueNode("same")
+    graph = nx.Graph([(connected, "neighbor")])
+    graph.add_node(isolate)
+
+    with pytest.raises(ValueError, match=r"opaque:tests\.test_cluster\.OpaqueNode"):
+        cluster(graph)
+    assert not called
+
+
+def test_cluster_preserves_spokes_isolated_by_hub_exclusion(monkeypatch):
+    edges = [("hub", f"leaf-{index}") for index in range(4)]
+    forward = nx.Graph(edges)
+    reverse = nx.Graph(reversed(edges))
+
+    def unexpected_partition(*args, **kwargs):
+        pytest.fail("edge-less spokes must not be sent to Leiden")
+
+    monkeypatch.setattr("graphify.cluster._partition", unexpected_partition)
+    forward_communities = cluster(forward, exclude_hubs_percentile=80)
+    reverse_communities = cluster(reverse, exclude_hubs_percentile=80)
+    forward_membership = {frozenset(nodes) for nodes in forward_communities.values()}
+    reverse_membership = {frozenset(nodes) for nodes in reverse_communities.values()}
+
+    assert {node for nodes in forward_communities.values() for node in nodes} == set(forward)
+    assert sorted(map(len, forward_communities.values())) == [1, 1, 1, 2]
+    assert forward_membership == reverse_membership
+    assert frozenset({"hub", "leaf-0"}) in forward_membership
 
 def test_cohesion_score_complete_graph():
     G = nx.complete_graph(4)
@@ -56,7 +167,7 @@ def test_score_all_keys_match_communities():
 def test_cluster_does_not_write_to_stdout(capsys):
     """Clustering should not emit ANSI escape codes or other output.
 
-    graspologic's leiden() can emit ANSI escape sequences that break
+    Leiden implementations can emit ANSI escape sequences that break
     PowerShell 5.1's scroll buffer on Windows (issue #19). The output
     suppression in _partition() should prevent any output from leaking.
     """
@@ -74,6 +185,313 @@ def test_cluster_does_not_write_to_stderr(capsys):
     # Allow logging output (starts with [graphify]) but no raw ANSI codes
     for line in captured.err.splitlines():
         assert "\x1b" not in line, f"cluster() wrote ANSI to stderr: {line!r}"
+
+
+def test_canonical_node_keys_are_exact_and_type_tagged():
+    assert _canonical_node_key("1") == 'str:"1"'
+    assert _canonical_node_key(1) == "int:1"
+    assert _canonical_node_key(True) == "bool:1"
+    assert _canonical_node_key(False) == "bool:0"
+    assert _canonical_node_key(b"\x00\xff") == "bytes:00ff"
+    assert _canonical_node_key(None) == "none:"
+    assert _canonical_node_key(1.5) == "float:0x1.8000000000000p+0"
+    assert _canonical_node_key(IntegralNode.SEVEN) == "integral:tests.test_cluster.IntegralNode:7"
+    assert _canonical_node_key(uuid.UUID(int=1)) == "uuid:00000000000000000000000000000001"
+    assert _canonical_node_key(("1", 1, (None, b"1"))) == (
+        'tuple:["str:\\"1\\"","int:1","tuple:[\\"none:\\",\\"bytes:31\\"]"]'
+    )
+    assert _canonical_node_key(OpaqueNode("x")) == (
+        'opaque:tests.test_cluster.OpaqueNode:"OpaqueNode(\'x\')"'
+    )
+
+
+def test_hub_label_tie_break_uses_canonical_node_order():
+    graph = nx.Graph([(1, "left"), ("1", "right")])
+    graph.nodes[1]["label"] = "integer"
+    graph.nodes["1"]["label"] = "string"
+
+    assert label_communities_by_hub(graph, {0: ["1", 1]}) == {0: "integer"}
+
+
+def test_community_member_signatures_preserve_legacy_strings_and_tag_mixed_ids():
+    assert community_member_sigs({0: ["b", "a"]}) == {0: "8fb20ef63ced4145"}
+    forward = community_member_sigs({0: ["1", 1, b"1"]})
+    reverse = community_member_sigs({0: [b"1", 1, "1"]})
+
+    assert forward == reverse
+    assert forward != community_member_sigs({0: ["1", "1", "b'1'"]})
+
+
+def test_native_leiden_maps_nodes_weights_and_exact_arguments(monkeypatch, capsys):
+    calls = []
+
+    def leiden(edges, **kwargs):
+        calls.append((edges, kwargs))
+        print("hidden stdout")
+        print("hidden stderr", file=sys.stderr)
+        return 0.75, {"0": 4, "1": 4, "2": 9}
+
+    _install_native_stub(monkeypatch, leiden)
+    graph = nx.Graph()
+    graph.add_edge("1", 1, weight=2)
+    graph.add_edge(1, b"node")
+
+    assert _partition(graph, resolution=2.0) == {b"node": 4, 1: 4, "1": 9}
+    assert calls == [
+        (
+            [("0", "1", 1.0), ("1", "2", 2.0)],
+            {
+                "resolution": 2.0,
+                "randomness": 0.001,
+                "iterations": 1,
+                "use_modularity": True,
+                "seed": 42,
+                "trials": 1,
+            },
+        )
+    ]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_native_leiden_is_insertion_order_invariant(monkeypatch):
+    calls = []
+
+    def leiden(edges, **kwargs):
+        calls.append(edges)
+        return 1.0, {node: int(node) % 2 for edge in edges for node in edge[:2]}
+
+    _install_native_stub(monkeypatch, leiden)
+    forward = nx.Graph()
+    forward.add_edge("z", 1, weight=0.5)
+    forward.add_edge(b"node", "z", weight=2)
+    reverse = nx.Graph()
+    reverse.add_edge("z", b"node", weight=2)
+    reverse.add_edge(1, "z", weight=0.5)
+
+    assert _partition(forward) == _partition(reverse)
+    assert calls[0] == calls[1]
+
+
+def test_louvain_fallback_is_insertion_order_invariant(monkeypatch):
+    def missing_native(name):
+        raise ModuleNotFoundError("missing", name=name)
+
+    monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+    monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+    nodes = ["left", 1, b"right", ("tail", 2)]
+    edges = [
+        ("left", 1, 10.0),
+        (1, b"right", 0.01),
+        (b"right", ("tail", 2), 10.0),
+    ]
+    variants = [
+        (nodes, edges),
+        (list(reversed(nodes)), list(reversed(edges))),
+        (nodes[2:] + nodes[:2], [(target, source, weight) for source, target, weight in edges]),
+    ]
+
+    memberships = []
+    for node_order, edge_order in variants:
+        graph = nx.Graph()
+        graph.add_nodes_from(node_order)
+        for source, target, weight in edge_order:
+            graph.add_edge(source, target, weight=weight)
+        memberships.append(_normalized_membership(_partition(graph)))
+
+    assert memberships[1:] == memberships[:-1]
+
+
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_preserves_extended_hashable_node_ids(monkeypatch, backend):
+    opaque = OpaqueNode("x")
+    node_ids = [1.5, ("nested", 2), uuid.UUID(int=1), IntegralNode.SEVEN, opaque]
+    graph = nx.path_graph(node_ids)
+
+    if backend == "native":
+        def leiden(edges, **kwargs):
+            native_nodes = {node for edge in edges for node in edge[:2]}
+            return 0.0, {node: 0 for node in native_nodes}
+
+        _install_native_stub(monkeypatch, leiden)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
+
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(
+            nx.community,
+            "louvain_communities",
+            lambda stable, **kwargs: [set(stable.nodes())],
+        )
+
+    assert set(_partition(graph)) == set(node_ids)
+
+
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_rejects_canonical_key_collisions_before_backend(monkeypatch, backend):
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        return 0.0, {}
+
+    if backend == "native":
+        _install_native_stub(monkeypatch, fail_if_called)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
+
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(nx.community, "louvain_communities", fail_if_called)
+    monkeypatch.setattr("graphify.cluster._canonical_node_key", lambda node: "same:key")
+    with pytest.raises(ValueError, match="canonical node-key collision"):
+        _partition(nx.Graph([("a", "b")]))
+    assert not called
+
+
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_rejects_duplicate_nan_before_backend(monkeypatch, backend):
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        return 0.0, {}
+
+    if backend == "native":
+        _install_native_stub(monkeypatch, fail_if_called)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
+
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(nx.community, "louvain_communities", fail_if_called)
+
+    graph = nx.Graph()
+    graph.add_edge(float("nan"), float("nan"))
+    with pytest.raises(ValueError, match="float:nan"):
+        _partition(graph)
+    assert not called
+
+
+@pytest.mark.parametrize("backend", ["native", "louvain"])
+def test_partition_rejects_opaque_repr_collisions_before_backend(monkeypatch, backend):
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        return 0.0, {}
+
+    if backend == "native":
+        _install_native_stub(monkeypatch, fail_if_called)
+    else:
+        def missing_native(name):
+            raise ModuleNotFoundError("missing", name=name)
+
+        monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+        monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+        monkeypatch.setattr(nx.community, "louvain_communities", fail_if_called)
+
+    graph = nx.Graph()
+    graph.add_edge(OpaqueNode("same"), OpaqueNode("same"))
+    with pytest.raises(ValueError, match=r"opaque:tests\.test_cluster\.OpaqueNode"):
+        _partition(graph)
+    assert not called
+
+
+def test_louvain_fallback_only_for_missing_top_level_native_module(monkeypatch):
+    def missing_native(name):
+        raise ModuleNotFoundError("missing", name=name)
+
+    monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+    monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
+    graph = nx.Graph([("a", "b"), ("c", "d")])
+    partition = _partition(graph)
+    assert set(partition) == set(graph)
+
+
+def test_broken_native_import_propagates(monkeypatch):
+    def broken_native(name):
+        raise ModuleNotFoundError("broken dependency", name="native_dependency")
+
+    monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+    monkeypatch.setattr("graphify.cluster.importlib.import_module", broken_native)
+    with pytest.raises(ModuleNotFoundError, match="broken dependency"):
+        _partition(nx.Graph([("a", "b")]))
+
+
+def test_native_import_error_propagates(monkeypatch):
+    def broken_native(name):
+        raise ImportError("broken native extension")
+
+    monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
+    monkeypatch.setattr("graphify.cluster.importlib.import_module", broken_native)
+    with pytest.raises(ImportError, match="broken native extension"):
+        _partition(nx.Graph([("a", "b")]))
+
+
+@pytest.mark.parametrize("error", [ImportError("broken call"), RuntimeError("native failed")])
+def test_native_call_exceptions_propagate(monkeypatch, error):
+    def leiden(edges, **kwargs):
+        raise error
+
+    _install_native_stub(monkeypatch, leiden)
+    with pytest.raises(type(error), match=str(error)):
+        _partition(nx.Graph([("a", "b")]))
+
+
+def test_native_call_exceptions_propagate_during_community_split(monkeypatch):
+    def leiden(edges, **kwargs):
+        raise RuntimeError("native split failed")
+
+    _install_native_stub(monkeypatch, leiden)
+    graph = nx.Graph([("a", "b")])
+    with pytest.raises(RuntimeError, match="native split failed"):
+        _split_community(graph, ["a", "b"])
+
+
+def test_split_community_orders_mixed_nodes_and_preserves_identity(monkeypatch):
+    graph = nx.Graph([(1, "1"), ("1", b"1")])
+    monkeypatch.setattr(
+        "graphify.cluster._partition",
+        lambda subgraph: {1: 0, "1": 1, b"1": 1},
+    )
+
+    assert _split_community(graph, ["1", b"1", 1]) == [[1], [b"1", "1"]]
+
+
+def test_native_leiden_rejects_node_loss(monkeypatch):
+    _install_native_stub(monkeypatch, lambda edges, **kwargs: (0.0, {"0": 0}))
+    with pytest.raises(RuntimeError, match="incomplete or unknown node mapping"):
+        _partition(nx.Graph([("a", "b")]))
+
+
+@pytest.mark.parametrize("resolution", [0.5, 1.0, 2.0])
+def test_native_leiden_resolution_parity_fixture(resolution):
+    pytest.importorskip("graspologic_native")
+    graph = nx.Graph()
+    for start in (0, 4, 8):
+        for source in range(start, start + 4):
+            for target in range(source + 1, start + 4):
+                graph.add_edge(source, target, weight=1.0)
+    graph.add_edge(3, 4, weight=0.2)
+    graph.add_edge(7, 8, weight=0.2)
+    expected = {
+        frozenset(range(0, 4)),
+        frozenset(range(4, 8)),
+        frozenset(range(8, 12)),
+    }
+    first = _partition(graph, resolution=resolution)
+    second = _partition(graph, resolution=resolution)
+    assert _normalized_membership(first) == expected
+    assert _normalized_membership(second) == expected
 
 
 def test_remap_communities_to_previous_reuses_old_ids():
@@ -98,3 +516,12 @@ def test_remap_communities_to_previous_assigns_deterministic_new_ids():
     assert list(remapped.keys()) == [0, 1]
     assert remapped[0] == ["x", "y", "z"]
     assert remapped[1] == ["m"]
+
+
+def test_remap_communities_to_previous_orders_mixed_nodes_canonically():
+    communities = {7: ["1", b"1", 1], 8: [None]}
+
+    assert remap_communities_to_previous(communities, {}) == {
+        0: [b"1", 1, "1"],
+        1: [None],
+    }

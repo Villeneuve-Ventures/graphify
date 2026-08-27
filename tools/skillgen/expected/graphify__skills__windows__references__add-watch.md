@@ -7,7 +7,7 @@ Load this when the user ran `/graphify add <url>` or passed `--watch`. Neither i
 Fetch a URL and add it to the corpus, then update the graph.
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys
 from graphify.ingest import ingest
 from pathlib import Path
@@ -40,8 +40,21 @@ Supported URL types (auto-detected):
 
 Start a background watcher that monitors a folder and auto-updates the graph when files change.
 
-```bash
-$(cat graphify-out/.graphify_python) -m graphify.watch INPUT_PATH --debounce 3
+```powershell
+if (-not (Test-Path -LiteralPath graphify-out\.graphify_python -PathType Leaf)) {
+    throw "Missing graphify-out\.graphify_python; rerun Step 1 interpreter bootstrap."
+}
+$GraphifySaved = (Get-Content -LiteralPath graphify-out\.graphify_python -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($GraphifySaved) -or
+    -not [IO.Path]::IsPathFullyQualified($GraphifySaved) -or
+    $GraphifySaved -match "[\r\n]") {
+    throw "Invalid graphify interpreter pointer."
+}
+& $GraphifySaved -E -P -B -c "import graphify, sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    throw "Saved graphify interpreter is unsupported or cannot import graphify."
+}
+& (Get-Content graphify-out\.graphify_python) -E -P -B -m graphify watch INPUT_PATH --debounce 3
 ```
 
 Replace INPUT_PATH with the folder to watch. Behavior depends on what changed:

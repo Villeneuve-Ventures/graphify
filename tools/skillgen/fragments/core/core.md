@@ -47,7 +47,7 @@ Drop any folder of code, docs, papers, images, or video into graphify and get a 
 
 If the user invoked `/graphify --help` or `/graphify -h` (with no other arguments), print the contents of the `## Usage` section above verbatim and stop. Do not run any commands, do not detect files, do not default the path to `.`. Just print the Usage block and return.
 
-**Fast path — existing graph:** Before doing anything else, check whether `graphify-out/graph.json` exists. The expected location is `graphify-out/graph.json` relative to the **current working directory** (i.e. the project root where you are running commands). If it exists AND the user's request is a natural-language question about the codebase (e.g. "How does X work?", "What calls Y?", "Trace the data flow through Z") and NOT an explicit rebuild command (`--update`, `--cluster-only`, or a bare path/URL that implies fresh extraction): **skip Steps 1–5 entirely and jump straight to `## For /graphify query`.** Run `graphify query "<question>"` immediately. Do not run detect. Do not check corpus size. Do not ask the user to narrow. The graph is already built — use it.
+**Fast path — existing graph:** Before doing anything else, check whether `graphify-out/graph.json` exists. The expected location is `graphify-out/graph.json` relative to the **current working directory** (i.e. the project root where you are running commands). If it exists AND the user's request is a natural-language question about the codebase (e.g. "How does X work?", "What calls Y?", "Trace the data flow through Z") and NOT an explicit rebuild command (`--update`, `--cluster-only`, or a bare path/URL that implies fresh extraction): run only the interpreter-bootstrap block in **Step 1 - Ensure graphify is installed**. Do not run Step 1's separate scan-root persistence block. Continue only after `.graphify_python` contains a supported Python 3.14.2 through 3.14.x interpreter that imports graphify, then jump straight to `## For /graphify query`. Skip Steps 2–5. Do not run detect. Do not check corpus size. Do not ask the user to narrow. The graph is already built — use it through the saved interpreter.
 
 If no path was given, use `.` (current directory). Do not ask the user for a path.
 
@@ -66,7 +66,7 @@ Only when the path is one or more `https://github.com/...` URLs, or several loca
 ### Step 2 - Detect files
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from graphify.detect import detect
 from pathlib import Path
@@ -128,7 +128,7 @@ Note: Parallelizing AST + semantic saves 5-15s on large corpora. AST is determin
 For any code files detected, run AST extraction in parallel with Part B subagents:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
 from graphify.extract import collect_files, extract
 from pathlib import Path
@@ -154,7 +154,7 @@ else:
 **Fast path:** If detection found zero docs, papers, and images (code-only corpus), skip Part B entirely and go straight to Part C. AST handles code - there is nothing for semantic subagents to do. **First write an empty semantic file** so Part C's merge has its input (it reads `.graphify_semantic.json` unconditionally; without this a code-only run hits `FileNotFoundError`):
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 Path('graphify-out/.graphify_semantic.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
@@ -174,7 +174,7 @@ Before dispatching subagents, print a timing estimate:
 Before dispatching any subagents, check which files already have cached extraction results:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from graphify.cache import check_semantic_cache
 from pathlib import Path
@@ -218,7 +218,7 @@ If more than half the chunks failed or are missing, stop and tell the user to re
 
 Merge all chunk files into `.graphify_semantic_new.json`. **After each Agent call completes, read the real token counts from the Agent tool result's `usage` field and write them back into the chunk JSON before merging** — the chunk JSON itself always has placeholder zeros. Then run:
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json, glob
 from pathlib import Path
 
@@ -242,7 +242,7 @@ print(f'Merged {len(chunks)} chunks: {total_in:,} in / {total_out:,} out tokens'
 
 Save new results to cache:
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from graphify.cache import save_semantic_cache
 from pathlib import Path
@@ -256,7 +256,7 @@ print(f'Cached {saved} files')
 
 Merge cached + new results into `graphify-out/.graphify_semantic.json`:
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 
@@ -289,7 +289,7 @@ Clean up temp files: `rm -f graphify-out/.graphify_cached.json graphify-out/.gra
 #### Part C - Merge AST + semantic into final extraction
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
 from pathlib import Path
 
@@ -326,7 +326,7 @@ print(f'Merged: {total} nodes, {edges} edges ({len(ast[\"nodes\"])} AST + {len(s
 
 ```bash
 mkdir -p graphify-out
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
 from graphify.build import build_from_json
 from graphify.cluster import cluster, score_all
@@ -388,7 +388,7 @@ Replace INPUT_PATH with the actual path.
 A non-destructive diagnostic on the extraction, before labeling. It surfaces edge collapse, dangling/missing endpoints, and self-loops — the silent-corruption modes of incremental updates and AST/LLM id mismatches. Read-only; never aborts.
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 from graphify.diagnostics import diagnose_extraction, format_diagnostic_report
@@ -416,7 +416,7 @@ Read `graphify-out/.graphify_analysis.json`. For each community key, look at its
 Then regenerate the report and save the labels for the visualizer:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
 from graphify.build import build_from_json
 from graphify.cluster import score_all
@@ -458,16 +458,18 @@ If `--obsidian` was given:
 
 - If `--obsidian-dir <path>` was also given, pass it via `--dir`. Otherwise defaults to `graphify-out/obsidian`.
 
-```bash
-graphify export obsidian
-# or with custom dir: graphify export obsidian --dir ~/vaults/my-project
+```@@GRAPHIFY_SHELL@@
+@@GRAPHIFY_GUARD@@
+@@GRAPHIFY_CMD@@ export obsidian
+# or with custom dir: @@GRAPHIFY_CMD@@ export obsidian --dir ~/vaults/my-project
 ```
 
 Generate the HTML graph (always, unless `--no-viz`):
 
-```bash
-graphify export html  # auto-aggregates to community view if graph > 5000 nodes
-# or: graphify export html --no-viz
+```@@GRAPHIFY_SHELL@@
+@@GRAPHIFY_GUARD@@
+@@GRAPHIFY_CMD@@ export html  # auto-aggregates to community view if graph > 5000 nodes
+# or: @@GRAPHIFY_CMD@@ export html --no-viz
 ```
 
 ### Steps 6b-8 - Wiki, Neo4j, FalkorDB, SVG, GraphML, MCP, benchmark (only on their flags)
@@ -479,7 +481,7 @@ These run only when their flag is present (`--wiki`, `--neo4j`/`--neo4j-push`, `
 ### Step 9 - Save manifest, update cost tracker, clean up, and report
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -558,21 +560,12 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 ## Interpreter guard for subcommands
 
-Before running any subcommand below (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`), check that `.graphify_python` exists. If it's missing (e.g. user deleted `graphify-out/`), re-resolve the interpreter first:
+Before running any operational subcommand (`--update`, `--cluster-only`, `query`, `path`, `explain`, `add`, exports, hooks, installs, watch, or MCP), unconditionally re-resolve and overwrite `.graphify_python` first:
 
-```bash
-if [ ! -f graphify-out/.graphify_python ]; then
-    GRAPHIFY_BIN=$(which graphify 2>/dev/null)
-    if [ -n "$GRAPHIFY_BIN" ]; then
-        PYTHON=$(head -1 "$GRAPHIFY_BIN" | tr -d '#!')
-        case "$PYTHON" in *[!a-zA-Z0-9/_.@-]*) PYTHON="python3" ;; esac
-    else
-        PYTHON="python3"
-    fi
-    mkdir -p graphify-out
-    "$PYTHON" -c "import sys; open('graphify-out/.graphify_python', 'w', encoding='utf-8').write(sys.executable)"
-fi
-```
+Run only this skill's platform-specific interpreter-bootstrap block in **Step 1 - Ensure graphify is installed**
+before every subcommand. Do not run Step 1's separate scan-root persistence block for a no-path subcommand. Continue only after the bootstrap overwrites
+`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a
+bare or unvalidated `python` / `python3` command.
 
 ## For --update and --cluster-only
 

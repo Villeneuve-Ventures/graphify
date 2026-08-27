@@ -2,7 +2,11 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/safishamsi/graphify/releases)
 
-## 0.9.17 (unreleased)
+## 0.10.0 (unreleased)
+
+- Breaking: Graphify now requires CPython 3.14.2 through the final 3.14.x release (`>=3.14.2,==3.14.*`); package metadata positively allowlists the 3.14 line instead of relying on prerelease upper-bound interpretation. CI, release graph generation, lint/type targets, Docker, and public installation guidance now declare the same compatibility window.
+- Changed: the optional `leiden` extra now uses `graspologic-native` directly instead of the Python-version-gated `graspologic` wrapper. Graphify preserves deterministic weighted Leiden behavior with stable structural node-ID encodings; opaque hashables use a type-qualified repr and fail on collisions. NetworkX Louvain remains the fallback only when the top-level native module is genuinely absent.
+- Docs: Graphify now maintains an English-only README; the translated README files were intentionally removed. Historical entries below retain their original translation paths as release-history records, not as claims that those files remain in the current tree.
 
 - Fix: a missing `manifest.json` no longer degrades `graphify extract --code-only` into a full scan that discards the committed semantic layer (#1925). On a fresh clone (or when the manifest is deliberately untracked because its mtimes churn), the incremental gate required both `manifest.json` and `graph.json`; with only the graph present it fell to a full scan, and under `--code-only` that dropped every doc/paper/image node — silently replacing a curated graph with an AST-only skeleton. An existing `graph.json` is now a sufficient incremental baseline: `detect_incremental` already treats an absent manifest as "everything new / nothing deleted", so `build_merge` + `_stale_graph_sources` preserve files that are merely out of this run's scope while still evicting genuinely deleted sources.
 - Fix: hyperedge-only documents are now stamped in the manifest instead of being re-extracted on every run (#1920). `_stamped_manifest_files` (#1897) decided a semantic doc "produced output" by inspecting only `nodes` and `edges`, never `hyperedges`, so a chunk whose only output for a doc was a hyperedge (3+ nodes sharing a concept) left that doc unstamped and perpetually re-queued. Stamping now counts hyperedge output too, mirroring the per-`source_file` keying the semantic cache already uses.
@@ -446,7 +450,7 @@ Full release notes with details on each version: [GitHub Releases](https://githu
 - Fix: `affected` and `graphify query` now handle graph files that use `"edges"` as the top-level key instead of `"links"`. Graphs produced by native `graphify extract` on some corpus layouts used `"edges"`; loading them in `affected.py` raised `KeyError: 'links'`. Normalised using the same established pattern already in `__main__.py` and `serve.py`.
 - Fix: a single `!` negation rule in `.graphifyignore` no longer disables all directory pruning. Previously any negation pattern caused `collect_files` to descend every ignored directory to look for re-included files. Since gitignore semantics cannot rescue files beneath an excluded parent, this descent was always wasted — the per-file filter still excluded them. Pruning now proceeds unconditionally; only the final per-file `_is_ignored` check is consulted for negation.
 - Feat: `--model` flag added to `graphify label-communities` and `graphify cluster-only`. Routes through `generate_community_labels` → `label_communities` → `_call_llm`; defaults to `None` (keeps existing backend default). Also fixes a latent arg-parsing bug where `--backend gemini` (space-separated) was mis-parsed as the positional path argument.
-- Docs: Persian (فارسی) README translation added (`docs/translations/README.fa-IR.md`).
+- Docs: Persian (فارسی) README translation added (`docs/translations/README.fa-IR.md`; historical path, removed in 0.10.0).
 
 ## 0.8.38 (2026-06-11)
 
@@ -581,7 +585,7 @@ Full release notes with details on each version: [GitHub Releases](https://githu
 - Fix: `extract_files_direct()` no longer silently defaults to kimi (Moonshot AI) — `backend=None` now calls `detect_backend()` and raises a clear `ValueError` if no key is configured, matching CLI behavior; README Privacy section updated with data-residency notes (#1086)
 - Fix: `pnpm-workspace.yaml` with `packages: - '.'` no longer crashes with `IndexError: tuple index out of range` on Python 3.10 — `Path.glob('.')` replaced with `[root]` guard in `_load_workspace_packages`; `GRAPHIFY_DEBUG=1` env var added to `_safe_extract` for full traceback on extraction errors (#1083)
 - Fix: anchored `.graphifyignore` patterns (leading `/`) no longer match the same directory name anywhere in the tree — `_matches()` in both `_is_ignored` and `_is_included` now gates basename/segment shortcuts on `not anchored`; anchored patterns do exact anchor-relative path match only (#1087)
-- Docs: Filipino (fil-PH) README translation added (#1080)
+- Docs: Filipino (fil-PH) README translation added (#1080; historical translation, removed in 0.10.0)
 
 ## 0.8.25 (2026-05-29)
 
@@ -648,7 +652,7 @@ Full release notes with details on each version: [GitHub Releases](https://githu
 
 - Fix: post-commit hook now updates graph after delete-only commits — shrink-guard is bypassed when `changed_paths` contains explicit deletions, preventing stale nodes from accumulating indefinitely (#1000)
 - Fix: `graphify export` (html/obsidian/wiki/svg/graphml/neo4j) no longer collapses to "Single community" when `.graphify_analysis.json` is absent — falls back to per-node `community` attribute already present in `graph.json` (#1001)
-- Fix: Ukrainian README translation updated to v8 — all new sections, correct badges, 31 languages (#995)
+- Fix: Ukrainian README translation updated to v8 — all new sections, correct badges, 31 languages (#995; historical translation, removed in 0.10.0)
 - Feat: semantic context tags on `references` edges for Python/JS/TS/C#/Java — `parameter_type`, `return_type`, `generic_arg`, `attribute`, `field`; C#/Java split `inherits`/`implements`; dedup key now includes context (#996)
   - **Breaking:** Java `extends` edges are now emitted as `inherits` — queries filtering on `relation="extends"` for Java nodes must be updated to `relation="inherits"`
 - Feat: constrained query expansion in skill — Step 0 extracts actual graph vocab and forces LLM to pick expansion tokens only from that set, preventing hallucinated expansions; Unicode regex fix captures Cyrillic/CJK labels (#998)
@@ -665,7 +669,7 @@ Full release notes with details on each version: [GitHub Releases](https://githu
 - Fix: `.ets` (ArkTS/HarmonyOS) files now recognized as code and extracted via the TypeScript parser (#926)
 - Fix: `graphify` now exits non-zero when all semantic-extraction chunks fail — previously a silent empty graph was written with exit code 0, masking backend failures (#889)
 - Feat: `graphify install --project` installs the skill into the current repository (`.claude/skills/`, `.agents/skills/`, etc.) instead of the user home directory; per-platform subcommands support the same flag (#931)
-- Docs: Uzbek (uz-UZ) README translation (#982)
+- Docs: Uzbek (uz-UZ) README translation (#982; historical translation, removed in 0.10.0)
 
 ## 0.8.15 (2026-05-22)
 
