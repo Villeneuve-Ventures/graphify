@@ -13,6 +13,7 @@ Windows fails closed without publishing this optional advisory state.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import secrets
 import stat
@@ -198,12 +199,9 @@ def _write_posix(pointer: Path, payload: bytes) -> None:
         raise InterpreterPointerError("interpreter pointer atomic publication failed") from exc
     finally:
         if temp_created:
-            try:
+            # Temporary-file removal is best-effort and must not mask the publication failure.
+            with contextlib.suppress(OSError):
                 os.unlink(temp_name, dir_fd=directory_fd)
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
         os.close(directory_fd)
 
 
