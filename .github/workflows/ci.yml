@@ -78,27 +78,6 @@ jobs:
           uv run --frozen graphify --help
           uv run --frozen graphify install
 
-  powershell-test:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          # PowerShell skill tests read immutable pre-split baselines from Git.
-          fetch-depth: 0
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
-        with:
-          python-version: "3.14"
-
-      - name: Install dependencies
-        run: uv sync --all-extras --frozen
-
-      - name: Run PowerShell skill tests
-        run: >-
-          uv run --frozen pytest tests/test_skillgen.py -q --tb=short
-          -k "powershell or user_site"
-
   security-scan:
     # The dev deps include bandit and pip-audit. Run them in CI so a new
     # HIGH-severity finding or vulnerable dependency is caught on the PR that
@@ -127,11 +106,8 @@ jobs:
         run: uv run --frozen pip-audit --strict
 
   leiden-binary-smoke:
-    name: Leiden binary smoke (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: Leiden binary smoke (macOS)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
 
@@ -155,10 +131,3 @@ jobs:
           partition = _partition(graph);
           communities = {frozenset(node for node, cid in partition.items() if cid == community) for community in set(partition.values())};
           assert callable(leiden) and communities == {frozenset({'0', '1'}), frozenset({'2', '3'})}"
-
-  docker-build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build the Python 3.14 image
-        run: docker build --tag graphify-python314 .

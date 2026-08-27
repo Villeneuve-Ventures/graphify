@@ -51,6 +51,32 @@ def _assert_exact_uv_python_selectors(markdown: str) -> None:
         assert selectors == [UV_PYTHON_SELECTOR], example
 
 
+def _workflow_job_body(workflow: str, job: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        workflow,
+    )
+    assert match is not None, f"missing workflow job: {job}"
+    return match.group(1)
+
+
+def _assert_ci_cost_override_policy(ci: str) -> None:
+    leiden_job = _workflow_job_body(ci, "leiden-binary-smoke")
+
+    assert re.findall(r"(?m)^    runs-on: ([^\n]+)$", leiden_job) == ["macos-latest"]
+    assert not re.search(r"(?m)^\s+strategy:\s*$", leiden_job)
+    assert not re.search(r"(?m)^\s+matrix:\s*$", leiden_job)
+    assert "  powershell-test:\n" not in ci
+    assert "windows-latest" not in ci
+    assert "${{ matrix.os }}" not in ci
+    assert "os: [ubuntu-latest, macos-latest, windows-latest]" not in ci
+    assert "  docker-build:\n" not in ci
+    assert "docker build --tag graphify-python314 ." not in ci
+    for job in ("skillgen-check", "test", "security-scan"):
+        job_body = _workflow_job_body(ci, job)
+        assert re.findall(r"(?m)^    runs-on: ([^\n]+)$", job_body) == ["ubuntu-latest"]
+
+
 def test_package_metadata_enforces_exact_python314_window():
     config = tomllib.loads((ROOT / "pyproject.toml").read_text())
     assert config["project"]["version"] == "0.10.0"
@@ -71,23 +97,46 @@ def test_package_metadata_enforces_exact_python314_window():
 def test_workflows_run_executable_python_on_314_only():
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
     release = (ROOT / ".github/workflows/release-graph.yml").read_text()
+    leiden_job = _workflow_job_body(ci, "leiden-binary-smoke")
     assert 'python-version: ["3.14"]' in ci
     ci_versions = re.findall(r'python-version: "([0-9.]+)"', ci)
-    assert len(ci_versions) == 4
+    assert len(ci_versions) == 3
     assert set(ci_versions) == {"3.14"}
     assert re.findall(r'python-version: "([0-9.]+)"', release) == ["3.14"]
-    assert 'uv pip install --only-binary=graspologic-native ".[leiden]"' in ci
-    assert "ubuntu-latest, macos-latest, windows-latest" in ci
-    assert "communities == {frozenset({'0', '1'}), frozenset({'2', '3'})}" in ci
-    assert "docker build --tag graphify-python314 ." in ci
+    assert 'uv pip install --only-binary=graspologic-native ".[leiden]"' in leiden_job
+    assert "name: Leiden binary smoke (macOS)" in leiden_job
+    assert "communities == {frozenset({'0', '1'}), frozenset({'2', '3'})}" in leiden_job
 
 
-def test_windows_ci_selects_powershell_and_user_site_runtime_regressions():
+def test_ci_cost_override_keeps_generic_jobs_and_removes_dedicated_os_jobs():
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
-    powershell_job = ci.split("  powershell-test:\n", 1)[1].split("\n  security-scan:", 1)[0]
 
-    assert '-k "powershell or user_site"' in powershell_job
-    assert "tests/test_skillgen.py" in powershell_job
+    _assert_ci_cost_override_policy(ci)
+
+
+def test_ci_cost_override_rejects_unrelated_macos_job_as_runner_evidence():
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    mutated = ci.replace("    runs-on: macos-latest", "    runs-on: ubuntu-latest", 1)
+    mutated += "\n  unrelated-macos-job:\n    runs-on: macos-latest\n"
+
+    with pytest.raises(AssertionError):
+        _assert_ci_cost_override_policy(mutated)
+
+
+def test_ci_cost_override_rejects_restored_leiden_matrix():
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    mutated = ci.replace(
+        "    runs-on: macos-latest\n    steps:",
+        "    runs-on: macos-latest\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        shard: [1]\n"
+        "    steps:",
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_ci_cost_override_policy(mutated)
 
 
 def test_docker_and_public_docs_match_python314_policy():
