@@ -38,7 +38,7 @@ graphify is a **local development tool**. It runs as a Claude Code skill and opt
 | YAML frontmatter injection | `_yaml_str()` escapes backslashes, double quotes, and newlines before embedding user-controlled strings (webpage titles, query questions) in YAML frontmatter. |
 | Encoding crashes on source files | All tree-sitter byte slices decoded with `errors="replace"` - non-UTF-8 source files degrade gracefully instead of crashing extraction. |
 | Symlink traversal | `os.walk(..., followlinks=False)` is explicit throughout `detect.py`. |
-| Saved Python interpreter pointer | `graphify-out/.graphify_python` is advisory compatibility state, not execution authority. Generated commands rediscover and validate a final CPython 3.14.2+ runtime containing the installed `graphifyy` distribution; installed Git hooks trust only the interpreter already running `graphify hook install`, then use isolated `-E -P -B` probes and launches. |
+| Saved Python interpreter pointer | `graphify-out/.graphify_python` is advisory compatibility state, not execution authority. Generated commands rediscover and validate a final CPython 3.14.2+ runtime containing the installed `graphifyy` distribution; installed Git hooks try the interpreter already running `graphify hook install` first, then validated, containment-checked lower-authority launcher, shebang, and PATH fallbacks, with isolated `-E -P -B` probes and launches. |
 | Corrupted graph.json | `_load_graph()` in `serve.py` wraps `json.JSONDecodeError` and prints a clear recovery message instead of crashing. |
 
 ### Interpreter selection trust boundary

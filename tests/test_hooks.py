@@ -8,7 +8,17 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
-from graphify.hooks import install, uninstall, status, _hooks_dir, _HOOK_MARKER, _CHECKOUT_MARKER
+import graphify.hooks as hooks
+from graphify.hooks import (
+    _CHECKOUT_MARKER,
+    _CHECKOUT_MARKER_END,
+    _HOOK_MARKER,
+    _HOOK_MARKER_END,
+    _hooks_dir,
+    install,
+    status,
+    uninstall,
+)
 
 
 def _make_git_repo(tmp_path: Path) -> Path:
@@ -35,14 +45,239 @@ def test_install_is_executable(tmp_path):
         assert hook.stat().st_mode & 0o111  # executable bit set
 
 
-def test_install_idempotent(tmp_path):
+def test_install_idempotent(tmp_path, monkeypatch):
     repo = _make_git_repo(tmp_path)
     install(repo)
+    hook_paths = {
+        repo / ".git" / "hooks" / "post-commit",
+        repo / ".git" / "hooks" / "post-checkout",
+    }
+    original_write_text = Path.write_text
+    original_write_bytes = Path.write_bytes
+
+    def spy_write_text(path, *args, **kwargs):
+        assert path not in hook_paths, f"idempotent reinstall rewrote {path.name}"
+        return original_write_text(path, *args, **kwargs)
+
+    def spy_write_bytes(path, *args, **kwargs):
+        assert path not in hook_paths, f"idempotent reinstall rewrote {path.name}"
+        return original_write_bytes(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", spy_write_text)
+    monkeypatch.setattr(Path, "write_bytes", spy_write_bytes)
     result = install(repo)
     assert "already installed" in result
-    # marker appears only once
+    for hook_path, marker in zip(
+        sorted(hook_paths),
+        (_CHECKOUT_MARKER, _HOOK_MARKER),
+        strict=True,
+    ):
+        assert hook_path.read_text().count(marker) == 1
+
+
+def _rendered_hook(script: str) -> bytes:
+    return script.replace("__PINNED_PYTHON__", shlex.quote(hooks._pinned_python())).encode()
+
+
+def test_install_updates_existing_graphify_sections_and_preserves_other_content(tmp_path):
+    repo = _make_git_repo(tmp_path)
+    hooks_dir = repo / ".git" / "hooks"
+    commit_hook = hooks_dir / "post-commit"
+    checkout_hook = hooks_dir / "post-checkout"
+    commit_prefix = b"#!/bin/sh\nprintf 'commit prefix\\n'\n"
+    commit_suffix = b"printf 'commit suffix\\n'\n"
+    checkout_prefix = b"#!/bin/sh\r\nprintf 'checkout prefix\\r\\n'\r\n"
+    stale_commit = (
+        f"{_HOOK_MARKER}\n# stale commit body\n{_HOOK_MARKER_END}\n".encode()
+    )
+    stale_checkout = (
+        f"{_CHECKOUT_MARKER}\r\n# stale checkout body\r\n{_CHECKOUT_MARKER_END}".encode()
+    )
+    commit_hook.write_bytes(commit_prefix + stale_commit + commit_suffix)
+    checkout_hook.write_bytes(checkout_prefix + stale_checkout)
+    commit_hook.chmod(0o751)
+    checkout_hook.chmod(0o741)
+
+    result = install(repo)
+
+    commit_bytes = commit_hook.read_bytes()
+    checkout_bytes = checkout_hook.read_bytes()
+    assert "updated" in result
+    assert commit_bytes == commit_prefix + _rendered_hook(hooks._HOOK_SCRIPT) + commit_suffix
+    assert checkout_bytes == checkout_prefix + _rendered_hook(hooks._CHECKOUT_SCRIPT)
+    assert commit_bytes.count(_HOOK_MARKER.encode()) == 1
+    assert commit_bytes.count(_HOOK_MARKER_END.encode()) == 1
+    assert checkout_bytes.count(_CHECKOUT_MARKER.encode()) == 1
+    assert checkout_bytes.count(_CHECKOUT_MARKER_END.encode()) == 1
+    assert commit_hook.stat().st_mode & 0o777 == 0o751
+    assert checkout_hook.stat().st_mode & 0o777 == 0o741
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        f"{_HOOK_MARKER}\nlegacy\n",
+        f"{_HOOK_MARKER_END}\nlegacy\n",
+        f"{_HOOK_MARKER_END}\nlegacy\n{_HOOK_MARKER}\n",
+        f"{_HOOK_MARKER}\n{_HOOK_MARKER}\nlegacy\n{_HOOK_MARKER_END}\n",
+        f"{_HOOK_MARKER}\nlegacy\n{_HOOK_MARKER_END}\n{_HOOK_MARKER_END}\n",
+        (
+            f"{_HOOK_MARKER}\nlegacy one\n{_HOOK_MARKER_END}\n"
+            f"{_HOOK_MARKER}\nlegacy two\n{_HOOK_MARKER_END}\n"
+        ),
+    ],
+    ids=["start-only", "end-only", "reversed", "duplicate-start", "duplicate-end", "two-pairs"],
+)
+def test_install_rejects_malformed_hook_markers_without_writing(tmp_path, malformed):
+    repo = _make_git_repo(tmp_path)
+    hooks_dir = repo / ".git" / "hooks"
+    commit_hook = hooks_dir / "post-commit"
+    checkout_hook = hooks_dir / "post-checkout"
+    commit_before = ("#!/bin/sh\n" + malformed + "printf 'commit suffix\\n'\n").encode()
+    checkout_before = b"#!/bin/sh\nprintf 'checkout untouched\\n'\n"
+    commit_hook.write_bytes(commit_before)
+    checkout_hook.write_bytes(checkout_before)
+
+    with pytest.raises(RuntimeError, match="marker|Graphify|graphify"):
+        install(repo)
+
+    assert commit_hook.read_bytes() == commit_before
+    assert checkout_hook.read_bytes() == checkout_before
+
+
+def test_install_preflights_malformed_checkout_before_updating_commit(tmp_path):
+    repo = _make_git_repo(tmp_path)
+    hooks_dir = repo / ".git" / "hooks"
+    commit_hook = hooks_dir / "post-commit"
+    checkout_hook = hooks_dir / "post-checkout"
+    commit_before = (
+        f"#!/bin/sh\n{_HOOK_MARKER}\n# stale commit\n{_HOOK_MARKER_END}\n"
+    ).encode()
+    checkout_before = (
+        f"#!/bin/sh\n{_CHECKOUT_MARKER}\n# missing checkout end\n"
+    ).encode()
+    commit_hook.write_bytes(commit_before)
+    checkout_hook.write_bytes(checkout_before)
+
+    with pytest.raises(RuntimeError, match="marker|Graphify|graphify"):
+        install(repo)
+
+    assert commit_hook.read_bytes() == commit_before
+    assert checkout_hook.read_bytes() == checkout_before
+
+
+def test_install_ignores_marker_like_substrings_as_ownership(tmp_path):
+    repo = _make_git_repo(tmp_path)
     hook = repo / ".git" / "hooks" / "post-commit"
-    assert hook.read_text().count(_HOOK_MARKER) == 1
+    existing = (
+        "#!/bin/sh\n"
+        f"printf '%s\\n' '{_HOOK_MARKER}'\n"
+        f"{_HOOK_MARKER_END} trailing text\n"
+    ).encode()
+    hook.write_bytes(existing)
+
+    result = install(repo)
+
+    content = hook.read_bytes()
+    assert "appended" in result
+    assert content.startswith(existing)
+    lines = content.decode().splitlines()
+    assert sum(line == _HOOK_MARKER for line in lines) == 1
+    assert sum(line == _HOOK_MARKER_END for line in lines) == 1
+
+
+def test_status_ignores_marker_like_substrings(tmp_path):
+    repo = _make_git_repo(tmp_path)
+    hook = repo / ".git" / "hooks" / "post-commit"
+    hook.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{_HOOK_MARKER}'\n",
+        encoding="utf-8",
+    )
+
+    result = status(repo)
+
+    assert result.splitlines()[0] == (
+        "post-commit: not installed (hook exists but graphify not found)"
+    )
+
+
+def test_substring_only_user_hook_round_trips_through_install_and_uninstall(tmp_path):
+    repo = _make_git_repo(tmp_path)
+    hook = repo / ".git" / "hooks" / "post-commit"
+    user_content = (
+        "#!/bin/sh\n"
+        f"printf '%s\\n' '{_HOOK_MARKER}'\n"
+        f"printf '%s\\n' '{_HOOK_MARKER_END}'\n"
+        "printf 'user suffix\\n'\n"
+    ).encode()
+    hook.write_bytes(user_content)
+    hook.chmod(0o751)
+
+    install(repo)
+    installed = hook.read_bytes()
+    assert status(repo).splitlines()[0] == "post-commit: installed"
+    assert installed.startswith(user_content.rstrip() + b"\n\n")
+    assert hook.stat().st_mode & 0o777 == 0o751
+
+    result = uninstall(repo)
+
+    assert "graphify removed" in result
+    assert hook.read_bytes() == user_content.rstrip() + b"\n\n"
+    assert hook.stat().st_mode & 0o777 == 0o751
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        f"{_HOOK_MARKER}\nlegacy\n",
+        f"{_HOOK_MARKER_END}\nlegacy\n",
+        f"{_HOOK_MARKER_END}\nlegacy\n{_HOOK_MARKER}\n",
+        (
+            f"{_HOOK_MARKER}\nlegacy one\n{_HOOK_MARKER_END}\n"
+            f"{_HOOK_MARKER}\nlegacy two\n{_HOOK_MARKER_END}\n"
+        ),
+    ],
+    ids=["start-only", "end-only", "reversed", "two-pairs"],
+)
+def test_uninstall_rejects_malformed_hook_markers_without_writing(tmp_path, malformed):
+    repo = _make_git_repo(tmp_path)
+    hook = repo / ".git" / "hooks" / "post-commit"
+    before = ("#!/bin/sh\n" + malformed + "printf 'user suffix\\n'\n").encode()
+    hook.write_bytes(before)
+    hook.chmod(0o751)
+
+    with pytest.raises(RuntimeError, match="marker|Graphify|graphify"):
+        uninstall(repo)
+
+    assert hook.read_bytes() == before
+    assert hook.stat().st_mode & 0o777 == 0o751
+
+
+def test_uninstall_preflights_malformed_checkout_before_removing_commit(tmp_path):
+    repo = _make_git_repo(tmp_path)
+    install(repo)
+    hooks_dir = repo / ".git" / "hooks"
+    commit_hook = hooks_dir / "post-commit"
+    checkout_hook = hooks_dir / "post-checkout"
+    checkout_hook.write_bytes(
+        (
+            f"#!/bin/sh\n{_CHECKOUT_MARKER}\nlegacy one\n{_CHECKOUT_MARKER_END}\n"
+            f"{_CHECKOUT_MARKER}\nlegacy two\n{_CHECKOUT_MARKER_END}\n"
+        ).encode()
+    )
+    checkout_hook.chmod(0o741)
+    commit_before = commit_hook.read_bytes()
+    checkout_before = checkout_hook.read_bytes()
+    commit_mode = commit_hook.stat().st_mode
+    checkout_mode = checkout_hook.stat().st_mode
+
+    with pytest.raises(RuntimeError, match="marker|Graphify|graphify"):
+        uninstall(repo)
+
+    assert commit_hook.read_bytes() == commit_before
+    assert checkout_hook.read_bytes() == checkout_before
+    assert commit_hook.stat().st_mode == commit_mode
+    assert checkout_hook.stat().st_mode == checkout_mode
 
 
 def test_install_appends_to_existing_hook(tmp_path):

@@ -4,6 +4,7 @@ import os
 import re
 import shlex
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 _HOOK_MARKER = "# graphify-hook-start"
@@ -603,39 +604,148 @@ def _hooks_dir(root: Path) -> Path:
     return d
 
 
-def _install_hook(hooks_dir: Path, name: str, script: str, marker: str) -> str:
-    """Install a single git hook, appending if an existing hook is present."""
+@dataclass(frozen=True)
+class _HookInstallPlan:
+    """A read-only decision for one hook installation."""
+
+    hook_path: Path
+    message: str
+    text: str | None = None
+    data: bytes | None = None
+    create: bool = False
+
+
+def _standalone_marker_spans(content: bytes, marker: str) -> list[tuple[int, int]]:
+    """Return spans for exact ASCII marker lines, including their line ending."""
+    marker_bytes = re.escape(marker.encode("ascii"))
+    pattern = re.compile(rb"^" + marker_bytes + rb"(?:\r\n|\n|\Z)", re.MULTILINE)
+    return [match.span() for match in pattern.finditer(content)]
+
+
+def _owned_hook_span(
+    content: bytes,
+    marker: str,
+    marker_end: str,
+    context: str,
+) -> tuple[int, int] | None:
+    """Classify one exact standalone marker pair, failing closed if malformed."""
+    starts = _standalone_marker_spans(content, marker)
+    ends = _standalone_marker_spans(content, marker_end)
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or starts[0][0] >= ends[0][0]:
+        raise RuntimeError(f"Malformed Graphify marker section in {context}")
+    return starts[0][0], ends[0][1]
+
+
+def _prepare_hook_install(
+    hooks_dir: Path,
+    name: str,
+    script: str,
+    marker: str,
+    marker_end: str,
+) -> _HookInstallPlan:
+    """Prepare one hook installation without mutating the hook."""
     hook_path = hooks_dir / name
     if hook_path.exists():
-        content = hook_path.read_text(encoding="utf-8")
-        if marker in content:
-            return f"already installed at {hook_path}"
-        hook_path.write_text(content.rstrip() + "\n\n" + script, encoding="utf-8", newline="\n")
-        return f"appended to existing {name} hook at {hook_path}"
-    hook_path.write_text("#!/bin/sh\n" + script, encoding="utf-8", newline="\n")
-    hook_path.chmod(0o755)
-    return f"installed at {hook_path}"
+        raw = hook_path.read_bytes()
+        owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
+        if owned is None:
+            # Preserve the established append behavior, including UTF-8
+            # validation, trailing-whitespace trimming, and LF output.
+            content = hook_path.read_text(encoding="utf-8")
+            return _HookInstallPlan(
+                hook_path,
+                f"appended to existing {name} hook at {hook_path}",
+                text=content.rstrip() + "\n\n" + script,
+            )
+
+        owned_start, owned_end = owned
+        rendered = script.encode("utf-8")
+        if raw[owned_start:owned_end] == rendered:
+            return _HookInstallPlan(
+                hook_path,
+                f"already installed at {hook_path}",
+            )
+        return _HookInstallPlan(
+            hook_path,
+            f"updated {name} hook at {hook_path}",
+            data=raw[:owned_start] + rendered + raw[owned_end:],
+        )
+
+    return _HookInstallPlan(
+        hook_path,
+        f"installed at {hook_path}",
+        text="#!/bin/sh\n" + script,
+        create=True,
+    )
 
 
-def _uninstall_hook(hooks_dir: Path, name: str, marker: str, marker_end: str) -> str:
-    """Remove graphify section from a git hook using start/end markers."""
+def _apply_hook_install(plan: _HookInstallPlan) -> str:
+    """Apply a previously prepared hook installation plan."""
+    if plan.data is not None:
+        plan.hook_path.write_bytes(plan.data)
+    elif plan.text is not None:
+        plan.hook_path.write_text(plan.text, encoding="utf-8", newline="\n")
+    if plan.create:
+        plan.hook_path.chmod(0o755)
+    return plan.message
+
+
+@dataclass(frozen=True)
+class _HookUninstallPlan:
+    """A read-only decision for one hook removal."""
+
+    hook_path: Path
+    message: str
+    data: bytes | None = None
+    delete: bool = False
+
+
+def _prepare_hook_uninstall(
+    hooks_dir: Path,
+    name: str,
+    marker: str,
+    marker_end: str,
+) -> _HookUninstallPlan:
+    """Prepare removal of one exact owned hook interval without mutating it."""
     hook_path = hooks_dir / name
     if not hook_path.exists():
-        return f"no {name} hook found - nothing to remove."
-    content = hook_path.read_text(encoding="utf-8")
-    if marker not in content:
-        return f"graphify hook not found in {name} - nothing to remove."
-    new_content = re.sub(
-        rf"{re.escape(marker)}.*?{re.escape(marker_end)}\n?",
-        "",
-        content,
-        flags=re.DOTALL,
-    ).strip()
-    if not new_content or new_content in ("#!/bin/bash", "#!/bin/sh"):
-        hook_path.unlink()
-        return f"removed {name} hook at {hook_path}"
-    hook_path.write_text(new_content + "\n", encoding="utf-8", newline="\n")
-    return f"graphify removed from {name} at {hook_path} (other hook content preserved)"
+        return _HookUninstallPlan(
+            hook_path,
+            f"no {name} hook found - nothing to remove.",
+        )
+
+    raw = hook_path.read_bytes()
+    owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
+    if owned is None:
+        return _HookUninstallPlan(
+            hook_path,
+            f"graphify hook not found in {name} - nothing to remove.",
+        )
+
+    owned_start, owned_end = owned
+    remaining = raw[:owned_start] + raw[owned_end:]
+    if remaining.strip() in (b"", b"#!/bin/bash", b"#!/bin/sh"):
+        return _HookUninstallPlan(
+            hook_path,
+            f"removed {name} hook at {hook_path}",
+            delete=True,
+        )
+    return _HookUninstallPlan(
+        hook_path,
+        f"graphify removed from {name} at {hook_path} (other hook content preserved)",
+        data=remaining,
+    )
+
+
+def _apply_hook_uninstall(plan: _HookUninstallPlan) -> str:
+    """Apply a previously prepared hook removal plan."""
+    if plan.delete:
+        plan.hook_path.unlink()
+    elif plan.data is not None:
+        plan.hook_path.write_bytes(plan.data)
+    return plan.message
 
 
 def _pinned_python() -> str:
@@ -812,8 +922,20 @@ def install(path: Path = Path(".")) -> str:
     hook = _HOOK_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
     checkout = _CHECKOUT_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
 
-    commit_msg = _install_hook(hooks_dir, "post-commit", hook, _HOOK_MARKER)
-    checkout_msg = _install_hook(hooks_dir, "post-checkout", checkout, _CHECKOUT_MARKER)
+    # Prepare both hooks before applying either so deterministic malformed
+    # ownership in one hook cannot leave the other partially upgraded.
+    commit_plan = _prepare_hook_install(
+        hooks_dir, "post-commit", hook, _HOOK_MARKER, _HOOK_MARKER_END
+    )
+    checkout_plan = _prepare_hook_install(
+        hooks_dir,
+        "post-checkout",
+        checkout,
+        _CHECKOUT_MARKER,
+        _CHECKOUT_MARKER_END,
+    )
+    commit_msg = _apply_hook_install(commit_plan)
+    checkout_msg = _apply_hook_install(checkout_plan)
     merge_msg = _register_merge_driver(root)
 
     return f"post-commit: {commit_msg}\npost-checkout: {checkout_msg}\nmerge driver: {merge_msg}"
@@ -826,8 +948,17 @@ def uninstall(path: Path = Path(".")) -> str:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
 
     hooks_dir = _user_hooks_dir(_hooks_dir(root))
-    commit_msg = _uninstall_hook(hooks_dir, "post-commit", _HOOK_MARKER, _HOOK_MARKER_END)
-    checkout_msg = _uninstall_hook(hooks_dir, "post-checkout", _CHECKOUT_MARKER, _CHECKOUT_MARKER_END)
+    commit_plan = _prepare_hook_uninstall(
+        hooks_dir, "post-commit", _HOOK_MARKER, _HOOK_MARKER_END
+    )
+    checkout_plan = _prepare_hook_uninstall(
+        hooks_dir,
+        "post-checkout",
+        _CHECKOUT_MARKER,
+        _CHECKOUT_MARKER_END,
+    )
+    commit_msg = _apply_hook_uninstall(commit_plan)
+    checkout_msg = _apply_hook_uninstall(checkout_plan)
     merge_msg = _unregister_merge_driver(root)
 
     return f"post-commit: {commit_msg}\npost-checkout: {checkout_msg}\nmerge driver: {merge_msg}"
@@ -840,13 +971,21 @@ def status(path: Path = Path(".")) -> str:
         return "Not in a git repository."
     hooks_dir = _user_hooks_dir(_hooks_dir(root))
 
-    def _check(name: str, marker: str) -> str:
+    def _check(name: str, marker: str, marker_end: str) -> str:
         p = hooks_dir / name
         if not p.exists():
             return "not installed"
-        return "installed" if marker in p.read_text(encoding="utf-8") else "not installed (hook exists but graphify not found)"
+        try:
+            owned = _owned_hook_span(
+                p.read_bytes(), marker, marker_end, f"{name} hook at {p}"
+            )
+        except RuntimeError:
+            return "not installed (malformed Graphify markers)"
+        if owned is not None:
+            return "installed"
+        return "not installed (hook exists but graphify not found)"
 
-    commit = _check("post-commit", _HOOK_MARKER)
-    checkout = _check("post-checkout", _CHECKOUT_MARKER)
+    commit = _check("post-commit", _HOOK_MARKER, _HOOK_MARKER_END)
+    checkout = _check("post-checkout", _CHECKOUT_MARKER, _CHECKOUT_MARKER_END)
     merge = _merge_driver_status(root)
     return f"post-commit: {commit}\npost-checkout: {checkout}\nmerge driver: {merge}"
