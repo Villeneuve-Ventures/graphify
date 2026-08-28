@@ -375,6 +375,13 @@ _GRAPHIFY_WORKSPACE=$(command pwd -P) || exit 1
 _graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; [ -d "$_gfy_root" ] && CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && command pwd -P; }
 _GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_INPUT_PATH-}") || _GRAPHIFY_INPUT_ROOT=""; _GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}") || _GRAPHIFY_OUTPUT_ROOT=""
 _graphify_path_denied() { _gfy_policy_path=$1; [ "$_GRAPHIFY_WORKSPACE" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_WORKSPACE"|"$_GRAPHIFY_WORKSPACE"/*) return 0 ;; esac; [ -z "$_GRAPHIFY_INPUT_ROOT" ] || { [ "$_GRAPHIFY_INPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_INPUT_ROOT"|"$_GRAPHIFY_INPUT_ROOT"/*) return 0 ;; esac; }; [ -z "$_GRAPHIFY_OUTPUT_ROOT" ] || { [ "$_GRAPHIFY_OUTPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_OUTPUT_ROOT"|"$_GRAPHIFY_OUTPUT_ROOT"/*) return 0 ;; esac; }; return 1; }
+_graphify_readlink() {
+    if [ -x /usr/bin/readlink ]; then /usr/bin/readlink "$1"
+    elif [ -x /bin/readlink ]; then /bin/readlink "$1"
+    elif [ -x /run/current-system/sw/bin/readlink ]; then /run/current-system/sw/bin/readlink "$1"
+    else command -p readlink "$1"
+    fi
+}
 _graphify_resolve_ambient() {
     _gfy_lexical=$1; case "$_gfy_lexical" in /*) ;; *) return 1 ;; esac
     _graphify_path_denied "$_gfy_lexical" && return 1; _gfy_path=$_gfy_lexical
@@ -382,8 +389,7 @@ _graphify_resolve_ambient() {
     while [ -L "$_gfy_path" ]; do
         _gfy_links=$((_gfy_links + 1))
         [ "$_gfy_links" -le 40 ] || return 1
-        [ -x /usr/bin/readlink ] || return 1
-        _gfy_link=$(/usr/bin/readlink "$_gfy_path") || return 1
+        _gfy_link=$(_graphify_readlink "$_gfy_path") || return 1
         case "$_gfy_link" in
             /*) _gfy_path=$_gfy_link ;;
             *) _gfy_dir=${_gfy_path%/*}; _gfy_path=$_gfy_dir/$_gfy_link ;;
@@ -451,6 +457,103 @@ if [ -z "$GRAPHIFY_PYTHON" ] && [ "${GRAPHIFY_DISCOVERY_OPTIONAL-0}" != 1 ]; the
     echo "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." >&2
     exit 1
 fi'''.replace("@@GRAPHIFY_IDENTITY_CHECK@@", _GRAPHIFY_IDENTITY_COMMAND)
+
+
+_WINDOWS_POSIX_DISCOVERY = r'''GRAPHIFY_PYTHON=""
+GRAPHIFY_PYTHON_EXPLICIT=0
+_GRAPHIFY_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
+_GRAPHIFY_IDENTITY_CHECK='@@GRAPHIFY_IDENTITY_CHECK@@'
+if [ -x /usr/bin/cygpath.exe ]; then _GRAPHIFY_CYGPATH=/usr/bin/cygpath.exe
+elif [ -x /usr/bin/cygpath ]; then _GRAPHIFY_CYGPATH=/usr/bin/cygpath
+elif [ -x /bin/cygpath.exe ]; then _GRAPHIFY_CYGPATH=/bin/cygpath.exe
+elif [ -x /bin/cygpath ]; then _GRAPHIFY_CYGPATH=/bin/cygpath
+else exit 1
+fi
+_graphify_to_posix() {
+    _gfy_native=$1
+    case "$_gfy_native" in [a-zA-Z]:|[a-zA-Z]:[!\\/]*|\\|\\[!\\]*) return 1 ;; esac
+    "$_GRAPHIFY_CYGPATH" -u "$_gfy_native"
+}
+_graphify_to_native() { [ -n "$1" ] || return 0; "$_GRAPHIFY_CYGPATH" -w "$1"; }
+_GRAPHIFY_WORKSPACE=$(command pwd -P) || exit 1
+_GRAPHIFY_WORKSPACE_NATIVE=$(_graphify_to_native "$_GRAPHIFY_WORKSPACE") || exit 1
+_graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in [a-zA-Z]:|[a-zA-Z]:[!\\/]*|\\|\\[!\\]*) return 1 ;; /*) ;; *) _gfy_root=$(_graphify_to_posix "$_gfy_root") || return 1 ;; esac; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; if [ -d "$_gfy_root" ]; then CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && command pwd -P; else printf '%s\n' "$_gfy_root"; fi; }
+_GRAPHIFY_DENY_POLICY_INVALID=0
+_gfy_input_raw=${GRAPHIFY_INPUT_PATH-}; _gfy_output_raw=${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}
+_GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "$_gfy_input_raw") || { _GRAPHIFY_INPUT_ROOT=""; [ -z "$_gfy_input_raw" ] || _GRAPHIFY_DENY_POLICY_INVALID=1; }
+_GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "$_gfy_output_raw") || { _GRAPHIFY_OUTPUT_ROOT=""; [ -z "$_gfy_output_raw" ] || _GRAPHIFY_DENY_POLICY_INVALID=1; }
+[ "$_GRAPHIFY_DENY_POLICY_INVALID" = 0 ] || exit 1
+_GRAPHIFY_INPUT_ROOT_NATIVE=$(_graphify_to_native "$_GRAPHIFY_INPUT_ROOT") || exit 1
+_GRAPHIFY_OUTPUT_ROOT_NATIVE=$(_graphify_to_native "$_GRAPHIFY_OUTPUT_ROOT") || exit 1
+_graphify_path_denied() { _gfy_policy_path=$1; [ "$_GRAPHIFY_WORKSPACE" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_WORKSPACE"|"$_GRAPHIFY_WORKSPACE"/*) return 0 ;; esac; [ -z "$_GRAPHIFY_INPUT_ROOT" ] || { [ "$_GRAPHIFY_INPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_INPUT_ROOT"|"$_GRAPHIFY_INPUT_ROOT"/*) return 0 ;; esac; }; [ -z "$_GRAPHIFY_OUTPUT_ROOT" ] || { [ "$_GRAPHIFY_OUTPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_OUTPUT_ROOT"|"$_GRAPHIFY_OUTPUT_ROOT"/*) return 0 ;; esac; }; return 1; }
+_graphify_readlink() {
+    if [ -x /usr/bin/readlink ]; then /usr/bin/readlink "$1"
+    elif [ -x /bin/readlink ]; then /bin/readlink "$1"
+    elif [ -x /run/current-system/sw/bin/readlink ]; then /run/current-system/sw/bin/readlink "$1"
+    else command -p readlink "$1"
+    fi
+}
+_graphify_resolve_ambient() {
+    _gfy_lexical=$1; _gfy_lexical=$(_graphify_to_posix "$_gfy_lexical") || return 1; case "$_gfy_lexical" in /*) ;; *) return 1 ;; esac
+    _graphify_path_denied "$_gfy_lexical" && return 1; _gfy_path=$_gfy_lexical
+    _gfy_links=0
+    while [ -L "$_gfy_path" ]; do
+        _gfy_links=$((_gfy_links + 1)); [ "$_gfy_links" -le 40 ] || return 1
+        _gfy_link=$(_graphify_readlink "$_gfy_path") || return 1
+        case "$_gfy_link" in /*) _gfy_path=$_gfy_link ;; *) _gfy_dir=${_gfy_path%/*}; _gfy_path=$_gfy_dir/$_gfy_link ;; esac
+    done
+    _gfy_dir=${_gfy_path%/*}; _gfy_base=${_gfy_path##*/}
+    _gfy_dir=$(CDPATH= cd -P -- "$_gfy_dir" 2>/dev/null && command pwd -P) || return 1
+    _gfy_path=$_gfy_dir/$_gfy_base; _graphify_path_denied "$_gfy_path" && return 1
+    [ -x "$_gfy_lexical" ] || return 1; GRAPHIFY_RESOLVED=$_gfy_lexical
+}
+_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _gfy_found=$(_graphify_to_posix "$_gfy_found") || return 1; _graphify_resolve_ambient "$_gfy_found"; }
+_graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
+_graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
+_graphify_ambient_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" ambient "$_GRAPHIFY_WORKSPACE_NATIVE" "$_GRAPHIFY_INPUT_ROOT_NATIVE" "$_GRAPHIFY_OUTPUT_ROOT_NATIVE" >/dev/null 2>&1; }
+# An explicit native active environment is caller-selected.
+case "${VIRTUAL_ENV-}" in
+    "") ;;
+    *) _gfy_venv=$(_graphify_to_posix "$VIRTUAL_ENV") || exit 1
+       _gfy_venv_python=$_gfy_venv/Scripts/python.exe
+       _graphify_usable "$_gfy_venv_python" && { GRAPHIFY_PYTHON=$_gfy_venv_python; GRAPHIFY_PYTHON_EXPLICIT=1; } ;;
+esac
+# Trusted uv and pipx metadata, then trusted candidates derived from it.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command uv; then
+    _gfy_uv=$GRAPHIFY_RESOLVED; _gfy_uv_dir=$("$_gfy_uv" tool dir 2>/dev/null)
+    _gfy_uv_dir=$(_graphify_to_posix "$_gfy_uv_dir") || _gfy_uv_dir=""
+    _gfy_candidate=${_gfy_uv_dir:+$_gfy_uv_dir/graphifyy/Scripts/python.exe}
+    if _graphify_resolve_ambient "$_gfy_candidate"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; fi
+fi
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command pipx; then
+    _gfy_pipx=$GRAPHIFY_RESOLVED; _gfy_pipx_home=$("$_gfy_pipx" environment --value PIPX_LOCAL_VENVS 2>/dev/null)
+    _gfy_pipx_home=$(_graphify_to_posix "$_gfy_pipx_home") || _gfy_pipx_home=""
+    _gfy_candidate=${_gfy_pipx_home:+$_gfy_pipx_home/graphifyy/Scripts/python.exe}
+    if _graphify_resolve_ambient "$_gfy_candidate"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; fi
+fi
+# Console-script launcher siblings cover native pip and pipx layouts.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command graphify; then
+    _gfy_graphify=$(_graphify_to_posix "$GRAPHIFY_RESOLVED") || _gfy_graphify=""
+    _gfy_bindir=${_gfy_graphify%/*}
+    for _gfy_candidate in "$_gfy_bindir/python.exe" "$_gfy_bindir/../python.exe"; do
+        if _graphify_resolve_ambient "$_gfy_candidate" && _graphify_ambient_usable "$GRAPHIFY_RESOLVED"; then GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; break; fi
+    done
+fi
+if [ -z "$GRAPHIFY_PYTHON" ]; then
+    for _gfy_name in python3.14 python3 python; do
+        if _graphify_command "$_gfy_name"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && { GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; break; }; fi
+    done
+fi
+# Resolve py -3.14 output and convert its native path before policy checks.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command py; then
+    _gfy_py=$GRAPHIFY_RESOLVED
+    _gfy_candidate=$("$_gfy_py" -3.14 -E -P -B -c 'import sys; print(sys.executable)' 2>/dev/null)
+    _gfy_candidate=$(_graphify_to_posix "$_gfy_candidate") || _gfy_candidate=""
+    if _graphify_resolve_ambient "$_gfy_candidate"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; fi
+fi
+if [ -z "$GRAPHIFY_PYTHON" ] && [ "${GRAPHIFY_DISCOVERY_OPTIONAL-0}" != 1 ]; then echo "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." >&2; exit 1; fi'''.replace(
+    "@@GRAPHIFY_IDENTITY_CHECK@@", _GRAPHIFY_IDENTITY_COMMAND
+)
 
 _POSIX_BOOTSTRAP = f'''# Installation is the only discovery path allowed to mutate the environment.
 GRAPHIFY_DISCOVERY_OPTIONAL=1
@@ -717,6 +820,7 @@ def _compact_posix_guard(script: str) -> str:
 
 
 _POSIX_OPERATION_GUARD = _compact_posix_guard(_POSIX_DISCOVERY)
+_WINDOWS_POSIX_OPERATION_GUARD = _compact_posix_guard(_WINDOWS_POSIX_DISCOVERY)
 
 _INTERPRETER_SHELL = {
     "posix": {
@@ -896,11 +1000,16 @@ def _render_saved_interpreter_commands(
             flags=re.DOTALL,
         )
 
+    posix_guard = (
+        _WINDOWS_POSIX_OPERATION_GUARD
+        if platform.key == "windows"
+        else _POSIX_OPERATION_GUARD
+    )
     body = bind_blocks(
         body,
         "(?:bash|sh)",
         "GRAPHIFY_PYTHON",
-        _POSIX_OPERATION_GUARD,
+        posix_guard,
         "GRAPHIFY_INPUT_PATH='INPUT_PATH'",
     )
     body = bind_blocks(

@@ -1898,6 +1898,366 @@ def test_posix_discovery_never_reads_saved_root_special_file(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_posix_discovery_selects_trusted_readlink_without_ambient_path(tmp_path):
+    """Symlink resolution uses only the bounded trusted resolver strategy."""
+    source = gen._POSIX_DISCOVERY
+    fixed_resolvers = (
+        "/usr/bin/readlink",
+        "/bin/readlink",
+        "/run/current-system/sw/bin/readlink",
+    )
+    positions = [source.index(resolver) for resolver in fixed_resolvers]
+    assert positions == sorted(positions)
+    assert "command -p readlink" in source
+    assert "command -v readlink" not in source
+    assert "$(readlink " not in source
+
+    project = tmp_path / "project"
+    project.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    target = external / "python"
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    candidate = external / "python-link"
+    candidate.symlink_to(target)
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    sentinel = tmp_path / "ambient-readlink-ran"
+    _write_executable_sentinel(hostile / "readlink", sentinel)
+
+    definitions = source.split("_graphify_command()", 1)[0]
+    for selected, resolver in enumerate(fixed_resolvers):
+        stub = tmp_path / f"trusted-readlink-{selected}"
+        stub.write_text("#!/bin/sh\nexec /usr/bin/readlink \"$@\"\n", encoding="utf-8")
+        stub.chmod(0o755)
+        controlled = definitions
+        for earlier in fixed_resolvers[:selected]:
+            controlled = controlled.replace(earlier, f"{tmp_path}/missing-{selected}")
+        controlled = controlled.replace(resolver, str(stub))
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                controlled
+                + "\n_graphify_resolve_ambient \"$GFY_CANDIDATE\""
+                + "\nprintf '%s\\n' \"$GRAPHIFY_RESOLVED\"\n",
+            ],
+            cwd=project,
+            env={**os.environ, "PATH": str(hostile), "GFY_CANDIDATE": str(candidate)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == str(candidate)
+        assert not sentinel.exists()
+
+    safe_path = definitions
+    for resolver in fixed_resolvers:
+        safe_path = safe_path.replace(resolver, f"{tmp_path}/missing-safe-path")
+    safe_path_result = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            safe_path
+            + "\n_graphify_resolve_ambient \"$GFY_CANDIDATE\""
+            + "\nprintf '%s\\n' \"$GRAPHIFY_RESOLVED\"\n",
+        ],
+        cwd=project,
+        env={**os.environ, "PATH": str(hostile), "GFY_CANDIDATE": str(candidate)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert safe_path_result.returncode == 0, safe_path_result.stderr
+    assert safe_path_result.stdout.strip() == str(candidate)
+    assert not sentinel.exists()
+
+    unavailable = safe_path.replace("command -p readlink", "false")
+    unavailable_result = subprocess.run(
+        ["/bin/bash", "-c", unavailable + "\n_graphify_resolve_ambient \"$GFY_CANDIDATE\""],
+        cwd=project,
+        env={**os.environ, "PATH": str(hostile), "GFY_CANDIDATE": str(candidate)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unavailable_result.returncode != 0
+    assert not sentinel.exists()
+
+
+def test_windows_bash_guard_converts_native_discovery_paths(tmp_path):
+    """Windows bash discovery explicitly bridges native and MSYS namespaces."""
+    source = gen._WINDOWS_POSIX_DISCOVERY
+    candidates = (
+        "/usr/bin/cygpath.exe",
+        "/usr/bin/cygpath",
+        "/bin/cygpath.exe",
+        "/bin/cygpath",
+    )
+    positions = [source.index(candidate) for candidate in candidates]
+    assert positions == sorted(positions)
+    assert "command -v cygpath" not in source
+    assert "_graphify_to_posix" in source
+    assert "_graphify_to_native" in source
+    assert " -u " in source
+    assert " -w " in source
+    assert "Scripts/python.exe" in source
+
+    # The two-way handoff must cover every native-path ingress and every native
+    # identity-probe egress named by the approved compatibility contract.
+    ingress_segments = (
+        source[source.index("VIRTUAL_ENV"):source.index("# Trusted uv")],
+        source[source.index("if [ -z \"$GRAPHIFY_PYTHON\" ] && _graphify_command uv"):
+               source.index("if [ -z \"$GRAPHIFY_PYTHON\" ] && _graphify_command pipx")],
+        source[source.index("if [ -z \"$GRAPHIFY_PYTHON\" ] && _graphify_command pipx"):
+               source.index("# Console-script")],
+        source[source.index("# Console-script"):source.index("if [ -z \"$GRAPHIFY_PYTHON\" ]; then")],
+    )
+    assert all("_graphify_to_posix" in segment for segment in ingress_segments)
+    assert "py -3.14" in source
+    py_segment = source[source.index("py -3.14"):]
+    assert "_graphify_to_posix" in py_segment
+    for root in ("_GRAPHIFY_WORKSPACE", "_GRAPHIFY_INPUT_ROOT", "_GRAPHIFY_OUTPUT_ROOT"):
+        assert re.search(rf"_graphify_to_native[^\n]*{root}|{root}[^\n]*_graphify_to_native", source)
+
+    core, refs = _platform_artifacts("windows")
+    bash_blocks = [
+        block
+        for body in (core, *refs.values())
+        for block in re.findall(r"```(?:bash|sh)\n(.*?)\n```", body, re.DOTALL)
+        if "GRAPHIFY_PYTHON=$(" in block
+    ]
+    assert bash_blocks
+    assert all(candidate in block for block in bash_blocks for candidate in candidates)
+
+    workspace = tmp_path / "workspace"
+    external = tmp_path / "external"
+    workspace.mkdir()
+    external.mkdir()
+    drive_native = r"C:\Fixture Root"
+    unc_native = r"\\server\share\Fixture Root"
+    drive_posix = external / "drive root"
+    unc_posix = external / "unc root"
+    drive_posix.mkdir()
+    unc_posix.mkdir()
+    (drive_posix / "Input With Spaces").mkdir()
+    (unc_posix / "Output With Spaces").mkdir()
+    converter_log = tmp_path / "converter.jsonl"
+    converter = external / "controlled-cygpath"
+    converter.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "mode, value = sys.argv[1:3]\n"
+        "dn, un = os.environ['GFY_DRIVE_NATIVE'], os.environ['GFY_UNC_NATIVE']\n"
+        "dp, up = os.environ['GFY_DRIVE_POSIX'], os.environ['GFY_UNC_POSIX']\n"
+        "if mode == '-u' and (value == dn or value.startswith(dn + '\\\\')):\n"
+        "    result = dp + value[len(dn):].replace('\\\\', '/')\n"
+        "elif mode == '-u' and (value == un or value.startswith(un + '\\\\')):\n"
+        "    result = up + value[len(un):].replace('\\\\', '/')\n"
+        "elif mode == '-u' and value.startswith('/'):\n"
+        "    result = value\n"
+        "elif mode == '-w' and value.startswith(dp):\n"
+        "    result = dn + value[len(dp):].replace('/', '\\\\')\n"
+        "elif mode == '-w' and value.startswith(up):\n"
+        "    result = un + value[len(up):].replace('/', '\\\\')\n"
+        "elif mode == '-w' and value.startswith('/'):\n"
+        "    result = r'C:\\Host' + value.replace('/', '\\\\')\n"
+        "else:\n"
+        "    raise SystemExit(2)\n"
+        "with open(os.environ['GFY_CONVERTER_LOG'], 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps([mode, value, result]) + '\\n')\n"
+        "print(result)\n",
+        encoding="utf-8",
+    )
+    converter.chmod(0o755)
+
+    interpreter_log = tmp_path / "interpreter-argv.log"
+
+    def write_python(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "#!/bin/sh\n"
+            f'printf \'%s\\n\' "$@" >> "{interpreter_log}"\n'
+            f'printf \'%s\\n\' --- >> "{interpreter_log}"\n'
+            f'exec "{sys.executable}" "$@"\n',
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
+    venv_python = drive_posix / "Venv With Spaces" / "Scripts" / "python.exe"
+    write_python(venv_python)
+
+    sentinel = tmp_path / "ambient-cygpath-ran"
+    hostile = external / "hostile"
+    hostile.mkdir()
+    _write_executable_sentinel(hostile / "cygpath", sentinel)
+    env = {
+        **os.environ,
+        "PATH": str(hostile),
+        "GFY_DRIVE_NATIVE": drive_native,
+        "GFY_UNC_NATIVE": unc_native,
+        "GFY_DRIVE_POSIX": str(drive_posix),
+        "GFY_UNC_POSIX": str(unc_posix),
+        "GFY_CONVERTER_LOG": str(converter_log),
+        "VIRTUAL_ENV": drive_native + r"\Venv With Spaces",
+        "GRAPHIFY_INPUT_PATH": drive_native + r"\Input With Spaces",
+        "GRAPHIFY_OUTPUT_ROOT": unc_native + r"\Output With Spaces",
+    }
+
+    # Substitute each fixed candidate independently. The guard must select the
+    # first executable spelling, map drive/UNC values with spaces into POSIX,
+    # then map deny roots back to native form for the CPython identity probe.
+    for selected in range(len(candidates)):
+        controlled = source
+        for index, candidate in enumerate(candidates):
+            replacement = str(converter) if index == selected else str(external / f"missing-{index}")
+            controlled = controlled.replace(candidate, replacement)
+        controlled += (
+            '\nprintf \'SELECTED=%s\\n\' "$GRAPHIFY_PYTHON"\n'
+            f'_graphify_to_posix {json.dumps(drive_native + r"\Input With Spaces")}\n'
+            f'_graphify_to_posix {json.dumps(unc_native + r"\Output With Spaces")}\n'
+            f'_graphify_to_native {json.dumps(str(drive_posix / "Input With Spaces"))}\n'
+            f'_graphify_to_native {json.dumps(str(unc_posix / "Output With Spaces"))}\n'
+        )
+        result = subprocess.run(
+            ["/bin/bash", "-c", controlled],
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, f"{candidates[selected]}: {result.stderr}"
+        assert f"SELECTED={venv_python}" in result.stdout
+        assert not sentinel.exists()
+
+    conversions = [json.loads(line) for line in converter_log.read_text().splitlines()]
+    assert any(mode == "-u" and value == env["GRAPHIFY_INPUT_PATH"] for mode, value, _ in conversions)
+    assert any(mode == "-u" and value == env["GRAPHIFY_OUTPUT_ROOT"] for mode, value, _ in conversions)
+    assert any(mode == "-u" and value == env["VIRTUAL_ENV"] for mode, value, _ in conversions)
+    assert any(mode == "-w" and value == str(drive_posix / "Input With Spaces") for mode, value, _ in conversions)
+    assert any(mode == "-w" and value == str(unc_posix / "Output With Spaces") for mode, value, _ in conversions)
+
+    def fixed_converter_source() -> str:
+        controlled = source
+        for index, candidate in enumerate(candidates):
+            controlled = controlled.replace(
+                candidate,
+                str(converter if index == 0 else external / f"missing-{index}"),
+            )
+        return controlled
+
+    def write_command(directory: Path, name: str, output: str) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        command = directory / name
+        command.write_text(
+            "#!/bin/sh\n" + f"printf '%s\\n' {json.dumps(output)}\n",
+            encoding="utf-8",
+        )
+        command.chmod(0o755)
+
+    uv_python = drive_posix / "uv tools" / "graphifyy" / "Scripts" / "python.exe"
+    pipx_python = unc_posix / "pipx home" / "graphifyy" / "Scripts" / "python.exe"
+    py_python = unc_posix / "Python 3.14" / "python.exe"
+    for python in (uv_python, pipx_python, py_python):
+        write_python(python)
+
+    uv_bin = external / "uv-bin"
+    write_command(uv_bin, "uv", drive_native + r"\uv tools")
+    pipx_bin = external / "pipx-bin"
+    write_command(pipx_bin, "pipx", unc_native + r"\pipx home")
+    py_bin = external / "py-bin"
+    write_command(py_bin, "py", unc_native + r"\Python 3.14\python.exe")
+    launcher_bin = drive_posix / "launcher" / "Scripts"
+    launcher_python = launcher_bin / "python.exe"
+    write_python(launcher_python)
+    write_command(launcher_bin, "graphify", "must-not-execute-launcher")
+
+    for label, path, expected in (
+        ("uv", uv_bin, uv_python),
+        ("pipx", pipx_bin, pipx_python),
+        ("launcher", launcher_bin, launcher_python),
+        ("py", py_bin, py_python),
+    ):
+        result = subprocess.run(
+            ["/bin/bash", "-c", fixed_converter_source() + '\nprintf \'SELECTED=%s\\n\' "$GRAPHIFY_PYTHON"\n'],
+            cwd=workspace,
+            env={**env, "PATH": str(path), "VIRTUAL_ENV": ""},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert f"SELECTED={expected}" in result.stdout, label
+
+    identity_argv = interpreter_log.read_text(encoding="utf-8")
+    assert env["GRAPHIFY_INPUT_PATH"] in identity_argv
+    assert env["GRAPHIFY_OUTPUT_ROOT"] in identity_argv
+
+    for invalid_root in ("C:", r"C:relative", "\\", r"\current-drive-rooted"):
+        invalid = source
+        for index, candidate in enumerate(candidates):
+            invalid = invalid.replace(candidate, str(converter if index == 0 else external / f"missing-{index}"))
+        invalid_result = subprocess.run(
+            ["/bin/bash", "-c", invalid],
+            cwd=workspace,
+            env={**env, "GRAPHIFY_INPUT_PATH": invalid_root},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert invalid_result.returncode != 0, invalid_root
+
+    # A lexical input alias and its physical target must both deny an ambient
+    # Python, even when the native spelling is converted before containment.
+    controlled_origin = drive_posix / "controlled origin"
+    controlled_origin.mkdir()
+    alias = drive_posix / "input alias"
+    alias.symlink_to(controlled_origin, target_is_directory=True)
+    denied_python = controlled_origin / "python.exe"
+    denied_python.write_text(
+        "#!/bin/sh\n"
+        f': > "{tmp_path / "denied-python-ran"}"\n'
+        f'exec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    denied_python.chmod(0o755)
+    denied_bin = controlled_origin / "bin"
+    denied_bin.mkdir()
+    (denied_bin / "python").symlink_to(denied_python)
+    denied_result = subprocess.run(
+        ["/bin/bash", "-c", fixed_converter_source()],
+        cwd=workspace,
+        env={
+            **env,
+            "PATH": str(denied_bin),
+            "VIRTUAL_ENV": "",
+            "GRAPHIFY_INPUT_PATH": drive_native + r"\input alias",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert denied_result.returncode != 0
+    assert not (tmp_path / "denied-python-ran").exists()
+
+    unavailable = source
+    for candidate in candidates:
+        unavailable = unavailable.replace(candidate, str(external / "missing-cygpath"))
+    unavailable_result = subprocess.run(
+        ["/bin/bash", "-c", unavailable],
+        cwd=workspace,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert unavailable_result.returncode != 0
+    assert not sentinel.exists()
+
+
 def test_explicit_project_local_virtualenv_is_accepted_but_same_ambient_path_is_not(tmp_path):
     project = tmp_path / "project"
     venv_bin = project / ".venv" / "bin"

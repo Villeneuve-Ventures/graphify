@@ -1039,19 +1039,23 @@ def _run_python_detect(
     interpreter: Path | None = None,
     input_root: Path | None = None,
     output_root: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
+    timeout: float = 10,
 ) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "PATH": str(interpreter.parent) if interpreter else "/nonexistent"}
     if input_root is not None:
         env["GRAPHIFY_INPUT_PATH"] = str(input_root)
     if output_root is not None:
         env["GRAPHIFY_OUTPUT_ROOT"] = str(output_root)
+    if env_overrides is not None:
+        env.update(env_overrides)
     return subprocess.run(
         ["/bin/sh", "-c", script + '\nprintf \'SELECTED=%s\\n\' "$GRAPHIFY_PYTHON"\n'],
         cwd=cwd,
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=timeout,
     )
 
 
@@ -1069,6 +1073,247 @@ def test_trusted_pin_allows_identity_valid_project_local_editable_origin(tmp_pat
 
     assert result.returncode == 0, result.stderr
     assert f"SELECTED={interpreter}" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+@pytest.mark.parametrize("marker_prefix", [b"", b"\xef\xbb\xbf"], ids=["no-newline", "utf8-bom"])
+@pytest.mark.parametrize("marker_kind", ["posix", "windows-drive", "windows-unc"])
+def test_dynamic_hook_discovery_denies_persisted_external_corpus(
+    tmp_path, marker_prefix, marker_kind
+):
+    """A saved corpus root denies lower-authority editable installations."""
+    workspace = tmp_path / "workspace"
+    graphify_out = workspace / "graphify-out"
+    graphify_out.mkdir(parents=True)
+    corpus = tmp_path / "external-corpus"
+    corpus.mkdir()
+    _write_graphify_package(corpus)
+    interpreter = _editable_interpreter(tmp_path / "dynamic", corpus)
+    from graphify.hooks import _PYTHON_DETECT
+
+    marker_values = {
+        "posix": os.fsencode(corpus),
+        "windows-drive": br"C:\External Corpus",
+        "windows-unc": br"\\server\share\External Corpus",
+    }
+    (graphify_out / ".graphify_root").write_bytes(
+        marker_prefix + marker_values[marker_kind]
+    )
+    script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
+    if marker_kind == "posix":
+        result = _run_python_detect(script, cwd=workspace, interpreter=interpreter)
+        assert result.returncode == 0, result.stderr
+        assert f"SELECTED={interpreter}" not in result.stdout
+        return
+
+    candidates = (
+        "/usr/bin/cygpath.exe",
+        "/usr/bin/cygpath",
+        "/bin/cygpath.exe",
+        "/bin/cygpath",
+    )
+    positions = [script.index(candidate) for candidate in candidates]
+    assert positions == sorted(positions)
+    assert "command -v cygpath" not in script
+    converter_log = tmp_path / "hook-converter.log"
+    converter = tmp_path / "trusted-hook-cygpath"
+    converter.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "mode, value = sys.argv[1], sys.argv[-1]\n"
+        "if mode != '-u' or value not in (r'C:\\External Corpus', r'\\\\server\\share\\External Corpus'):\n"
+        "    raise SystemExit(2)\n"
+        "with open(os.environ['GFY_HOOK_CONVERTER_LOG'], 'a', encoding='utf-8') as log:\n"
+        "    log.write(value + '\\n')\n"
+        "print(os.environ['GFY_HOOK_CORPUS'])\n",
+        encoding="utf-8",
+    )
+    converter.chmod(0o755)
+    ambient_marker = tmp_path / "ambient-hook-cygpath-ran"
+    ambient_converter = interpreter.parent / "cygpath"
+    _write_capturing_executable(ambient_converter, ambient_marker)
+    overrides = {
+        "GFY_HOOK_CONVERTER_LOG": str(converter_log),
+        "GFY_HOOK_CORPUS": str(corpus),
+    }
+
+    for selected in range(len(candidates)):
+        controlled = script
+        for index, candidate in enumerate(candidates):
+            replacement = str(converter) if index == selected else str(tmp_path / f"missing-cygpath-{index}")
+            controlled = controlled.replace(candidate, replacement)
+        result = _run_python_detect(
+            controlled,
+            cwd=workspace,
+            interpreter=interpreter,
+            env_overrides=overrides,
+        )
+        assert result.returncode == 0, f"{candidates[selected]}: {result.stderr}"
+        assert f"SELECTED={interpreter}" not in result.stdout
+        assert not ambient_marker.exists()
+
+    assert marker_values[marker_kind].decode() in converter_log.read_text(encoding="utf-8")
+
+    # A trusted conversion can succeed while the resulting POSIX path is stale
+    # or not a directory. Those markers are invalid denial data, like a POSIX
+    # nonexistent marker, so they must not suppress an otherwise valid dynamic
+    # interpreter. This is distinct from conversion failure, which fails closed.
+    trusted = script
+    for index, candidate in enumerate(candidates):
+        replacement = str(converter) if index == 0 else str(tmp_path / f"missing-stale-{index}")
+        trusted = trusted.replace(candidate, replacement)
+    not_directory = tmp_path / "converted-not-directory"
+    not_directory.write_text("not a corpus", encoding="utf-8")
+    for label, converted in (
+        ("nonexistent", tmp_path / "converted-does-not-exist"),
+        ("not-directory", not_directory),
+    ):
+        stale_result = _run_python_detect(
+            trusted,
+            cwd=workspace,
+            interpreter=interpreter,
+            env_overrides={**overrides, "GFY_HOOK_CORPUS": str(converted)},
+        )
+        assert stale_result.returncode == 0, f"{label}: {stale_result.stderr}"
+        assert f"SELECTED={interpreter}" in stale_result.stdout, label
+        assert not ambient_marker.exists()
+
+    relative_result = _run_python_detect(
+        trusted,
+        cwd=workspace,
+        interpreter=interpreter,
+        env_overrides={**overrides, "GFY_HOOK_CORPUS": "relative/converted-root"},
+    )
+    assert f"SELECTED={interpreter}" not in relative_result.stdout
+    assert not ambient_marker.exists()
+
+    unavailable = script
+    for candidate in candidates:
+        unavailable = unavailable.replace(candidate, str(tmp_path / "missing-cygpath"))
+    unavailable_result = _run_python_detect(
+        unavailable,
+        cwd=workspace,
+        interpreter=interpreter,
+        env_overrides=overrides,
+    )
+    assert f"SELECTED={interpreter}" not in unavailable_result.stdout
+    assert not ambient_marker.exists()
+
+    failing_converter = tmp_path / "failing-hook-cygpath"
+    failing_converter.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    failing_converter.chmod(0o755)
+    failed = script
+    for index, candidate in enumerate(candidates):
+        replacement = str(failing_converter) if index == 0 else str(tmp_path / f"missing-failed-{index}")
+        failed = failed.replace(candidate, replacement)
+    failed_result = _run_python_detect(
+        failed,
+        cwd=workspace,
+        interpreter=interpreter,
+        env_overrides=overrides,
+    )
+    assert f"SELECTED={interpreter}" not in failed_result.stdout
+    assert not ambient_marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_persisted_hook_corpus_is_denial_only(tmp_path):
+    """Persisted roots can reject dynamic candidates but cannot select authority."""
+    from graphify.hooks import _PYTHON_DETECT, _REBUILD_BODY_CHECKOUT, _REBUILD_BODY_COMMIT
+
+    pinned_workspace = tmp_path / "pinned-workspace"
+    graphify_out = pinned_workspace / "graphify-out"
+    graphify_out.mkdir(parents=True)
+    _write_graphify_package(pinned_workspace)
+    pinned = _editable_interpreter(tmp_path / "pinned", pinned_workspace)
+    os.mkfifo(graphify_out / ".graphify_root")
+    pinned_result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", str(pinned)),
+        cwd=pinned_workspace,
+    )
+    assert pinned_result.returncode == 0, pinned_result.stderr
+    assert f"SELECTED={pinned}" in pinned_result.stdout
+
+    corpus = tmp_path / "external-corpus"
+    corpus.mkdir()
+    _write_graphify_package(corpus)
+    dynamic = _editable_interpreter(tmp_path / "dynamic", corpus)
+    parity_cases = (
+        ("unset", None, Path("graphify-out/.graphify_root")),
+        ("empty", "", Path(".graphify_root")),
+        ("relative", "out dir", Path("out dir/.graphify_root")),
+        ("absolute", str(tmp_path / "absolute out"), tmp_path / "absolute out/.graphify_root"),
+    )
+    for label, graphify_out_value, marker_path in parity_cases:
+        workspace = tmp_path / f"workspace-{label}"
+        workspace.mkdir()
+        marker = marker_path if marker_path.is_absolute() else workspace / marker_path
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(corpus), encoding="utf-8")
+        irrelevant = tmp_path / f"irrelevant-output-{label}"
+        irrelevant.mkdir()
+        overrides = {"GRAPHIFY_OUTPUT_ROOT": str(irrelevant)}
+        if graphify_out_value is not None:
+            overrides["GRAPHIFY_OUT"] = graphify_out_value
+        result = _run_python_detect(
+            _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+            cwd=workspace,
+            interpreter=dynamic,
+            env_overrides=overrides,
+        )
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert f"SELECTED={dynamic}" not in result.stdout, label
+        marker.unlink()
+
+    invalid_workspace = tmp_path / "invalid-workspace"
+    invalid_workspace.mkdir()
+    invalid_out = invalid_workspace / "graphify-out"
+    invalid_out.mkdir()
+    marker = invalid_out / ".graphify_root"
+    invalid_cases = (
+        ("missing", None),
+        ("relative", b"relative/path"),
+        ("nonexistent", os.fsencode(tmp_path / "does-not-exist")),
+        ("metacharacter", b"$(touch " + os.fsencode(tmp_path / "marker-content-ran") + b")"),
+        ("extra-line", os.fsencode(corpus) + b"\n" + os.fsencode(tmp_path)),
+    )
+    for label, content in invalid_cases:
+        marker.unlink(missing_ok=True)
+        if content is not None:
+            marker.write_bytes(content)
+        result = _run_python_detect(
+            _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+            cwd=invalid_workspace,
+            interpreter=dynamic,
+        )
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert f"SELECTED={dynamic}" in result.stdout, label
+        assert not (tmp_path / "marker-content-ran").exists()
+
+    marker.unlink(missing_ok=True)
+    target = tmp_path / "valid-marker-target"
+    target.write_text(str(corpus), encoding="utf-8")
+    marker.symlink_to(target)
+    symlink_result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=invalid_workspace,
+        interpreter=dynamic,
+        timeout=2,
+    )
+    assert f"SELECTED={dynamic}" in symlink_result.stdout
+    marker.unlink()
+
+    os.mkfifo(marker)
+    fifo_result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=invalid_workspace,
+        interpreter=dynamic,
+    )
+    assert f"SELECTED={dynamic}" in fifo_result.stdout
+
+    for body in (_REBUILD_BODY_COMMIT, _REBUILD_BODY_CHECKOUT):
+        assert "Path(_out) / '.graphify_root'" in body
+        assert "_root = Path(_txt)" in body
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")

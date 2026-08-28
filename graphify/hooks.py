@@ -41,6 +41,65 @@ _PINNED=__PINNED_PYTHON__
 if [ -n "$_PINNED" ] && [ -x "$_PINNED" ] && "$_PINNED" -E -P -B -c "$_GFY_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" 2>/dev/null; then
     GRAPHIFY_PYTHON="$_PINNED"
 fi
+# Persisted corpus state is denial-only and is inspected only after the trusted
+# install-time pin fails. A same-user check/open race remains possible here.
+_GFY_PERSISTED_ROOT=""
+_GFY_PERSISTED_POLICY_INVALID=0
+_gfy_native_root_to_posix() {
+    if [ -x /usr/bin/cygpath.exe ]; then _GFY_CYGPATH=/usr/bin/cygpath.exe
+    elif [ -x /usr/bin/cygpath ]; then _GFY_CYGPATH=/usr/bin/cygpath
+    elif [ -x /bin/cygpath.exe ]; then _GFY_CYGPATH=/bin/cygpath.exe
+    elif [ -x /bin/cygpath ]; then _GFY_CYGPATH=/bin/cygpath
+    else return 1
+    fi
+    "$_GFY_CYGPATH" -u "$1"
+}
+if [ -z "$GRAPHIFY_PYTHON" ]; then
+    if [ "${GRAPHIFY_OUT+x}" = x ]; then
+        if [ -n "$GRAPHIFY_OUT" ]; then _GFY_ROOT_MARKER=$GRAPHIFY_OUT/.graphify_root
+        else _GFY_ROOT_MARKER=./.graphify_root
+        fi
+    else
+        _GFY_ROOT_MARKER=graphify-out/.graphify_root
+    fi
+    if [ -f "$_GFY_ROOT_MARKER" ] && [ ! -L "$_GFY_ROOT_MARKER" ]; then
+        _GFY_ROOT_LINE=""
+        _GFY_ROOT_EXTRA=""
+        if exec 3< "$_GFY_ROOT_MARKER"; then
+            IFS= read -r _GFY_ROOT_LINE <&3 || [ -n "$_GFY_ROOT_LINE" ]
+            _GFY_ROOT_STATUS=$?
+            if IFS= read -r _GFY_ROOT_EXTRA <&3 || [ -n "$_GFY_ROOT_EXTRA" ]; then
+                _GFY_ROOT_STATUS=1
+            fi
+            exec 3<&-
+            _GFY_BOM=$(printf '\\357\\273\\277')
+            case "$_GFY_ROOT_LINE" in "$_GFY_BOM"*) _GFY_ROOT_LINE=${_GFY_ROOT_LINE#"$_GFY_BOM"} ;; esac
+            _GFY_ROOT_NATIVE=0
+            _GFY_BACKSLASH=$(printf '\\\\')
+            case "$_GFY_ROOT_LINE" in
+                [a-zA-Z]:*) _GFY_ROOT_TAIL=${_GFY_ROOT_LINE#??}
+                    case "$_GFY_ROOT_TAIL" in /*|"$_GFY_BACKSLASH"*) _GFY_ROOT_NATIVE=1 ;; esac ;;
+                "$_GFY_BACKSLASH"*) _GFY_ROOT_TAIL=${_GFY_ROOT_LINE#?}
+                    case "$_GFY_ROOT_TAIL" in "$_GFY_BACKSLASH"*) _GFY_ROOT_NATIVE=1 ;; esac ;;
+            esac
+            case "$_GFY_ROOT_LINE" in
+                /*) if [ "$_GFY_ROOT_STATUS" -eq 0 ]; then
+                        _GFY_PERSISTED_ROOT=$(_gfy_canonical_root "$_GFY_ROOT_LINE") || _GFY_PERSISTED_ROOT=""
+                    fi ;;
+            esac
+            if [ "$_GFY_ROOT_NATIVE" = 1 ] && [ "$_GFY_ROOT_STATUS" -eq 0 ]; then
+                _GFY_ROOT_LINE=$(_gfy_native_root_to_posix "$_GFY_ROOT_LINE") || _GFY_PERSISTED_POLICY_INVALID=1
+                case "$_GFY_ROOT_LINE" in
+                    /*) _GFY_PERSISTED_ROOT=$(_gfy_canonical_root "$_GFY_ROOT_LINE") || _GFY_PERSISTED_ROOT="" ;;
+                    *) _GFY_PERSISTED_POLICY_INVALID=1 ;;
+                esac
+            fi
+        fi
+    fi
+fi
+if [ "$_GFY_PERSISTED_POLICY_INVALID" != 0 ]; then
+    exit 0
+fi
 _gfy_path_denied() {
     _GFY_DENY_PATH=$1
     [ "$_GFY_WORKSPACE" = / ] && return 0
@@ -52,6 +111,10 @@ _gfy_path_denied() {
     if [ -n "$_GFY_OUTPUT_ROOT" ]; then
         [ "$_GFY_OUTPUT_ROOT" = / ] && return 0
         case "$_GFY_DENY_PATH" in "$_GFY_OUTPUT_ROOT"|"$_GFY_OUTPUT_ROOT"/*) return 0 ;; esac
+    fi
+    if [ -n "$_GFY_PERSISTED_ROOT" ]; then
+        [ "$_GFY_PERSISTED_ROOT" = / ] && return 0
+        case "$_GFY_DENY_PATH" in "$_GFY_PERSISTED_ROOT"|"$_GFY_PERSISTED_ROOT"/*) return 0 ;; esac
     fi
     return 1
 }
@@ -122,11 +185,11 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
         # (or ./python.exe inside a venv's Scripts dir).
         _GFY_BINDIR=${GRAPHIFY_BIN%/*}
         _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_BINDIR/../python.exe") || _GFY_CANDIDATE=""
-        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" 2>/dev/null; then
+        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
             GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
         else
             _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_BINDIR/python.exe") || _GFY_CANDIDATE=""
-            if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" 2>/dev/null; then
+            if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
                 GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
             fi
         fi
@@ -165,7 +228,7 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
                    _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
                fi ;;
         esac
-        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" 2>/dev/null; then
+        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
             GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
         fi
     fi
@@ -177,14 +240,14 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
     if [ -n "$_GFY_CANDIDATE" ]; then
         _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
     fi
-    if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" 2>/dev/null; then
+    if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
         GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
     else
         _GFY_CANDIDATE=$(_gfy_capture_command python) || _GFY_CANDIDATE=""
         if [ -n "$_GFY_CANDIDATE" ]; then
             _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
         fi
-        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" 2>/dev/null; then
+        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
             GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
         else
             echo "[graphify hook] could not locate a trusted final CPython 3.14.2+ with graphify installed. Re-run 'graphify hook install' from the environment where graphify lives." >&2
