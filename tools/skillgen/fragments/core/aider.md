@@ -110,7 +110,7 @@ fi
 is_supported_graphify_python "$PYTHON" || { echo "Graphify requires Python 3.14.2 through the final 3.14.x release." >&2; exit 1; }
 # Write interpreter path for all subsequent steps (persists across invocations)
 mkdir -p graphify-out
-"$PYTHON" -E -P -B -c "import sys; open('graphify-out/.graphify_python', 'w', encoding='utf-8').write(sys.executable)"
+"$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python
 ```
 
 If the import succeeds, print nothing and move straight to Step 2.

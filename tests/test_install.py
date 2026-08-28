@@ -1,6 +1,7 @@
 """Tests for graphify install --platform routing."""
 import os
 from pathlib import Path
+import re
 import sys
 from unittest.mock import patch
 import pytest
@@ -234,6 +235,21 @@ def test_codex_skill_uses_graphify_with_existing_graph():
     assert "graphify query" in skill
     assert "graphify explain" in skill
     assert "graphify path" in skill
+
+
+def test_packaged_skills_never_execute_advisory_interpreter_pointer():
+    """Installer output must retain the generator's no-pointer-authority invariant."""
+    import graphify
+
+    package = Path(graphify.__file__).parent
+    skills = list(package.glob("skill*.md")) + list((package / "skills").rglob("*.md"))
+    assert skills
+    for skill in skills:
+        body = skill.read_text(encoding="utf-8")
+        assert "$(cat graphify-out/.graphify_python)" not in body, skill
+        assert not re.search(r"Get-Content[^\n]*graphify_python", body, re.IGNORECASE), skill
+        if "### Step 1 - Ensure graphify is installed" in body:
+            assert "-m graphify.interpreter_pointer write" in body, skill
 
 
 def test_codex_agents_install_mentions_dirty_graph_output(tmp_path):

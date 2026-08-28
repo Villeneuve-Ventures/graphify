@@ -24,7 +24,9 @@ timestamp or version is ever written into a generated file.
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import shlex
 import subprocess
 import sys
 from collections import Counter
@@ -34,6 +36,8 @@ except ModuleNotFoundError:  # Python 3.10 - graphify supports >=3.10
     import tomli as tomllib  # type: ignore[no-redef]
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from graphify._interpreter_identity import _GRAPHIFY_IDENTITY_SOURCE
 
 # tools/skillgen/gen.py -> repo root is two parents up.
 SKILLGEN_DIR = Path(__file__).resolve().parent
@@ -298,59 +302,743 @@ class Platform:
         return _HOOKS_TARGET[self.hooks_variant]
 
 
-_SAVED_INTERPRETER_SHELL = {
+_GRAPHIFY_IDENTITY_COMMAND = f"exec({json.dumps(_GRAPHIFY_IDENTITY_SOURCE)})"
+_GRAPHIFY_IDENTITY_COMMAND_POWERSHELL = f"exec({_GRAPHIFY_IDENTITY_SOURCE!r})"
+
+
+_POSIX_DISCOVERY = r'''GRAPHIFY_PYTHON=""
+GRAPHIFY_PYTHON_EXPLICIT=0
+_GRAPHIFY_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
+_GRAPHIFY_IDENTITY_CHECK='@@GRAPHIFY_IDENTITY_CHECK@@'
+_GRAPHIFY_WORKSPACE=$(command pwd -P) || exit 1
+_graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; [ -d "$_gfy_root" ] && CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && command pwd -P; }
+_GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_INPUT_PATH-}") || _GRAPHIFY_INPUT_ROOT=""; _GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}") || _GRAPHIFY_OUTPUT_ROOT=""; _graphify_absolute_command() { _gfy_command=$1; case "$_gfy_command" in /*) case "$_gfy_command" in */./*|*/../*|*/.|*/..) ;; *) GRAPHIFY_COMMAND_PATH=$_gfy_command; return 0 ;; esac; _gfy_command_dir=${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; */*) _gfy_command_dir=$_GRAPHIFY_WORKSPACE/${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; *) _gfy_command_dir=$_GRAPHIFY_WORKSPACE; _gfy_command_base=$_gfy_command ;; esac; case "$_gfy_command_base" in ""|.|..) return 1 ;; esac; _gfy_command_dir=$(CDPATH= cd -L -- "$_gfy_command_dir" 2>/dev/null && command pwd -L) || return 1; GRAPHIFY_COMMAND_PATH=$_gfy_command_dir/$_gfy_command_base; }
+_graphify_path_denied() { _gfy_policy_path=$1; [ "$_GRAPHIFY_WORKSPACE" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_WORKSPACE"|"$_GRAPHIFY_WORKSPACE"/*) return 0 ;; esac; [ -z "$_GRAPHIFY_INPUT_ROOT" ] || { [ "$_GRAPHIFY_INPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_INPUT_ROOT"|"$_GRAPHIFY_INPUT_ROOT"/*) return 0 ;; esac; }; [ -z "$_GRAPHIFY_OUTPUT_ROOT" ] || { [ "$_GRAPHIFY_OUTPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_OUTPUT_ROOT"|"$_GRAPHIFY_OUTPUT_ROOT"/*) return 0 ;; esac; }; return 1; }
+_graphify_readlink() {
+    if [ -x /usr/bin/readlink ]; then /usr/bin/readlink "$1"
+    elif [ -x /bin/readlink ]; then /bin/readlink "$1"
+    elif [ -x /run/current-system/sw/bin/readlink ]; then /run/current-system/sw/bin/readlink "$1"
+    else command -p readlink "$1"
+    fi
+}
+_graphify_resolve_ambient() {
+    _gfy_lexical=$1; case "$_gfy_lexical" in /*) ;; *) return 1 ;; esac
+    _graphify_path_denied "$_gfy_lexical" && return 1; _gfy_path=$_gfy_lexical
+    _gfy_links=0
+    while [ -L "$_gfy_path" ]; do
+        _gfy_links=$((_gfy_links + 1))
+        [ "$_gfy_links" -le 40 ] || return 1
+        _gfy_link=$(_graphify_readlink "$_gfy_path") || return 1
+        case "$_gfy_link" in
+            /*) _gfy_path=$_gfy_link ;;
+            *) _gfy_dir=${_gfy_path%/*}; _gfy_path=$_gfy_dir/$_gfy_link ;;
+        esac
+    done
+    _gfy_dir=${_gfy_path%/*}; _gfy_base=${_gfy_path##*/}
+    _gfy_dir=$(CDPATH= cd -P -- "$_gfy_dir" 2>/dev/null && command pwd -P) || return 1
+    _gfy_path=$_gfy_dir/$_gfy_base
+    _graphify_path_denied "$_gfy_path" && return 1
+    [ -x "$_gfy_lexical" ] || return 1
+    GRAPHIFY_RESOLVED=$_gfy_lexical
+}
+_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _graphify_absolute_command "$_gfy_found" || return 1; _graphify_resolve_ambient "$GRAPHIFY_COMMAND_PATH"; }
+_graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
+_graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
+_graphify_ambient_supported() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-supported "$_GRAPHIFY_WORKSPACE" "$_GRAPHIFY_INPUT_ROOT" "$_GRAPHIFY_OUTPUT_ROOT" >/dev/null 2>&1; }; _graphify_ambient_usable() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-identity "$_GRAPHIFY_WORKSPACE" "$_GRAPHIFY_INPUT_ROOT" "$_GRAPHIFY_OUTPUT_ROOT" >/dev/null 2>&1; }
+# An explicit absolute active environment is caller-selected, including a
+# project-local venv. Keep its lexical path for invocation.
+case "${VIRTUAL_ENV-}" in
+    /*) _gfy_venv_python=$VIRTUAL_ENV/bin/python
+        _graphify_usable "$_gfy_venv_python" && { GRAPHIFY_PYTHON=$_gfy_venv_python; GRAPHIFY_PYTHON_EXPLICIT=1; } ;;
+esac
+# Trusted uv and pipx metadata, then trusted candidates derived from it.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command uv; then
+    _gfy_uv=$GRAPHIFY_RESOLVED
+    _gfy_uv_dir=$("$_gfy_uv" tool dir 2>/dev/null)
+    _gfy_candidate=${_gfy_uv_dir:+$_gfy_uv_dir/graphifyy/bin/python}
+    if _graphify_resolve_ambient "$_gfy_candidate"; then
+        _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED
+    fi
+fi
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command pipx; then
+    _gfy_pipx=$GRAPHIFY_RESOLVED
+    _gfy_pipx_home=$("$_gfy_pipx" environment --value PIPX_LOCAL_VENVS 2>/dev/null)
+    _gfy_candidate=${_gfy_pipx_home:+$_gfy_pipx_home/graphifyy/bin/python}
+    if _graphify_resolve_ambient "$_gfy_candidate"; then
+        _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED
+    fi
+fi
+# Console-script shebang covers direct and pipx installs without executing the launcher.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command graphify; then
+    _gfy_graphify=$GRAPHIFY_RESOLVED
+    IFS= read -r _gfy_shebang < "$_gfy_graphify" || _gfy_shebang=""
+    _gfy_shebang=${_gfy_shebang#\#!}
+    case "$_gfy_shebang" in
+        "/usr/bin/env "*)
+            _gfy_env_command=${_gfy_shebang#"/usr/bin/env "}
+            case "$_gfy_env_command" in
+                ""|*[!a-zA-Z0-9_.@+-]*) _gfy_shebang="" ;;
+                *) if _graphify_command "$_gfy_env_command"; then _gfy_shebang=$GRAPHIFY_RESOLVED; else _gfy_shebang=""; fi ;;
+            esac ;;
+        *[!a-zA-Z0-9/_.@+-]*) _gfy_shebang="" ;;
+        *) if _graphify_resolve_ambient "$_gfy_shebang"; then _gfy_shebang=$GRAPHIFY_RESOLVED; else _gfy_shebang=""; fi ;;
+    esac
+    _graphify_ambient_usable "$_gfy_shebang" && GRAPHIFY_PYTHON=$_gfy_shebang
+fi
+if [ -z "$GRAPHIFY_PYTHON" ]; then
+    for _gfy_name in python3.14 python3 python; do
+        if _graphify_command "$_gfy_name"; then
+            _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && { GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; break; }
+        fi
+    done
+fi
+if [ -z "$GRAPHIFY_PYTHON" ] && [ "${GRAPHIFY_DISCOVERY_OPTIONAL-0}" != 1 ]; then
+    echo "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." >&2
+    exit 1
+fi'''.replace("@@GRAPHIFY_IDENTITY_CHECK@@", _GRAPHIFY_IDENTITY_COMMAND)
+
+
+_WINDOWS_POSIX_DISCOVERY = r'''GRAPHIFY_PYTHON=""
+GRAPHIFY_PYTHON_EXPLICIT=0
+_GRAPHIFY_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
+_GRAPHIFY_IDENTITY_CHECK='@@GRAPHIFY_IDENTITY_CHECK@@'
+if [ -x /usr/bin/cygpath.exe ]; then _GRAPHIFY_CYGPATH=/usr/bin/cygpath.exe
+elif [ -x /usr/bin/cygpath ]; then _GRAPHIFY_CYGPATH=/usr/bin/cygpath
+elif [ -x /bin/cygpath.exe ]; then _GRAPHIFY_CYGPATH=/bin/cygpath.exe
+elif [ -x /bin/cygpath ]; then _GRAPHIFY_CYGPATH=/bin/cygpath
+else exit 1
+fi
+_graphify_to_posix() {
+    _gfy_native=$1
+    case "$_gfy_native" in [a-zA-Z]:|[a-zA-Z]:[!\\/]*|\\|\\[!\\]*) return 1 ;; esac
+    "$_GRAPHIFY_CYGPATH" -u "$_gfy_native"
+}
+_graphify_to_native() { [ -n "$1" ] || return 0; "$_GRAPHIFY_CYGPATH" -w "$1"; }
+_GRAPHIFY_WORKSPACE=$(command pwd -P) || exit 1
+_GRAPHIFY_WORKSPACE_NATIVE=$(_graphify_to_native "$_GRAPHIFY_WORKSPACE") || exit 1
+_graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in [a-zA-Z]:|[a-zA-Z]:[!\\/]*|\\|\\[!\\]*) return 1 ;; /*) ;; *) _gfy_root=$(_graphify_to_posix "$_gfy_root") || return 1 ;; esac; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; if [ -d "$_gfy_root" ]; then CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && command pwd -P; else printf '%s\n' "$_gfy_root"; fi; }
+_graphify_absolute_command() { _gfy_command=$1; case "$_gfy_command" in /*) case "$_gfy_command" in */./*|*/../*|*/.|*/..) ;; *) GRAPHIFY_COMMAND_PATH=$_gfy_command; return 0 ;; esac; _gfy_command_dir=${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; */*) _gfy_command_dir=$_GRAPHIFY_WORKSPACE/${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; *) _gfy_command_dir=$_GRAPHIFY_WORKSPACE; _gfy_command_base=$_gfy_command ;; esac; case "$_gfy_command_base" in ""|.|..) return 1 ;; esac; _gfy_command_dir=$(CDPATH= cd -L -- "$_gfy_command_dir" 2>/dev/null && command pwd -L) || return 1; GRAPHIFY_COMMAND_PATH=$_gfy_command_dir/$_gfy_command_base; }
+_GRAPHIFY_DENY_POLICY_INVALID=0
+_gfy_input_raw=${GRAPHIFY_INPUT_PATH-}; _gfy_output_raw=${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}
+_GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "$_gfy_input_raw") || { _GRAPHIFY_INPUT_ROOT=""; [ -z "$_gfy_input_raw" ] || _GRAPHIFY_DENY_POLICY_INVALID=1; }
+_GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "$_gfy_output_raw") || { _GRAPHIFY_OUTPUT_ROOT=""; [ -z "$_gfy_output_raw" ] || _GRAPHIFY_DENY_POLICY_INVALID=1; }
+[ "$_GRAPHIFY_DENY_POLICY_INVALID" = 0 ] || exit 1
+_GRAPHIFY_INPUT_ROOT_NATIVE=$(_graphify_to_native "$_GRAPHIFY_INPUT_ROOT") || exit 1
+_GRAPHIFY_OUTPUT_ROOT_NATIVE=$(_graphify_to_native "$_GRAPHIFY_OUTPUT_ROOT") || exit 1
+_graphify_path_denied() { _gfy_policy_path=$1; [ "$_GRAPHIFY_WORKSPACE" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_WORKSPACE"|"$_GRAPHIFY_WORKSPACE"/*) return 0 ;; esac; [ -z "$_GRAPHIFY_INPUT_ROOT" ] || { [ "$_GRAPHIFY_INPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_INPUT_ROOT"|"$_GRAPHIFY_INPUT_ROOT"/*) return 0 ;; esac; }; [ -z "$_GRAPHIFY_OUTPUT_ROOT" ] || { [ "$_GRAPHIFY_OUTPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_OUTPUT_ROOT"|"$_GRAPHIFY_OUTPUT_ROOT"/*) return 0 ;; esac; }; return 1; }
+_graphify_readlink() {
+    if [ -x /usr/bin/readlink ]; then /usr/bin/readlink "$1"
+    elif [ -x /bin/readlink ]; then /bin/readlink "$1"
+    elif [ -x /run/current-system/sw/bin/readlink ]; then /run/current-system/sw/bin/readlink "$1"
+    else command -p readlink "$1"
+    fi
+}
+_graphify_resolve_ambient() {
+    _gfy_lexical=$1; _gfy_lexical=$(_graphify_to_posix "$_gfy_lexical") || return 1; case "$_gfy_lexical" in /*) ;; *) return 1 ;; esac
+    _graphify_path_denied "$_gfy_lexical" && return 1; _gfy_path=$_gfy_lexical
+    _gfy_links=0
+    while [ -L "$_gfy_path" ]; do
+        _gfy_links=$((_gfy_links + 1)); [ "$_gfy_links" -le 40 ] || return 1
+        _gfy_link=$(_graphify_readlink "$_gfy_path") || return 1
+        case "$_gfy_link" in /*) _gfy_path=$_gfy_link ;; *) _gfy_dir=${_gfy_path%/*}; _gfy_path=$_gfy_dir/$_gfy_link ;; esac
+    done
+    _gfy_dir=${_gfy_path%/*}; _gfy_base=${_gfy_path##*/}
+    _gfy_dir=$(CDPATH= cd -P -- "$_gfy_dir" 2>/dev/null && command pwd -P) || return 1
+    _gfy_path=$_gfy_dir/$_gfy_base; _graphify_path_denied "$_gfy_path" && return 1
+    [ -x "$_gfy_lexical" ] || return 1; GRAPHIFY_RESOLVED=$_gfy_lexical
+}
+_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _gfy_found=$(_graphify_to_posix "$_gfy_found") || return 1; _graphify_absolute_command "$_gfy_found" || return 1; _graphify_resolve_ambient "$GRAPHIFY_COMMAND_PATH"; }
+_graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
+_graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
+_graphify_ambient_supported() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-supported "$_GRAPHIFY_WORKSPACE_NATIVE" "$_GRAPHIFY_INPUT_ROOT_NATIVE" "$_GRAPHIFY_OUTPUT_ROOT_NATIVE" >/dev/null 2>&1; }
+_graphify_ambient_usable() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-identity "$_GRAPHIFY_WORKSPACE_NATIVE" "$_GRAPHIFY_INPUT_ROOT_NATIVE" "$_GRAPHIFY_OUTPUT_ROOT_NATIVE" >/dev/null 2>&1; }
+# An explicit native active environment is caller-selected.
+case "${VIRTUAL_ENV-}" in
+    "") ;;
+    *) _gfy_venv=$(_graphify_to_posix "$VIRTUAL_ENV") || exit 1
+       _gfy_venv_python=$_gfy_venv/Scripts/python.exe
+       _graphify_usable "$_gfy_venv_python" && { GRAPHIFY_PYTHON=$_gfy_venv_python; GRAPHIFY_PYTHON_EXPLICIT=1; } ;;
+esac
+# Trusted uv and pipx metadata, then trusted candidates derived from it.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command uv; then
+    _gfy_uv=$GRAPHIFY_RESOLVED; _gfy_uv_dir=$("$_gfy_uv" tool dir 2>/dev/null)
+    _gfy_uv_dir=$(_graphify_to_posix "$_gfy_uv_dir") || _gfy_uv_dir=""
+    _gfy_candidate=${_gfy_uv_dir:+$_gfy_uv_dir/graphifyy/Scripts/python.exe}
+    if _graphify_resolve_ambient "$_gfy_candidate"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; fi
+fi
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command pipx; then
+    _gfy_pipx=$GRAPHIFY_RESOLVED; _gfy_pipx_home=$("$_gfy_pipx" environment --value PIPX_LOCAL_VENVS 2>/dev/null)
+    _gfy_pipx_home=$(_graphify_to_posix "$_gfy_pipx_home") || _gfy_pipx_home=""
+    _gfy_candidate=${_gfy_pipx_home:+$_gfy_pipx_home/graphifyy/Scripts/python.exe}
+    if _graphify_resolve_ambient "$_gfy_candidate"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; fi
+fi
+# Console-script launcher siblings cover native pip and pipx layouts.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command graphify; then
+    _gfy_graphify=$(_graphify_to_posix "$GRAPHIFY_RESOLVED") || _gfy_graphify=""
+    _gfy_bindir=${_gfy_graphify%/*}
+    for _gfy_candidate in "$_gfy_bindir/python.exe" "$_gfy_bindir/../python.exe"; do
+        if _graphify_resolve_ambient "$_gfy_candidate" && _graphify_ambient_usable "$GRAPHIFY_RESOLVED"; then GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; break; fi
+    done
+fi
+if [ -z "$GRAPHIFY_PYTHON" ]; then
+    for _gfy_name in python3.14 python3 python; do
+        if _graphify_command "$_gfy_name"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && { GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; break; }; fi
+    done
+fi
+# Resolve py -3.14 output and convert its native path before policy checks.
+if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command py; then
+    _gfy_py=$GRAPHIFY_RESOLVED
+    _gfy_candidate=$("$_gfy_py" -3.14 -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" executable 2>/dev/null)
+    _gfy_candidate=$(_graphify_to_posix "$_gfy_candidate") || _gfy_candidate=""
+    if _graphify_resolve_ambient "$_gfy_candidate"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; fi
+fi
+if [ -z "$GRAPHIFY_PYTHON" ] && [ "${GRAPHIFY_DISCOVERY_OPTIONAL-0}" != 1 ]; then echo "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." >&2; exit 1; fi'''.replace(
+    "@@GRAPHIFY_IDENTITY_CHECK@@", _GRAPHIFY_IDENTITY_COMMAND
+)
+
+_POSIX_BOOTSTRAP = f'''# Installation is the only discovery path allowed to mutate the environment.
+GRAPHIFY_DISCOVERY_OPTIONAL=1
+{_POSIX_DISCOVERY}
+unset GRAPHIFY_DISCOVERY_OPTIONAL
+PYTHON=$GRAPHIFY_PYTHON
+_GRAPHIFY_PYTHON_EXPLICIT=$GRAPHIFY_PYTHON_EXPLICIT
+if [ -z "$PYTHON" ]; then
+    case "${{VIRTUAL_ENV-}}" in
+        /*) _gfy_candidate=$VIRTUAL_ENV/bin/python
+            _graphify_supported "$_gfy_candidate" && {{ PYTHON=$_gfy_candidate; _GRAPHIFY_PYTHON_EXPLICIT=1; }} ;;
+    esac
+fi
+if [ -z "$PYTHON" ]; then
+    for _gfy_name in python3.14 python3 python; do
+        if _graphify_command "$_gfy_name"; then
+            _graphify_ambient_supported "$GRAPHIFY_RESOLVED" && {{ PYTHON=$GRAPHIFY_RESOLVED; _GRAPHIFY_PYTHON_EXPLICIT=0; break; }}
+        fi
+    done
+fi
+_graphify_selected_usable() {{ if [ "$_GRAPHIFY_PYTHON_EXPLICIT" = 1 ]; then _graphify_usable "$1"; else _graphify_ambient_usable "$1"; fi; }}
+if ! _graphify_selected_usable "$PYTHON"; then
+    if _graphify_command uv; then
+        _gfy_uv=$GRAPHIFY_RESOLVED
+        "$_gfy_uv" tool install --python '>=3.14.2,<3.15' --upgrade graphifyy -q
+        _gfy_uv_dir=$("$_gfy_uv" tool dir 2>/dev/null)
+        _gfy_candidate=${{_gfy_uv_dir:+$_gfy_uv_dir/graphifyy/bin/python}}
+        if _graphify_resolve_ambient "$_gfy_candidate" && _graphify_ambient_usable "$GRAPHIFY_RESOLVED"; then
+            PYTHON=$GRAPHIFY_RESOLVED
+            _GRAPHIFY_PYTHON_EXPLICIT=0
+        fi
+    elif [ -n "$PYTHON" ]; then
+        "$PYTHON" -E -P -B -m pip install graphifyy -q 2>/dev/null \
+          || "$PYTHON" -E -P -B -m pip install graphifyy -q --break-system-packages
+    fi
+fi
+_graphify_selected_usable "$PYTHON" || {{ echo "Graphify requires CPython 3.14.2 through the final 3.14.x release." >&2; exit 1; }}
+"$PYTHON" -E -P -B -c 'from pathlib import Path; Path("graphify-out").mkdir(parents=True, exist_ok=True)' || exit 1
+if ! "$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python; then echo "Graphify cannot safely publish the advisory interpreter pointer; continuing with the freshly discovered interpreter." >&2; fi
+export PYTHONUTF8=1'''
+
+_POWERSHELL_DISCOVERY = r'''$GraphifyPython = $null
+$GraphifyPythonExplicit = $false
+$GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
+if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
+$GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
+$GraphifyDenyPolicyInvalid = $false
+function Test-GraphifyFullyQualifiedPath {
+    param([string]$Path)
+    if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    $root = [IO.Path]::GetPathRoot($Path)
+    if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
+    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    return $true
+}
+function Resolve-GraphifyPolicyPath {
+    param(
+        [string]$Path,
+        [Collections.Generic.HashSet[string]]$Visited = $null,
+        [int]$Hops = 0
+    )
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
+    try {
+        $full = [IO.Path]::GetFullPath($Path)
+        $root = [IO.Path]::GetPathRoot($full)
+        if (-not $root) { return $null }
+        if ($null -eq $Visited) {
+            $Visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        }
+        $current = $root
+        $parts = @($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })
+        for ($index = 0; $index -lt $parts.Count; $index++) {
+            $part = $parts[$index]
+            $current = [IO.Path]::GetFullPath((Join-Path $current $part))
+            $info = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+            if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $sourcePath = [IO.Path]::GetFullPath($current)
+                if (-not $Visited.Add($sourcePath)) { return $null }
+                $nextHops = $Hops + 1
+                if ($nextHops -gt 63) { return $null }
+                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") {
+                    if ($info.PSObject.Properties.Name -notcontains "Target") { return $null }
+                    $targets = @(
+                        @($info.Target) | Where-Object {
+                            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+                        }
+                    )
+                    if ($targets.Count -ne 1) { return $null }
+                    $targetText = [string]$targets[0]
+                } else {
+                    $target = $info.ResolveLinkTarget($false)
+                    if (-not $target -or -not $target.FullName) { return $null }
+                    $targetText = [string]$target.FullName
+                }
+                if (Test-GraphifyFullyQualifiedPath $targetText) {
+                    $targetPath = [IO.Path]::GetFullPath($targetText)
+                } else {
+                    $linkParent = Split-Path -Parent $sourcePath
+                    if (-not $linkParent) { return $null }
+                    $targetPath = [IO.Path]::GetFullPath((Join-Path $linkParent $targetText))
+                }
+                if ($index + 1 -lt $parts.Count) {
+                    $remainingSuffix = [string]::Join(
+                        [IO.Path]::DirectorySeparatorChar,
+                        [string[]]$parts[($index + 1)..($parts.Count - 1)]
+                    )
+                    $targetPath = Join-Path $targetPath $remainingSuffix
+                }
+                return Resolve-GraphifyPolicyPath $targetPath $Visited $nextHops
+            }
+        }
+        return [IO.Path]::GetFullPath($current)
+    } catch { return $null }
+}
+function Add-GraphifyDenyRoot {
+    param([string]$Path, [bool]$Required = $false)
+    if (-not $Path) { return }
+    try {
+        $full = if (Test-GraphifyFullyQualifiedPath $path) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
+        if (-not (Test-Path -LiteralPath $full -PathType Container)) { if ($Required) { $script:GraphifyDenyPolicyInvalid = $true }; return }
+        $resolved = Resolve-GraphifyPolicyPath $full
+        if (-not $resolved) { $script:GraphifyDenyPolicyInvalid = $true; return }
+        if ($resolved -ne [IO.Path]::GetPathRoot($resolved)) { $resolved = $resolved.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
+        $lexical = [IO.Path]::GetFullPath($full)
+        if ($lexical -ne [IO.Path]::GetPathRoot($lexical)) { $lexical = $lexical.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
+        if (-not $GraphifyDenyRoots.Contains($lexical)) { $GraphifyDenyRoots.Add($lexical) }
+        if (-not $GraphifyDenyRoots.Contains($resolved)) { $GraphifyDenyRoots.Add($resolved) }
+    } catch { $script:GraphifyDenyPolicyInvalid = $true; return }
+}
+Add-GraphifyDenyRoot $GraphifyWorkspace $true
+if ($env:GRAPHIFY_INPUT_PATH -and $env:GRAPHIFY_INPUT_PATH -ne "INPUT_PATH") { Add-GraphifyDenyRoot $env:GRAPHIFY_INPUT_PATH $true }
+$GraphifySelectedOutput = if ($env:GRAPHIFY_OUTPUT_ROOT) { $env:GRAPHIFY_OUTPUT_ROOT } elseif ($env:GRAPHIFY_OUT) { $env:GRAPHIFY_OUT } else { "graphify-out" }
+Add-GraphifyDenyRoot $GraphifySelectedOutput ([bool]($env:GRAPHIFY_OUTPUT_ROOT -or $env:GRAPHIFY_OUT))
+function Test-GraphifyWorkspacePath {
+    param([string]$Path)
+    if ($GraphifyDenyPolicyInvalid) { return $true }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $true }
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    try {
+        $lexical = [IO.Path]::GetFullPath($Path)
+        $resolved = Resolve-GraphifyPolicyPath $lexical
+        if (-not $resolved) { return $true }
+    }
+    catch { return $true }
+    foreach ($root in $GraphifyDenyRoots) {
+        $prefix = if ($root -eq [IO.Path]::GetPathRoot($root)) { $root } else { $root + [IO.Path]::DirectorySeparatorChar }
+        if ($lexical -eq $root -or $lexical.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($resolved -eq $root -or $resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+function Resolve-GraphifyAmbientCommand {
+    param([string]$Name)
+    $command = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $command) { return $null }
+    $path = [IO.Path]::GetFullPath($command.Source)
+    if (Test-GraphifyWorkspacePath $path) { return $null }
+    return $path
+}
+$GraphifyIdentityCheck = @'
+@@GRAPHIFY_IDENTITY_CHECK@@
+'@
+function Test-GraphifyPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
+    if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
+    & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Test-GraphifyAmbientPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
+    & $Candidate -E -P -B -S -c $GraphifyIdentityCheck ambient-identity @GraphifyDenyRoots 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Test-GraphifyAmbientSupportedPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
+    & $Candidate -E -P -B -S -c $GraphifyIdentityCheck ambient-supported @GraphifyDenyRoots 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Test-GraphifySupportedPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
+    & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Invoke-GraphifyNativeText {
+    param([string]$Candidate, [string[]]$Arguments)
+    if (-not $Candidate) { return $null }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
+    $output = & $Candidate @Arguments 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    if (-not ($invocationSucceeded -and $exitCode -eq 0)) { return $null }
+    $lines = @(
+        @($output) | Where-Object {
+            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+        }
+    )
+    if ($lines.Count -ne 1) { return $null }
+    return ([string]$lines[0]).Trim()
+}
+if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
+    $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
+    if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
+}
+if (-not $GraphifyPython) {
+    $uv = Resolve-GraphifyAmbientCommand uv
+    if ($uv) {
+        $uvDir = Invoke-GraphifyNativeText $uv @("tool", "dir")
+        if ($uvDir) {
+            $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
+    }
+}
+if (-not $GraphifyPython) {
+    $pipx = Resolve-GraphifyAmbientCommand pipx
+    if ($pipx) {
+        $venvs = Invoke-GraphifyNativeText $pipx @("environment", "--value", "PIPX_LOCAL_VENVS")
+        if ($venvs) {
+            $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
+    }
+}
+if (-not $GraphifyPython) {
+    $graphify = Resolve-GraphifyAmbientCommand graphify
+    if ($graphify) {
+        $bindir = Split-Path -Parent $graphify
+        foreach ($candidate in @((Join-Path $bindir "python.exe"), (Join-Path $bindir "../python.exe"))) {
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate); break }
+        }
+    }
+}
+if (-not $GraphifyPython) {
+    foreach ($name in @("python3.14", "python3", "py", "python")) {
+        $candidate = Resolve-GraphifyAmbientCommand $name
+        if (-not $candidate) { continue }
+        if ($name -eq "py") {
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-S", "-c", $GraphifyIdentityCheck, "executable")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+        } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
+    }
+}
+if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }'''.replace(
+    "@@GRAPHIFY_IDENTITY_CHECK@@", _GRAPHIFY_IDENTITY_COMMAND_POWERSHELL
+)
+
+_POWERSHELL_BOOTSTRAP = rf'''# Installation is the only discovery path allowed to mutate the environment.
+$GraphifyDiscoveryOptional = $true
+{_POWERSHELL_DISCOVERY}
+Remove-Variable GraphifyDiscoveryOptional -ErrorAction SilentlyContinue
+$installPython = $GraphifyPython
+$installPythonExplicit = $GraphifyPythonExplicit
+if (-not $installPython -and (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV")) {{
+    $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $activeVenv)) {{ $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }}
+    if (Test-GraphifySupportedPython $activeVenv) {{ $installPython = $activeVenv; $installPythonExplicit = $true }}
+}}
+if (-not $installPython) {{
+    foreach ($name in @("python3.14", "python3", "py", "python")) {{
+        $candidate = Resolve-GraphifyAmbientCommand $name
+        if (-not $candidate) {{ continue }}
+        if ($name -eq "py") {{
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-S", "-c", $GraphifyIdentityCheck, "executable")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientSupportedPython $resolved)) {{ $installPython = [IO.Path]::GetFullPath($resolved); $installPythonExplicit = $false; break }}
+        }} elseif (Test-GraphifyAmbientSupportedPython $candidate) {{ $installPython = $candidate; $installPythonExplicit = $false; break }}
+    }}
+}}
+$installPythonUsable = if ($installPythonExplicit) {{ Test-GraphifyPython $installPython }} else {{ Test-GraphifyAmbientPython $installPython }}
+if (-not $installPythonUsable) {{
+    $uv = Resolve-GraphifyAmbientCommand uv
+    if ($uv) {{
+        & $uv tool install --python ">=3.14.2,<3.15" --upgrade graphifyy -q
+        if ($LASTEXITCODE -ne 0) {{ throw "Graphify uv tool installation failed." }}
+        $uvDir = Invoke-GraphifyNativeText $uv @("tool", "dir")
+        if ($uvDir) {{
+            $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) {{ $candidate = Join-Path $uvDir "graphifyy/bin/python" }}
+            if (-not (Test-GraphifyWorkspacePath $candidate) -and (Test-GraphifyAmbientPython $candidate)) {{ $GraphifyPython = [IO.Path]::GetFullPath($candidate); $GraphifyPythonExplicit = $false }}
+        }}
+    }} elseif ($installPython) {{
+        & $installPython -E -P -B -m pip install graphifyy -q
+        if ($LASTEXITCODE -ne 0) {{ throw "Graphify pip installation failed." }}
+        $installedPythonUsable = if ($installPythonExplicit) {{ Test-GraphifyPython $installPython }} else {{ Test-GraphifyAmbientPython $installPython }}
+        if ($installedPythonUsable) {{ $GraphifyPython = $installPython; $GraphifyPythonExplicit = $installPythonExplicit }}
+    }}
+}} else {{
+    $GraphifyPython = $installPython
+    $GraphifyPythonExplicit = $installPythonExplicit
+}}
+$GraphifyPythonUsable = if ($GraphifyPythonExplicit) {{ Test-GraphifyPython $GraphifyPython }} else {{ Test-GraphifyAmbientPython $GraphifyPython }}
+if (-not $GraphifyPythonUsable) {{ throw "Graphify requires CPython 3.14.2 through the final 3.14.x release." }}
+New-Item -ItemType Directory -Force -Path graphify-out -ErrorAction Stop | Out-Null
+& $GraphifyPython -E -P -B -m graphify.interpreter_pointer write graphify-out\.graphify_python
+if ($LASTEXITCODE -ne 0) {{
+    Write-Warning "Graphify cannot safely publish the advisory interpreter pointer on Windows; continuing with the freshly discovered interpreter."
+}}'''
+
+
+def _compact_posix_guard(script: str) -> str:
+    """Run discovery in a privileged absolute shell and capture its result."""
+    compact_parts: list[str] = []
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        compact_parts.append(line)
+        continues = line.endswith(("{", " then", " do", " else", " in", "*)", ";;", ";", "\\"))
+        compact_parts.append(" " if continues else "; ")
+    compact_script = "".join(compact_parts).removesuffix("; ")
+    child = (
+        compact_script
+        + '; [ -n "$GRAPHIFY_PYTHON" ] || exit 1'
+        + '; printf "%sx" "$GRAPHIFY_PYTHON"'
+    )
+    return (
+        "GRAPHIFY_PYTHON=$(GRAPHIFY_INPUT_PATH=\"${GRAPHIFY_INPUT_PATH-}\" "
+        f"/bin/sh -p -c {shlex.quote(child)}); "
+        'GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON%x}; '
+        'GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON:?Graphify interpreter discovery failed}'
+    )
+
+
+_POSIX_OPERATION_GUARD = _compact_posix_guard(_POSIX_DISCOVERY)
+_WINDOWS_POSIX_OPERATION_GUARD = _compact_posix_guard(_WINDOWS_POSIX_DISCOVERY)
+
+_INTERPRETER_SHELL = {
     "posix": {
         "fence": "bash",
-        "guard": """if [ ! -f graphify-out/.graphify_python ]; then
-    echo "Missing graphify-out/.graphify_python; rerun Step 1 interpreter bootstrap." >&2
-    exit 1
-fi
-_GRAPHIFY_SAVED=$(cat graphify-out/.graphify_python)
-case "$_GRAPHIFY_SAVED" in
-    /*) ;;
-    *) echo "Invalid graphify interpreter pointer." >&2; exit 1 ;;
-esac
-if [ ! -x "$_GRAPHIFY_SAVED" ]; then
-    echo "Saved graphify interpreter is not executable." >&2
-    exit 1
-fi
-"$_GRAPHIFY_SAVED" -E -P -B -c 'import graphify, sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)' >/dev/null 2>&1 || {
-    echo "Saved graphify interpreter is unsupported or cannot import graphify." >&2
-    exit 1
-}""",
-        "command": '"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify',
-        "python": '"$(cat graphify-out/.graphify_python)" -E -P -B',
+        "guard": _POSIX_OPERATION_GUARD,
+        "command": '"$GRAPHIFY_PYTHON" -E -P -B -m graphify',
+        "python": '"$GRAPHIFY_PYTHON" -E -P -B',
     },
     "powershell": {
         "fence": "powershell",
-        "guard": """if (-not (Test-Path -LiteralPath graphify-out\\.graphify_python -PathType Leaf)) {
-    throw "Missing graphify-out\\.graphify_python; rerun Step 1 interpreter bootstrap."
-}
-$GraphifySaved = (Get-Content -LiteralPath graphify-out\\.graphify_python -Raw).Trim()
-if ([string]::IsNullOrWhiteSpace($GraphifySaved) -or
-    -not [IO.Path]::IsPathFullyQualified($GraphifySaved) -or
-    $GraphifySaved -match "[\\r\\n]") {
-    throw "Invalid graphify interpreter pointer."
-}
-& $GraphifySaved -E -P -B -c "import graphify, sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)"
-if ($LASTEXITCODE -ne 0) {
-    throw "Saved graphify interpreter is unsupported or cannot import graphify."
-}""",
-        "command": "& (Get-Content graphify-out\\.graphify_python) -E -P -B -m graphify",
-        "python": "& (Get-Content graphify-out\\.graphify_python) -E -P -B",
+        "guard": _POWERSHELL_DISCOVERY,
+        "command": "& $GraphifyPython -E -P -B -m graphify",
+        "python": "& $GraphifyPython -E -P -B",
     },
 }
 
+_MCP_CONFIG = {
+    "posix": '''```bash
+@@GRAPHIFY_GUARD@@
+"$GRAPHIFY_PYTHON" -E -P -B -c 'import json, os, sys; graph_path = os.path.join(os.path.realpath(os.getcwd()), "graphify-out", "graph.json"); print(json.dumps({"mcpServers": {"graphify": {"command": sys.argv[1], "args": ["-E", "-P", "-B", "-m", "graphify.serve", graph_path]}}}))' "$GRAPHIFY_PYTHON"
+```''',
+    "powershell": '''```powershell
+@@GRAPHIFY_GUARD@@
+$graphPath = Join-Path ([IO.Path]::GetFullPath((Get-Location).Path)) "graphify-out\\graph.json"
+[ordered]@{
+    mcpServers = [ordered]@{
+        "graphify" = [ordered]@{
+            command = $GraphifyPython
+            args = @("-E", "-P", "-B", "-m", "graphify.serve", $graphPath)
+        }
+    }
+} | ConvertTo-Json -Depth 4
+```''',
+}
 
-def _render_saved_interpreter_commands(body: str, platform: Platform) -> str:
-    """Fill operational-command slots with the platform's saved interpreter contract."""
-    shell = _SAVED_INTERPRETER_SHELL[platform.shell]
-    return (
+
+def _render_static_mcp_config(body: str, platform: Platform) -> str:
+    """Replace copy-by-hand MCP JSON with configuration-time discovery output."""
+    config = _MCP_CONFIG[platform.shell].replace(
+        "@@GRAPHIFY_GUARD@@", _INTERPRETER_SHELL[platform.shell]["guard"]
+    )
+    return re.sub(
+        r"```json\n\{\n\s*\"mcpServers\".*?\n\}\n```",
+        lambda _: config,
+        body,
+        flags=re.DOTALL,
+    )
+
+
+def _render_step1_bootstrap(
+    body: str, platform: Platform, *, artifact_role: str
+) -> str:
+    """Single-home each mutating bootstrap behind hardened discovery."""
+    if artifact_role not in {"core", "monolith", "reference"}:
+        raise ValueError(f"unknown artifact role: {artifact_role!r}")
+    install_heading = "### Step 1 - Ensure graphify is installed"
+    target_count = len(
+        re.findall(rf"^{re.escape(install_heading)}$", body, flags=re.MULTILINE)
+    )
+    if target_count > 1 or (artifact_role != "reference" and target_count != 1):
+        raise ValueError(
+            f"{artifact_role} artifact has {target_count} installation Step 1 targets"
+        )
+    if target_count == 0:
+        return body
+
+    fence = "bash" if platform.shell == "posix" else "powershell"
+    bootstrap = _POSIX_BOOTSTRAP if platform.shell == "posix" else _POWERSHELL_BOOTSTRAP
+    input_binding = (
+        "GRAPHIFY_INPUT_PATH='INPUT_PATH'"
+        if platform.shell == "posix"
+        else '$env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"'
+    )
+    bootstrap = f"{input_binding}\n{bootstrap}"
+    pattern = rf"({re.escape(install_heading)}\n.*?```{fence}\n)(.*?)(\n```)"
+    rendered, replacements = re.subn(
+        pattern,
+        lambda match: match.group(1) + bootstrap + match.group(3),
+        body,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if replacements != 1:
+        raise ValueError(
+            f"{artifact_role} installation Step 1 has {replacements} bootstrap targets"
+        )
+    return rendered
+
+
+def _render_advisory_pointer_prose(body: str) -> str:
+    """Describe fresh discovery as authority and the persisted pointer as metadata."""
+    body = re.sub(
+        r"Continue only after `\.graphify_python` contains a supported Python 3\.14\.2 through 3\.14\.x interpreter that imports graphify, then jump straight to `## For /graphify query`\.",
+        "Continue only after Step 1 freshly discovers and binds a supported Python 3.14.2 through 3.14.x interpreter that imports graphify; `.graphify_python` is advisory metadata only. Then jump straight to `## For /graphify query`.",
+        body,
+    )
+    body = re.sub(
+        r"run Step 1 first so `\.graphify_python` is overwritten with a supported Python 3\.14\.2 through 3\.14\.x interpreter that imports graphify\.",
+        "run Step 1 first to freshly discover and bind a supported Python 3.14.2 through 3.14.x interpreter that imports graphify; `.graphify_python` is refreshed as advisory metadata only.",
+        body,
+    )
+    body = body.replace("use it through the saved interpreter", "use it through the freshly bound interpreter")
+    body = body.replace("Execute all operational commands through the saved interpreter.", "Execute each operational block through its freshly discovered interpreter.")
+    body = body.replace("through the saved interpreter", "through a freshly discovered interpreter")
+    body = re.sub(
+        r"the saved interpreter",
+        "the freshly discovered interpreter",
+        body,
+        flags=re.IGNORECASE,
+    )
+    body = body.replace(
+        "unconditionally re-resolve and overwrite `.graphify_python` first:",
+        "freshly discover and bind a trusted interpreter first; `.graphify_python` remains advisory metadata:",
+    )
+    body = body.replace(
+        "`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a",
+        "a trusted Python 3.14 interpreter for that block; never execute the advisory pointer or persist a",
+    )
+    body = body.replace(
+        "`graphify-out/.graphify_python` is freshly validated and overwritten.",
+        "fresh discovery binds the runtime interpreter; `graphify-out/.graphify_python` is advisory metadata only.",
+    )
+    body = re.sub(
+        r"The freshly discovered interpreter and its user-site packages are trusted inputs outside the\s+inspected-corpus boundary\. Pointer symlink and time-of-check/time-of-use hardening\s+remain separate work; these startup flags do not provide that identity guarantee\.",
+        "Only the freshly discovered and bound interpreter is runtime authority. `graphify-out/.graphify_python` is advisory metadata and is never read for execution.",
+        body,
+        flags=re.IGNORECASE,
+    )
+    return body
+
+
+def _render_saved_interpreter_commands(
+    body: str, platform: Platform, *, artifact_role: str
+) -> str:
+    """Fill and harden every execution-bearing block with fresh discovery."""
+    shell = _INTERPRETER_SHELL[platform.shell]
+    body = (
         body.replace("@@GRAPHIFY_SHELL@@", shell["fence"])
         .replace("@@GRAPHIFY_GUARD@@", shell["guard"])
         .replace("@@GRAPHIFY_CMD@@", shell["command"])
         .replace("@@GRAPHIFY_PYTHON@@", shell["python"])
     )
+    body = re.sub(
+        r'test -f graphify-out/\.graphify_python && _GRAPHIFY_SAVED=\$\(cat graphify-out/\.graphify_python\).*?Invalid saved graphify interpreter; rerun Step 1\." >&2; exit 1; \}',
+        lambda _: _POSIX_OPERATION_GUARD,
+        body,
+    )
+    body = re.sub(r'"?\$\(cat graphify-out/\.graphify_python\)"?\s+-E -P -B', '"$GRAPHIFY_PYTHON" -E -P -B', body)
+    body = re.sub(r'& \(Get-Content(?: -LiteralPath)? graphify-out\\\.graphify_python(?: -Raw)?\)', '& $GraphifyPython', body)
+    body = body.replace("`\"$(cat graphify-out/.graphify_python)\" -E -P -B`", "the freshly discovered interpreter with `-E -P -B`")
+    body = body.replace("`$(cat graphify-out/.graphify_python)`", "the freshly discovered interpreter")
+    body = body.replace("printed by `cat graphify-out/.graphify_python` after the successful Step 1 rerun", "emitted by the fresh discovery block below")
+    body = body.replace("printed by `cat graphify-out/.graphify_python`", "emitted by the fresh discovery block below")
+    body = body.replace('"command": "<absolute path from: cat graphify-out/.graphify_python>"', '"command": "$GRAPHIFY_PYTHON"')
+    body = body.replace("`& (Get-Content graphify-out\\.graphify_python) -E -P -B`", "the freshly discovered interpreter with `-E -P -B`")
+
+    def bind_blocks(
+        body: str, fence: str, binding: str, guard: str, input_binding: str
+    ) -> str:
+        def bind_operational_block(match: re.Match[str]) -> str:
+            block = match.group(1)
+            if binding not in block or "graphify.interpreter_pointer write" in block:
+                return match.group(0)
+            prefix = ""
+            if re.search(r"(?<!GRAPHIFY_)\bINPUT_PATH\b", block) and input_binding not in block:
+                prefix += f"{input_binding}\n"
+            if guard not in block:
+                prefix += f"{guard}\n"
+            if not prefix:
+                return match.group(0)
+            return match.group(0).replace(block, f"{prefix}{block}", 1)
+
+        return re.sub(
+            rf"```{fence}\n(.*?)\n```",
+            bind_operational_block,
+            body,
+            flags=re.DOTALL,
+        )
+
+    posix_guard = (
+        _WINDOWS_POSIX_OPERATION_GUARD
+        if platform.key == "windows"
+        else _POSIX_OPERATION_GUARD
+    )
+    body = bind_blocks(
+        body,
+        "(?:bash|sh)",
+        "GRAPHIFY_PYTHON",
+        posix_guard,
+        "GRAPHIFY_INPUT_PATH='INPUT_PATH'",
+    )
+    body = bind_blocks(
+        body,
+        "powershell",
+        "GraphifyPython",
+        _POWERSHELL_DISCOVERY,
+        '$env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"',
+    )
+    body = _render_static_mcp_config(body, platform)
+    body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
+    return _render_advisory_pointer_prose(body)
 
 
 def load_platforms() -> dict[str, Platform]:
@@ -439,7 +1127,7 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
-    body = _render_saved_interpreter_commands(body, platform)
+    body = _render_saved_interpreter_commands(body, platform, artifact_role="core")
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
         raise ValueError(f"unfilled core slots for '{platform.key}': {leftover}")
@@ -470,7 +1158,7 @@ def _render_agents_md_hooks(platform: Platform) -> str:
         .replace("@@AGENTS_UNINSTALL_BLOCK@@", slots["uninstall_block"])
         .replace("@@AGENTS_PRETOOLUSE_NOTE@@", slots["pretooluse_note"])
     )
-    body = _render_saved_interpreter_commands(body, platform)
+    body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
         raise ValueError(f"unfilled agents-md hooks slots for '{platform.key}': {leftover}")
@@ -486,6 +1174,7 @@ def render(platform: Platform) -> list[RenderedArtifact]:
     """
     if platform.bucket == "monolith":
         body = _read_fragment(f"core/{platform.monolith}.md")
+        body = _render_saved_interpreter_commands(body, platform, artifact_role="monolith")
         return [RenderedArtifact(platform.skill_dst, body)]
 
     if platform.bucket != "split":
@@ -507,7 +1196,7 @@ def render(platform: Platform) -> list[RenderedArtifact]:
             body = _render_agents_md_hooks(platform)
         else:
             body = _read_fragment(references[name])
-        body = _render_saved_interpreter_commands(body, platform)
+        body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))
     return artifacts
@@ -1024,6 +1713,7 @@ def _is_python314_bootstrap_fix_line(line: str) -> bool:
         '|| "$PYTHON" -E -P -B -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3; }',
         '"$PYTHON" -c "import sys; open(\'graphify-out/.graphify_python\', \'w\', encoding=\'utf-8\').write(sys.executable)"',
         '"$PYTHON" -E -P -B -c "import sys; open(\'graphify-out/.graphify_python\', \'w\', encoding=\'utf-8\').write(sys.executable)"',
+        '"$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python',
         'is_supported_graphify_python "$PYTHON" || { echo "Graphify requires Python 3.14.2 through the final 3.14.x release." >&2; exit 1; }',
     }
 
@@ -1035,7 +1725,11 @@ def _is_saved_interpreter_subcommand_fix_line(line: str) -> bool:
     entry-point replacements, plus the unconditional Step 1 guard handoff.
     """
     stripped = line.strip()
+    if stripped in {"GRAPHIFY_INPUT_PATH='INPUT_PATH'", '$env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"'}:
+        return True
     if stripped.startswith("**Fast path — existing graph:** If `graphify-out/graph.json` exists"):
+        return True
+    if stripped.startswith("Before running any subcommand below ("):
         return True
     if stripped.startswith("test -f graphify-out/.graphify_python && _GRAPHIFY_SAVED="):
         return "Invalid saved graphify interpreter; rerun Step 1." in stripped
@@ -1171,7 +1865,7 @@ _SUBCOMMAND_GUARD_BODY = [
     "",
     "Run this skill's platform-specific **Step 1 - Ensure graphify is installed**",
     "before every subcommand. Continue only after Step 1 overwrites",
-    "`graphify-out/.graphify_python` with a validated Python 3.14 interpreter path; never persist a",
+    "a trusted Python 3.14 interpreter for that block; never execute the advisory pointer or persist a",
     "bare or unvalidated `python` / `python3` command.",
     "",
 ]
@@ -1191,6 +1885,54 @@ def _normalise_subcommand_guard(lines: list[str], *, validate_current: bool) -> 
     if validate_current and lines[start:end] != _SUBCOMMAND_GUARD_BODY:
         return lines, "subcommand interpreter guard drifted from the validated Step 1 handoff"
     return lines[:start] + ["", "@@VALIDATED_PYTHON_SUBCOMMAND_GUARD@@", ""] + lines[end:], None
+
+
+def _normalise_issue88_monolith_render(text: str) -> str:
+    """Remove issue-88's mechanical render layer for the frozen-v8 audit.
+
+    The underlying monolith content and all earlier sanctioned migrations remain
+    audited. This avoids broadening the line allowlist for a discovery block
+    deliberately injected into every standalone command block.
+    """
+    text = re.sub(
+        r"(### Step 1[^\n]*\n.*?```bash\n)(.*?)(\n```)",
+        lambda match: match.group(1) + "@@ISSUE88_BOOTSTRAP@@" + match.group(3),
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    rendered_config = _MCP_CONFIG["posix"].replace(
+        "@@GRAPHIFY_GUARD@@", _POSIX_OPERATION_GUARD
+    )
+    pointer_config = '''```json
+{
+  "mcpServers": {
+    "graphify": {
+      "command": "<absolute path from: cat graphify-out/.graphify_python>",
+      "args": ["-E", "-P", "-B", "-m", "graphify.serve", "/absolute/path/to/graphify-out/graph.json"]
+    }
+  }
+}
+```'''
+    text = text.replace(rendered_config, pointer_config)
+    text = text.replace(_POSIX_OPERATION_GUARD + "\n", "")
+    text = text.replace(
+        '"$GRAPHIFY_PYTHON" -E -P -B',
+        '"$(cat graphify-out/.graphify_python)" -E -P -B',
+    )
+    text = text.replace(
+        "emitted by the fresh discovery block below",
+        "printed by `cat graphify-out/.graphify_python` after the successful Step 1 rerun",
+    )
+    text = text.replace(
+        "Only the freshly discovered and bound interpreter is runtime authority. `graphify-out/.graphify_python` is advisory metadata and is never read for execution.",
+        "The saved interpreter and its user-site packages are trusted inputs outside the inspected-corpus boundary. Pointer symlink and time-of-check/time-of-use hardening remain separate work; these startup flags do not provide that identity guarantee.",
+    )
+    text = text.replace(
+        "fresh discovery binds the runtime interpreter; `graphify-out/.graphify_python` is advisory metadata only.",
+        "`graphify-out/.graphify_python` is freshly validated and overwritten.",
+    )
+    return text
 
 
 def monolith_roundtrip(platform: Platform) -> list[str]:
@@ -1216,11 +1958,15 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     if platform.roundtrip_ref is None:
         return [f"[{platform.key}] monolith is missing roundtrip_ref"]
 
-    rendered_lines = render(platform)[0].content.splitlines()
+    rendered_text = _normalise_issue88_monolith_render(render(platform)[0].content)
+    rendered_lines = rendered_text.splitlines()
     # Strip trigger lines from the original — they are non-spec and their removal
     # (#1180) is a permitted diff.
+    original_text = _normalise_issue88_monolith_render(
+        _normalise(_git_show(platform.roundtrip_ref))
+    )
     original_lines = [
-        l for l in _normalise(_git_show(platform.roundtrip_ref)).splitlines()
+        l for l in original_text.splitlines()
         if not _is_trigger_line(l)
     ]
 

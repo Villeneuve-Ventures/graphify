@@ -236,20 +236,17 @@ def test_devin_skill_file_exists_in_package():
     assert skill.exists(), "skill-devin.md missing from package"
 
 
-def test_devin_skill_file_uses_isolated_python_c_syntax():
+def test_devin_skill_file_uses_freshly_discovered_isolated_python_c_syntax():
     """Devin skill must use isolated inline Python syntax without bash heredocs.
 
-    All mature graphify skills use the interpreter-detection pattern
-    ``$(cat graphify-out/.graphify_python) -E -P -B -c "..."`` rather than bare
-    ``python -c "..."`` so they work in pipx / venv environments without
-    importing a corpus-local or ``PYTHONPATH``-injected ``graphify`` package.
+    Devin must bind fresh discovery rather than execute advisory pointer text,
+    while retaining ``-E -P -B`` for corpus and environment isolation.
     """
     import graphify
     skill = (Path(graphify.__file__).parent / "skill-devin.md").read_text()
-    assert '.graphify_python)" -E -P -B -c "' in skill, (
-        "skill-devin.md must use the isolated interpreter-detection pattern "
-        "'\"$(cat graphify-out/.graphify_python)\" -E -P -B -c \"...\"'"
-    )
+    assert "-E -P -B -c \"" in skill
+    assert "$(cat graphify-out/.graphify_python)" not in skill
+    assert "-m graphify.interpreter_pointer write" in skill
     assert "#!/bin/bash" not in skill
 
 
