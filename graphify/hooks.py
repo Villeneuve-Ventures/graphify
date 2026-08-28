@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from graphify._interpreter_identity import _GRAPHIFY_IDENTITY_SOURCE
+
 _HOOK_MARKER = "# graphify-hook-start"
 _HOOK_MARKER_END = "# graphify-hook-end"
 _CHECKOUT_MARKER = "# graphify-checkout-hook-start"
@@ -24,7 +26,7 @@ _PYTHON_DETECT = """\
 # running graphify hook install. Dynamic fallbacks are lower-authority and may
 # not come from the repository being processed.
 _GFY_PROBE="import importlib.metadata as m, importlib.util as u, json, os, re, sys, urllib.parse as p, urllib.request as r; v=sys.version_info; s=u.find_spec('graphify'); d=m.distribution('graphifyy'); name=re.sub('[-_.]+', '-', d.metadata['Name']).lower(); actual=os.path.normcase(os.path.abspath(s.origin or '')) if s else ''; owned=[x for x in (d.files or ()) if str(x) == 'graphify/__init__.py']; installed=os.path.normcase(os.path.abspath(str(d.locate_file(owned[0])))) if len(owned) == 1 else ''; direct=json.loads(d.read_text('direct_url.json') or '{}'); parts=p.urlparse(direct.get('url', '')); is_editable=direct.get('dir_info', {}).get('editable') is True; editable=is_editable and parts.scheme == 'file' and parts.netloc in ('', 'localhost') and not parts.params and not parts.query and not parts.fragment; editable_init=os.path.normcase(os.path.abspath(os.path.join(r.url2pathname(parts.path), 'graphify', '__init__.py'))) if editable else ''; identity=(not is_editable and len(owned) == 1 and actual == installed) or (editable and actual == editable_init); ok=sys.implementation.name == 'cpython' and v.releaselevel == 'final' and (3, 14, 2) <= v[:3] < (3, 15, 0) and name == 'graphifyy' and identity; sys.exit(0 if ok else 1)"
-_GFY_DYNAMIC_PROBE="import importlib.metadata as m, importlib.util as u, json, os, pathlib as q, re, sys, urllib.parse as p, urllib.request as r; v=sys.version_info; s=u.find_spec('graphify'); d=m.distribution('graphifyy'); name=re.sub('[-_.]+', '-', d.metadata['Name']).lower(); actual=os.path.normcase(os.path.abspath(s.origin or '')) if s else ''; owned=[x for x in (d.files or ()) if str(x) == 'graphify/__init__.py']; installed=os.path.normcase(os.path.abspath(str(d.locate_file(owned[0])))) if len(owned) == 1 else ''; direct=json.loads(d.read_text('direct_url.json') or '{}'); parts=p.urlparse(direct.get('url', '')); is_editable=direct.get('dir_info', {}).get('editable') is True; editable=is_editable and parts.scheme == 'file' and parts.netloc in ('', 'localhost') and not parts.params and not parts.query and not parts.fragment; editable_init=os.path.normcase(os.path.abspath(os.path.join(r.url2pathname(parts.path), 'graphify', '__init__.py'))) if editable else ''; identity=(not is_editable and len(owned) == 1 and actual == installed) or (editable and actual == editable_init); roots=[q.Path(x) for x in sys.argv[1:] if x]; lexical=q.Path(actual); denied=identity and any(lexical.is_relative_to(root) or lexical.resolve().is_relative_to(root.resolve()) for root in roots); ok=sys.implementation.name == 'cpython' and v.releaselevel == 'final' and (3, 14, 2) <= v[:3] < (3, 15, 0) and name == 'graphifyy' and identity and not denied; sys.exit(0 if ok else 1)"
+_GFY_IDENTITY_CHECK=""" + shlex.quote(_GRAPHIFY_IDENTITY_SOURCE) + """
 # Capture an absolute lexical invocation path. Resolve its symlinks only for
 # the containment check so a venv's lexical Python path keeps venv semantics.
 _GFY_WORKSPACE=$(pwd -P 2>/dev/null)
@@ -173,6 +175,9 @@ _gfy_accept_dynamic() {
     [ -x "$_GFY_CANDIDATE" ] || return 1
     printf '%s\n' "$_GFY_CANDIDATE"
 }
+_gfy_dynamic_usable() {
+    [ -n "$1" ] && "$1" -E -P -B -S -c "$_GFY_IDENTITY_CHECK" ambient-identity "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" >/dev/null 2>&1
+}
 
 # Resolve via the graphify launcher on PATH. The generated-output interpreter
 # pointer is advisory state and is deliberately never a hook input.
@@ -186,11 +191,11 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
         # (or ./python.exe inside a venv's Scripts dir).
         _GFY_BINDIR=${GRAPHIFY_BIN%/*}
         _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_BINDIR/../python.exe") || _GFY_CANDIDATE=""
-        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
+        if [ -n "$_GFY_CANDIDATE" ] && _gfy_dynamic_usable "$_GFY_CANDIDATE"; then
             GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
         else
             _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_BINDIR/python.exe") || _GFY_CANDIDATE=""
-            if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
+            if [ -n "$_GFY_CANDIDATE" ] && _gfy_dynamic_usable "$_GFY_CANDIDATE"; then
                 GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
             fi
         fi
@@ -229,7 +234,7 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
                    _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
                fi ;;
         esac
-        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
+        if [ -n "$_GFY_CANDIDATE" ] && _gfy_dynamic_usable "$_GFY_CANDIDATE"; then
             GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
         fi
     fi
@@ -241,14 +246,14 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
     if [ -n "$_GFY_CANDIDATE" ]; then
         _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
     fi
-    if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
+    if [ -n "$_GFY_CANDIDATE" ] && _gfy_dynamic_usable "$_GFY_CANDIDATE"; then
         GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
     else
         _GFY_CANDIDATE=$(_gfy_capture_command python) || _GFY_CANDIDATE=""
         if [ -n "$_GFY_CANDIDATE" ]; then
             _GFY_CANDIDATE=$(_gfy_accept_dynamic "$_GFY_CANDIDATE") || _GFY_CANDIDATE=""
         fi
-        if [ -n "$_GFY_CANDIDATE" ] && "$_GFY_CANDIDATE" -E -P -B -c "$_GFY_DYNAMIC_PROBE" "$_GFY_WORKSPACE" "$_GFY_INPUT_ROOT" "$_GFY_OUTPUT_ROOT" "$_GFY_PERSISTED_ROOT" 2>/dev/null; then
+        if [ -n "$_GFY_CANDIDATE" ] && _gfy_dynamic_usable "$_GFY_CANDIDATE"; then
             GRAPHIFY_PYTHON="$_GFY_CANDIDATE"
         else
             echo "[graphify hook] could not locate a trusted final CPython 3.14.2+ with graphify installed. Re-run 'graphify hook install' from the environment where graphify lives." >&2

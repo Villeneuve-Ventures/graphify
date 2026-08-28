@@ -1,4 +1,5 @@
 """Tests for hooks.py - git hook install/uninstall."""
+import ast
 import json
 import os
 import shlex
@@ -1197,13 +1198,32 @@ def _isolated_interpreter(tmp_path: Path) -> tuple[Path, Path]:
         capture_output=True,
     )
     interpreter = environment / ("Scripts/python.exe" if os.name == "nt" else "bin/python3")
-    site_packages = Path(
+    site_packages = _interpreter_site_packages(interpreter)
+    return interpreter, site_packages
+
+
+def _interpreter_site_packages(interpreter: Path) -> Path:
+    return Path(
         subprocess.check_output(
-            [str(interpreter), "-E", "-P", "-B", "-c", "import site; print(site.getsitepackages()[0])"],
+            [
+                str(interpreter),
+                "-E",
+                "-P",
+                "-B",
+                "-S",
+                "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib'))",
+            ],
             text=True,
         ).strip()
     )
-    return interpreter, site_packages
+
+
+def _write_executable_pth(site_packages: Path, sentinel: Path) -> None:
+    (site_packages / "00-startup-sentinel.pth").write_text(
+        f"import pathlib; pathlib.Path({str(sentinel)!r}).touch()\n",
+        encoding="utf-8",
+    )
 
 
 def _editable_interpreter(tmp_path: Path, origin: Path) -> Path:
@@ -1608,6 +1628,124 @@ def test_dynamic_probe_rejects_denied_origins_and_symlink_crossings(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_dynamic_identity_rejects_invalid_candidate_without_executing_pth(tmp_path):
+    """Lower-authority identity rejection must not initialize candidate site."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    interpreter, site_packages = _isolated_interpreter(tmp_path / "invalid")
+    sentinel = tmp_path / "invalid-candidate-startup-ran"
+    _write_executable_pth(site_packages, sentinel)
+
+    result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=workspace,
+        interpreter=interpreter,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"SELECTED={interpreter}" not in result.stdout
+    assert not sentinel.exists(), "ambient identity probe initialized site-packages"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_dynamic_identity_selects_valid_wheel_without_executing_pth(tmp_path):
+    """An unrelated executable .pth must neither run nor disqualify a wheel."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    interpreter = _wheel_interpreter(tmp_path / "wheel")
+    sentinel = tmp_path / "valid-wheel-startup-ran"
+    _write_executable_pth(_interpreter_site_packages(interpreter), sentinel)
+
+    result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=workspace,
+        interpreter=interpreter,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"SELECTED={interpreter}" in result.stdout
+    assert not sentinel.exists(), "ambient identity probe initialized site-packages"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_dynamic_identity_preserves_safe_editable_and_wheel_candidates(tmp_path):
+    """No-site screening reconstructs safe path-only editable and wheel identity."""
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    editable_origin = tmp_path / "editable-origin"
+    workspace.mkdir()
+    _write_graphify_package(editable_origin)
+    candidates = {
+        "editable": _editable_interpreter(tmp_path / "editable", editable_origin),
+        "wheel": _wheel_interpreter(tmp_path / "wheel"),
+    }
+    script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
+
+    for label, interpreter in candidates.items():
+        result = _run_python_detect(
+            script,
+            cwd=workspace,
+            interpreter=interpreter,
+        )
+        assert result.returncode == 0, f"{label}: {result.stderr}"
+        assert f"SELECTED={interpreter}" in result.stdout, label
+
+
+def test_dynamic_identity_uses_one_shared_no_site_screening_policy():
+    """All five ambient sites must route one shared identity-only no-site helper."""
+    from graphify.hooks import _PYTHON_DETECT
+    from tools.skillgen import gen
+
+    generator_source = Path(gen.__file__).read_text(encoding="utf-8")
+    generator_tree = ast.parse(generator_source)
+    shared_imports = [
+        node
+        for node in generator_tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and node.module.startswith("graphify.")
+        and any(alias.name == "_GRAPHIFY_IDENTITY_SOURCE" for alias in node.names)
+    ]
+    assert len(shared_imports) == 1
+    assigned_names = {
+        target.id
+        for node in generator_tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert "_GRAPHIFY_IDENTITY_SOURCE" not in assigned_names
+    assert shlex.quote(gen._GRAPHIFY_IDENTITY_SOURCE) in _PYTHON_DETECT
+
+    policy_lines = [
+        line.strip()
+        for line in gen._GRAPHIFY_IDENTITY_SOURCE.splitlines()
+        if line.strip()
+    ]
+    assert policy_lines[0] == "import sys"
+    assert "sys.flags.no_site" in policy_lines[1]
+    assert "raise SystemExit" in policy_lines[1]
+
+    assert _PYTHON_DETECT.count("_gfy_dynamic_usable() {") == 1
+    dynamic_calls = [
+        line
+        for line in _PYTHON_DETECT.splitlines()
+        if "_gfy_dynamic_usable" in line and "_gfy_dynamic_usable()" not in line
+    ]
+    assert len(dynamic_calls) == 5
+    assert all("$_GFY_CANDIDATE" in line for line in dynamic_calls)
+    assert "-E -P -B -S" in _PYTHON_DETECT
+    assert "ambient-identity" in _PYTHON_DETECT
+    assert "_GFY_DYNAMIC_PROBE" not in _PYTHON_DETECT
+    assert _PYTHON_DETECT.count("could not locate a trusted final CPython") == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
 @pytest.mark.parametrize("source", ["trusted-pin", "dynamic"], ids=str)
 @pytest.mark.parametrize(
     "record_state",
@@ -1626,8 +1764,29 @@ def test_hook_wheel_identity_requires_exact_record_ownership(tmp_path, source, r
         marker=None if record_state == "valid" else marker,
     )
     pin = str(interpreter) if source == "trusted-pin" else ""
+    screening_script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", pin)
+
+    if source == "dynamic" and record_state == "origin-mismatch":
+        screening = _run_python_detect(
+            screening_script,
+            cwd=workspace,
+            interpreter=interpreter,
+        )
+        assert screening.returncode == 0, screening.stderr
+        assert f"SELECTED={interpreter}" in screening.stdout
+        assert not marker.exists(), "startup hook executed during ambient screening"
+
+        final = subprocess.run(
+            [str(interpreter), "-E", "-P", "-B", "-c", "import graphify"],
+            capture_output=True,
+            text=True,
+        )
+        assert final.returncode == 0, final.stderr
+        assert marker.exists(), "site-enabled final execution skipped startup hook"
+        return
+
     script = (
-        _PYTHON_DETECT.replace("__PINNED_PYTHON__", pin)
+        screening_script
         + '\n[ -z "$GRAPHIFY_PYTHON" ] || "$GRAPHIFY_PYTHON" -E -P -B -c \'import graphify\'\n'
     )
 
