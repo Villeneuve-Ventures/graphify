@@ -300,11 +300,15 @@ class Platform:
         return _HOOKS_TARGET[self.hooks_variant]
 
 
-_GRAPHIFY_IDENTITY_SOURCE = r'''import importlib.metadata
+_GRAPHIFY_IDENTITY_SOURCE = r'''import sys
+if sys.flags.no_site != 1 and sys.argv[1] != "trusted": raise SystemExit(1)
+import importlib.machinery
+import importlib.metadata
 import importlib.util
 import json
 import os
-import sys
+import site
+import stat
 import urllib.parse
 import urllib.request
 
@@ -315,10 +319,183 @@ def contained(path, root):
     except (OSError, ValueError):
         return False
 
-try:
-    distribution = importlib.metadata.distribution("graphifyy")
-    if distribution.metadata.get("Name") != "graphifyy":
+def unique_paths(paths):
+    result = []
+    seen = set()
+    for path in paths:
+        if not isinstance(path, str) or not path:
+            raise ValueError
+        absolute = os.path.abspath(path)
+        key = os.path.normcase(absolute)
+        if key not in seen:
+            seen.add(key)
+            result.append(absolute)
+    return result
+
+def venv_system_site_enabled():
+    config = os.path.join(sys.prefix, "pyvenv.cfg")
+    try:
+        text = open(config, encoding="utf-8").read()
+    except (OSError, UnicodeError):
         raise ValueError
+    values = []
+    for raw_line in text.splitlines():
+        key, separator, value = raw_line.partition("=")
+        if key.strip().lower() != "include-system-site-packages":
+            continue
+        if not separator or value.strip().lower() not in ("true", "false"):
+            raise ValueError
+        values.append(value.strip().lower() == "true")
+    if len(values) != 1:
+        raise ValueError
+    return values[0]
+
+def normal_site_roots():
+    roots = []
+    is_venv = sys.prefix != sys.base_prefix or sys.exec_prefix != sys.base_exec_prefix
+    user_enabled = False
+    if is_venv:
+        roots.extend(site.getsitepackages(unique_paths((sys.prefix, sys.exec_prefix))))
+        include_system = venv_system_site_enabled()
+        if include_system:
+            user_enabled = site.check_enableusersite() is True
+            if user_enabled:
+                roots.append(site.getusersitepackages())
+            roots.extend(
+                site.getsitepackages(
+                    unique_paths((sys.base_prefix, sys.base_exec_prefix))
+                )
+            )
+    else:
+        user_enabled = site.check_enableusersite() is True
+        if user_enabled:
+            roots.append(site.getusersitepackages())
+        roots.extend(site.getsitepackages(unique_paths((sys.prefix, sys.exec_prefix))))
+    return [path for path in unique_paths(roots) if os.path.isdir(path)], user_enabled
+
+def path_denied(path, deny_roots):
+    absolute = os.path.abspath(path)
+    real = os.path.realpath(absolute)
+    for root_arg in deny_roots:
+        if not root_arg:
+            continue
+        root = os.path.abspath(root_arg)
+        real_root = os.path.realpath(root)
+        if contained(absolute, root) or contained(real, real_root):
+            return True
+    return False
+
+def inert_startup_paths(roots, deny_roots, strict):
+    accepted = []
+    unsafe = False
+    for root in roots:
+        try:
+            entries = sorted(os.scandir(root), key=lambda entry: entry.name)
+        except OSError:
+            raise ValueError
+        for entry in entries:
+            if entry.name.startswith(".") or not entry.name.endswith(".pth"):
+                continue
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+                if (
+                    getattr(entry_stat, "st_flags", 0) & getattr(stat, "UF_HIDDEN", 0)
+                    or getattr(entry_stat, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 2)
+                ):
+                    continue
+                if (
+                    entry.is_symlink()
+                    or not entry.is_file(follow_symlinks=False)
+                ):
+                    unsafe = True
+                    continue
+                text = open(entry.path, encoding="utf-8-sig").read()
+            except (OSError, UnicodeError):
+                unsafe = True
+                continue
+            file_accepted = []
+            file_unsafe = False
+            for raw_line in text.splitlines():
+                line = raw_line.rstrip()
+                if not line or line.startswith("#"):
+                    continue
+                if "\x00" in line or line.startswith(("import ", "import\t")):
+                    file_unsafe = True
+                    continue
+                target = os.path.abspath(os.path.join(root, line))
+                if not os.path.exists(target):
+                    continue
+                try:
+                    target_mode = os.stat(target).st_mode
+                except OSError:
+                    file_unsafe = True
+                    continue
+                if not (stat.S_ISDIR(target_mode) or stat.S_ISREG(target_mode)):
+                    file_unsafe = True
+                    continue
+                if path_denied(target, deny_roots):
+                    file_unsafe = True
+                    continue
+                file_accepted.append(target)
+            if file_unsafe:
+                unsafe = True
+            else:
+                accepted.extend(file_accepted)
+    if strict and unsafe:
+        raise ValueError
+    return unique_paths(accepted)
+
+def ambient_paths(deny_roots, strict):
+    roots, user_enabled = normal_site_roots()
+    sanitized = list(sys.path)
+    for root in roots:
+        sanitized.extend((root, *inert_startup_paths([root], deny_roots, strict)))
+    sanitized = unique_paths(sanitized)
+    if strict:
+        if importlib.machinery.PathFinder.find_spec("sitecustomize", sanitized) is not None:
+            raise ValueError
+        if user_enabled and importlib.machinery.PathFinder.find_spec(
+            "usercustomize", sanitized
+        ) is not None:
+            raise ValueError
+    return roots, sanitized
+
+def supported():
+    return (
+        sys.implementation.name == "cpython"
+        and sys.version_info.releaselevel == "final"
+        and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0)
+    )
+
+try:
+    arguments = sys.argv[1:]
+    action = arguments[0]
+    if not supported():
+        raise ValueError
+    if action == "executable":
+        print(sys.executable)
+        raise SystemExit(0)
+    if action == "trusted":
+        deny_roots = []
+        distribution = importlib.metadata.distribution("graphifyy")
+        if distribution.metadata.get("Name") != "graphifyy":
+            raise ValueError
+    elif action not in ("ambient-supported", "ambient-identity"):
+        raise ValueError
+    else:
+        deny_roots = arguments[1:]
+        roots, sanitized = ambient_paths(
+            deny_roots, strict=action == "ambient-supported"
+        )
+        if action == "ambient-supported":
+            raise SystemExit(0)
+        sys.path[:] = sanitized
+        distribution = next(
+            distribution
+            for distribution in importlib.metadata.distributions(path=roots)
+            if distribution.metadata.get("Name") == "graphifyy"
+        )
     spec = importlib.util.find_spec("graphify")
     if spec is None or not spec.origin:
         raise ValueError
@@ -351,16 +528,16 @@ try:
         recorded_origin = os.path.abspath(distribution.locate_file(owned[0]))
         if os.path.normcase(recorded_origin) != os.path.normcase(origin):
             raise ValueError
-    arguments = sys.argv[1:]
-    if arguments[0] == "ambient":
-        for root_arg in arguments[1:]:
-            if not root_arg:
-                continue
-            root = os.path.abspath(root_arg)
-            real_root = os.path.realpath(root)
-            if contained(origin, root) or contained(real_origin, real_root):
-                raise ValueError
-except (Exception, SystemExit):
+    for root_arg in deny_roots:
+        if not root_arg:
+            continue
+        root = os.path.abspath(root_arg)
+        real_root = os.path.realpath(root)
+        if contained(origin, root) or contained(real_origin, real_root):
+            raise ValueError
+except (Exception, SystemExit) as error:
+    if isinstance(error, SystemExit) and error.code == 0:
+        raise
     raise SystemExit(1)
 '''
 _GRAPHIFY_IDENTITY_COMMAND = f"exec({json.dumps(_GRAPHIFY_IDENTITY_SOURCE)})"
@@ -405,7 +582,7 @@ _graphify_resolve_ambient() {
 _graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _graphify_absolute_command "$_gfy_found" || return 1; _graphify_resolve_ambient "$GRAPHIFY_COMMAND_PATH"; }
 _graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
 _graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
-_graphify_ambient_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" ambient "$_GRAPHIFY_WORKSPACE" "$_GRAPHIFY_INPUT_ROOT" "$_GRAPHIFY_OUTPUT_ROOT" >/dev/null 2>&1; }
+_graphify_ambient_supported() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-supported "$_GRAPHIFY_WORKSPACE" "$_GRAPHIFY_INPUT_ROOT" "$_GRAPHIFY_OUTPUT_ROOT" >/dev/null 2>&1; }; _graphify_ambient_usable() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-identity "$_GRAPHIFY_WORKSPACE" "$_GRAPHIFY_INPUT_ROOT" "$_GRAPHIFY_OUTPUT_ROOT" >/dev/null 2>&1; }
 # An explicit absolute active environment is caller-selected, including a
 # project-local venv. Keep its lexical path for invocation.
 case "${VIRTUAL_ENV-}" in
@@ -511,7 +688,8 @@ _graphify_resolve_ambient() {
 _graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _gfy_found=$(_graphify_to_posix "$_gfy_found") || return 1; _graphify_absolute_command "$_gfy_found" || return 1; _graphify_resolve_ambient "$GRAPHIFY_COMMAND_PATH"; }
 _graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
 _graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
-_graphify_ambient_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" ambient "$_GRAPHIFY_WORKSPACE_NATIVE" "$_GRAPHIFY_INPUT_ROOT_NATIVE" "$_GRAPHIFY_OUTPUT_ROOT_NATIVE" >/dev/null 2>&1; }
+_graphify_ambient_supported() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-supported "$_GRAPHIFY_WORKSPACE_NATIVE" "$_GRAPHIFY_INPUT_ROOT_NATIVE" "$_GRAPHIFY_OUTPUT_ROOT_NATIVE" >/dev/null 2>&1; }
+_graphify_ambient_usable() { [ -n "$1" ] && "$1" -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" ambient-identity "$_GRAPHIFY_WORKSPACE_NATIVE" "$_GRAPHIFY_INPUT_ROOT_NATIVE" "$_GRAPHIFY_OUTPUT_ROOT_NATIVE" >/dev/null 2>&1; }
 # An explicit native active environment is caller-selected.
 case "${VIRTUAL_ENV-}" in
     "") ;;
@@ -548,7 +726,7 @@ fi
 # Resolve py -3.14 output and convert its native path before policy checks.
 if [ -z "$GRAPHIFY_PYTHON" ] && _graphify_command py; then
     _gfy_py=$GRAPHIFY_RESOLVED
-    _gfy_candidate=$("$_gfy_py" -3.14 -E -P -B -c 'import sys; print(sys.executable)' 2>/dev/null)
+    _gfy_candidate=$("$_gfy_py" -3.14 -E -P -B -S -c "$_GRAPHIFY_IDENTITY_CHECK" executable 2>/dev/null)
     _gfy_candidate=$(_graphify_to_posix "$_gfy_candidate") || _gfy_candidate=""
     if _graphify_resolve_ambient "$_gfy_candidate"; then _graphify_ambient_usable "$GRAPHIFY_RESOLVED" && GRAPHIFY_PYTHON=$GRAPHIFY_RESOLVED; fi
 fi
@@ -571,7 +749,7 @@ fi
 if [ -z "$PYTHON" ]; then
     for _gfy_name in python3.14 python3 python; do
         if _graphify_command "$_gfy_name"; then
-            _graphify_supported "$GRAPHIFY_RESOLVED" && {{ PYTHON=$GRAPHIFY_RESOLVED; _GRAPHIFY_PYTHON_EXPLICIT=0; break; }}
+            _graphify_ambient_supported "$GRAPHIFY_RESOLVED" && {{ PYTHON=$GRAPHIFY_RESOLVED; _GRAPHIFY_PYTHON_EXPLICIT=0; break; }}
         fi
     done
 fi
@@ -731,8 +909,16 @@ function Test-GraphifyAmbientPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
     if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
-    if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
-    & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
+    & $Candidate -E -P -B -S -c $GraphifyIdentityCheck ambient-identity @GraphifyDenyRoots 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Test-GraphifyAmbientSupportedPython {
+    param([string]$Candidate)
+    if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
+    & $Candidate -E -P -B -S -c $GraphifyIdentityCheck ambient-supported @GraphifyDenyRoots 2>$null
     $invocationSucceeded = $?
     $exitCode = $LASTEXITCODE
     return $invocationSucceeded -and $exitCode -eq 0
@@ -803,7 +989,7 @@ if (-not $GraphifyPython) {
         $candidate = Resolve-GraphifyAmbientCommand $name
         if (-not $candidate) { continue }
         if ($name -eq "py") {
-            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-S", "-c", $GraphifyIdentityCheck, "executable")
             if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
         } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
@@ -828,9 +1014,9 @@ if (-not $installPython) {{
         $candidate = Resolve-GraphifyAmbientCommand $name
         if (-not $candidate) {{ continue }}
         if ($name -eq "py") {{
-            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")
-            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifySupportedPython $resolved)) {{ $installPython = [IO.Path]::GetFullPath($resolved); $installPythonExplicit = $false; break }}
-        }} elseif (Test-GraphifySupportedPython $candidate) {{ $installPython = $candidate; $installPythonExplicit = $false; break }}
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-S", "-c", $GraphifyIdentityCheck, "executable")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientSupportedPython $resolved)) {{ $installPython = [IO.Path]::GetFullPath($resolved); $installPythonExplicit = $false; break }}
+        }} elseif (Test-GraphifyAmbientSupportedPython $candidate) {{ $installPython = $candidate; $installPythonExplicit = $false; break }}
     }}
 }}
 $installPythonUsable = if ($installPythonExplicit) {{ Test-GraphifyPython $installPython }} else {{ Test-GraphifyAmbientPython $installPython }}
