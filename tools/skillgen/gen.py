@@ -373,7 +373,7 @@ _GRAPHIFY_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.na
 _GRAPHIFY_IDENTITY_CHECK='@@GRAPHIFY_IDENTITY_CHECK@@'
 _GRAPHIFY_WORKSPACE=$(command pwd -P) || exit 1
 _graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; [ -d "$_gfy_root" ] && CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && command pwd -P; }
-_GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_INPUT_PATH-}") || _GRAPHIFY_INPUT_ROOT=""; _GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}") || _GRAPHIFY_OUTPUT_ROOT=""
+_GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_INPUT_PATH-}") || _GRAPHIFY_INPUT_ROOT=""; _GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}") || _GRAPHIFY_OUTPUT_ROOT=""; _graphify_absolute_command() { _gfy_command=$1; case "$_gfy_command" in /*) case "$_gfy_command" in */./*|*/../*|*/.|*/..) ;; *) GRAPHIFY_COMMAND_PATH=$_gfy_command; return 0 ;; esac; _gfy_command_dir=${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; */*) _gfy_command_dir=$_GRAPHIFY_WORKSPACE/${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; *) _gfy_command_dir=$_GRAPHIFY_WORKSPACE; _gfy_command_base=$_gfy_command ;; esac; case "$_gfy_command_base" in ""|.|..) return 1 ;; esac; _gfy_command_dir=$(CDPATH= cd -L -- "$_gfy_command_dir" 2>/dev/null && command pwd -L) || return 1; GRAPHIFY_COMMAND_PATH=$_gfy_command_dir/$_gfy_command_base; }
 _graphify_path_denied() { _gfy_policy_path=$1; [ "$_GRAPHIFY_WORKSPACE" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_WORKSPACE"|"$_GRAPHIFY_WORKSPACE"/*) return 0 ;; esac; [ -z "$_GRAPHIFY_INPUT_ROOT" ] || { [ "$_GRAPHIFY_INPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_INPUT_ROOT"|"$_GRAPHIFY_INPUT_ROOT"/*) return 0 ;; esac; }; [ -z "$_GRAPHIFY_OUTPUT_ROOT" ] || { [ "$_GRAPHIFY_OUTPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_OUTPUT_ROOT"|"$_GRAPHIFY_OUTPUT_ROOT"/*) return 0 ;; esac; }; return 1; }
 _graphify_readlink() {
     if [ -x /usr/bin/readlink ]; then /usr/bin/readlink "$1"
@@ -402,7 +402,7 @@ _graphify_resolve_ambient() {
     [ -x "$_gfy_lexical" ] || return 1
     GRAPHIFY_RESOLVED=$_gfy_lexical
 }
-_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _graphify_resolve_ambient "$_gfy_found"; }
+_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _graphify_absolute_command "$_gfy_found" || return 1; _graphify_resolve_ambient "$GRAPHIFY_COMMAND_PATH"; }
 _graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
 _graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
 _graphify_ambient_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" ambient "$_GRAPHIFY_WORKSPACE" "$_GRAPHIFY_INPUT_ROOT" "$_GRAPHIFY_OUTPUT_ROOT" >/dev/null 2>&1; }
@@ -478,6 +478,7 @@ _graphify_to_native() { [ -n "$1" ] || return 0; "$_GRAPHIFY_CYGPATH" -w "$1"; }
 _GRAPHIFY_WORKSPACE=$(command pwd -P) || exit 1
 _GRAPHIFY_WORKSPACE_NATIVE=$(_graphify_to_native "$_GRAPHIFY_WORKSPACE") || exit 1
 _graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in [a-zA-Z]:|[a-zA-Z]:[!\\/]*|\\|\\[!\\]*) return 1 ;; /*) ;; *) _gfy_root=$(_graphify_to_posix "$_gfy_root") || return 1 ;; esac; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; if [ -d "$_gfy_root" ]; then CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && command pwd -P; else printf '%s\n' "$_gfy_root"; fi; }
+_graphify_absolute_command() { _gfy_command=$1; case "$_gfy_command" in /*) case "$_gfy_command" in */./*|*/../*|*/.|*/..) ;; *) GRAPHIFY_COMMAND_PATH=$_gfy_command; return 0 ;; esac; _gfy_command_dir=${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; */*) _gfy_command_dir=$_GRAPHIFY_WORKSPACE/${_gfy_command%/*}; _gfy_command_base=${_gfy_command##*/} ;; *) _gfy_command_dir=$_GRAPHIFY_WORKSPACE; _gfy_command_base=$_gfy_command ;; esac; case "$_gfy_command_base" in ""|.|..) return 1 ;; esac; _gfy_command_dir=$(CDPATH= cd -L -- "$_gfy_command_dir" 2>/dev/null && command pwd -L) || return 1; GRAPHIFY_COMMAND_PATH=$_gfy_command_dir/$_gfy_command_base; }
 _GRAPHIFY_DENY_POLICY_INVALID=0
 _gfy_input_raw=${GRAPHIFY_INPUT_PATH-}; _gfy_output_raw=${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}
 _GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "$_gfy_input_raw") || { _GRAPHIFY_INPUT_ROOT=""; [ -z "$_gfy_input_raw" ] || _GRAPHIFY_DENY_POLICY_INVALID=1; }
@@ -507,7 +508,7 @@ _graphify_resolve_ambient() {
     _gfy_path=$_gfy_dir/$_gfy_base; _graphify_path_denied "$_gfy_path" && return 1
     [ -x "$_gfy_lexical" ] || return 1; GRAPHIFY_RESOLVED=$_gfy_lexical
 }
-_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _gfy_found=$(_graphify_to_posix "$_gfy_found") || return 1; _graphify_resolve_ambient "$_gfy_found"; }
+_graphify_command() { _gfy_found=$(command -v "$1" 2>/dev/null) || return 1; _gfy_found=$(_graphify_to_posix "$_gfy_found") || return 1; _graphify_absolute_command "$_gfy_found" || return 1; _graphify_resolve_ambient "$GRAPHIFY_COMMAND_PATH"; }
 _graphify_supported() { [ -n "$1" ] && "$1" -E -P -B -c "$_GRAPHIFY_VERSION_CHECK" >/dev/null 2>&1; }
 _graphify_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" trusted >/dev/null 2>&1; }
 _graphify_ambient_usable() { _graphify_supported "$1" && "$1" -E -P -B -c "$_GRAPHIFY_IDENTITY_CHECK" ambient "$_GRAPHIFY_WORKSPACE_NATIVE" "$_GRAPHIFY_INPUT_ROOT_NATIVE" "$_GRAPHIFY_OUTPUT_ROOT_NATIVE" >/dev/null 2>&1; }
@@ -610,22 +611,59 @@ function Test-GraphifyFullyQualifiedPath {
     return $true
 }
 function Resolve-GraphifyPolicyPath {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [Collections.Generic.HashSet[string]]$Visited = $null,
+        [int]$Hops = 0
+    )
     if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
+        if (-not $root) { return $null }
+        if ($null -eq $Visited) {
+            $Visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        }
         $current = $root
-        $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($part in ($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })) {
+        $parts = @($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })
+        for ($index = 0; $index -lt $parts.Count; $index++) {
+            $part = $parts[$index]
             $current = [IO.Path]::GetFullPath((Join-Path $current $part))
             $info = Get-Item -LiteralPath $current -Force -ErrorAction Stop
             if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") { return $null }
-                $target = $info.ResolveLinkTarget($true)
-                if (-not $target) { return $null }
-                $current = [IO.Path]::GetFullPath($target.FullName)
-                if (-not $visited.Add($current)) { return $null }
+                $sourcePath = [IO.Path]::GetFullPath($current)
+                if (-not $Visited.Add($sourcePath)) { return $null }
+                $nextHops = $Hops + 1
+                if ($nextHops -gt 63) { return $null }
+                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") {
+                    if ($info.PSObject.Properties.Name -notcontains "Target") { return $null }
+                    $targets = @(
+                        @($info.Target) | Where-Object {
+                            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+                        }
+                    )
+                    if ($targets.Count -ne 1) { return $null }
+                    $targetText = [string]$targets[0]
+                } else {
+                    $target = $info.ResolveLinkTarget($false)
+                    if (-not $target -or -not $target.FullName) { return $null }
+                    $targetText = [string]$target.FullName
+                }
+                if (Test-GraphifyFullyQualifiedPath $targetText) {
+                    $targetPath = [IO.Path]::GetFullPath($targetText)
+                } else {
+                    $linkParent = Split-Path -Parent $sourcePath
+                    if (-not $linkParent) { return $null }
+                    $targetPath = [IO.Path]::GetFullPath((Join-Path $linkParent $targetText))
+                }
+                if ($index + 1 -lt $parts.Count) {
+                    $remainingSuffix = [string]::Join(
+                        [IO.Path]::DirectorySeparatorChar,
+                        [string[]]$parts[($index + 1)..($parts.Count - 1)]
+                    )
+                    $targetPath = Join-Path $targetPath $remainingSuffix
+                }
+                return Resolve-GraphifyPolicyPath $targetPath $Visited $nextHops
             }
         }
         return [IO.Path]::GetFullPath($current)
@@ -682,22 +720,47 @@ $GraphifyIdentityCheck = @'
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifyAmbientPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifySupportedPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Invoke-GraphifyNativeText {
+    param([string]$Candidate, [string[]]$Arguments)
+    if (-not $Candidate) { return $null }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
+    $output = & $Candidate @Arguments 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    if (-not ($invocationSucceeded -and $exitCode -eq 0)) { return $null }
+    $lines = @(
+        @($output) | Where-Object {
+            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+        }
+    )
+    if ($lines.Count -ne 1) { return $null }
+    return ([string]$lines[0]).Trim()
 }
 if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
@@ -707,19 +770,23 @@ if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
     if ($uv) {
-        $uvDir = (& $uv tool dir 2>$null).Trim()
-        $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $uvDir = Invoke-GraphifyNativeText $uv @("tool", "dir")
+        if ($uvDir) {
+            $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
     $pipx = Resolve-GraphifyAmbientCommand pipx
     if ($pipx) {
-        $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
-        $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $venvs = Invoke-GraphifyNativeText $pipx @("environment", "--value", "PIPX_LOCAL_VENVS")
+        if ($venvs) {
+            $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
@@ -736,8 +803,8 @@ if (-not $GraphifyPython) {
         $candidate = Resolve-GraphifyAmbientCommand $name
         if (-not $candidate) { continue }
         if ($name -eq "py") {
-            $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
         } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }
@@ -761,8 +828,8 @@ if (-not $installPython) {{
         $candidate = Resolve-GraphifyAmbientCommand $name
         if (-not $candidate) {{ continue }}
         if ($name -eq "py") {{
-            $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifySupportedPython $resolved)) {{ $installPython = [IO.Path]::GetFullPath($resolved); $installPythonExplicit = $false; break }}
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifySupportedPython $resolved)) {{ $installPython = [IO.Path]::GetFullPath($resolved); $installPythonExplicit = $false; break }}
         }} elseif (Test-GraphifySupportedPython $candidate) {{ $installPython = $candidate; $installPythonExplicit = $false; break }}
     }}
 }}
@@ -772,10 +839,12 @@ if (-not $installPythonUsable) {{
     if ($uv) {{
         & $uv tool install --python ">=3.14.2,<3.15" --upgrade graphifyy -q
         if ($LASTEXITCODE -ne 0) {{ throw "Graphify uv tool installation failed." }}
-        $uvDir = (& $uv tool dir 2>$null).Trim()
-        $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) {{ $candidate = Join-Path $uvDir "graphifyy/bin/python" }}
-        if (-not (Test-GraphifyWorkspacePath $candidate) -and (Test-GraphifyAmbientPython $candidate)) {{ $GraphifyPython = [IO.Path]::GetFullPath($candidate); $GraphifyPythonExplicit = $false }}
+        $uvDir = Invoke-GraphifyNativeText $uv @("tool", "dir")
+        if ($uvDir) {{
+            $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) {{ $candidate = Join-Path $uvDir "graphifyy/bin/python" }}
+            if (-not (Test-GraphifyWorkspacePath $candidate) -and (Test-GraphifyAmbientPython $candidate)) {{ $GraphifyPython = [IO.Path]::GetFullPath($candidate); $GraphifyPythonExplicit = $false }}
+        }}
     }} elseif ($installPython) {{
         & $installPython -E -P -B -m pip install graphifyy -q
         if ($LASTEXITCODE -ne 0) {{ throw "Graphify pip installation failed." }}

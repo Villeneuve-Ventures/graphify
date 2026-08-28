@@ -23,22 +23,59 @@ function Test-GraphifyFullyQualifiedPath {
     return $true
 }
 function Resolve-GraphifyPolicyPath {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [Collections.Generic.HashSet[string]]$Visited = $null,
+        [int]$Hops = 0
+    )
     if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
+        if (-not $root) { return $null }
+        if ($null -eq $Visited) {
+            $Visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        }
         $current = $root
-        $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($part in ($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })) {
+        $parts = @($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })
+        for ($index = 0; $index -lt $parts.Count; $index++) {
+            $part = $parts[$index]
             $current = [IO.Path]::GetFullPath((Join-Path $current $part))
             $info = Get-Item -LiteralPath $current -Force -ErrorAction Stop
             if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") { return $null }
-                $target = $info.ResolveLinkTarget($true)
-                if (-not $target) { return $null }
-                $current = [IO.Path]::GetFullPath($target.FullName)
-                if (-not $visited.Add($current)) { return $null }
+                $sourcePath = [IO.Path]::GetFullPath($current)
+                if (-not $Visited.Add($sourcePath)) { return $null }
+                $nextHops = $Hops + 1
+                if ($nextHops -gt 63) { return $null }
+                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") {
+                    if ($info.PSObject.Properties.Name -notcontains "Target") { return $null }
+                    $targets = @(
+                        @($info.Target) | Where-Object {
+                            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+                        }
+                    )
+                    if ($targets.Count -ne 1) { return $null }
+                    $targetText = [string]$targets[0]
+                } else {
+                    $target = $info.ResolveLinkTarget($false)
+                    if (-not $target -or -not $target.FullName) { return $null }
+                    $targetText = [string]$target.FullName
+                }
+                if (Test-GraphifyFullyQualifiedPath $targetText) {
+                    $targetPath = [IO.Path]::GetFullPath($targetText)
+                } else {
+                    $linkParent = Split-Path -Parent $sourcePath
+                    if (-not $linkParent) { return $null }
+                    $targetPath = [IO.Path]::GetFullPath((Join-Path $linkParent $targetText))
+                }
+                if ($index + 1 -lt $parts.Count) {
+                    $remainingSuffix = [string]::Join(
+                        [IO.Path]::DirectorySeparatorChar,
+                        [string[]]$parts[($index + 1)..($parts.Count - 1)]
+                    )
+                    $targetPath = Join-Path $targetPath $remainingSuffix
+                }
+                return Resolve-GraphifyPolicyPath $targetPath $Visited $nextHops
             }
         }
         return [IO.Path]::GetFullPath($current)
@@ -95,22 +132,47 @@ exec('import importlib.metadata\nimport importlib.util\nimport json\nimport os\n
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifyAmbientPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifySupportedPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Invoke-GraphifyNativeText {
+    param([string]$Candidate, [string[]]$Arguments)
+    if (-not $Candidate) { return $null }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
+    $output = & $Candidate @Arguments 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    if (-not ($invocationSucceeded -and $exitCode -eq 0)) { return $null }
+    $lines = @(
+        @($output) | Where-Object {
+            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+        }
+    )
+    if ($lines.Count -ne 1) { return $null }
+    return ([string]$lines[0]).Trim()
 }
 if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
@@ -120,19 +182,23 @@ if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
     if ($uv) {
-        $uvDir = (& $uv tool dir 2>$null).Trim()
-        $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $uvDir = Invoke-GraphifyNativeText $uv @("tool", "dir")
+        if ($uvDir) {
+            $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
     $pipx = Resolve-GraphifyAmbientCommand pipx
     if ($pipx) {
-        $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
-        $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $venvs = Invoke-GraphifyNativeText $pipx @("environment", "--value", "PIPX_LOCAL_VENVS")
+        if ($venvs) {
+            $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
@@ -149,8 +215,8 @@ if (-not $GraphifyPython) {
         $candidate = Resolve-GraphifyAmbientCommand $name
         if (-not $candidate) { continue }
         if ($name -eq "py") {
-            $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
         } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }
@@ -187,22 +253,59 @@ function Test-GraphifyFullyQualifiedPath {
     return $true
 }
 function Resolve-GraphifyPolicyPath {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [Collections.Generic.HashSet[string]]$Visited = $null,
+        [int]$Hops = 0
+    )
     if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
+        if (-not $root) { return $null }
+        if ($null -eq $Visited) {
+            $Visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        }
         $current = $root
-        $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($part in ($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })) {
+        $parts = @($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })
+        for ($index = 0; $index -lt $parts.Count; $index++) {
+            $part = $parts[$index]
             $current = [IO.Path]::GetFullPath((Join-Path $current $part))
             $info = Get-Item -LiteralPath $current -Force -ErrorAction Stop
             if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") { return $null }
-                $target = $info.ResolveLinkTarget($true)
-                if (-not $target) { return $null }
-                $current = [IO.Path]::GetFullPath($target.FullName)
-                if (-not $visited.Add($current)) { return $null }
+                $sourcePath = [IO.Path]::GetFullPath($current)
+                if (-not $Visited.Add($sourcePath)) { return $null }
+                $nextHops = $Hops + 1
+                if ($nextHops -gt 63) { return $null }
+                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") {
+                    if ($info.PSObject.Properties.Name -notcontains "Target") { return $null }
+                    $targets = @(
+                        @($info.Target) | Where-Object {
+                            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+                        }
+                    )
+                    if ($targets.Count -ne 1) { return $null }
+                    $targetText = [string]$targets[0]
+                } else {
+                    $target = $info.ResolveLinkTarget($false)
+                    if (-not $target -or -not $target.FullName) { return $null }
+                    $targetText = [string]$target.FullName
+                }
+                if (Test-GraphifyFullyQualifiedPath $targetText) {
+                    $targetPath = [IO.Path]::GetFullPath($targetText)
+                } else {
+                    $linkParent = Split-Path -Parent $sourcePath
+                    if (-not $linkParent) { return $null }
+                    $targetPath = [IO.Path]::GetFullPath((Join-Path $linkParent $targetText))
+                }
+                if ($index + 1 -lt $parts.Count) {
+                    $remainingSuffix = [string]::Join(
+                        [IO.Path]::DirectorySeparatorChar,
+                        [string[]]$parts[($index + 1)..($parts.Count - 1)]
+                    )
+                    $targetPath = Join-Path $targetPath $remainingSuffix
+                }
+                return Resolve-GraphifyPolicyPath $targetPath $Visited $nextHops
             }
         }
         return [IO.Path]::GetFullPath($current)
@@ -259,22 +362,47 @@ exec('import importlib.metadata\nimport importlib.util\nimport json\nimport os\n
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifyAmbientPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifySupportedPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Invoke-GraphifyNativeText {
+    param([string]$Candidate, [string[]]$Arguments)
+    if (-not $Candidate) { return $null }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
+    $output = & $Candidate @Arguments 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    if (-not ($invocationSucceeded -and $exitCode -eq 0)) { return $null }
+    $lines = @(
+        @($output) | Where-Object {
+            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+        }
+    )
+    if ($lines.Count -ne 1) { return $null }
+    return ([string]$lines[0]).Trim()
 }
 if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
@@ -284,19 +412,23 @@ if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
     if ($uv) {
-        $uvDir = (& $uv tool dir 2>$null).Trim()
-        $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $uvDir = Invoke-GraphifyNativeText $uv @("tool", "dir")
+        if ($uvDir) {
+            $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
     $pipx = Resolve-GraphifyAmbientCommand pipx
     if ($pipx) {
-        $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
-        $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $venvs = Invoke-GraphifyNativeText $pipx @("environment", "--value", "PIPX_LOCAL_VENVS")
+        if ($venvs) {
+            $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
@@ -313,8 +445,8 @@ if (-not $GraphifyPython) {
         $candidate = Resolve-GraphifyAmbientCommand $name
         if (-not $candidate) { continue }
         if ($name -eq "py") {
-            $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
         } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }
@@ -341,22 +473,59 @@ function Test-GraphifyFullyQualifiedPath {
     return $true
 }
 function Resolve-GraphifyPolicyPath {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [Collections.Generic.HashSet[string]]$Visited = $null,
+        [int]$Hops = 0
+    )
     if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
+        if (-not $root) { return $null }
+        if ($null -eq $Visited) {
+            $Visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        }
         $current = $root
-        $visited = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($part in ($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })) {
+        $parts = @($full.Substring($root.Length) -split '[\\/]' | Where-Object { $_ })
+        for ($index = 0; $index -lt $parts.Count; $index++) {
+            $part = $parts[$index]
             $current = [IO.Path]::GetFullPath((Join-Path $current $part))
             $info = Get-Item -LiteralPath $current -Force -ErrorAction Stop
             if (($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") { return $null }
-                $target = $info.ResolveLinkTarget($true)
-                if (-not $target) { return $null }
-                $current = [IO.Path]::GetFullPath($target.FullName)
-                if (-not $visited.Add($current)) { return $null }
+                $sourcePath = [IO.Path]::GetFullPath($current)
+                if (-not $Visited.Add($sourcePath)) { return $null }
+                $nextHops = $Hops + 1
+                if ($nextHops -gt 63) { return $null }
+                if ($info.PSObject.Methods.Name -notcontains "ResolveLinkTarget") {
+                    if ($info.PSObject.Properties.Name -notcontains "Target") { return $null }
+                    $targets = @(
+                        @($info.Target) | Where-Object {
+                            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+                        }
+                    )
+                    if ($targets.Count -ne 1) { return $null }
+                    $targetText = [string]$targets[0]
+                } else {
+                    $target = $info.ResolveLinkTarget($false)
+                    if (-not $target -or -not $target.FullName) { return $null }
+                    $targetText = [string]$target.FullName
+                }
+                if (Test-GraphifyFullyQualifiedPath $targetText) {
+                    $targetPath = [IO.Path]::GetFullPath($targetText)
+                } else {
+                    $linkParent = Split-Path -Parent $sourcePath
+                    if (-not $linkParent) { return $null }
+                    $targetPath = [IO.Path]::GetFullPath((Join-Path $linkParent $targetText))
+                }
+                if ($index + 1 -lt $parts.Count) {
+                    $remainingSuffix = [string]::Join(
+                        [IO.Path]::DirectorySeparatorChar,
+                        [string[]]$parts[($index + 1)..($parts.Count - 1)]
+                    )
+                    $targetPath = Join-Path $targetPath $remainingSuffix
+                }
+                return Resolve-GraphifyPolicyPath $targetPath $Visited $nextHops
             }
         }
         return [IO.Path]::GetFullPath($current)
@@ -413,22 +582,47 @@ exec('import importlib.metadata\nimport importlib.util\nimport json\nimport os\n
 function Test-GraphifyPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck trusted 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifyAmbientPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     if (-not (Test-GraphifySupportedPython $Candidate)) { return $false }
     & $Candidate -E -P -B -c $GraphifyIdentityCheck ambient @GraphifyDenyRoots 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
 }
 function Test-GraphifySupportedPython {
     param([string]$Candidate)
     if (-not $Candidate) { return $false }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $false }
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
-    return $LASTEXITCODE -eq 0
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    return $invocationSucceeded -and $exitCode -eq 0
+}
+function Invoke-GraphifyNativeText {
+    param([string]$Candidate, [string[]]$Arguments)
+    if (-not $Candidate) { return $null }
+    if (-not (Test-Path -LiteralPath $Candidate -PathType Leaf)) { return $null }
+    $output = & $Candidate @Arguments 2>$null
+    $invocationSucceeded = $?
+    $exitCode = $LASTEXITCODE
+    if (-not ($invocationSucceeded -and $exitCode -eq 0)) { return $null }
+    $lines = @(
+        @($output) | Where-Object {
+            $_ -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$_)
+        }
+    )
+    if ($lines.Count -ne 1) { return $null }
+    return ([string]$lines[0]).Trim()
 }
 if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
@@ -438,19 +632,23 @@ if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
 if (-not $GraphifyPython) {
     $uv = Resolve-GraphifyAmbientCommand uv
     if ($uv) {
-        $uvDir = (& $uv tool dir 2>$null).Trim()
-        $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $uvDir = Invoke-GraphifyNativeText $uv @("tool", "dir")
+        if ($uvDir) {
+            $candidate = Join-Path $uvDir "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $uvDir "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
     $pipx = Resolve-GraphifyAmbientCommand pipx
     if ($pipx) {
-        $venvs = (& $pipx environment --value PIPX_LOCAL_VENVS 2>$null).Trim()
-        $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
-        if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        $venvs = Invoke-GraphifyNativeText $pipx @("environment", "--value", "PIPX_LOCAL_VENVS")
+        if ($venvs) {
+            $candidate = Join-Path $venvs "graphifyy\Scripts\python.exe"
+            if (-not (Test-Path -LiteralPath $candidate)) { $candidate = Join-Path $venvs "graphifyy/bin/python" }
+            if ((-not (Test-GraphifyWorkspacePath $candidate)) -and (Test-GraphifyAmbientPython $candidate)) { $GraphifyPython = [IO.Path]::GetFullPath($candidate) }
+        }
     }
 }
 if (-not $GraphifyPython) {
@@ -467,8 +665,8 @@ if (-not $GraphifyPython) {
         $candidate = Resolve-GraphifyAmbientCommand $name
         if (-not $candidate) { continue }
         if ($name -eq "py") {
-            $resolved = (& $candidate -3.14 -E -P -B -c "import sys; print(sys.executable)" 2>$null).Trim()
-            if ($LASTEXITCODE -eq 0 -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
+            $resolved = Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")
+            if ($resolved -and -not (Test-GraphifyWorkspacePath $resolved) -and (Test-GraphifyAmbientPython $resolved)) { $GraphifyPython = [IO.Path]::GetFullPath($resolved); break }
         } elseif (Test-GraphifyAmbientPython $candidate) { $GraphifyPython = $candidate; break }
     }
 }

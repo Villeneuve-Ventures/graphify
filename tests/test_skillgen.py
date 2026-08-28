@@ -74,6 +74,39 @@ def _run_powershell_script(
     )
 
 
+def _create_windows_junction_or_skip(junction: Path, target: Path) -> None:
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).decode(errors="replace").strip()
+        pytest.skip(f"Windows junction creation is unavailable on this host: {detail}")
+
+
+def _write_windows_py_output_shim(
+    path: Path, marker: Path, output_case: str
+) -> None:
+    output = {
+        "empty": "",
+        "multiline": "echo C:\\first-python.exe\r\necho C:\\second-python.exe\r\n",
+    }[output_case]
+    path.write_text(
+        f'@echo off\r\n>>"{marker}" echo ran\r\n{output}exit /b 0\r\n',
+        encoding="utf-8",
+        newline="",
+    )
+
+
+def _write_windows_python_delegate(path: Path, python: Path) -> None:
+    path.write_text(
+        f'@echo off\r\n"{python}" %*\r\nexit /b %ERRORLEVEL%\r\n',
+        encoding="utf-8",
+        newline="",
+    )
+
+
 def test_audit_coverage_passes():
     """Every v8 heading lands in the lean core or exactly one reference."""
     platforms = gen.load_platforms()
@@ -378,7 +411,9 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert "function Test-GraphifyPython" in bootstrap, key
             assert 'foreach ($name in @("python3.14", "python3", "py", "python"))' in bootstrap, key
             assert "Resolve-GraphifyAmbientCommand $name" in bootstrap, key
-            assert "& $candidate -3.14 -E -P -B -c" in bootstrap, key
+            assert bootstrap.count(
+                'Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-c", "import sys; print(sys.executable)")'
+            ) == 2, key
             assert "& $installPython -E -P -B -m pip install graphifyy" in bootstrap, key
             assert "& $uv tool install" in bootstrap, key
             assert "\n        pip install graphifyy" not in bootstrap, key
@@ -537,6 +572,27 @@ def _powershell_root_persistence_script() -> str:
     return _powershell_step1_scripts()[1].replace("INPUT_PATH", ".")
 
 
+def _powershell_function_sources(source: str) -> dict[str, str]:
+    from tree_sitter import Language, Parser
+    import tree_sitter_powershell
+
+    encoded = source.encode()
+    tree = Parser(Language(tree_sitter_powershell.language())).parse(encoded)
+    assert not tree.root_node.has_error, tree.root_node
+    functions: dict[str, str] = {}
+    pending = [tree.root_node]
+    while pending:
+        node = pending.pop()
+        if node.type == "function_statement":
+            name_node = next(
+                child for child in node.children if child.type == "function_name"
+            )
+            name = encoded[name_node.start_byte : name_node.end_byte].decode()
+            functions[name] = encoded[node.start_byte : node.end_byte].decode()
+        pending.extend(reversed(node.children))
+    return functions
+
+
 def _isolated_bootstrap_bin(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -651,11 +707,19 @@ def _run_posix_query_with_python(
     cwd: Path,
     trusted: bool,
     discovery_source: str = "path",
+    candidate_bin_dir: Path | None = None,
+    relative_path_entry: bool = False,
+    candidate_execution_marker: Path | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    bin_dir = tmp_path / f"candidate-bin-{python.parent.parent.name}-{discovery_source}"
+    bin_dir = candidate_bin_dir or (
+        tmp_path / f"candidate-bin-{python.parent.parent.name}-{discovery_source}"
+    )
     bin_dir.mkdir(exist_ok=True)
-    delegate = f'#!/bin/sh\nexec "{python}" "$@"\n'
+    marker_command = (
+        f': > "{candidate_execution_marker}"\n' if candidate_execution_marker else ""
+    )
+    delegate = f'#!/bin/sh\n{marker_command}exec "{python}" "$@"\n'
     if discovery_source == "path":
         candidate = bin_dir / "python3.14"
         candidate.write_text(delegate, encoding="utf-8")
@@ -693,7 +757,8 @@ def _run_posix_query_with_python(
         pipx.chmod(0o755)
     else:
         raise AssertionError(discovery_source)
-    env = {**os.environ, "PATH": str(bin_dir), **(extra_env or {})}
+    path_entry = os.path.relpath(bin_dir, cwd) if relative_path_entry else str(bin_dir)
+    env = {**os.environ, "PATH": path_entry, **(extra_env or {})}
     if trusted:
         env["VIRTUAL_ENV"] = str(python.parent.parent)
     else:
@@ -2476,6 +2541,84 @@ def test_posix_ambient_candidate_accepts_external_identity_valid_origin(
     assert marker.exists()
 
 
+def test_posix_ambient_candidate_accepts_external_relative_path_entry(tmp_path):
+    project = tmp_path / "workspace"
+    project.mkdir()
+    candidate_bin = tmp_path / "candidate-bin"
+    candidate_execution_marker = tmp_path / "relative-candidate-executed"
+    python, marker = _disposable_graphify_python(tmp_path, "relative-external")
+
+    result = _run_posix_query_with_python(
+        tmp_path,
+        python,
+        cwd=project,
+        trusted=False,
+        candidate_bin_dir=candidate_bin,
+        relative_path_entry=True,
+        candidate_execution_marker=candidate_execution_marker,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert candidate_execution_marker.exists()
+    assert marker.exists()
+
+
+@pytest.mark.parametrize(
+    "denied_location",
+    [
+        "workspace-direct",
+        "workspace-symlink-parent",
+        "input-symlink-parent",
+        "output-symlink-parent",
+    ],
+)
+def test_posix_relative_path_candidate_rejects_denied_physical_location_before_execution(
+    tmp_path, denied_location
+):
+    project = tmp_path / "workspace"
+    project.mkdir()
+    selected_input = tmp_path / "selected-input"
+    selected_input.mkdir()
+    selected_output = tmp_path / "selected-output"
+    selected_output.mkdir()
+    denied_root_name = denied_location.split("-", 1)[0]
+    denied_root = {
+        "workspace": project,
+        "input": selected_input,
+        "output": selected_output,
+    }[denied_root_name]
+    if denied_location == "workspace-direct":
+        candidate_bin = denied_root / "candidate-bin"
+    else:
+        physical_parent = denied_root / "physical-parent"
+        physical_parent.mkdir()
+        lexical_parent = tmp_path / f"external-alias-{denied_root_name}"
+        lexical_parent.symlink_to(physical_parent, target_is_directory=True)
+        candidate_bin = lexical_parent / "candidate-bin"
+    candidate_execution_marker = tmp_path / f"{denied_location}-candidate-executed"
+    python, marker = _disposable_graphify_python(
+        tmp_path, f"relative-denied-{denied_location}"
+    )
+
+    result = _run_posix_query_with_python(
+        tmp_path,
+        python,
+        cwd=project,
+        trusted=False,
+        candidate_bin_dir=candidate_bin,
+        relative_path_entry=True,
+        candidate_execution_marker=candidate_execution_marker,
+        extra_env={
+            "GRAPHIFY_INPUT_PATH": str(selected_input),
+            "GRAPHIFY_OUTPUT_ROOT": str(selected_output),
+        },
+    )
+
+    assert result.returncode != 0
+    assert not candidate_execution_marker.exists(), "denied candidate was executed"
+    assert not marker.exists(), "denied candidate reached generated operation"
+
+
 @pytest.mark.parametrize("deny_root", ["workspace", "input", "output"])
 @pytest.mark.parametrize(
     "origin_shape",
@@ -2666,6 +2809,135 @@ def test_powershell_bootstrap_validates_every_candidate_and_parses():
         assert not tree.root_node.has_error, tree.root_node
 
 
+def test_powershell_policy_path_rewalks_immediate_reparse_edges_with_shared_bound():
+    functions = _powershell_function_sources(gen._POWERSHELL_DISCOVERY)
+    resolver = functions["Resolve-GraphifyPolicyPath"]
+
+    assert "ResolveLinkTarget($false)" in resolver
+    assert "ResolveLinkTarget($true)" not in resolver
+    assert "$info.Target" in resolver
+    assert "IsNullOrWhiteSpace" in resolver
+    assert re.search(r"\.Count\s+-ne\s+1", resolver)
+    assert "HashSet[string]" in resolver
+    assert "OrdinalIgnoreCase" in resolver
+    assert re.search(r"\.Add\(\$", resolver)
+    assert re.search(r"\$\w*[Hh]ops?\s+-(?:ge|gt)\s+63\b", resolver)
+    assert re.search(
+        r"Join-Path\s+\$\w*[Tt]arget\w*\s+\$\w*(?:[Rr]emaining|[Ss]uffix)\w*",
+        resolver,
+    )
+    assert resolver.count("Resolve-GraphifyPolicyPath") >= 2
+
+
+def test_powershell_candidate_probes_require_leaf_and_immediate_native_status():
+    functions = _powershell_function_sources(gen._POWERSHELL_DISCOVERY)
+
+    for name in (
+        "Test-GraphifyPython",
+        "Test-GraphifyAmbientPython",
+        "Test-GraphifySupportedPython",
+    ):
+        lines = [line.strip() for line in functions[name].splitlines() if line.strip()]
+        leaf_index = next(
+            index
+            for index, line in enumerate(lines)
+            if "Test-Path" in line
+            and "-LiteralPath $Candidate" in line
+            and "-PathType Leaf" in line
+        )
+        invoke_index = next(
+            index for index, line in enumerate(lines) if "& $Candidate" in line
+        )
+        assert leaf_index < invoke_index
+        success_match = re.fullmatch(r"\$(\w+)\s*=\s*\$\?", lines[invoke_index + 1])
+        exit_match = re.fullmatch(
+            r"\$(\w+)\s*=\s*\$LASTEXITCODE", lines[invoke_index + 2]
+        )
+        assert success_match is not None
+        assert exit_match is not None
+        result = " ".join(lines[invoke_index + 3 :])
+        assert f"${success_match.group(1)}" in result
+        assert f"${exit_match.group(1)}" in result
+        assert "-and" in result
+        assert "-eq 0" in result
+
+
+def test_powershell_native_text_helper_owns_single_line_command_consumers():
+    discovery_functions = _powershell_function_sources(gen._POWERSHELL_DISCOVERY)
+    bootstrap_functions = _powershell_function_sources(gen._POWERSHELL_BOOTSTRAP)
+    helper_names = [
+        name
+        for name, body in discovery_functions.items()
+        if "IsNullOrWhiteSpace" in body
+        and "$LASTEXITCODE" in body
+        and ".Trim()" in body
+        and "@(" in body
+    ]
+    assert len(helper_names) == 1
+    helper_name = helper_names[0]
+    helper = discovery_functions[helper_name]
+    assert bootstrap_functions[helper_name] == helper
+
+    lines = [line.strip() for line in helper.splitlines() if line.strip()]
+    leaf_index = next(
+        index
+        for index, line in enumerate(lines)
+        if "Test-Path" in line and "-PathType Leaf" in line
+    )
+    invoke_index = next(index for index, line in enumerate(lines) if "& $" in line)
+    success_index = next(
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"\$\w+\s*=\s*\$\?", line)
+    )
+    exit_index = next(
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"\$\w+\s*=\s*\$LASTEXITCODE", line)
+    )
+    conjunction_index = next(
+        index
+        for index, line in enumerate(lines)
+        if index > exit_index and "-and" in line and "-eq 0" in line
+    )
+    array_index = next(
+        index
+        for index, line in enumerate(lines)
+        if index > conjunction_index and "@(" in line
+    )
+    cardinality_index = next(
+        index
+        for index, line in enumerate(lines)
+        if index > array_index and ".Count" in line and "1" in line
+    )
+    trim_index = next(
+        index
+        for index, line in enumerate(lines)
+        if index > cardinality_index and ".Trim()" in line
+    )
+    assert leaf_index < invoke_index < success_index < exit_index
+    assert exit_index < conjunction_index < array_index < cardinality_index < trim_index
+
+    direct_trim = re.compile(r"\(\s*&[^\r\n]+\)\.Trim\(\)")
+    assert not direct_trim.search(gen._POWERSHELL_DISCOVERY)
+    assert not direct_trim.search(gen._POWERSHELL_BOOTSTRAP)
+    discovery_calls = [
+        line
+        for line in gen._POWERSHELL_DISCOVERY.splitlines()
+        if helper_name in line and not line.lstrip().startswith("function ")
+    ]
+    bootstrap_calls = [
+        line
+        for line in gen._POWERSHELL_BOOTSTRAP.splitlines()
+        if helper_name in line and not line.lstrip().startswith("function ")
+    ]
+    assert any("$uv" in line and "tool" in line and "dir" in line for line in discovery_calls)
+    assert any("$pipx" in line and "PIPX_LOCAL_VENVS" in line for line in discovery_calls)
+    assert any("$candidate" in line and "-3.14" in line for line in discovery_calls)
+    assert sum("$uv" in line and "tool" in line and "dir" in line for line in bootstrap_calls) >= 2
+    assert sum("$candidate" in line and "-3.14" in line for line in bootstrap_calls) >= 2
+
+
 def test_powershell_bootstrap_separates_trusted_identity_from_ambient_origin_policy():
     script = _powershell_bootstrap_script()
 
@@ -2845,6 +3117,242 @@ def test_powershell_reparse_aliases_cannot_escape_deny_roots(tmp_path, alias_kin
 
     assert result.returncode != 0
     assert not marker.exists()
+
+
+@pytest.mark.skipif(
+    not _windows_powershell_51_available(),
+    reason="runtime requires Windows PowerShell 5.1; pwsh cannot prove Target fallback",
+)
+def test_powershell_51_two_hop_junction_preserves_suffix_and_executes_external_graphify(
+    tmp_path,
+):
+    executable = shutil.which("powershell.exe")
+    assert executable is not None
+    project = tmp_path / "workspace"
+    project.mkdir()
+    middle = tmp_path / "junction-middle"
+    middle.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    python, marker = _disposable_graphify_python(external, "identity-valid")
+    physical_candidate = python.with_name("python3.14.exe")
+    shutil.copy2(python, physical_candidate)
+
+    second_hop = middle / "second-hop"
+    _create_windows_junction_or_skip(second_hop, external)
+    first_hop = tmp_path / "first-hop"
+    _create_windows_junction_or_skip(first_hop, middle)
+    candidate = (
+        first_hop
+        / "second-hop"
+        / "identity-valid"
+        / "Scripts"
+        / "python3.14.exe"
+    )
+    assert candidate.exists()
+
+    env = os.environ.copy()
+    env["PATH"] = str(candidate.parent)
+    env.pop("VIRTUAL_ENV", None)
+    script = (
+        gen._POWERSHELL_DISCOVERY
+        + "\nif (-not $GraphifyPython) { exit 91 }\n"
+        + "& $GraphifyPython -E -P -B -m graphify\n"
+        + "$invocationSucceeded = $?\n"
+        + "$exitCode = $LASTEXITCODE\n"
+        + "if (-not $invocationSucceeded -or $exitCode -ne 0) { exit 92 }\n"
+    )
+
+    result = _run_powershell_script(
+        executable,
+        script,
+        tmp_path,
+        cwd=project,
+        env=env,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert marker.exists(), "the exact once-preserved suffix never reached Graphify"
+
+
+@pytest.mark.skipif(
+    not _windows_powershell_51_available(),
+    reason="runtime requires Windows PowerShell 5.1; pwsh cannot prove Target fallback",
+)
+def test_powershell_51_reparse_cycle_fails_closed_within_timeout(tmp_path):
+    executable = shutil.which("powershell.exe")
+    assert executable is not None
+    first = tmp_path / "cycle-first"
+    second = tmp_path / "cycle-second"
+    _create_windows_junction_or_skip(first, second)
+    _create_windows_junction_or_skip(second, first)
+    cyclic_candidate = first / "missing.exe"
+    candidate_literal = "'" + str(cyclic_candidate).replace("'", "''") + "'"
+    script = (
+        "$GraphifyDiscoveryOptional = $true\n"
+        + gen._POWERSHELL_DISCOVERY
+        + f"\nif (Resolve-GraphifyPolicyPath {candidate_literal}) {{ exit 91 }}\n"
+    )
+    env = os.environ.copy()
+    env["PATH"] = ""
+    env.pop("VIRTUAL_ENV", None)
+
+    result = _run_powershell_script(
+        executable,
+        script,
+        tmp_path,
+        cwd=tmp_path,
+        env=env,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+@pytest.mark.skipif(
+    not _windows_powershell_51_available(),
+    reason="runtime requires Windows PowerShell 5.1; pwsh cannot prove stale status",
+)
+def test_powershell_51_missing_candidate_rejects_stale_success_status(tmp_path):
+    executable = shutil.which("powershell.exe")
+    assert executable is not None
+    missing = tmp_path / "missing-python.exe"
+    missing_literal = "'" + str(missing).replace("'", "''") + "'"
+    script = (
+        "$GraphifyDiscoveryOptional = $true\n"
+        + gen._POWERSHELL_DISCOVERY
+        + f"\n$missing = {missing_literal}\n"
+        + "$LASTEXITCODE = 0\n"
+        + "if (Test-GraphifySupportedPython $missing) { exit 91 }\n"
+        + "$LASTEXITCODE = 0\n"
+        + "if (Test-GraphifyPython $missing) { exit 92 }\n"
+        + "$LASTEXITCODE = 0\n"
+        + "if (Test-GraphifyAmbientPython $missing) { exit 93 }\n"
+    )
+    env = os.environ.copy()
+    env["PATH"] = ""
+    env.pop("VIRTUAL_ENV", None)
+
+    result = _run_powershell_script(
+        executable,
+        script,
+        tmp_path,
+        cwd=tmp_path,
+        env=env,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+
+
+@pytest.mark.skipif(
+    not _windows_powershell_51_available(),
+    reason="runtime requires Windows PowerShell 5.1; pwsh cannot prove native output handling",
+)
+@pytest.mark.parametrize("py_output", ["empty", "multiline"])
+def test_powershell_51_ordinary_discovery_rejects_ambiguous_py_output_and_falls_through(
+    tmp_path, py_output
+):
+    executable = shutil.which("powershell.exe")
+    assert executable is not None
+    project = tmp_path / "workspace"
+    project.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    python, graphify_marker = _disposable_graphify_python(
+        external, f"ordinary-{py_output}"
+    )
+    bin_dir = tmp_path / "ordinary-bin"
+    bin_dir.mkdir()
+    py_marker = tmp_path / f"ordinary-{py_output}-py-ran"
+    _write_windows_py_output_shim(bin_dir / "py.cmd", py_marker, py_output)
+    _write_windows_python_delegate(bin_dir / "python.cmd", python)
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env.pop("VIRTUAL_ENV", None)
+    script = (
+        gen._POWERSHELL_DISCOVERY
+        + "\nif (-not $GraphifyPython) { exit 91 }\n"
+        + "& $GraphifyPython -E -P -B -m graphify\n"
+        + "$invocationSucceeded = $?\n"
+        + "$exitCode = $LASTEXITCODE\n"
+        + "if (-not $invocationSucceeded -or $exitCode -ne 0) { exit 92 }\n"
+    )
+
+    result = _run_powershell_script(
+        executable,
+        script,
+        tmp_path,
+        cwd=project,
+        env=env,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    assert py_marker.read_text(encoding="utf-8").splitlines() == ["ran"]
+    assert graphify_marker.exists()
+
+
+@pytest.mark.skipif(
+    not _windows_powershell_51_available(),
+    reason="runtime requires Windows PowerShell 5.1; pwsh cannot prove bootstrap fallback",
+)
+@pytest.mark.parametrize("py_output", ["empty", "multiline"])
+def test_powershell_51_bootstrap_rejects_ambiguous_py_output_then_installs_with_python(
+    tmp_path, py_output
+):
+    executable = shutil.which("powershell.exe")
+    assert executable is not None
+    project = tmp_path / "workspace"
+    project.mkdir()
+    python, pip_marker, graphify_marker = _offline_python_with_trusted_fake_pip(
+        tmp_path
+    )
+    bin_dir = tmp_path / "bootstrap-bin"
+    bin_dir.mkdir()
+    py_marker = tmp_path / f"bootstrap-{py_output}-py-ran"
+    _write_windows_py_output_shim(bin_dir / "py.cmd", py_marker, py_output)
+    _write_windows_python_delegate(bin_dir / "python.cmd", python)
+    env = os.environ.copy()
+    env["PATH"] = str(bin_dir)
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("UV_TOOL_DIR", None)
+    env.pop("PIPX_HOME", None)
+
+    bootstrap = _run_powershell_script(
+        executable,
+        _powershell_bootstrap_script(),
+        tmp_path,
+        cwd=project,
+        env=env,
+        timeout=30,
+    )
+
+    assert bootstrap.returncode == 0, bootstrap.stderr.decode(errors="replace")
+    assert py_marker.read_text(encoding="utf-8").splitlines() == ["ran", "ran"]
+    assert "install graphifyy" in pip_marker.read_text(encoding="utf-8")
+    pointer = project / "graphify-out" / ".graphify_python"
+    pointer.parent.mkdir(exist_ok=True)
+    advisory_value = "C:\\untrusted\\missing-python.exe"
+    pointer.write_text(advisory_value, encoding="utf-8")
+    operation = _run_powershell_script(
+        executable,
+        gen._POWERSHELL_DISCOVERY
+        + "\nif (-not $GraphifyPython) { exit 91 }\n"
+        + "& $GraphifyPython -E -P -B -m graphify\n"
+        + "$invocationSucceeded = $?\n"
+        + "$exitCode = $LASTEXITCODE\n"
+        + "if (-not $invocationSucceeded -or $exitCode -ne 0) { exit 92 }\n",
+        tmp_path,
+        cwd=project,
+        env=env,
+        timeout=15,
+    )
+
+    assert operation.returncode == 0, operation.stderr.decode(errors="replace")
+    assert graphify_marker.exists()
+    assert pointer.read_text(encoding="utf-8") == advisory_value
 
 
 @pytest.mark.skipif(
