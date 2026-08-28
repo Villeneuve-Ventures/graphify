@@ -32,6 +32,27 @@ _WINDOWS_POWERSHELL = sys.platform == "win32" and (
 )
 
 
+def _windows_powershell_51_available() -> bool:
+    if sys.platform != "win32":
+        return False
+    executable = shutil.which("powershell.exe")
+    if executable is None:
+        return False
+    result = subprocess.run(
+        [
+            executable,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$PSVersionTable.PSVersion.ToString()",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip().startswith("5.1")
+
+
 def _run_powershell_script(
     executable: str,
     script: str,
@@ -386,7 +407,14 @@ def test_monolithic_skills_route_mcp_and_watch_through_fresh_interpreter(platfor
     assert body.count("successfully rerun Step 1") == 2
     assert body.count("advisory metadata only") >= 2
     assert "is freshly validated and overwritten" not in body
-    assert body.count('"args": ["-E", "-P", "-B", "-m", "graphify.serve", sys.argv[2]]') == 1
+    assert body.count(
+        'graph_path = os.path.join(os.path.realpath(os.getcwd()), '
+        '"graphify-out", "graph.json")'
+    ) == 1
+    assert body.count(
+        '"args": ["-E", "-P", "-B", "-m", "graphify.serve", graph_path]'
+    ) == 1
+    assert '"args": ["-E", "-P", "-B", "-m", "graphify.serve", sys.argv[2]]' not in body
     assert "python3 -m graphify.serve" not in body
     assert "python3 -m graphify.watch" not in body
     assert '"command": "python3"' not in body
@@ -718,6 +746,313 @@ def _block_containing(body: str, needle: str) -> str:
     matches = [block for _, block in _executable_blocks(body) if needle in block]
     assert len(matches) == 1, (needle, len(matches))
     return matches[0]
+
+
+def test_step1_bootstrap_targets_only_install_step():
+    platforms = gen.load_platforms()
+    rendered = {key: gen.render(platform) for key, platform in platforms.items()}
+    assert len(rendered) == 16
+
+    install_heading = "### Step 1 - Ensure graphify is installed"
+    install_marker = "Installation is the only discovery path allowed to mutate the environment."
+    pointer_write = "graphify.interpreter_pointer write"
+    split_queries = []
+    for key, artifacts in rendered.items():
+        platform = platforms[key]
+        primary = artifacts[0].content
+        assert primary.count(install_heading) == 1, key
+        assert primary.count(install_marker) == 1, key
+        assert primary.count(pointer_write) == 1, key
+        if platform.bucket == "split":
+            query = next(
+                artifact.content
+                for artifact in artifacts
+                if artifact.path.endswith("/references/query.md")
+            )
+            split_queries.append((key, query))
+
+    assert len(split_queries) == 14
+    for key, query in split_queries:
+        assert install_heading not in query, key
+        assert install_marker not in query, key
+        assert pointer_write not in query, key
+        ordered = (
+            "if not Path('graphify-out/graph.json').exists():",
+            "### Step 0 — Constrained query expansion",
+            "### Step 1 — Traversal",
+            '-m graphify query "QUESTION"',
+        )
+        offsets = [query.index(needle) for needle in ordered]
+        assert offsets == sorted(offsets), key
+
+    posix = platforms["claude"]
+    target = f"{install_heading}\n\n```bash\necho old\n```\n"
+    with pytest.raises(ValueError):
+        gen._render_step1_bootstrap("# no install target\n", posix, artifact_role="core")
+    with pytest.raises(ValueError):
+        gen._render_step1_bootstrap("# no install target\n", posix, artifact_role="monolith")
+    untouched = "### Step 1 — Traversal\n\n```bash\necho query\n```\n"
+    assert gen._render_step1_bootstrap(
+        untouched, posix, artifact_role="reference"
+    ) == untouched
+    for role in ("core", "monolith", "reference"):
+        with pytest.raises(ValueError):
+            gen._render_step1_bootstrap(target + target, posix, artifact_role=role)
+
+
+@pytest.mark.parametrize("candidate_path", ["lexical", "physical"])
+def test_posix_operational_input_binding_reaches_privileged_discovery_child(
+    tmp_path, candidate_path
+):
+    _, refs = _platform_artifacts("claude")
+    block = _block_containing(refs["update.md"], "-m graphify update INPUT_PATH")
+    guard = gen._POSIX_OPERATION_GUARD
+    assert guard.startswith("GRAPHIFY_PYTHON=$(")
+    assert "/bin/sh -p -c" in guard
+    outer_tail = (
+        "); GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON%x}; "
+        "GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON:?Graphify interpreter discovery failed}"
+    )
+    assert guard.endswith(outer_tail)
+    assert guard[guard.rfind("); ") + 3 :] == outer_tail[3:]
+
+    project = tmp_path / "project"
+    project.mkdir()
+    physical_input = tmp_path / "physical input root"
+    candidate_bin = physical_input / "bin"
+    candidate_bin.mkdir(parents=True)
+    input_alias = tmp_path / "input alias with spaces"
+    input_alias.symlink_to(physical_input, target_is_directory=True)
+    marker = tmp_path / f"{candidate_path}-candidate-ran"
+    _write_executable_sentinel(
+        candidate_bin / "python3.14", marker, delegate=Path(sys.executable)
+    )
+    selected_bin = input_alias / "bin" if candidate_path == "lexical" else candidate_bin
+    script = block.replace(
+        "GRAPHIFY_INPUT_PATH='INPUT_PATH'",
+        f"GRAPHIFY_INPUT_PATH='{input_alias}'",
+        1,
+    ).replace(
+        '"$GRAPHIFY_PYTHON" -E -P -B -m graphify update INPUT_PATH',
+        '"$GRAPHIFY_PYTHON" -E -P -B -m graphify --help',
+        1,
+    )
+    env = {**os.environ, "PATH": str(selected_bin)}
+    env.pop("VIRTUAL_ENV", None)
+
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert not marker.exists()
+
+
+def test_posix_generated_discovery_uses_privileged_builtin_pwd(tmp_path):
+    assert "/bin/pwd" not in gen._POSIX_DISCOVERY
+    assert "/bin/pwd" not in gen._POSIX_OPERATION_GUARD
+    assert "/bin/pwd" not in gen._MCP_CONFIG["posix"]
+    assert gen._POSIX_DISCOVERY.count("command pwd -P") >= 3
+
+    project = tmp_path / "project"
+    project.mkdir()
+    sentinel_bin = tmp_path / "sentinel-bin"
+    sentinel_bin.mkdir()
+    path_marker = tmp_path / "path-pwd-ran"
+    _write_executable_sentinel(sentinel_bin / "pwd", path_marker)
+    env = {
+        **os.environ,
+        "PATH": str(sentinel_bin) + os.pathsep + os.environ.get("PATH", ""),
+        "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+    }
+
+    builtin = subprocess.run(
+        ["/bin/sh", "-p", "-c", "command pwd -P"],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert builtin.returncode == 0, builtin.stderr
+    assert builtin.stdout.strip() == str(project.resolve())
+    assert not path_marker.exists()
+
+    for guard_source, guard in (
+        ("owner", gen._POSIX_OPERATION_GUARD),
+        ("rendered-query", _query_block_as_help()),
+    ):
+        control = tmp_path / f"{guard_source}-control"
+        script = guard + "\n" + (
+            '"$GRAPHIFY_PYTHON" -E -P -B -c '
+            "'from pathlib import Path; import sys; Path(sys.argv[1]).touch()' "
+            '"$GFY_CONTROL_MARKER"\n'
+        )
+        result = subprocess.run(
+            ["/bin/bash", "-c", script],
+            cwd=project,
+            env={**env, "GFY_CONTROL_MARKER": str(control)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert control.exists()
+        assert not path_marker.exists()
+
+    config = gen._MCP_CONFIG["posix"].replace(
+        "@@GRAPHIFY_GUARD@@", gen._POSIX_OPERATION_GUARD
+    )
+    config_script = config.split("```bash\n", 1)[1].rsplit("\n```", 1)[0]
+    child = tmp_path / "mcp-config.sh"
+    child.write_text(config_script, encoding="utf-8")
+    function_marker = tmp_path / "function-pwd-ran"
+    parent = f"""
+function pwd {{ : > "{function_marker}"; return 97; }}
+export -f pwd
+exec /bin/bash "$1"
+"""
+    result = subprocess.run(
+        ["/bin/bash", "-c", parent, "hostile-pwd-parent", str(child)],
+        cwd=project,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mcpServers"]["graphify"]["args"][-1] == str(
+        project.resolve() / "graphify-out" / "graph.json"
+    )
+    assert not function_marker.exists()
+    assert not path_marker.exists()
+
+
+def test_powershell_discovery_uses_ps51_compatible_fully_qualified_path_check():
+    discovery = gen._POWERSHELL_DISCOVERY
+    bootstrap, root_persistence = _powershell_step1_scripts()
+    windows_artifacts = gen.render(gen.load_platforms()["windows"])
+
+    assert "IsPathFullyQualified" not in discovery
+    assert "IsPathFullyQualified" not in gen._POWERSHELL_BOOTSTRAP
+    assert all("IsPathFullyQualified" not in artifact.content for artifact in windows_artifacts)
+    assert discovery.count("function Test-GraphifyFullyQualifiedPath") == 1
+    assert "Test-GraphifyFullyQualifiedPath $Path" in discovery
+    assert "Test-GraphifyFullyQualifiedPath $path" in discovery
+    assert 'Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV"' in discovery
+    assert gen._POWERSHELL_BOOTSTRAP.count(
+        'Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV"'
+    ) == 2
+
+    from tree_sitter import Language, Parser
+    import tree_sitter_powershell
+
+    parser = Parser(Language(tree_sitter_powershell.language()))
+    for source in (bootstrap, root_persistence):
+        tree = parser.parse(source.encode())
+        assert not tree.root_node.has_error, tree.root_node
+
+
+@pytest.mark.skipif(
+    not _windows_powershell_51_available(),
+    reason="Windows PowerShell 5.1 runtime unavailable; native compatibility validation gap",
+)
+def test_powershell_fully_qualified_path_check_matches_windows_semantics(tmp_path):
+    executable = shutil.which("powershell.exe")
+    assert executable is not None
+
+    def ps_string(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    cases = {
+        r"C:\absolute": True,
+        "C:/absolute": True,
+        r"\\server\share\absolute": True,
+        str(tmp_path.resolve()): True,
+        "": False,
+        r"relative\path": False,
+        "C:relative": False,
+        r"\current-drive-relative": False,
+        "/current-drive-relative": False,
+    }
+    entries = "\n".join(
+        f"$Expected[{ps_string(path)}] = ${str(expected).lower()}"
+        for path, expected in cases.items()
+    )
+    script = (
+        "$GraphifyDiscoveryOptional = $true\n"
+        + gen._POWERSHELL_DISCOVERY
+        + "\n$Expected = [ordered]@{}\n"
+        + entries
+        + "\n$Actual = [ordered]@{}\n"
+        + "foreach ($Entry in $Expected.GetEnumerator()) { "
+        + "$Actual[$Entry.Key] = [bool](Test-GraphifyFullyQualifiedPath $Entry.Key) }\n"
+        + "$Actual | ConvertTo-Json -Compress\n"
+    )
+    result = _run_powershell_script(
+        executable,
+        script,
+        tmp_path,
+        cwd=tmp_path,
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    output = [line for line in result.stdout.decode().splitlines() if line.strip()]
+    assert json.loads(output[-1]) == cases
+
+
+def test_generated_query_references_preserve_traversal_step():
+    rendered = gen.render_all(gen.load_platforms())
+    queries = [
+        artifact
+        for artifact in rendered
+        if artifact.path.endswith("/references/query.md")
+    ]
+    assert len(queries) == 14
+
+    for artifact in queries:
+        committed = (REPO_ROOT / artifact.path).read_text(encoding="utf-8")
+        expected = gen._expected_path(artifact.path).read_text(encoding="utf-8")
+        assert committed == artifact.content, artifact.path
+        assert expected == artifact.content, artifact.path
+        assert committed.count("### Step 1 — Traversal") == 1, artifact.path
+        assert "### Step 0 — Constrained query expansion" in committed, artifact.path
+        assert "if not Path('graphify-out/graph.json').exists():" in committed, artifact.path
+        assert '-m graphify query "QUESTION"' in committed, artifact.path
+        assert "### Step 1 - Ensure graphify is installed" not in committed, artifact.path
+        assert (
+            "Installation is the only discovery path allowed to mutate the environment."
+            not in committed
+        ), artifact.path
+        assert "graphify.interpreter_pointer write" not in committed, artifact.path
+
+
+def test_generated_artifacts_exclude_bin_pwd_and_ps7_only_path_api():
+    rendered = gen.render_all(gen.load_platforms())
+    assert len(rendered) == 134
+    expected_paths = {gen._expected_path(artifact.path) for artifact in rendered}
+    assert len(expected_paths) == 134
+    assert set(gen.EXPECTED_DIR.iterdir()) == expected_paths
+
+    for artifact in rendered:
+        committed = (REPO_ROOT / artifact.path).read_text(encoding="utf-8")
+        expected = gen._expected_path(artifact.path).read_text(encoding="utf-8")
+        assert committed == artifact.content, artifact.path
+        assert expected == artifact.content, artifact.path
+        for content in (committed, expected):
+            assert "/bin/pwd" not in content, artifact.path
+            assert "IsPathFullyQualified" not in content, artifact.path
+            if "/bin/sh -p -c" in content:
+                assert "command pwd -P" in content, artifact.path
+            if "$GraphifyPython = $null" in content:
+                assert "function Test-GraphifyFullyQualifiedPath" in content, artifact.path
 
 
 @pytest.mark.parametrize("command", ["python3.14", "python3"])
@@ -1270,7 +1605,7 @@ def test_posix_operation_guard_ignores_exported_hostile_bash_functions(
     control_marker = tmp_path / f"{guard_source}-control"
     hostile_markers = {
         name: tmp_path / f"{guard_source}-{name}-ran"
-        for name in ("printf", "eval", "command", "unset", "bracket", "exit")
+        for name in ("printf", "eval", "command", "unset", "pwd", "bracket", "exit")
     }
     child = tmp_path / f"{guard_source}-guard.sh"
     child.write_text(
@@ -1287,9 +1622,10 @@ function printf { : > "$GFY_PRINTF_MARKER"; return 97; }
 function eval { : > "$GFY_EVAL_MARKER"; return 97; }
 function command { : > "$GFY_COMMAND_MARKER"; return 97; }
 function unset { : > "$GFY_UNSET_MARKER"; return 97; }
+function pwd { : > "$GFY_PWD_MARKER"; return 97; }
 function [ { : > "$GFY_BRACKET_MARKER"; return 97; }
 function exit { : > "$GFY_EXIT_MARKER"; return 97; }
-export -f printf eval command unset [ exit
+export -f printf eval command unset pwd [ exit
 exec /bin/bash "$1"
 """
     env = {

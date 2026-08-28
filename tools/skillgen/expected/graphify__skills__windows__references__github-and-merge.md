@@ -13,9 +13,17 @@ $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
 $GraphifyDenyPolicyInvalid = $false
+function Test-GraphifyFullyQualifiedPath {
+    param([string]$Path)
+    if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    $root = [IO.Path]::GetPathRoot($Path)
+    if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
+    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    return $true
+}
 function Resolve-GraphifyPolicyPath {
     param([string]$Path)
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $null }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
@@ -39,7 +47,7 @@ function Add-GraphifyDenyRoot {
     param([string]$Path, [bool]$Required = $false)
     if (-not $Path) { return }
     try {
-        $full = if ([IO.Path]::IsPathFullyQualified($Path)) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
+        $full = if (Test-GraphifyFullyQualifiedPath $path) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
         if (-not (Test-Path -LiteralPath $full -PathType Container)) { if ($Required) { $script:GraphifyDenyPolicyInvalid = $true }; return }
         $resolved = Resolve-GraphifyPolicyPath $full
         if (-not $resolved) { $script:GraphifyDenyPolicyInvalid = $true; return }
@@ -57,7 +65,7 @@ Add-GraphifyDenyRoot $GraphifySelectedOutput ([bool]($env:GRAPHIFY_OUTPUT_ROOT -
 function Test-GraphifyWorkspacePath {
     param([string]$Path)
     if ($GraphifyDenyPolicyInvalid) { return $true }
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $true }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $true }
     if (-not (Test-Path -LiteralPath $Path)) { return $true }
     try {
         $lexical = [IO.Path]::GetFullPath($Path)
@@ -103,7 +111,7 @@ function Test-GraphifySupportedPython {
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
     return $LASTEXITCODE -eq 0
 }
-if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
+if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
     if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
@@ -159,9 +167,17 @@ $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
 $GraphifyDenyPolicyInvalid = $false
+function Test-GraphifyFullyQualifiedPath {
+    param([string]$Path)
+    if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    $root = [IO.Path]::GetPathRoot($Path)
+    if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
+    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    return $true
+}
 function Resolve-GraphifyPolicyPath {
     param([string]$Path)
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $null }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
@@ -185,7 +201,7 @@ function Add-GraphifyDenyRoot {
     param([string]$Path, [bool]$Required = $false)
     if (-not $Path) { return }
     try {
-        $full = if ([IO.Path]::IsPathFullyQualified($Path)) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
+        $full = if (Test-GraphifyFullyQualifiedPath $path) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
         if (-not (Test-Path -LiteralPath $full -PathType Container)) { if ($Required) { $script:GraphifyDenyPolicyInvalid = $true }; return }
         $resolved = Resolve-GraphifyPolicyPath $full
         if (-not $resolved) { $script:GraphifyDenyPolicyInvalid = $true; return }
@@ -203,7 +219,7 @@ Add-GraphifyDenyRoot $GraphifySelectedOutput ([bool]($env:GRAPHIFY_OUTPUT_ROOT -
 function Test-GraphifyWorkspacePath {
     param([string]$Path)
     if ($GraphifyDenyPolicyInvalid) { return $true }
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $true }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $true }
     if (-not (Test-Path -LiteralPath $Path)) { return $true }
     try {
         $lexical = [IO.Path]::GetFullPath($Path)
@@ -249,7 +265,7 @@ function Test-GraphifySupportedPython {
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
     return $LASTEXITCODE -eq 0
 }
-if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
+if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
     if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
@@ -314,9 +330,17 @@ $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
 $GraphifyDenyPolicyInvalid = $false
+function Test-GraphifyFullyQualifiedPath {
+    param([string]$Path)
+    if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    $root = [IO.Path]::GetPathRoot($Path)
+    if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
+    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    return $true
+}
 function Resolve-GraphifyPolicyPath {
     param([string]$Path)
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $null }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
@@ -340,7 +364,7 @@ function Add-GraphifyDenyRoot {
     param([string]$Path, [bool]$Required = $false)
     if (-not $Path) { return }
     try {
-        $full = if ([IO.Path]::IsPathFullyQualified($Path)) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
+        $full = if (Test-GraphifyFullyQualifiedPath $path) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
         if (-not (Test-Path -LiteralPath $full -PathType Container)) { if ($Required) { $script:GraphifyDenyPolicyInvalid = $true }; return }
         $resolved = Resolve-GraphifyPolicyPath $full
         if (-not $resolved) { $script:GraphifyDenyPolicyInvalid = $true; return }
@@ -358,7 +382,7 @@ Add-GraphifyDenyRoot $GraphifySelectedOutput ([bool]($env:GRAPHIFY_OUTPUT_ROOT -
 function Test-GraphifyWorkspacePath {
     param([string]$Path)
     if ($GraphifyDenyPolicyInvalid) { return $true }
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $true }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $true }
     if (-not (Test-Path -LiteralPath $Path)) { return $true }
     try {
         $lexical = [IO.Path]::GetFullPath($Path)
@@ -404,7 +428,7 @@ function Test-GraphifySupportedPython {
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
     return $LASTEXITCODE -eq 0
 }
-if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
+if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
     if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }

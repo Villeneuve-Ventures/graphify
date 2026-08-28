@@ -371,8 +371,8 @@ _POSIX_DISCOVERY = r'''GRAPHIFY_PYTHON=""
 GRAPHIFY_PYTHON_EXPLICIT=0
 _GRAPHIFY_VERSION_CHECK='import sys; raise SystemExit(0 if sys.implementation.name == "cpython" and sys.version_info.releaselevel == "final" and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)'
 _GRAPHIFY_IDENTITY_CHECK='@@GRAPHIFY_IDENTITY_CHECK@@'
-_GRAPHIFY_WORKSPACE=$(/bin/pwd -P) || exit 1
-_graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; [ -d "$_gfy_root" ] && CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && /bin/pwd -P; }
+_GRAPHIFY_WORKSPACE=$(command pwd -P) || exit 1
+_graphify_canonical_root() { _gfy_root=$1; [ -n "$_gfy_root" ] || return 1; case "$_gfy_root" in /*) ;; *) _gfy_root=$_GRAPHIFY_WORKSPACE/$_gfy_root ;; esac; [ -d "$_gfy_root" ] && CDPATH= cd -P -- "$_gfy_root" 2>/dev/null && command pwd -P; }
 _GRAPHIFY_INPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_INPUT_PATH-}") || _GRAPHIFY_INPUT_ROOT=""; _GRAPHIFY_OUTPUT_ROOT=$(_graphify_canonical_root "${GRAPHIFY_OUTPUT_ROOT-${GRAPHIFY_OUT-graphify-out}}") || _GRAPHIFY_OUTPUT_ROOT=""
 _graphify_path_denied() { _gfy_policy_path=$1; [ "$_GRAPHIFY_WORKSPACE" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_WORKSPACE"|"$_GRAPHIFY_WORKSPACE"/*) return 0 ;; esac; [ -z "$_GRAPHIFY_INPUT_ROOT" ] || { [ "$_GRAPHIFY_INPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_INPUT_ROOT"|"$_GRAPHIFY_INPUT_ROOT"/*) return 0 ;; esac; }; [ -z "$_GRAPHIFY_OUTPUT_ROOT" ] || { [ "$_GRAPHIFY_OUTPUT_ROOT" = / ] && return 0; case "$_gfy_policy_path" in "$_GRAPHIFY_OUTPUT_ROOT"|"$_GRAPHIFY_OUTPUT_ROOT"/*) return 0 ;; esac; }; return 1; }
 _graphify_resolve_ambient() {
@@ -390,7 +390,7 @@ _graphify_resolve_ambient() {
         esac
     done
     _gfy_dir=${_gfy_path%/*}; _gfy_base=${_gfy_path##*/}
-    _gfy_dir=$(CDPATH= cd -P -- "$_gfy_dir" 2>/dev/null && /bin/pwd -P) || return 1
+    _gfy_dir=$(CDPATH= cd -P -- "$_gfy_dir" 2>/dev/null && command pwd -P) || return 1
     _gfy_path=$_gfy_dir/$_gfy_base
     _graphify_path_denied "$_gfy_path" && return 1
     [ -x "$_gfy_lexical" ] || return 1
@@ -498,9 +498,17 @@ $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
 if ($GraphifyWorkspace -ne [IO.Path]::GetPathRoot($GraphifyWorkspace)) { $GraphifyWorkspace = $GraphifyWorkspace.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) }
 $GraphifyDenyRoots = [Collections.Generic.List[string]]::new()
 $GraphifyDenyPolicyInvalid = $false
+function Test-GraphifyFullyQualifiedPath {
+    param([string]$Path)
+    if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
+    $root = [IO.Path]::GetPathRoot($Path)
+    if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
+    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    return $true
+}
 function Resolve-GraphifyPolicyPath {
     param([string]$Path)
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $null }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $null }
     try {
         $full = [IO.Path]::GetFullPath($Path)
         $root = [IO.Path]::GetPathRoot($full)
@@ -524,7 +532,7 @@ function Add-GraphifyDenyRoot {
     param([string]$Path, [bool]$Required = $false)
     if (-not $Path) { return }
     try {
-        $full = if ([IO.Path]::IsPathFullyQualified($Path)) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
+        $full = if (Test-GraphifyFullyQualifiedPath $path) { [IO.Path]::GetFullPath($Path) } else { [IO.Path]::GetFullPath((Join-Path $GraphifyWorkspace $Path)) }
         if (-not (Test-Path -LiteralPath $full -PathType Container)) { if ($Required) { $script:GraphifyDenyPolicyInvalid = $true }; return }
         $resolved = Resolve-GraphifyPolicyPath $full
         if (-not $resolved) { $script:GraphifyDenyPolicyInvalid = $true; return }
@@ -542,7 +550,7 @@ Add-GraphifyDenyRoot $GraphifySelectedOutput ([bool]($env:GRAPHIFY_OUTPUT_ROOT -
 function Test-GraphifyWorkspacePath {
     param([string]$Path)
     if ($GraphifyDenyPolicyInvalid) { return $true }
-    if (-not $Path -or -not [IO.Path]::IsPathFullyQualified($Path)) { return $true }
+    if (-not (Test-GraphifyFullyQualifiedPath $Path)) { return $true }
     if (-not (Test-Path -LiteralPath $Path)) { return $true }
     try {
         $lexical = [IO.Path]::GetFullPath($Path)
@@ -588,7 +596,7 @@ function Test-GraphifySupportedPython {
     & $Candidate -E -P -B -c "import sys; raise SystemExit(0 if sys.implementation.name == 'cpython' and sys.version_info.releaselevel == 'final' and (3, 14, 2) <= sys.version_info[:3] < (3, 15, 0) else 1)" 2>$null
     return $LASTEXITCODE -eq 0
 }
-if ([IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {
+if (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV") {
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) { $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }
     if (Test-GraphifyPython $activeVenv) { $GraphifyPython = $activeVenv; $GraphifyPythonExplicit = $true }
@@ -640,7 +648,7 @@ $GraphifyDiscoveryOptional = $true
 Remove-Variable GraphifyDiscoveryOptional -ErrorAction SilentlyContinue
 $installPython = $GraphifyPython
 $installPythonExplicit = $GraphifyPythonExplicit
-if (-not $installPython -and [IO.Path]::IsPathFullyQualified("$env:VIRTUAL_ENV")) {{
+if (-not $installPython -and (Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV")) {{
     $activeVenv = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
     if (-not (Test-Path -LiteralPath $activeVenv)) {{ $activeVenv = Join-Path $env:VIRTUAL_ENV "bin/python" }}
     if (Test-GraphifySupportedPython $activeVenv) {{ $installPython = $activeVenv; $installPythonExplicit = $true }}
@@ -701,7 +709,8 @@ def _compact_posix_guard(script: str) -> str:
         + '; printf "%sx" "$GRAPHIFY_PYTHON"'
     )
     return (
-        f"GRAPHIFY_PYTHON=$(/bin/sh -p -c {shlex.quote(child)}); "
+        "GRAPHIFY_PYTHON=$(GRAPHIFY_INPUT_PATH=\"${GRAPHIFY_INPUT_PATH-}\" "
+        f"/bin/sh -p -c {shlex.quote(child)}); "
         'GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON%x}; '
         'GRAPHIFY_PYTHON=${GRAPHIFY_PYTHON:?Graphify interpreter discovery failed}'
     )
@@ -727,7 +736,7 @@ _INTERPRETER_SHELL = {
 _MCP_CONFIG = {
     "posix": '''```bash
 @@GRAPHIFY_GUARD@@
-"$GRAPHIFY_PYTHON" -E -P -B -c 'import json, sys; print(json.dumps({"mcpServers": {"graphify": {"command": sys.argv[1], "args": ["-E", "-P", "-B", "-m", "graphify.serve", sys.argv[2]]}}}))' "$GRAPHIFY_PYTHON" "$(/bin/pwd -P)/graphify-out/graph.json"
+"$GRAPHIFY_PYTHON" -E -P -B -c 'import json, os, sys; graph_path = os.path.join(os.path.realpath(os.getcwd()), "graphify-out", "graph.json"); print(json.dumps({"mcpServers": {"graphify": {"command": sys.argv[1], "args": ["-E", "-P", "-B", "-m", "graphify.serve", graph_path]}}}))' "$GRAPHIFY_PYTHON"
 ```''',
     "powershell": '''```powershell
 @@GRAPHIFY_GUARD@@
@@ -757,8 +766,23 @@ def _render_static_mcp_config(body: str, platform: Platform) -> str:
     )
 
 
-def _render_step1_bootstrap(body: str, platform: Platform) -> str:
+def _render_step1_bootstrap(
+    body: str, platform: Platform, *, artifact_role: str
+) -> str:
     """Single-home each mutating bootstrap behind hardened discovery."""
+    if artifact_role not in {"core", "monolith", "reference"}:
+        raise ValueError(f"unknown artifact role: {artifact_role!r}")
+    install_heading = "### Step 1 - Ensure graphify is installed"
+    target_count = len(
+        re.findall(rf"^{re.escape(install_heading)}$", body, flags=re.MULTILINE)
+    )
+    if target_count > 1 or (artifact_role != "reference" and target_count != 1):
+        raise ValueError(
+            f"{artifact_role} artifact has {target_count} installation Step 1 targets"
+        )
+    if target_count == 0:
+        return body
+
     fence = "bash" if platform.shell == "posix" else "powershell"
     bootstrap = _POSIX_BOOTSTRAP if platform.shell == "posix" else _POWERSHELL_BOOTSTRAP
     input_binding = (
@@ -767,14 +791,19 @@ def _render_step1_bootstrap(body: str, platform: Platform) -> str:
         else '$env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"'
     )
     bootstrap = f"{input_binding}\n{bootstrap}"
-    pattern = rf"(### Step 1[^\n]*\n.*?```{fence}\n)(.*?)(\n```)"
-    return re.sub(
+    pattern = rf"({re.escape(install_heading)}\n.*?```{fence}\n)(.*?)(\n```)"
+    rendered, replacements = re.subn(
         pattern,
         lambda match: match.group(1) + bootstrap + match.group(3),
         body,
         count=1,
         flags=re.DOTALL,
     )
+    if replacements != 1:
+        raise ValueError(
+            f"{artifact_role} installation Step 1 has {replacements} bootstrap targets"
+        )
+    return rendered
 
 
 def _render_advisory_pointer_prose(body: str) -> str:
@@ -819,7 +848,9 @@ def _render_advisory_pointer_prose(body: str) -> str:
     return body
 
 
-def _render_saved_interpreter_commands(body: str, platform: Platform) -> str:
+def _render_saved_interpreter_commands(
+    body: str, platform: Platform, *, artifact_role: str
+) -> str:
     """Fill and harden every execution-bearing block with fresh discovery."""
     shell = _INTERPRETER_SHELL[platform.shell]
     body = (
@@ -880,7 +911,7 @@ def _render_saved_interpreter_commands(body: str, platform: Platform) -> str:
         '$env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"',
     )
     body = _render_static_mcp_config(body, platform)
-    body = _render_step1_bootstrap(body, platform)
+    body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
     return _render_advisory_pointer_prose(body)
 
 
@@ -970,7 +1001,7 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
-    body = _render_saved_interpreter_commands(body, platform)
+    body = _render_saved_interpreter_commands(body, platform, artifact_role="core")
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
         raise ValueError(f"unfilled core slots for '{platform.key}': {leftover}")
@@ -1001,7 +1032,7 @@ def _render_agents_md_hooks(platform: Platform) -> str:
         .replace("@@AGENTS_UNINSTALL_BLOCK@@", slots["uninstall_block"])
         .replace("@@AGENTS_PRETOOLUSE_NOTE@@", slots["pretooluse_note"])
     )
-    body = _render_saved_interpreter_commands(body, platform)
+    body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
         raise ValueError(f"unfilled agents-md hooks slots for '{platform.key}': {leftover}")
@@ -1017,7 +1048,7 @@ def render(platform: Platform) -> list[RenderedArtifact]:
     """
     if platform.bucket == "monolith":
         body = _read_fragment(f"core/{platform.monolith}.md")
-        body = _render_saved_interpreter_commands(body, platform)
+        body = _render_saved_interpreter_commands(body, platform, artifact_role="monolith")
         return [RenderedArtifact(platform.skill_dst, body)]
 
     if platform.bucket != "split":
@@ -1039,7 +1070,7 @@ def render(platform: Platform) -> list[RenderedArtifact]:
             body = _render_agents_md_hooks(platform)
         else:
             body = _read_fragment(references[name])
-        body = _render_saved_interpreter_commands(body, platform)
+        body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))
     return artifacts
