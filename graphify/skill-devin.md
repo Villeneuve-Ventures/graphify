@@ -219,7 +219,7 @@ from graphify.detect import detect
 from pathlib import Path
 result = detect(Path('INPUT_PATH'))
 print(json.dumps(result))
-" > graphify-out/.graphify_detect.json
+" > .graphify_detect.json
 ```
 
 Replace INPUT_PATH with the actual path the user provided. Do NOT cat or print the JSON - read it silently and present a clean summary instead:
@@ -269,13 +269,13 @@ import json, os
 from pathlib import Path
 from graphify.transcribe import transcribe_all
 
-detect = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
+detect = json.loads(Path('.graphify_detect.json').read_text())
 video_files = detect.get('files', {}).get('video', [])
 prompt = os.environ.get('GRAPHIFY_WHISPER_PROMPT', 'Use proper punctuation and paragraph breaks.')
 
 transcript_paths = transcribe_all(video_files, initial_prompt=prompt)
 print(json.dumps(transcript_paths))
-" > graphify-out/.graphify_transcripts.json
+" > .graphify_transcripts.json
 ```
 
 After transcription:
@@ -311,16 +311,16 @@ from pathlib import Path
 import json
 
 code_files = []
-detect = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
+detect = json.loads(Path('.graphify_detect.json').read_text())
 for f in detect.get('files', {}).get('code', []):
     code_files.extend(collect_files(Path(f)) if Path(f).is_dir() else [Path(f)])
 
 if code_files:
     result = extract(code_files)
-    Path('graphify-out/.graphify_ast.json').write_text(json.dumps(result, indent=2))
+    Path('.graphify_ast.json').write_text(json.dumps(result, indent=2))
     print(f'AST: {len(result[\"nodes\"])} nodes, {len(result[\"edges\"])} edges')
 else:
-    Path('graphify-out/.graphify_ast.json').write_text(json.dumps({'nodes':[],'edges':[],'input_tokens':0,'output_tokens':0}))
+    Path('.graphify_ast.json').write_text(json.dumps({'nodes':[],'edges':[],'input_tokens':0,'output_tokens':0}))
     print('No code files - skipping AST extraction')
 "
 ```
@@ -348,7 +348,7 @@ import json
 from graphify.cache import check_semantic_cache
 from pathlib import Path
 
-detect = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
+detect = json.loads(Path('.graphify_detect.json').read_text())
 # Only content files go to semantic extraction. Code is already covered
 # structurally by the AST pass; flattening every category here makes the
 # extraction step re-read every source file (#1392).
@@ -359,10 +359,10 @@ cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(a
 # Always (re)write the cache file: write hits, else DELETE any leftover from a
 # prior run so Part C never merges a stale .graphify_cached.json (#1392).
 if cached_nodes or cached_edges or cached_hyperedges:
-    Path('graphify-out/.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges}))
+    Path('.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges}))
 else:
-    Path('graphify-out/.graphify_cached.json').unlink(missing_ok=True)
-Path('graphify-out/.graphify_uncached.txt').write_text('\n'.join(uncached))
+    Path('.graphify_cached.json').unlink(missing_ok=True)
+Path('.graphify_uncached.txt').write_text('\n'.join(uncached))
 print(f'Cache: {len(all_files)-len(uncached)} files hit, {len(uncached)} files need extraction')
 "
 ```
@@ -449,7 +449,7 @@ import json, glob
 from pathlib import Path
 from graphify.semantic_cleanup import load_validated_semantic_fragment, sanitize_semantic_fragment
 
-chunks = sorted(glob.glob('graphify-out/.graphify_chunk_*.json'))
+chunks = sorted(glob.glob('.graphify_chunk_*.json'))
 all_nodes, all_edges, all_hyperedges = [], [], []
 total_in, total_out = 0, 0
 for c in chunks:
@@ -463,7 +463,7 @@ for c in chunks:
     all_hyperedges += d.get('hyperedges', [])
     total_in += d.get('input_tokens', 0)
     total_out += d.get('output_tokens', 0)
-Path('graphify-out/.graphify_semantic_new.json').write_text(json.dumps({
+Path('.graphify_semantic_new.json').write_text(json.dumps({
     'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges,
     'input_tokens': total_in, 'output_tokens': total_out,
 }, indent=2))
@@ -494,8 +494,8 @@ import json
 from pathlib import Path
 from graphify.semantic_cleanup import sanitize_semantic_fragment
 
-cached = json.loads(Path('graphify-out/.graphify_cached.json').read_text()) if Path('graphify-out/.graphify_cached.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}
-new = json.loads(Path('graphify-out/.graphify_semantic_new.json').read_text()) if Path('graphify-out/.graphify_semantic_new.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}
+cached = json.loads(Path('.graphify_cached.json').read_text()) if Path('.graphify_cached.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}
+new = json.loads(Path('.graphify_semantic_new.json').read_text()) if Path('.graphify_semantic_new.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}
 
 all_nodes = cached['nodes'] + new.get('nodes', [])
 all_edges = cached['edges'] + new.get('edges', [])
@@ -515,7 +515,7 @@ merged = {
     'output_tokens': new.get('output_tokens', 0),
 }
 merged = sanitize_semantic_fragment(merged)
-Path('graphify-out/.graphify_semantic.json').write_text(json.dumps(merged, indent=2))
+Path('.graphify_semantic.json').write_text(json.dumps(merged, indent=2))
 print(f'Extraction complete - {len(deduped)} nodes, {len(all_edges)} edges ({len(cached[\"nodes\"])} from cache, {len(new.get(\"nodes\",[]))} new)')
 "
 ```
@@ -530,8 +530,8 @@ import sys, json
 from pathlib import Path
 from graphify.semantic_cleanup import sanitize_semantic_fragment
 
-ast = json.loads(Path('graphify-out/.graphify_ast.json').read_text())
-sem = json.loads(Path('graphify-out/.graphify_semantic.json').read_text())
+ast = json.loads(Path('.graphify_ast.json').read_text())
+sem = json.loads(Path('.graphify_semantic.json').read_text())
 
 # Merge: AST nodes first, semantic nodes deduplicated by id
 seen = {n['id'] for n in ast['nodes']}
@@ -551,7 +551,7 @@ merged = {
     'output_tokens': sem.get('output_tokens', 0),
 }
 merged = sanitize_semantic_fragment(merged)
-Path('graphify-out/.graphify_extract.json').write_text(json.dumps(merged, indent=2))
+Path('.graphify_extract.json').write_text(json.dumps(merged, indent=2))
 total = len(merged_nodes)
 edges = len(merged_edges)
 print(f'Merged: {total} nodes, {edges} edges ({len(ast[\"nodes\"])} AST + {len(sem[\"nodes\"])} semantic)')
@@ -575,8 +575,8 @@ from graphify.report import generate
 from graphify.export import to_json
 from pathlib import Path
 
-extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text())
-detection  = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
+extraction = json.loads(Path('.graphify_extract.json').read_text())
+detection  = json.loads(Path('.graphify_detect.json').read_text())
 
 G = build_from_json(extraction, directed=IS_DIRECTED)
 # Guard BEFORE any write: an empty extraction must not clobber a good graph.json /
@@ -597,12 +597,12 @@ questions = suggest_questions(G, communities, labels)
 # Persist the graph first and only write the report/analysis if it actually
 # persisted - to_json refuses to shrink an existing graph.json (#479), and a
 # report describing a graph we did not write would be a lie (#1392).
-wrote = to_json(G, communities, 'graphify-out/graph.json')
+wrote = to_json(G, communities, 'graph.json')
 if not wrote:
-    print('ERROR: refused to shrink graphify-out/graph.json (fewer nodes than the existing graph). Run a full rebuild to be safe.')
+    print('ERROR: refused to shrink graph.json (fewer nodes than the existing graph). Run a full rebuild to be safe.')
     raise SystemExit(1)
 report = generate(G, communities, cohesion, labels, gods, surprises, detection, tokens, 'INPUT_PATH', suggested_questions=questions)
-Path('graphify-out/GRAPH_REPORT.md').write_text(report)
+Path('GRAPH_REPORT.md').write_text(report)
 
 analysis = {
     'communities': {str(k): v for k, v in communities.items()},
@@ -611,7 +611,7 @@ analysis = {
     'surprises': surprises,
     'questions': questions,
 }
-Path('graphify-out/.graphify_analysis.json').write_text(json.dumps(analysis, indent=2))
+Path('.graphify_analysis.json').write_text(json.dumps(analysis, indent=2))
 print(f'Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges, {len(communities)} communities')
 "
 ```
@@ -637,9 +637,9 @@ from graphify.analyze import god_nodes, surprising_connections, suggest_question
 from graphify.report import generate
 from pathlib import Path
 
-extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text())
-detection  = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
-analysis   = json.loads(Path('graphify-out/.graphify_analysis.json').read_text())
+extraction = json.loads(Path('.graphify_extract.json').read_text())
+detection  = json.loads(Path('.graphify_detect.json').read_text())
+analysis   = json.loads(Path('.graphify_analysis.json').read_text())
 
 G = build_from_json(extraction, directed=IS_DIRECTED)
 communities = {int(k): v for k, v in analysis['communities'].items()}
@@ -653,8 +653,8 @@ labels = LABELS_DICT
 questions = suggest_questions(G, communities, labels)
 
 report = generate(G, communities, cohesion, labels, analysis['gods'], analysis['surprises'], detection, tokens, 'INPUT_PATH', suggested_questions=questions)
-Path('graphify-out/GRAPH_REPORT.md').write_text(report)
-Path('graphify-out/.graphify_labels.json').write_text(json.dumps({str(k): v for k, v in labels.items()}))
+Path('GRAPH_REPORT.md').write_text(report)
+Path('.graphify_labels.json').write_text(json.dumps({str(k): v for k, v in labels.items()}))
 print('Report updated with community labels')
 "
 ```
@@ -914,15 +914,15 @@ from datetime import datetime, timezone
 from graphify.detect import save_manifest
 
 # Save manifest for --update
-detect = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
+detect = json.loads(Path('.graphify_detect.json').read_text())
 save_manifest(detect['files'], root='INPUT_PATH')
 
 # Update cumulative cost tracker
-extract = json.loads(Path('graphify-out/.graphify_extract.json').read_text())
+extract = json.loads(Path('.graphify_extract.json').read_text())
 input_tok = extract.get('input_tokens', 0)
 output_tok = extract.get('output_tokens', 0)
 
-cost_path = Path('graphify-out/cost.json')
+cost_path = Path('cost.json')
 if cost_path.exists():
     cost = json.loads(cost_path.read_text())
 else:

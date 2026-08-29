@@ -160,7 +160,7 @@ def load_memory_docs(memory_dir: Path) -> list[dict[str, Any]]:
 
 
 def _load_node_community(graph_path: Path, analysis_path: Path,
-                         labels_path: Path) -> dict[str, str] | None:
+                         labels_path: Path, *, snapshot=None) -> dict[str, str] | None:
     """Build a lookup from node id AND node label -> community label, or None if the
     graph isn't available.
 
@@ -173,8 +173,9 @@ def _load_node_community(graph_path: Path, analysis_path: Path,
     if not graph_path.exists():
         return None
     try:
-        from graphify.transaction import open_graph_snapshot
-        snapshot = open_graph_snapshot(graph_path, purpose="reflect-community")
+        if snapshot is None:
+            from graphify.transaction import open_graph_snapshot
+            snapshot = open_graph_snapshot(graph_path, purpose="reflect-community")
         analysis_payload = snapshot.artifacts.get(".graphify_analysis.json")
         if analysis_payload is None:
             return None
@@ -214,7 +215,7 @@ def _load_node_community(graph_path: Path, analysis_path: Path,
     return node_community
 
 
-def _load_known_nodes(graph_path: Path) -> set[str] | None:
+def _load_known_nodes(graph_path: Path, *, snapshot=None) -> set[str] | None:
     """The set of node ids AND labels in the current graph, or None if unavailable.
 
     Used to drop source nodes from lessons once the code they pointed at is gone
@@ -226,8 +227,12 @@ def _load_known_nodes(graph_path: Path) -> set[str] | None:
     indexing ids alone silently dropped every label-form citation (the common case).
     """
     try:
-        from graphify.transaction import open_graph_snapshot
-        data = open_graph_snapshot(Path(graph_path), purpose="reflect-known-nodes").data
+        if snapshot is None:
+            from graphify.transaction import open_graph_snapshot
+            snapshot = open_graph_snapshot(
+                Path(graph_path), purpose="reflect-known-nodes"
+            )
+        data = snapshot.data
     except (OSError, ValueError):
         return None
     nodes = data.get("nodes")
@@ -586,14 +591,24 @@ def reflect(memory_dir: Path, out_path: Path,
 
     node_community = None
     known_nodes = None
+    graph_snapshot = None
     if graph_path is not None:
         graph_path = Path(graph_path)
+        try:
+            from graphify.transaction import open_graph_snapshot
+            graph_snapshot = open_graph_snapshot(
+                graph_path, purpose="reflect"
+            )
+        except (OSError, ValueError):
+            graph_snapshot = None
         analysis_path = Path(analysis_path) if analysis_path else (
             graph_path.parent / ".graphify_analysis.json")
         labels_path = Path(labels_path) if labels_path else (
             graph_path.parent / ".graphify_labels.json")
-        node_community = _load_node_community(graph_path, analysis_path, labels_path)
-        known_nodes = _load_known_nodes(graph_path)
+        node_community = _load_node_community(
+            graph_path, analysis_path, labels_path, snapshot=graph_snapshot
+        )
+        known_nodes = _load_known_nodes(graph_path, snapshot=graph_snapshot)
 
     if now is None:
         now = datetime.now(timezone.utc)
@@ -610,7 +625,9 @@ def reflect(memory_dir: Path, out_path: Path,
     # is in hand. Best-effort: a sidecar failure must never break LESSONS.md.
     if graph_path is not None:
         try:
-            write_learning_sidecar(agg, Path(graph_path), now=now)
+            write_learning_sidecar(
+                agg, Path(graph_path), now=now, snapshot=graph_snapshot
+            )
         except Exception:
             pass
 
@@ -626,8 +643,9 @@ def reflect(memory_dir: Path, out_path: Path,
 # touched — read surfaces merge this overlay in only at display time.
 
 
-def _build_id_label_maps(graph_path: Path) -> tuple[dict[str, str], dict[str, list[str]],
-                                                    dict[str, dict[str, Any]]]:
+def _build_id_label_maps(graph_path: Path, *, snapshot=None) -> tuple[
+    dict[str, str], dict[str, list[str]], dict[str, dict[str, Any]]
+]:
     """From graph.json build:
 
     - ``id_set``: id -> id (every node id, so an id-form citation resolves to itself)
@@ -641,8 +659,12 @@ def _build_id_label_maps(graph_path: Path) -> tuple[dict[str, str], dict[str, li
     label_to_ids: dict[str, list[str]] = {}
     node_by_id: dict[str, dict[str, Any]] = {}
     try:
-        from graphify.transaction import open_graph_snapshot
-        data = open_graph_snapshot(Path(graph_path), purpose="reflect-projection").data
+        if snapshot is None:
+            from graphify.transaction import open_graph_snapshot
+            snapshot = open_graph_snapshot(
+                Path(graph_path), purpose="reflect-projection"
+            )
+        data = snapshot.data
     except (OSError, ValueError):
         return id_set, label_to_ids, node_by_id
     for n in data.get("nodes", []):
@@ -764,7 +786,8 @@ def _provenance_for(node: str, prov_map: dict[str, list],
 
 
 def build_learning_overlay(agg: dict[str, Any], graph_path: Path,
-                           *, now: datetime | None = None) -> dict[str, Any]:
+                           *, now: datetime | None = None,
+                           snapshot=None) -> dict[str, Any]:
     """Project the reflect aggregate into the sidecar's ``{version, generated_at,
     nodes}`` structure, keyed by canonical node id.
 
@@ -778,7 +801,9 @@ def build_learning_overlay(agg: dict[str, Any], graph_path: Path,
         now = now.replace(tzinfo=timezone.utc)
 
     graph_path = Path(graph_path)
-    id_set, label_to_ids, node_by_id = _build_id_label_maps(graph_path)
+    id_set, label_to_ids, node_by_id = _build_id_label_maps(
+        graph_path, snapshot=snapshot
+    )
     prov_map = agg.get("_node_provenance", {})
 
     # id -> entry; a canonical id can be cited under both its id and label form,
@@ -830,13 +855,16 @@ def build_learning_overlay(agg: dict[str, Any], graph_path: Path,
 
 
 def write_learning_sidecar(agg: dict[str, Any], graph_path: Path,
-                           *, now: datetime | None = None) -> Path:
+                           *, now: datetime | None = None,
+                           snapshot=None) -> Path:
     """Write ``.graphify_learning.json`` next to ``graph_path`` deterministically.
 
     Sorted keys + indent=2 so re-runs on identical input (and a fixed ``now``)
     are byte-identical. Returns the sidecar path.
     """
-    overlay = build_learning_overlay(agg, graph_path, now=now)
+    overlay = build_learning_overlay(
+        agg, graph_path, now=now, snapshot=snapshot
+    )
     sidecar = Path(graph_path).parent / LEARNING_SIDECAR_NAME
     sidecar.write_text(
         json.dumps(overlay, indent=2, sort_keys=True, ensure_ascii=False) + "\n",

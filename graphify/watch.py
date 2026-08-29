@@ -884,7 +884,6 @@ def _rebuild_code(
                 claim = claim_rebuild_queue(transaction, claim.drainer)
                 continue
             full = any(item["kind"] == "full" for item in claim.items)
-            pending = _drain_pending(actual_out)
             claimed_paths: list[list[Path]] = []
             for item in claim.items:
                 values = item.get("changed_paths")
@@ -894,7 +893,6 @@ def _rebuild_code(
                     )
             merged = None if full else _merge_changed_paths(
                 changed_paths,
-                pending,
                 *claimed_paths,
             )
             changed_paths = None

@@ -19,6 +19,32 @@ except ImportError:
     _jieba = None
 
 
+def _graph_from_snapshot(snapshot) -> nx.Graph:
+    """Build the in-memory graph from one admitted immutable snapshot."""
+    data = snapshot.data
+    if "links" not in data and "edges" in data:
+        data = dict(data, links=data["edges"])
+    data = {**data, "directed": True}
+    try:
+        from graphify.build import graph_has_legacy_ids as _legacy
+        if _legacy(data.get("nodes", [])):
+            print(
+                "[graphify] note: this graph uses the pre-#1504 node-ID scheme; "
+                "rebuild with `graphify extract --force` for path-qualified IDs.",
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
+    try:
+        G = json_graph.node_link_graph(data, edges="links")
+    except TypeError:
+        G = json_graph.node_link_graph(data)
+    # Learning state is optional and not part of the generation receipt. Do not
+    # reopen receipt-bound graph artifacts after canonical admission.
+    G.graph["_learning_overlay"] = {}
+    return G
+
+
 def _load_graph(graph_path: str) -> nx.Graph:
     try:
         resolved = Path(graph_path).resolve()
@@ -28,38 +54,10 @@ def _load_graph(graph_path: str) -> nx.Graph:
             raise FileNotFoundError(f"Graph file not found: {resolved}")
         check_graph_file_size_cap(resolved)
         from graphify.transaction import open_graph_snapshot
-        data = open_graph_snapshot(resolved, purpose="serve").data
-        if "links" not in data and "edges" in data:
-            data = dict(data, links=data["edges"])
-        data = {**data, "directed": True}
-        try:
-            from graphify.build import graph_has_legacy_ids as _legacy
-            if _legacy(data.get("nodes", [])):
-                print(
-                    "[graphify] note: this graph uses the pre-#1504 node-ID scheme; "
-                    "rebuild with `graphify extract --force` for path-qualified IDs.",
-                    file=sys.stderr,
-                )
-        except Exception:
-            pass
-        try:
-            G = json_graph.node_link_graph(data, edges="links")
-        except TypeError:
-            G = json_graph.node_link_graph(data)
-        # Attach the work-memory overlay (derived sidecar next to graph.json) so
-        # the query/MCP read surface can annotate NODE lines display-only. Empty
-        # when no sidecar exists, leaving un-annotated output byte-identical.
-        try:
-            from graphify.reflect import load_learning_overlay as _llo
-            G.graph["_learning_overlay"] = _llo(resolved)
-        except Exception:
-            G.graph["_learning_overlay"] = {}
-        return G
+        snapshot = open_graph_snapshot(resolved, purpose="serve")
+        return _graph_from_snapshot(snapshot)
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except json.JSONDecodeError as exc:
-        print(f"error: graph.json is corrupted ({exc}). Re-run /graphify to rebuild.", file=sys.stderr)
         sys.exit(1)
 
 
@@ -1024,7 +1022,7 @@ def _build_server(graph_path: str):
 
     from graphify import paths as _paths
 
-    # Per-graph context cache: resolved graph.json path -> {key, G, communities}.
+    # Per-graph context cache: resolved graph.json path -> exact snapshot digest.
     # The server's default graph is just the first entry; a tool call carrying a
     # project_path adds its own. Routing every graph through one cache means the
     # eager trigram index and the mtime+size hot-reload behave identically for
@@ -1035,7 +1033,7 @@ def _build_server(graph_path: str):
 
     def _load_ctx(path: str):
         """Return (G, communities) for a graph.json path, reusing a cached
-        context until the file's (mtime, size) changes and then transparently
+        context until the admitted snapshot digest changes and then transparently
         rebuilding it. Unlike ``_load_graph`` it never exits the process on a
         missing/corrupt file — it raises, so a bad project_path surfaces as a
         tool error instead of killing a server that is happily serving other
@@ -1043,31 +1041,30 @@ def _build_server(graph_path: str):
         from graphify.transaction import open_graph_snapshot
 
         try:
-            open_graph_snapshot(path, purpose="mcp-context-admission")
+            snapshot = open_graph_snapshot(path, purpose="mcp-context-admission")
         except FileNotFoundError as exc:
             raise FileNotFoundError(f"graph.json not found: {path}") from exc
-        try:
-            s = Path(path).stat()
-            key = (s.st_mtime_ns, s.st_size)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"graph.json not found: {path}")
+        key = snapshot.digest
         ent = _ctx_cache.get(path)
         if ent is not None and ent["key"] == key:
-            return ent["G"], ent["communities"]
+            return ent["G"], ent["communities"], ent["artifacts"]
         with _ctx_lock:
             ent = _ctx_cache.get(path)
             if ent is not None and ent["key"] == key:
-                return ent["G"], ent["communities"]  # another thread built it
-            try:
-                new_G = _load_graph(path)
-            except SystemExit as e:  # _load_graph exits on missing/corrupt file
-                raise RuntimeError(f"could not load graph.json at {path}") from e
+                return ent["G"], ent["communities"], ent["artifacts"]
+            new_G = _graph_from_snapshot(snapshot)
             # Warm the trigram index before exposing the graph so the first query
             # against it is fast (same rationale as the original startup warm-up).
             _get_trigram_index(new_G)
             comm = _communities_from_graph(new_G)
-            _ctx_cache[path] = {"key": key, "G": new_G, "communities": comm}
-            return new_G, comm
+            artifacts = dict(snapshot.artifacts)
+            _ctx_cache[path] = {
+                "key": key,
+                "G": new_G,
+                "communities": comm,
+                "artifacts": artifacts,
+            }
+            return new_G, comm, artifacts
 
     def _resolve_graph_path(project_path) -> str:
         """Map an optional project_path to a concrete graph.json path. ``None``
@@ -1084,18 +1081,19 @@ def _build_server(graph_path: str):
     # await between them), so a concurrent call never observes a half-applied
     # swap.
     active_graph_path = _default_graph_path
+    active_artifacts: dict[str, bytes] = {}
     try:
-        G, communities = _load_ctx(_default_graph_path)
+        G, communities, active_artifacts = _load_ctx(_default_graph_path)
     except (FileNotFoundError, RuntimeError):
         # No default graph at startup → run as a pure multi-project server. Tools
         # then require project_path; a call without one gets a clear error rather
         # than the process refusing to start (which is what _load_graph would do).
-        G, communities = None, {}
+        G, communities = nx.DiGraph(), {}
 
     def _select_graph(project_path) -> None:
-        nonlocal G, communities, active_graph_path
+        nonlocal G, communities, active_graph_path, active_artifacts
         path = _resolve_graph_path(project_path)
-        G, communities = _load_ctx(path)
+        G, communities, active_artifacts = _load_ctx(path)
         active_graph_path = path
 
     server = Server("graphify")
@@ -1507,10 +1505,10 @@ def _build_server(graph_path: str):
     }
 
     def _load_community_labels() -> dict[int, str]:
-        labels_path = Path(active_graph_path).parent / ".graphify_labels.json"
-        if labels_path.exists():
+        payload = active_artifacts.get(".graphify_labels.json")
+        if payload is not None:
             try:
-                return {int(k): v for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()}
+                return {int(k): v for k, v in json.loads(payload).items()}
             except Exception:
                 pass
         return {cid: f"Community {cid}" for cid in communities}
@@ -1531,9 +1529,9 @@ def _build_server(graph_path: str):
         _select_graph(None)  # resources read the server's default graph
         uri_str = str(uri)
         if uri_str == "graphify://report":
-            report_path = Path(active_graph_path).parent / "GRAPH_REPORT.md"
-            if report_path.exists():
-                return report_path.read_text(encoding="utf-8")
+            report_payload = active_artifacts.get("GRAPH_REPORT.md")
+            if report_payload is not None:
+                return report_payload.decode("utf-8")
             return "GRAPH_REPORT.md not found. Run graphify extract first."
         if uri_str == "graphify://stats":
             return _tool_graph_stats({})

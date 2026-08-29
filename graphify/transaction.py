@@ -38,6 +38,7 @@ MANAGED_PUBLICATION_PATHS = (
     "manifest.json",
     "graph.html",
     "graphify-callflow.html",
+    "GRAPH_TREE.html",
     ".graphify_semantic_marker",
     "needs_update",
     ".graphify_build.json",
@@ -117,6 +118,24 @@ class OutputCapability:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+@dataclass
+class PreparedWorkspaceCapability:
+    workspace: OutputCapability
+    output: OutputCapability
+
+    @property
+    def path(self) -> Path:
+        return self.workspace.path
+
+    def validate(self) -> None:
+        self.workspace.validate()
+        self.output.validate()
+
+    def close(self) -> None:
+        self.output.close()
+        self.workspace.close()
 
 
 @dataclass(frozen=True)
@@ -418,7 +437,45 @@ def _replace_bytes(
             with contextlib.suppress(OSError):
                 os.unlink(temporary, dir_fd=capability.fd)
             raise PendingTransactionError(f"managed entry identity changed: {name}")
-    os.replace(temporary, name, src_dir_fd=capability.fd, dst_dir_fd=capability.fd)
+        quarantine = f".{name}.graphify-merge-backup.{secrets.token_hex(16)}"
+        os.rename(
+            name,
+            quarantine,
+            src_dir_fd=capability.fd,
+            dst_dir_fd=capability.fd,
+        )
+        quarantined = _entry_stat(capability, quarantine)
+        if quarantined is None or (
+            quarantined.st_dev,
+            quarantined.st_ino,
+        ) != expected_identity:
+            if _entry_stat(capability, name) is None:
+                os.rename(
+                    quarantine,
+                    name,
+                    src_dir_fd=capability.fd,
+                    dst_dir_fd=capability.fd,
+                )
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=capability.fd)
+            raise PendingTransactionError(f"managed entry changed during quarantine: {name}")
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=capability.fd,
+                dst_dir_fd=capability.fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=capability.fd)
+            raise PendingTransactionError(
+                f"managed entry replacement won final publication: {name}"
+            ) from exc
+        os.unlink(temporary, dir_fd=capability.fd)
+    else:
+        os.replace(temporary, name, src_dir_fd=capability.fd, dst_dir_fd=capability.fd)
     os.fsync(capability.fd)
     capability.validate()
 
@@ -617,7 +674,8 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
         return None
     transaction_id = marker.get("transaction_id")
     expected = _identity_from_json(marker.get("identity"))
-    if not isinstance(transaction_id, str) or expected is None:
+    expected_output = _identity_from_json(marker.get("output_identity"))
+    if not isinstance(transaction_id, str) or expected is None or expected_output is None:
         raise PendingTransactionError("prepared workspace binding is malformed")
     workspace = capability.path.parent / f".graphify-prepare-{transaction_id}"
     with pin_output(workspace.parent) as parent_capability:
@@ -635,6 +693,18 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
             expected.inode,
         ):
             raise PendingTransactionError("prepared workspace identity changed")
+        with pin_output(workspace / "graphify-out") as output_capability:
+            if output_capability.identity != expected_output:
+                raise PendingTransactionError("prepared output identity changed")
+        retired = sorted(
+            name
+            for name in os.listdir(parent_capability.fd)
+            if name.startswith(".graphify-retired-")
+        )
+        if len(retired) >= 16:
+            raise PendingTransactionError(
+                "prepared retirement quarantine reached its bounded capacity"
+            )
         tombstone = f".graphify-retired-{transaction_id}-{secrets.token_hex(8)}"
         os.rename(
             workspace.name,
@@ -642,6 +712,29 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
             src_dir_fd=parent_capability.fd,
             dst_dir_fd=parent_capability.fd,
         )
+        retired_info = os.stat(
+            tombstone, dir_fd=parent_capability.fd, follow_symlinks=False
+        )
+        if (retired_info.st_dev, retired_info.st_ino) != (
+            expected.device,
+            expected.inode,
+        ):
+            try:
+                os.stat(
+                    workspace.name,
+                    dir_fd=parent_capability.fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                os.rename(
+                    tombstone,
+                    workspace.name,
+                    src_dir_fd=parent_capability.fd,
+                    dst_dir_fd=parent_capability.fd,
+                )
+            raise PendingTransactionError(
+                "prepared workspace changed during identity retirement"
+            )
         os.fsync(parent_capability.fd)
     _unlink(capability, PREPARED_FILE)
     return workspace.parent / tombstone
@@ -776,7 +869,7 @@ def active_transaction_token_path(output: Path | str = "graphify-out") -> Path:
 
 def _pin_prepared_workspace(
     transaction: Transaction, capability: OutputCapability
-) -> OutputCapability:
+) -> PreparedWorkspaceCapability:
     """Open the exact preparation directory while the owner lock is held."""
     _validate_authority(capability, transaction)
     workspace = transaction.output.parent / f".graphify-prepare-{transaction.id}"
@@ -789,15 +882,17 @@ def _pin_prepared_workspace(
                 raise PendingTransactionError(
                     "prepared workspace already exists without owner binding"
                 ) from exc
-        prepared_capability = pin_output(workspace)
+        workspace_capability = pin_output(workspace)
         try:
-            os.mkdir("graphify-out", 0o700, dir_fd=prepared_capability.fd)
+            os.mkdir("graphify-out", 0o700, dir_fd=workspace_capability.fd)
+            output_capability = pin_output(workspace / "graphify-out")
             marker = {
                 "schema": 1,
                 "transaction_id": transaction.id,
                 "generation": transaction.generation,
                 "token_digest": transaction.token_digest,
-                "identity": prepared_capability.identity.json(),
+                "identity": workspace_capability.identity.json(),
+                "output_identity": output_capability.identity.json(),
             }
             _create_bytes(capability, PREPARED_FILE, _json_bytes(marker))
             for name in MANAGED_PUBLICATION_PATHS:
@@ -807,38 +902,35 @@ def _pin_prepared_workspace(
                     if isinstance(exc.__cause__, FileNotFoundError):
                         continue
                     raise
-                _replace_relative_bytes(
-                    prepared_capability, f"graphify-out/{name}", payload
-                )
+                _replace_relative_bytes(output_capability, name, payload)
         except Exception:
-            prepared_capability.close()
+            with contextlib.suppress(UnboundLocalError):
+                output_capability.close()
+            workspace_capability.close()
             raise
     else:
-        prepared_capability = pin_output(workspace)
-    try:
+        workspace_capability = pin_output(workspace)
         try:
-            prepared_output_info = os.stat(
-                "graphify-out",
-                dir_fd=prepared_capability.fd,
-                follow_symlinks=False,
-            )
-        except FileNotFoundError as exc:
-            raise PendingTransactionError(
-                "prepared output directory is missing"
-            ) from exc
+            output_capability = pin_output(workspace / "graphify-out")
+        except Exception:
+            workspace_capability.close()
+            raise
+    try:
         if (
             marker.get("schema") != 1
             or marker.get("transaction_id") != transaction.id
             or marker.get("generation") != transaction.generation
             or marker.get("token_digest") != transaction.token_digest
             or _identity_from_json(marker.get("identity"))
-            != prepared_capability.identity
-            or not stat.S_ISDIR(prepared_output_info.st_mode)
+            != workspace_capability.identity
+            or _identity_from_json(marker.get("output_identity"))
+            != output_capability.identity
         ):
             raise PendingTransactionError("prepared workspace owner binding changed")
-        return prepared_capability
+        return PreparedWorkspaceCapability(workspace_capability, output_capability)
     except Exception:
-        prepared_capability.close()
+        output_capability.close()
+        workspace_capability.close()
         raise
 
 
@@ -940,6 +1032,7 @@ def run_token(
             "GRAPHIFY_TRANSACTION_ROOT",
             "GRAPHIFY_TRANSACTION_OUTPUT",
             "GRAPHIFY_TRANSACTION_TOKEN",
+            "GRAPHIFY_PREPARED_OUTPUT",
         )
     }
     os.environ.update(
@@ -948,20 +1041,16 @@ def run_token(
         GRAPHIFY_TRANSACTION_OUTPUT=str(tx.output),
         GRAPHIFY_TRANSACTION_TOKEN=str(path),
     )
-    prepared_capability: OutputCapability | None = None
-    prepared_output_capability: OutputCapability | None = None
+    prepared_capability: PreparedWorkspaceCapability | None = None
     prior_cwd_fd: int | None = None
     try:
         if prepared:
             with pin_output(tx.output) as output_capability, _locked(output_capability):
                 prepared_capability = _pin_prepared_workspace(tx, output_capability)
-                prepared_output_capability = pin_output(
-                    prepared_capability.path / "graphify-out"
-                )
             prior_cwd_fd = os.open(".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            os.fchdir(prepared_capability.fd)
+            os.fchdir(prepared_capability.output.fd)
             prepared_capability.validate()
-            prepared_output_capability.validate()
+            os.environ["GRAPHIFY_PREPARED_OUTPUT"] = "1"
         if mode == "-c":
             sys.argv = ["-c", *arguments]
             namespace = {"__name__": "__main__", "__file__": None, "__package__": None}
@@ -975,8 +1064,6 @@ def run_token(
         if prior_cwd_fd is not None:
             os.fchdir(prior_cwd_fd)
             os.close(prior_cwd_fd)
-        if prepared_output_capability is not None:
-            prepared_output_capability.close()
         if prepared_capability is not None:
             prepared_capability.close()
         _AUTHORITY.reset(authority_token)
@@ -991,6 +1078,32 @@ def run_token(
 def run_prepared_token(token_path: Path | str, python_args: list[str]) -> None:
     """Execute one exact Python shape from the retained prepared capability."""
     run_token(token_path, python_args, prepared=True)
+
+
+def commit_prepared_bytes(
+    transaction: Transaction, relative_name: str, payload: bytes
+) -> None:
+    """Publish one immutable artifact only into the pinned prepared output."""
+    if not isinstance(payload, bytes):
+        raise TypeError("prepared commit payload must be immutable bytes")
+    with pin_output(transaction.output) as capability, _locked(capability):
+        _validate_authority(capability, transaction)
+        prepared = _pin_prepared_workspace(transaction, capability)
+        try:
+            _replace_relative_bytes(prepared.output, relative_name, payload)
+        finally:
+            prepared.close()
+
+
+def unlink_prepared(transaction: Transaction, name: str) -> None:
+    """Remove one top-level prepared artifact under exact live authority."""
+    with pin_output(transaction.output) as capability, _locked(capability):
+        _validate_authority(capability, transaction)
+        prepared = _pin_prepared_workspace(transaction, capability)
+        try:
+            _unlink(prepared.output, name)
+        finally:
+            prepared.close()
 
 
 def _validate_authority(
@@ -1383,16 +1496,28 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
     """Read an unpublished graph only for its exact live transaction owner."""
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
-    workspace = prepared_workspace_path()
-    requested = Path(path).expanduser().absolute()
-    expected = workspace / "graphify-out" / requested.name
-    live_alias = transaction.output / requested.name
-    if requested not in {expected, live_alias}:
-        raise PendingTransactionError("prepared graph is outside the owned workspace")
-    with pin_output(workspace) as prepared_capability:
-        payload = _read_relative_bytes(
-            prepared_capability, f"graphify-out/{requested.name}"
-        )
+        prepared_capability = _pin_prepared_workspace(transaction, capability)
+        try:
+            requested = Path(path).expanduser().absolute()
+            expected = prepared_capability.output.path / requested.name
+            live_alias = transaction.output / requested.name
+            if requested not in {expected, live_alias}:
+                raise PendingTransactionError("prepared graph is outside the owned workspace")
+            payload = _read_relative_bytes(prepared_capability.output, requested.name)
+            artifacts: dict[str, bytes] = {requested.name: payload}
+            for name in MANAGED_PUBLICATION_PATHS:
+                if name == requested.name:
+                    continue
+                try:
+                    artifacts[name] = _read_relative_bytes(
+                        prepared_capability.output, name
+                    )
+                except PendingTransactionError as exc:
+                    if isinstance(exc.__cause__, FileNotFoundError):
+                        continue
+                    raise
+        finally:
+            prepared_capability.close()
         try:
             data = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -1405,6 +1530,8 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
             expected,
             payload,
             hashlib.sha256(payload).hexdigest(),
+            artifacts.get("manifest.json"),
+            artifacts,
         )
 
 
@@ -1621,6 +1748,7 @@ def takeover_drainer(
         successor = DrainerTuple(drainer.generation, drainer.claim_epoch + 1, secrets.token_hex(16))
         live = _read_transaction(capability)
         if live is not None:
+            _retire_prepared_locked(capability)
             inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
             inflight = _read_queue(capability, inflight_name)
             if inflight:
@@ -1671,7 +1799,6 @@ def takeover_drainer(
                 lease_deadline=current_time + lease_seconds,
             )
             _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(protocol))
-            _AUTHORITY.set(_authority_for(live))
         _write_drainer(
             capability,
             successor,
@@ -1790,6 +1917,21 @@ def recover_close(output: Path | str) -> None:
         current = _read_drainer(capability)
         if current is not None and current[1] == "CLOSE_PENDING":
             _finish_close_locked(capability, current[2])
+            current = _read_drainer(capability)
+        if current is not None and current[1] == "complete" and _read_queue(capability):
+            raw_generation = current[2].get(
+                "successor_generation", current[0].generation + 1
+            )
+            if not isinstance(raw_generation, int) or raw_generation <= current[0].generation:
+                raise PendingTransactionError("close successor generation is malformed")
+            successor = DrainerTuple(raw_generation, 0, secrets.token_hex(16))
+            _write_drainer(
+                capability,
+                successor,
+                "reserved",
+                lease_deadline=time.time() + 30.0,
+                predecessor_receipt=current[2].get("receipt_digest"),
+            )
 
 
 def recover_transaction(
@@ -2001,6 +2143,10 @@ def merge_detached_snapshots(
         current_graph = nx.node_link_graph(snapshots[1], edges="links")
         other_graph = nx.node_link_graph(snapshots[2], edges="links")
         merged_graph = nx.compose(current_graph, other_graph)
+        if merged_graph.number_of_nodes() > _DETACHED_MAX_NODES:
+            raise PendingTransactionError(
+                "composed detached merge exceeds node count limit"
+            )
         merged = nx.node_link_data(merged_graph, edges="links")
     except (KeyError, TypeError, nx.NetworkXError) as exc:
         raise PendingTransactionError("malformed detached merge graph") from exc
@@ -2013,6 +2159,9 @@ def merge_detached_snapshots(
         "input_digests": digests,
     }
     merged["graph"] = graph_meta
+    merged_payload = json.dumps(merged, sort_keys=True).encode("utf-8")
+    if len(merged_payload) > _DETACHED_MAX_BYTES:
+        raise PendingTransactionError("composed detached merge exceeds size limit")
     current_path = Path(current).absolute()
     with pin_output(current_path.parent) as capability, _locked(capability):
         current_entry = _entry_stat(capability, current_path.name)
@@ -2024,7 +2173,7 @@ def merge_detached_snapshots(
         _replace_bytes(
             capability,
             current_path.name,
-            json.dumps(merged, sort_keys=True).encode("utf-8"),
+            merged_payload,
             expected_identity=current_identity,
         )
 
@@ -2104,51 +2253,49 @@ def finish_transaction(transaction: Transaction) -> None:
 def finalize_prepared_transaction() -> None:
     """Capability-commit an owner-prepared full-build generation and close it."""
     transaction = current_transaction()
-    workspace = prepared_workspace_path()
-
-    with pin_output(workspace) as prepared_capability, pin_output(
-        transaction.output
-    ) as capability, _locked(capability):
+    with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
+        prepared_capability = _pin_prepared_workspace(transaction, capability)
 
         def prepared_bytes(name: str) -> bytes:
-            return _read_relative_bytes(
-                prepared_capability, f"graphify-out/{name}"
-            )
+            return _read_relative_bytes(prepared_capability.output, name)
 
-        graph_name = "graph.json"
-        graph_data = json.loads(
-            prepared_bytes(graph_name).decode("utf-8")
-        )
-        metadata = graph_data.get("graph")
-        if not isinstance(metadata, dict):
-            metadata = {}
-            graph_data["graph"] = metadata
-        metadata[GRAPH_WATERMARK_KEY] = {
-            "schema": 1,
-            "protocol_epoch": 1,
-            "generation": transaction.generation,
-            "state": "active",
-        }
-        graph_payload = json.dumps(
-            graph_data, ensure_ascii=False, separators=(",", ":")
-        ).encode("utf-8")
         try:
-            manifest_payload = prepared_bytes("manifest.json")
-        except FileNotFoundError as exc:
-            raise PendingTransactionError(
-                "prepared manifest is required before finalization"
-            ) from exc
-        prepared: dict[str, bytes] = {}
-        for name in MANAGED_PUBLICATION_PATHS:
-            if name in {graph_name, "manifest.json"}:
-                continue
+            graph_name = "graph.json"
+            graph_data = json.loads(prepared_bytes(graph_name).decode("utf-8"))
+            metadata = graph_data.get("graph")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                graph_data["graph"] = metadata
+            metadata[GRAPH_WATERMARK_KEY] = {
+                "schema": 1,
+                "protocol_epoch": 1,
+                "generation": transaction.generation,
+                "state": "active",
+            }
+            graph_payload = json.dumps(
+                graph_data, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
             try:
-                prepared[name] = prepared_bytes(name)
+                manifest_payload = prepared_bytes("manifest.json")
             except PendingTransactionError as exc:
                 if isinstance(exc.__cause__, FileNotFoundError):
-                    continue
+                    raise PendingTransactionError(
+                        "prepared manifest is required before finalization"
+                    ) from exc
                 raise
+            prepared: dict[str, bytes] = {}
+            for name in MANAGED_PUBLICATION_PATHS:
+                if name in {graph_name, "manifest.json"}:
+                    continue
+                try:
+                    prepared[name] = prepared_bytes(name)
+                except PendingTransactionError as exc:
+                    if isinstance(exc.__cause__, FileNotFoundError):
+                        continue
+                    raise
+        finally:
+            prepared_capability.close()
     artifacts = [graph_name]
     with owned_step(transaction):
         commit_bytes(transaction, graph_name, graph_payload)

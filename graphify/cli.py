@@ -868,6 +868,8 @@ def _export_graph_path() -> Path:
             return Path(arguments[index + 1]).expanduser().resolve()
         if argument.startswith("--graph="):
             return Path(argument.split("=", 1)[1]).expanduser().resolve()
+    if os.environ.get("GRAPHIFY_PREPARED_OUTPUT") == "1":
+        return Path("graph.json").resolve()
     return (Path(_GRAPHIFY_OUT) / "graph.json").resolve()
 
 
@@ -919,6 +921,7 @@ def _transactional_export() -> None:
         begin_transaction,
         commit_bytes,
         commit_generation,
+        commit_prepared_bytes,
         commit_relative_bytes,
         commit_unlink,
         current_transaction,
@@ -926,6 +929,7 @@ def _transactional_export() -> None:
         open_graph_snapshot,
         open_prepared_graph,
         owned_step,
+        unlink_prepared,
     )
 
     graph = _export_graph_path()
@@ -945,7 +949,16 @@ def _transactional_export() -> None:
     captured_err = io.StringIO()
     original_argv = sys.argv
     success_exit: SystemExit | None = None
-    manifest_payload = snapshot.manifest_payload or b"{}"
+    manifest_payload = snapshot.manifest_payload
+    if manifest_payload is None:
+        if active_transaction is not None:
+            raise PendingTransactionError(
+                "managed export requires an exact prepared manifest"
+            )
+        # Receiptless legacy graphs predate manifest enforcement. A direct
+        # export bootstraps their first coordinated generation with the same
+        # empty-manifest compatibility payload used by legacy extraction.
+        manifest_payload = b"{}"
     with tempfile.TemporaryDirectory(prefix="graphify-export-prepare-") as staging_name:
         staging = Path(staging_name)
         staged_graph = staging / graph.name
@@ -998,9 +1011,9 @@ def _transactional_export() -> None:
                     if not prepared.is_file() or prepared == staged_graph:
                         continue
                     relative = prepared.relative_to(staging).as_posix()
-                    commit_relative_bytes(transaction, relative, prepared.read_bytes())
+                    commit_prepared_bytes(transaction, relative, prepared.read_bytes())
                 if subcmd == "html" and "--no-viz" in original_argv:
-                    commit_unlink(transaction, "graph.html")
+                    unlink_prepared(transaction, "graph.html")
             rendered_out = captured_out.getvalue().replace(str(staging), str(graph.parent))
             rendered_err = captured_err.getvalue().replace(str(staging), str(graph.parent))
             sys.stdout.write(rendered_out)

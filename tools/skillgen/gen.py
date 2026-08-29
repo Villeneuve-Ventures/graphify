@@ -1051,7 +1051,71 @@ def _render_saved_interpreter_commands(
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
     body = _route_full_build_transaction(body)
+    if artifact_role == "reference":
+        body = _route_reference_transaction(body, platform)
     return _render_advisory_pointer_prose(body)
+
+
+def _route_reference_transaction(body: str, platform: Platform) -> str:
+    """Route pre-finalization reference writes through the prepared capability."""
+    local_exports = r"(?:wiki|neo4j|falkordb|svg|graphml)(?![^\n]*--push)"
+    if platform.shell == "powershell":
+        body = re.sub(
+            rf"(?m)^& \$GraphifyPython -E -P -B -m graphify export ({local_exports})\s*$",
+            lambda match: (
+                "$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B "
+                "-c 'from graphify.transaction import active_transaction_token_path; "
+                "print(active_transaction_token_path())'\n"
+                "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+                "& $GraphifyPython -E -P -B -m graphify.transaction "
+                "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' "
+                f"-m graphify export {match.group(1)}"
+            ),
+            body,
+        )
+    else:
+        body = re.sub(
+            rf'(?m)^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export ({local_exports})\s*$',
+            lambda match: (
+                'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+                "'from graphify.transaction import active_transaction_token_path; "
+                "print(active_transaction_token_path())') || exit $?; "
+                "export GRAPHIFY_TRANSACTION_TOKEN; "
+                '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction '
+                'run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- '
+                f"-m graphify export {match.group(1)}"
+            ),
+            body,
+        )
+
+    if "from graphify.transcribe import transcribe_all" in body:
+        body = body.replace(
+            '"$GRAPHIFY_PYTHON" -E -P -B -c "\nimport json, os, sys',
+            'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+            "'from graphify.transaction import active_transaction_token_path; "
+            "print(active_transaction_token_path())') || exit $?; "
+            "export GRAPHIFY_TRANSACTION_TOKEN; "
+            '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction '
+            'run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "\n'
+            "import json, os, sys",
+            1,
+        )
+        body = body.replace(
+            '& $GraphifyPython -E -P -B -c "\nimport json, os, sys',
+            "$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B "
+            "-c 'from graphify.transaction import active_transaction_token_path; "
+            "print(active_transaction_token_path())'\n"
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+            "& $GraphifyPython -E -P -B -m graphify.transaction "
+            "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -c \"\n"
+            "import json, os, sys",
+            1,
+        )
+        body = body.replace("graphify-out/.graphify_detect.json", ".graphify_detect.json")
+        body = body.replace(
+            "graphify-out/.graphify_transcripts.json", ".graphify_transcripts.json"
+        )
+    return body
 
 
 def _route_full_build_transaction(body: str) -> str:
@@ -1112,11 +1176,10 @@ def _route_full_build_transaction(body: str) -> str:
             f"{interpreter} -E -P -B -m graphify.transaction run-prepared-token "
             '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
         )
-        return match.group(0).replace(
-            block,
-            block.replace(command, runner),
-            1,
-        )
+        routed_block = block.replace(command, "@@GRAPHIFY_RUNNER@@", 1)
+        routed_block = routed_block.replace("graphify-out/", "")
+        routed_block = routed_block.replace("@@GRAPHIFY_RUNNER@@", runner, 1)
+        return match.group(0).replace(block, routed_block, 1)
 
     section = re.sub(
         r"```(?:bash|sh)\n(.*?)\n```", route_bash, section, flags=re.DOTALL
@@ -1982,6 +2045,26 @@ def _is_prepared_transaction_runner_line(line: str) -> bool:
     )
 
 
+def _is_prepared_workspace_path_line(line: str) -> bool:
+    """Whether a routed monolith line names a managed prepared-workspace file."""
+    names = (
+        ".graphify_detect.json",
+        ".graphify_transcripts.json",
+        ".graphify_chunk_",
+        ".graphify_semantic_new.json",
+        "GRAPH_REPORT.md",
+        "cost.json",
+        "graph.json",
+    )
+    return (
+        any(name in line for name in names)
+        or "Path('.graphify_" in line
+        or "Path('graphify-out/.graphify_" in line
+        or "glob.glob('.graphify_" in line
+        or "glob.glob('graphify-out/.graphify_" in line
+    )
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
@@ -2004,6 +2087,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_saved_interpreter_subcommand_fix_line,
     _is_semantic_cache_scope_fix_line,
     _is_prepared_transaction_runner_line,
+    _is_prepared_workspace_path_line,
 )
 
 

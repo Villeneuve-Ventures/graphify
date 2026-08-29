@@ -70,6 +70,9 @@ Default URI is `falkordb://localhost:6379` (the scheme is informational - `redis
 
 ### Step 7d - MCP server (only if --mcp flag)
 
+Start this long-running reader only after Step 9 has successfully finalized the
+prepared generation. Never start it against the unpublished workspace.
+
 ```@@GRAPHIFY_SHELL@@
 @@GRAPHIFY_GUARD@@
 @@GRAPHIFY_PYTHON@@ -m graphify.serve graphify-out/graph.json
@@ -91,7 +94,9 @@ To configure in Claude Desktop, add to `claude_desktop_config.json`. Claude Desk
 
 ### Step 8 - Token reduction benchmark (only if total_words > 5000)
 
-If `total_words` from `graphify-out/.graphify_detect.json` is greater than 5,000, run:
+After Step 9 has successfully finalized the prepared generation, if
+`total_words` from `graphify-out/.graphify_detect.json` is greater than 5,000,
+run:
 
 ```@@GRAPHIFY_SHELL@@
 @@GRAPHIFY_GUARD@@

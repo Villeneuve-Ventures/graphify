@@ -140,6 +140,7 @@ def test_full_build_token_runner_exports_before_final_commit(tmp_path):
     from graphify.transaction import (
         begin_transaction,
         finalize_prepared_transaction,
+        run_prepared_token,
         run_token,
         stage_transaction_handoff,
     )
@@ -147,7 +148,11 @@ def test_full_build_token_runner_exports_before_final_commit(tmp_path):
     out = _make_graph(tmp_path)
     transaction = begin_transaction("full", tmp_path, output=out)
     token = stage_transaction_handoff(transaction)
-    run_token(
+    run_prepared_token(
+        token.path,
+        ["-c", "from pathlib import Path; Path('manifest.json').write_text('{}')"],
+    )
+    run_prepared_token(
         token.path,
         [
             "-c",
@@ -156,16 +161,10 @@ def test_full_build_token_runner_exports_before_final_commit(tmp_path):
             "dispatch_command('export')",
         ],
     )
-    assert (out / "graph.html").is_file()
+    assert not (out / "graph.html").exists()
     assert (out / ".graphify_transaction.json").is_file()
-    run_token(
-        token.path,
-        [
-            "-c",
-            "from graphify.transaction import prepared_workspace_path; "
-            "(prepared_workspace_path() / 'graphify-out' / 'manifest.json').write_text('{}')",
-        ],
-    )
+    prepared_out = out.parent / f".graphify-prepare-{token.id}" / "graphify-out"
+    assert (prepared_out / "graph.html").is_file()
     run_token(
         token.path,
         [
@@ -187,11 +186,9 @@ def test_rendered_style_prepare_detect_export_finalize_cleanup(tmp_path):
     )
     script = r'''
 set -eu
-WORKSPACE=$("$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -c 'from graphify.transaction import prepared_workspace_path; print(prepared_workspace_path())')
-cd "$WORKSPACE"
-"$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -c 'from pathlib import Path; Path("graphify-out/.graphify_detect.json").write_text("{}")'
-test -f graphify-out/.graphify_detect.json
-"$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -m graphify export html
+"$PYTHON_BIN" -E -P -B -m graphify.transaction run-prepared-token "$TOKEN_PATH" -- -c 'from pathlib import Path; Path(".graphify_detect.json").write_text("{}")'
+test -f "$PREPARED_OUT/.graphify_detect.json"
+"$PYTHON_BIN" -E -P -B -m graphify.transaction run-prepared-token "$TOKEN_PATH" -- -m graphify export html
 "$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -c 'from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()'
 '''
     result = subprocess.run(
@@ -201,6 +198,7 @@ test -f graphify-out/.graphify_detect.json
             **os.environ,
             "PYTHON_BIN": sys.executable,
             "TOKEN_PATH": str(token.path),
+            "PREPARED_OUT": str(out.parent / f".graphify-prepare-{token.id}" / "graphify-out"),
         },
         capture_output=True,
         text=True,

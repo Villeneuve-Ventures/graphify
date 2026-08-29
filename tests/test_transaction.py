@@ -236,6 +236,63 @@ def test_takeover_rotates_token_and_installs_usable_successor_authority(tmp_path
     )
 
 
+def test_tokenless_takeover_cannot_install_local_publication_authority(tmp_path):
+    root, output, _tx, _token = _owner(tmp_path)
+    code = (
+        "import json; from pathlib import Path; "
+        "from graphify.transaction import takeover_drainer, resume_transaction, commit_bytes; "
+        f"output=Path({str(output)!r}); root=Path({str(root)!r}); "
+        "takeover_drainer(output, now=10**12); "
+        "live=json.loads((output/'.graphify_transaction.json').read_text()); "
+        "tx=resume_transaction(live['id'], root, output=output); "
+        "commit_bytes(tx, 'tokenless-takeover-publish', b'no')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", code],
+        cwd=Path(__file__).resolve().parent.parent,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "owner context" in result.stderr
+    assert not (output / "tokenless-takeover-publish").exists()
+
+
+def test_old_token_runner_cannot_self_takeover_then_publish(tmp_path):
+    _root, output, _tx, token = _owner(tmp_path)
+    code = (
+        "import json; from pathlib import Path; "
+        "from graphify.transaction import takeover_drainer, resume_transaction, commit_bytes; "
+        "old=Path(__import__('os').environ['GRAPHIFY_TRANSACTION_OUTPUT']); "
+        "takeover_drainer(old, now=10**12); "
+        "live=json.loads((old/'.graphify_transaction.json').read_text()); "
+        "tx=resume_transaction(live['id'], live['root'], output=old); "
+        "commit_bytes(tx, 'old-token-self-takeover', b'no')"
+    )
+    with pytest.raises(PendingTransactionError, match="owner context"):
+        run_token(token.path, ["-c", code])
+    assert not (output / "old-token-self-takeover").exists()
+
+
+def test_takeover_retires_prepared_binding_and_successor_can_prepare(tmp_path):
+    _root, output, _tx, token = _owner(tmp_path)
+    run_prepared_token(
+        token.path, ["-c", "from pathlib import Path; Path('old-proof').write_text('old')"]
+    )
+    old_workspace = output.parent / f".graphify-prepare-{token.id}"
+    takeover_drainer(output, now=10**12)
+    successor_token = active_transaction_token_path(output)
+    run_prepared_token(
+        successor_token,
+        ["-c", "from pathlib import Path; Path('new-proof').write_text('new')"],
+    )
+    assert not old_workspace.exists()
+    assert list(output.parent.glob(f".graphify-retired-{token.id}-*"))
+    successor_workspace = output.parent / f".graphify-prepare-{successor_token.name.rsplit('.', 1)[-1]}"
+    assert (successor_workspace / "graphify-out" / "new-proof").read_text() == "new"
+
+
 def test_finalize_requires_prepared_manifest(tmp_path):
     from graphify.transaction import finalize_prepared_transaction
 
@@ -434,7 +491,7 @@ def test_prepared_workspace_retarget_preserves_replacement_sentinel(tmp_path):
     workspace.rename(output.parent / "retired-original")
     workspace.mkdir()
     (workspace / "sentinel").write_text("replacement", encoding="utf-8")
-    with pytest.raises(PendingTransactionError, match="identity|missing"):
+    with pytest.raises(PendingTransactionError, match="identity|missing|cannot pin"):
         run_token(
             token.path,
             ["-c", "from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()"],
@@ -452,13 +509,13 @@ def test_prepared_runner_executes_from_retained_workspace_after_rename(tmp_path)
         f"workspace=Path({str(replacement)!r}); moved=Path({str(moved)!r}); "
         "workspace.rename(moved); workspace.mkdir(); "
         "(workspace/'sentinel').write_text('replacement'); "
-        "Path('graphify-out/relative-proof').write_text('retained'); "
+        "Path('relative-proof').write_text('retained'); "
         f"Path({str(proof)!r}).write_text(str(os.stat('.').st_ino))"
     )
     run_prepared_token(token.path, ["-c", code])
     assert (moved / "graphify-out" / "relative-proof").read_text() == "retained"
     assert (replacement / "sentinel").read_text() == "replacement"
-    assert int(proof.read_text()) == moved.stat().st_ino
+    assert int(proof.read_text()) == (moved / "graphify-out").stat().st_ino
 
 
 def test_prepared_runner_rejects_swap_before_fchdir(tmp_path, monkeypatch):
@@ -485,6 +542,23 @@ def test_prepared_runner_rejects_swap_before_fchdir(tmp_path, monkeypatch):
     assert not (workspace / "graphify-out").exists()
 
 
+def test_prepared_runner_writes_through_retained_child_after_child_swap(tmp_path):
+    _root, output, _tx, token = _owner(tmp_path)
+    workspace = output.parent / f".graphify-prepare-{token.id}"
+    moved_child = tmp_path / "moved-prepared-child"
+    code = (
+        "from pathlib import Path; "
+        f"child=Path({str(workspace / 'graphify-out')!r}); "
+        f"child.rename(Path({str(moved_child)!r})); child.mkdir(); "
+        "(child/'sentinel').write_text('replacement'); "
+        "Path('retained-child-proof').write_text('original')"
+    )
+    run_prepared_token(token.path, ["-c", code])
+    assert (moved_child / "retained-child-proof").read_text() == "original"
+    assert (workspace / "graphify-out" / "sentinel").read_text() == "replacement"
+    assert not (workspace / "graphify-out" / "retained-child-proof").exists()
+
+
 def test_prepared_cost_is_receipt_bound_and_accumulates_across_generations(tmp_path):
     from graphify.transaction import finalize_prepared_transaction
 
@@ -499,9 +573,9 @@ def test_prepared_cost_is_receipt_bound_and_accumulates_across_generations(tmp_p
         [
             "-c",
             "import json; from pathlib import Path; "
-            f"Path('graphify-out/graph.json').write_bytes({ _graph(tx.generation)!r}); "
-            "Path('graphify-out/manifest.json').write_text('{}'); "
-            f"Path('graphify-out/cost.json').write_text(json.dumps({first_cost!r}))",
+            f"Path('graph.json').write_bytes({ _graph(tx.generation)!r}); "
+            "Path('manifest.json').write_text('{}'); "
+            f"Path('cost.json').write_text(json.dumps({first_cost!r}))",
         ],
     )
     run_token(
@@ -518,12 +592,12 @@ def test_prepared_cost_is_receipt_bound_and_accumulates_across_generations(tmp_p
         [
             "-c",
             "import json; from pathlib import Path; "
-            "cost= json.loads(Path('graphify-out/cost.json').read_text()); "
+            "cost= json.loads(Path('cost.json').read_text()); "
             "cost['runs'].append({'input_tokens': 5, 'output_tokens': 7}); "
             "cost['total_input_tokens'] += 5; cost['total_output_tokens'] += 7; "
-            "Path('graphify-out/cost.json').write_text(json.dumps(cost)); "
-            f"Path('graphify-out/graph.json').write_bytes({_graph(second.generation)!r}); "
-            "Path('graphify-out/manifest.json').write_text('{}')",
+            "Path('cost.json').write_text(json.dumps(cost)); "
+            f"Path('graph.json').write_bytes({_graph(second.generation)!r}); "
+            "Path('manifest.json').write_text('{}')",
         ],
     )
     run_token(
@@ -1035,6 +1109,43 @@ def test_close_pending_recovery_and_racing_enqueue_create_successor(tmp_path):
     assert drainer["generation"] == late.drainer.generation
 
 
+def test_recover_close_reconstructs_successor_after_complete_reserve_crash(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    _commit_owner_generation(output, tx)
+    tx = resume_transaction(tx.id, root, output=output)
+    queue_rebuild(
+        "update", root, output=output, changed_paths=["late-after-complete.py"]
+    )
+    original = transaction_module._write_drainer
+    crashed = False
+
+    def crash_before_successor(capability, drainer, state, **extra):
+        nonlocal crashed
+        if state == "reserved" and not crashed:
+            crashed = True
+            raise RuntimeError("complete-before-successor")
+        return original(capability, drainer, state, **extra)
+
+    monkeypatch.setattr(transaction_module, "_write_drainer", crash_before_successor)
+    with pytest.raises(RuntimeError, match="complete-before-successor"):
+        finish_transaction(tx)
+    monkeypatch.setattr(transaction_module, "_write_drainer", original)
+    recover_close(output)
+    recovered_drainer = json.loads((output / ".graphify_drainer.json").read_text())
+    assert recovered_drainer["state"] == "reserved"
+    successor = begin_transaction("runtime", root, output=output)
+    claim = claim_rebuild_queue(successor, successor.drainer)
+    assert any(
+        isinstance(paths := item.get("changed_paths"), list)
+        and "late-after-complete.py" in paths
+        for item in claim.items
+    )
+
+
 @pytest.mark.parametrize(
     "boundary",
     [
@@ -1201,6 +1312,47 @@ def test_detached_merge_checks_identity_inside_final_replace(tmp_path, monkeypat
     with pytest.raises(PendingTransactionError, match="identity"):
         merge_detached_snapshots(base, current, other)
     assert current.read_bytes() == b"replacement"
+
+
+def test_detached_merge_does_not_overwrite_replacement_winning_final_link(
+    tmp_path, monkeypatch
+):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    for path in (base, current, other):
+        path.write_bytes(_graph(3))
+    real_link = os.link
+    injected = False
+
+    def replace_before_link(src, dst, *args, **kwargs):
+        nonlocal injected
+        if dst == current.name and not injected:
+            injected = True
+            current.write_bytes(b"replacement")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", replace_before_link)
+    with pytest.raises(PendingTransactionError, match="replacement won"):
+        merge_detached_snapshots(base, current, other)
+    assert current.read_bytes() == b"replacement"
+
+
+def test_detached_merge_rejects_composed_node_cap_before_mutation(tmp_path):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    base.write_bytes(_graph(1))
+    current_payload = json.loads(_graph(1))
+    current_payload["nodes"] = [{"id": f"a-{index}"} for index in range(50_001)]
+    current.write_text(json.dumps(current_payload), encoding="utf-8")
+    other_payload = json.loads(_graph(1))
+    other_payload["nodes"] = [{"id": f"b-{index}"} for index in range(50_000)]
+    other.write_text(json.dumps(other_payload), encoding="utf-8")
+    before = current.read_bytes()
+    with pytest.raises(PendingTransactionError, match="composed.*node count"):
+        merge_detached_snapshots(base, current, other)
+    assert current.read_bytes() == before
 
 
 def test_detached_merge_refuses_retargeted_current_snapshot(

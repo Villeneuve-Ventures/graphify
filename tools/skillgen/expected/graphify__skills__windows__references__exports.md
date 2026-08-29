@@ -236,7 +236,9 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-& $GraphifyPython -E -P -B -m graphify export wiki
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export wiki
 ```
 
 ### Step 7 - Neo4j export (only if --neo4j or --neo4j-push flag)
@@ -466,7 +468,9 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-& $GraphifyPython -E -P -B -m graphify export neo4j
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export neo4j
 ```
 
 **If `--neo4j-push <uri>`** - push directly to a running Neo4j instance. Ask the user for credentials if not provided:
@@ -926,7 +930,9 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-& $GraphifyPython -E -P -B -m graphify export falkordb
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export falkordb
 ```
 
 **If `--falkordb-push <uri>`** - push directly to a running FalkorDB instance. Credentials are optional; ask the user only if the instance requires auth:
@@ -1384,7 +1390,9 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-& $GraphifyPython -E -P -B -m graphify export svg
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export svg
 ```
 
 ### Step 7c - GraphML export (only if --graphml flag)
@@ -1612,10 +1620,15 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-& $GraphifyPython -E -P -B -m graphify export graphml
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export graphml
 ```
 
 ### Step 7d - MCP server (only if --mcp flag)
+
+Start this long-running reader only after Step 9 has successfully finalized the
+prepared generation. Never start it against the unpublished workspace.
 
 ```powershell
 $env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"
@@ -2081,7 +2094,9 @@ $graphPath = Join-Path ([IO.Path]::GetFullPath((Get-Location).Path)) "graphify-o
 
 ### Step 8 - Token reduction benchmark (only if total_words > 5000)
 
-If `total_words` from `graphify-out/.graphify_detect.json` is greater than 5,000, run:
+After Step 9 has successfully finalized the prepared generation, if
+`total_words` from `graphify-out/.graphify_detect.json` is greater than 5,000,
+run:
 
 ```powershell
 $env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"

@@ -1714,7 +1714,8 @@ def test_transaction_fence_is_unique_ordered_and_preserves_outside_bytes():
     detect_block = routed[start:routed.index("### Step 2.5", start)]
     assert "graphify.transaction run-prepared-token" in detect_block
     assert 'cd "$GRAPHIFY_TRANSACTION_WORKSPACE"' not in detect_block
-    assert "> graphify-out/.graphify_detect.json" in detect_block
+    assert "> .graphify_detect.json" in detect_block
+    assert "> graphify-out/.graphify_detect.json" not in detect_block
 
     with pytest.raises(ValueError, match="duplicate Step 2"):
         gen._route_full_build_transaction(source.replace("### Step 2", "### Step 2\n### Step 2", 1))
@@ -3762,7 +3763,8 @@ def test_powershell_bootstrap_validates_every_candidate_and_parses():
     assert "graphify-out\\.graphify_python" in script
     assert ".graphify_root" not in script
     assert ".graphify_python" not in root_persistence
-    assert "graphify-out\\.graphify_root" in root_persistence
+    assert 'Path(".graphify_root")' in root_persistence
+    assert "graphify-out\\.graphify_root" not in root_persistence
     assert "Resolve-Path INPUT_PATH" in root_persistence
     for unsafe in (
         "Get-Command uv", "Get-Command pipx", "Get-Command graphify",
@@ -5317,6 +5319,30 @@ def test_full_build_renders_consume_transaction_runner_and_finalize():
         ):
             if "write_text(" in block or "save_manifest(" in block:
                 assert "graphify.transaction run-prepared-token" in block
+
+
+def test_split_references_route_pre_finalization_writes_through_prepared_runner():
+    for platform in gen.load_platforms().values():
+        if platform.bucket != "split":
+            continue
+        rendered = {Path(item.path).name: item.content for item in gen.render(platform)}
+        exports = rendered["exports.md"]
+        transcribe = rendered["transcribe.md"]
+        export_blocks = [
+            block
+            for _, block in _executable_blocks(exports)
+            if "graphify.transaction run-prepared-token" in block
+        ]
+        for name in ("wiki", "neo4j", "falkordb", "svg", "graphml"):
+            assert any(
+                f"-m graphify export {name}" in block for block in export_blocks
+            )
+        assert "--push" in exports
+        assert "run-prepared-token" in transcribe
+        assert "Path('.graphify_detect.json')" in transcribe
+        assert "Path('.graphify_transcripts.json')" in transcribe
+        assert "Path('graphify-out/.graphify_detect.json')" not in transcribe
+        assert "after Step 9" in exports
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")

@@ -1568,6 +1568,32 @@ def test_transactional_watch_accepts_legacy_baseline_before_creating_markers(
     assert graph["graph"]["_graphify_protocol"]["state"] == "active"
 
 
+def test_transactional_watch_consumes_checkpointed_legacy_paths_without_drain(
+    tmp_path, monkeypatch
+):
+    import graphify.watch as watch_module
+
+    source = tmp_path / "source.py"
+    late = tmp_path / "late-open-writer.py"
+    source.write_text("def source():\n    return 1\n", encoding="utf-8")
+    late.write_text("def late():\n    return 2\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / ".pending_changes").write_text(str(late) + "\n", encoding="utf-8")
+
+    def forbidden_drain(_output):
+        raise AssertionError("transactional claim must not unlink legacy pending state")
+
+    monkeypatch.setattr(watch_module, "_drain_pending", forbidden_drain)
+    assert watch_module._rebuild_code(tmp_path, changed_paths=[source]) is True
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert any(
+        node.get("source_file", "").endswith("late-open-writer.py")
+        for node in graph["nodes"]
+    )
+    assert (output / ".pending_changes").exists()
+
+
 def test_merge_changed_paths_dedupes_in_order():
     """_merge_changed_paths preserves first-seen order and drops dupes."""
     from graphify.watch import _merge_changed_paths
