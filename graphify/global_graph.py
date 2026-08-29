@@ -103,7 +103,8 @@ def global_add(source_path: Path, repo_tag: str) -> dict:
     # Load source graph
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(source_path)
-    data = json.loads(source_path.read_text(encoding="utf-8"))
+    from graphify.transaction import open_graph_snapshot
+    data = open_graph_snapshot(source_path, purpose="global-add").data
     if "links" not in data and "edges" in data:
         data = dict(data, links=data["edges"])
     try:

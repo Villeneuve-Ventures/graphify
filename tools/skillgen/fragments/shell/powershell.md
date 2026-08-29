@@ -83,6 +83,28 @@ if (-not $GRAPHIFY_PYTHON) {
 # Save interpreter path — all subsequent steps read this
 & $GRAPHIFY_PYTHON -E -P -B -m graphify.interpreter_pointer write graphify-out\.graphify_python
 if ($LASTEXITCODE -ne 0) { throw "Failed to publish the Graphify interpreter pointer." }
+
+# Full-build transaction handoff. The exact token binds the canonical input
+# root and actual output directory; environment ids/roots alone are not owner authority.
+$GRAPHIFY_TRANSACTION_TOKEN = & $GRAPHIFY_PYTHON -E -P -B -c @'
+import sys
+from pathlib import Path
+from graphify.transaction import begin_transaction, stage_transaction_handoff
+root = Path(sys.argv[1]).resolve(strict=True)
+output = (root / 'graphify-out').resolve()
+print(stage_transaction_handoff(begin_transaction('full', root, output=output)).path, end='')
+'@ INPUT_PATH
+if ($LASTEXITCODE -ne 0) { throw "Graphify transaction handoff failed." }
+$Env:GRAPHIFY_TRANSACTION_TOKEN = [string]$GRAPHIFY_TRANSACTION_TOKEN
+function Invoke-GraphifyTransactionPython {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PythonArgs)
+    if (-not $Env:GRAPHIFY_TRANSACTION_TOKEN) {
+        throw "Missing immutable Graphify transaction token."
+    }
+    & $GRAPHIFY_PYTHON -E -P -B -m graphify.transaction run-token `
+        $Env:GRAPHIFY_TRANSACTION_TOKEN -- @PythonArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 ```
 
 If the import succeeds, print nothing and move straight to Step 2.

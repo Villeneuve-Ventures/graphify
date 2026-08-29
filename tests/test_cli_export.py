@@ -12,6 +12,41 @@ from pathlib import Path
 
 import pytest
 
+
+def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypatch):
+    from graphify.cli import _resolve_transaction_destination
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    external = tmp_path / "archive" / "custom.json"
+    external.parent.mkdir()
+    for argv in (
+        ["graphify", "cluster-only", str(corpus), "--graph", str(external)],
+        ["graphify", "cluster-only", str(corpus), f"--graph={external}"],
+        ["graphify", "cluster-only", "--graph", str(external), "--", str(corpus)],
+    ):
+        monkeypatch.setattr("sys.argv", argv)
+        destination = _resolve_transaction_destination("cluster-only")
+        assert destination.graph == external.resolve()
+        assert destination.output == external.parent.resolve()
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["graphify", "cluster-only", ".", "--graph"],
+        ["graphify", "cluster-only", ".", "--graph="],
+        ["graphify", "cluster-only", ".", "--unknown", "value"],
+    ],
+)
+def test_issue89_cli_destination_rejects_ambiguous_options(argv, monkeypatch):
+    from graphify.cli import _CliArgumentError, _resolve_transaction_destination
+
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(_CliArgumentError):
+        _resolve_transaction_destination("cluster-only")
+
+
 PYTHON = sys.executable
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -57,6 +92,148 @@ def _make_graph(tmp_path: Path) -> Path:
         json.dumps({str(k): v for k, v in labels.items()})
     )
     return out
+
+
+def _assert_transactional_export(out: Path) -> None:
+    protocol = json.loads((out / ".graphify_protocol.json").read_text())
+    receipt = json.loads((out / ".graphify_generation.json").read_text())
+    graph = json.loads((out / "graph.json").read_text())
+    watermark = graph["graph"]["_graphify_protocol"]
+    assert protocol["state"] == "COMPLETE"
+    assert receipt["generation"] == protocol["generation"]
+    assert watermark["generation"] == receipt["generation"]
+
+
+def test_full_build_token_runner_exports_before_final_commit(tmp_path):
+    from graphify.transaction import (
+        begin_transaction,
+        finalize_prepared_transaction,
+        run_token,
+        stage_transaction_handoff,
+    )
+
+    out = _make_graph(tmp_path)
+    transaction = begin_transaction("full", tmp_path, output=out)
+    token = stage_transaction_handoff(transaction)
+    run_token(
+        token.path,
+        [
+            "-c",
+            "import sys; from graphify.cli import dispatch_command; "
+            f"sys.argv=['graphify','export','html','--graph',{str(out / 'graph.json')!r}]; "
+            "dispatch_command('export')",
+        ],
+    )
+    assert (out / "graph.html").is_file()
+    assert (out / ".graphify_transaction.json").is_file()
+    run_token(
+        token.path,
+        [
+            "-c",
+            "from graphify.transaction import finalize_prepared_transaction; "
+            "finalize_prepared_transaction()",
+        ],
+    )
+    _assert_transactional_export(out)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "artifact"),
+    [
+        (["export", "html"], "graph.html"),
+        (["export", "svg"], "graph.svg"),
+        (["export", "graphml"], "graph.graphml"),
+        (["export", "neo4j"], "cypher.txt"),
+        (["export", "falkordb"], "cypher.txt"),
+    ],
+)
+def test_issue89_managed_file_exports_commit_generation(tmp_path, arguments, artifact):
+    out = _make_graph(tmp_path)
+    result = _run(arguments, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (out / artifact).exists()
+    _assert_transactional_export(out)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "artifact"),
+    [
+        (["export", "wiki"], "wiki/index.md"),
+        (["export", "obsidian"], "obsidian/graph.canvas"),
+    ],
+)
+def test_issue89_managed_directory_exports_commit_generation(
+    tmp_path, arguments, artifact
+):
+    out = _make_graph(tmp_path)
+    result = _run(arguments, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (out / artifact).exists()
+    _assert_transactional_export(out)
+
+
+def test_issue89_managed_export_does_not_republish_unrelated_nested_files(tmp_path):
+    out = _make_graph(tmp_path)
+    unrelated = out / "private" / "note.txt"
+    unrelated.parent.mkdir()
+    unrelated.write_bytes(b"user-owned")
+    unrelated.chmod(0o644)
+
+    result = _run(["export", "html"], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert unrelated.read_bytes() == b"user-owned"
+    assert unrelated.stat().st_mode & 0o777 == 0o644
+    _assert_transactional_export(out)
+
+
+def test_issue89_external_obsidian_destination_stays_unmanaged(tmp_path):
+    out = _make_graph(tmp_path)
+    external = tmp_path / "external-vault"
+    result = _run(["export", "obsidian", "--dir", str(external)], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (external / "graph.canvas").exists()
+    assert not (out / ".graphify_protocol.json").exists()
+
+
+def test_issue89_managed_callflow_export_commits_generation(tmp_path):
+    out = _make_graph(tmp_path)
+    (out / "GRAPH_REPORT.md").write_text(
+        "# Graph Report\n\n## Architecture\n\nAlpha calls Beta.\n", encoding="utf-8"
+    )
+    result = _run(["export", "callflow-html", "--graph", str(out / "graph.json")], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert list(out.glob("*callflow.html"))
+    _assert_transactional_export(out)
+
+
+def test_issue89_extract_manifest_failure_leaves_recoverable_owner(
+    tmp_path, monkeypatch, capsys
+):
+    import graphify.__main__ as mainmod
+    import graphify.detect as detectmod
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(
+        detectmod,
+        "save_manifest",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("manifest failed")),
+    )
+    monkeypatch.setattr(
+        mainmod.sys,
+        "argv",
+        ["graphify", "extract", str(corpus), "--code-only", "--no-cluster"],
+    )
+    with pytest.raises(OSError, match="manifest failed"):
+        mainmod.main()
+    out = corpus / "graphify-out"
+    assert (out / ".graphify_transaction.json").exists()
+    assert not (out / ".graphify_generation.json").exists()
+    captured = capsys.readouterr()
+    assert "success" not in captured.out.lower()
 
 
 # ── graphify export html ─────────────────────────────────────────────────────
@@ -193,6 +370,16 @@ def test_query_missing_graph_fails(tmp_path):
     assert r.returncode != 0
 
 
+def test_query_rejects_pending_managed_generation_before_graph_use(tmp_path):
+    from graphify.transaction import begin_transaction
+
+    out = _make_graph(tmp_path)
+    begin_transaction("runtime", tmp_path, output=out)
+    r = _run(["query", "anything"], tmp_path)
+    assert r.returncode != 0
+    assert "without a graph receipt" in r.stderr.lower()
+
+
 def test_query_uses_graphify_out_env(tmp_path):
     out = _make_graph(tmp_path)
     custom_out = tmp_path / "custom-graph"
@@ -318,7 +505,18 @@ def test_cluster_only_creates_output_dir_when_missing(tmp_path):
 
     r = _run(["cluster-only", ".", "--graph", str(graph_src), "--no-viz"], tmp_path)
     assert r.returncode == 0, r.stderr
-    assert (tmp_path / "graphify-out" / "GRAPH_REPORT.md").exists()
+    assert (graph_src.parent / "GRAPH_REPORT.md").exists()
+    assert (graph_src.parent / ".graphify_generation.json").exists()
+    protocol = json.loads(
+        (graph_src.parent / ".graphify_protocol.json").read_text(encoding="utf-8")
+    )
+    assert protocol["state"] == "COMPLETE"
+    watermark = json.loads(graph_src.read_text(encoding="utf-8"))["graph"][
+        "_graphify_protocol"
+    ]
+    assert watermark["state"] == "active"
+    assert watermark["generation"] == protocol["generation"]
+    assert not (tmp_path / "graphify-out").exists()
 
 
 def test_cluster_only_graph_in_graphify_out_writes_beside_it(tmp_path):
@@ -354,6 +552,13 @@ def test_extract_out_does_not_pollute_corpus(tmp_path):
     )
     assert r.returncode == 0, r.stderr
     assert (out / "graphify-out" / "graph.json").exists()   # graph in --out
+    receipt = out / "graphify-out" / ".graphify_generation.json"
+    assert receipt.exists()
+    generation = json.loads(receipt.read_text(encoding="utf-8"))["generation"]
+    graph = json.loads(
+        (out / "graphify-out" / "graph.json").read_text(encoding="utf-8")
+    )
+    assert graph["graph"]["_graphify_protocol"]["generation"] == generation
     assert not (corpus / "graphify-out").exists()           # corpus untouched
 
 

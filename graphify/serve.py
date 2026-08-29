@@ -27,8 +27,8 @@ def _load_graph(graph_path: str) -> nx.Graph:
         if not resolved.exists():
             raise FileNotFoundError(f"Graph file not found: {resolved}")
         check_graph_file_size_cap(resolved)
-        safe = resolved
-        data = json.loads(safe.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        data = open_graph_snapshot(resolved, purpose="serve").data
         if "links" not in data and "edges" in data:
             data = dict(data, links=data["edges"])
         data = {**data, "directed": True}

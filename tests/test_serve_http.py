@@ -200,6 +200,19 @@ def _call_tool(client, headers, name, arguments, rid) -> str:
     return resp.json()["result"]["content"][0]["text"]
 
 
+def test_pending_managed_graph_is_rejected_by_http_tool(tmp_path):
+    from graphify.transaction import begin_transaction
+
+    graph_path = Path(_graph_file(tmp_path))
+    begin_transaction("runtime", tmp_path, output=graph_path.parent)
+    app = serve_mod._build_http_app(str(graph_path), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        result = _call_tool(client, headers, "graph_stats", {}, rid=2)
+    assert "Error executing graph_stats" in result
+    assert "receipt" in result.lower()
+
+
 def test_project_path_is_optional_on_every_tool(tmp_path):
     """Multi-project support is additive: every tool gains an optional
     project_path, and none of them makes it required."""

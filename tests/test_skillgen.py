@@ -712,6 +712,12 @@ def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, P
         f"    (package / '__main__.py').write_text({graphify_main!r})\n"
         "    (package / 'interpreter_pointer.py').write_text(\n"
         "        \"from pathlib import Path\\nimport sys\\nPath(sys.argv[2]).parent.mkdir(parents=True, exist_ok=True)\\nPath(sys.argv[2]).write_text(sys.executable)\\n\"\n"
+        "    )\n"
+        "    (package / 'transaction.py').write_text(\n"
+        "        \"from pathlib import Path\\n\"\n"
+        "        \"class _Value:\\n    pass\\n\"\n"
+        "        \"def begin_transaction(kind, root, output):\\n    value=_Value(); value.output=Path(output); value.output.mkdir(parents=True, exist_ok=True); return value\\n\"\n"
+        "        \"def stage_transaction_handoff(transaction):\\n    value=_Value(); value.path=transaction.output/'.graphify_transaction_token.fake'; value.path.write_text('token'); return value\\n\"\n"
         "    )\n",
         encoding="utf-8",
     )
@@ -1686,6 +1692,10 @@ def test_rendered_executable_blocks_reject_ambient_graphify_commands():
                     assert all(
                         line.lstrip().startswith(
                             '"$GRAPHIFY_PYTHON" -E -P -B -m graphify'
+                        )
+                        or (
+                            line.lstrip().startswith("GRAPHIFY_TRANSACTION_TOKEN=$(")
+                            and " -m graphify.transaction run-token " in line
                         )
                         for line in operational
                     ), f"{key}:{artifact.path}\n{block}"
@@ -5255,3 +5265,62 @@ def test_agents_audit_baseline_is_amps_v8_body():
     assert gen._v8_baseline_ref("agents") == "47042beb05d1f6dd2186c0c499ae2840ce604ead:graphify/skill-amp.md"
     problems = gen.audit_coverage(platforms["agents"])
     assert problems == [], "\n".join(problems)
+
+
+def test_full_build_renders_consume_transaction_runner_and_finalize():
+    for platform in gen.load_platforms().values():
+        artifacts = gen.render(platform)
+        core = next(
+            artifact.content
+            for artifact in artifacts
+            if "/references/" not in artifact.path
+        )
+        start = core.index("### Step 2")
+        boundaries = [
+            value
+            for marker in ("## Interpreter guard", "## For --update")
+            if (value := core.find(marker, start)) >= 0
+        ]
+        full_build = core[start : min(boundaries) if boundaries else len(core)]
+        assert "active_transaction_token_path" in full_build
+        assert "graphify.transaction run-token" in full_build
+        assert full_build.count("finalize_prepared_transaction()") == 1
+        for line in full_build.splitlines():
+            if " -m graphify export " in line and not line.lstrip().startswith("#"):
+                assert "graphify.transaction run-token" in line
+        for block in re.findall(
+            r"```(?:bash|sh)\n(.*?)\n```", full_build, flags=re.DOTALL
+        ):
+            if "write_text(" in block or "save_manifest(" in block:
+                assert "graphify.transaction run-token" in block
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+def test_rendered_posix_transaction_runner_executes_with_exact_token(tmp_path):
+    from graphify.transaction import begin_transaction, stage_transaction_handoff
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    transaction = begin_transaction("full", root, output=output)
+    token = stage_transaction_handoff(transaction)
+    script = r'''
+graphify_transaction_python() {
+    "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- "$@"
+}
+graphify_transaction_python -c "from graphify.transaction import current_transaction, commit_bytes; tx=current_transaction(); commit_bytes(tx, 'runner-proof', b'ok')"
+'''
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "GRAPHIFY_PYTHON": sys.executable,
+            "GRAPHIFY_TRANSACTION_TOKEN": str(token.path),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (output / "runner-proof").read_bytes() == b"ok"

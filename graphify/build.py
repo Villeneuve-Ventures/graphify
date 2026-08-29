@@ -936,8 +936,9 @@ def build_merge(
         from graphify.security import check_graph_file_size_cap
         check_graph_file_size_cap(graph_path)
         try:
-            data = json.loads(graph_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
+            from graphify.transaction import open_graph_snapshot
+            data = open_graph_snapshot(graph_path, purpose="build-merge").data
+        except (json.JSONDecodeError, OSError, RuntimeError) as exc:
             raise RuntimeError(
                 f"Cannot read {graph_path} for incremental merge: {exc}. "
                 "Delete the file and run a full rebuild."

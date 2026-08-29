@@ -571,7 +571,8 @@ def write_tree_html(
 ) -> Path:
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(graph_path)
-    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    from graphify.transaction import open_graph_snapshot
+    graph = open_graph_snapshot(graph_path, purpose="tree-html").data
     tree = build_tree(graph, root=root, max_children=max_children,
                       project_label=project_label)
     title = f"{tree['name']} — graphify tree viewer"

@@ -260,7 +260,8 @@ def load_graph(path: str | Path) -> tuple:
             check_graph_file_size_cap(Path(path))
         except ValueError as exc:
             raise SystemExit(f"ERROR: {exc}") from exc
-    data = read_json(path)
+    from graphify.transaction import open_graph_snapshot
+    data = open_graph_snapshot(Path(path), purpose="callflow-html").data
     if not isinstance(data, dict):
         raise SystemExit(f"ERROR: graph file must contain a JSON object: {path}")
 

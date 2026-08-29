@@ -188,7 +188,8 @@ def _load_node_community(graph_path: Path, analysis_path: Path,
     # id -> label from the graph, so a label-form citation resolves to a community too.
     id_to_label: dict[str, str] = {}
     try:
-        gdata = json.loads(graph_path.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        gdata = open_graph_snapshot(graph_path, purpose="reflect-community").data
         for n in gdata.get("nodes", []):
             if isinstance(n, dict) and n.get("id") is not None and n.get("label") is not None:
                 id_to_label[str(n["id"])] = str(n["label"])
@@ -220,7 +221,8 @@ def _load_known_nodes(graph_path: Path) -> set[str] | None:
     indexing ids alone silently dropped every label-form citation (the common case).
     """
     try:
-        data = json.loads(Path(graph_path).read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        data = open_graph_snapshot(Path(graph_path), purpose="reflect-known-nodes").data
     except (OSError, ValueError):
         return None
     nodes = data.get("nodes")
@@ -634,7 +636,8 @@ def _build_id_label_maps(graph_path: Path) -> tuple[dict[str, str], dict[str, li
     label_to_ids: dict[str, list[str]] = {}
     node_by_id: dict[str, dict[str, Any]] = {}
     try:
-        data = json.loads(Path(graph_path).read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        data = open_graph_snapshot(Path(graph_path), purpose="reflect-projection").data
     except (OSError, ValueError):
         return id_set, label_to_ids, node_by_id
     for n in data.get("nodes", []):

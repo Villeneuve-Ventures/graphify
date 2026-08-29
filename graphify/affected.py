@@ -228,12 +228,12 @@ def format_affected(
 
 
 def load_graph(path: Path) -> nx.Graph:
-    import json
     from networkx.readwrite import json_graph
+    from graphify.transaction import PendingTransactionError, open_graph_snapshot
 
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
+        raw = open_graph_snapshot(path, purpose="affected").data
+    except (OSError, PendingTransactionError) as exc:
         raise RuntimeError(
             f"Cannot read graph file {path}: {exc}. "
             "Re-run 'graphify extract' to regenerate it."

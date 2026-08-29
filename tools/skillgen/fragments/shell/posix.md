@@ -64,6 +64,17 @@ fi
 # Write interpreter path for all subsequent steps (persists across invocations)
 "$PYTHON" -E -P -B -c 'from pathlib import Path; Path("graphify-out").mkdir(parents=True, exist_ok=True)' || exit 1
 "$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python || exit 1
+
+# Full-build transaction handoff. The token binds the canonical input root and
+# the actual output directory; ids/roots in the environment are never authority.
+GRAPHIFY_TRANSACTION_TOKEN=$(
+    "$PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.transaction import begin_transaction, stage_transaction_handoff; root=Path(sys.argv[1]).resolve(strict=True); output=(root / "graphify-out").resolve(); print(stage_transaction_handoff(begin_transaction("full", root, output=output)).path, end="")' INPUT_PATH
+) || exit $?
+export GRAPHIFY_TRANSACTION_TOKEN
+graphify_transaction_python() {
+    [ -n "${GRAPHIFY_TRANSACTION_TOKEN-}" ] || { echo "missing immutable Graphify transaction token" >&2; return 1; }
+    "$PYTHON" -E -P -B -m graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- "$@"
+}
 ```
 
 If the import succeeds, print nothing and move straight to Step 2.

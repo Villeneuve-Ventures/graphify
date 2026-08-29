@@ -7,6 +7,25 @@ import time
 from pathlib import Path
 import pytest
 
+
+def test_issue89_manifest_failure_is_not_success(monkeypatch, tmp_path, capsys):
+    import graphify.watch as watch
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+
+    def fail_manifest(*_args, **_kwargs):
+        raise OSError("manifest unavailable")
+
+    monkeypatch.setattr("graphify.detect.save_manifest", fail_manifest)
+    assert watch._rebuild_code(root, no_cluster=True, block_on_lock=True) is False
+    output = capsys.readouterr().out.lower()
+    assert "manifest unavailable" in output
+    assert "updated" not in output
+    assert (root / "graphify-out" / ".graphify_transaction.json").exists()
+
+
 from graphify.watch import _notify_only, _WATCHED_EXTENSIONS, _rebuild_lock, _check_shrink
 
 
@@ -825,7 +844,11 @@ def test_rebuild_code_is_idempotent_when_cluster_ids_flap(tmp_path, monkeypatch)
     second_graph = graph_path.read_text(encoding="utf-8")
     second_report = report_path.read_text(encoding="utf-8")
 
-    assert first_graph == second_graph
+    first_payload = json.loads(first_graph)
+    second_payload = json.loads(second_graph)
+    first_payload["graph"].pop("_graphify_protocol")
+    second_payload["graph"].pop("_graphify_protocol")
+    assert first_payload == second_payload
     assert first_report == second_report
 
 
@@ -1471,115 +1494,46 @@ def test_rebuild_code_queues_on_lock_contention(tmp_path, monkeypatch, capsys):
         assert pending.read_text(encoding="utf-8").splitlines() == ["a.py", "b.py"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="fcntl-only (POSIX)")
-def test_rebuild_code_merges_pending_on_acquire(tmp_path, monkeypatch):
-    """#1059: the process that acquires the lock must drain .pending_changes
-    and pass the merged change set to the inner rebuild call."""
-    from graphify import watch as watch_mod
+def test_rebuild_code_real_transaction_drains_arrival_before_close(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_mod
+    from graphify.watch import _rebuild_code
 
-    out = tmp_path / "graphify-out"
-    out.mkdir()
-    # Pre-populate the queue as if an earlier contender had dropped its paths.
-    watch_mod._queue_pending(out, [Path("queued1.py"), Path("queued2.py")])
+    source = tmp_path / "own.py"
+    source.write_text("def own():\n    return 1\n", encoding="utf-8")
+    real_close = transaction_mod.close_if_queue_empty
+    injected = False
 
-    # Snapshot the original BEFORE monkeypatching so we can drive the outer
-    # dispatch path while the inner recursive call resolves to our spy.
-    orig_rebuild = watch_mod._rebuild_code
-    inner_calls: list[list[str]] = []
+    def queue_once_before_close(transaction, *, receipt_digest, failpoint=None):
+        nonlocal injected
+        if not injected:
+            injected = True
+            late = tmp_path / "late.py"
+            late.write_text("def late():\n    return 2\n", encoding="utf-8")
+            transaction_mod.queue_rebuild(
+                "update",
+                tmp_path,
+                output=tmp_path / "graphify-out",
+                changed_paths=[late],
+                source="late-test",
+            )
+        return real_close(
+            transaction, receipt_digest=receipt_digest, failpoint=failpoint
+        )
 
-    def recording_inner(watch_path, **kwargs):
-        if kwargs.get("acquire_lock") is False:
-            paths = kwargs.get("changed_paths") or []
-            inner_calls.append([p.as_posix() for p in paths])
-        return True
-
-    monkeypatch.setattr(watch_mod, "_rebuild_code", recording_inner)
-
-    ok = orig_rebuild(
-        tmp_path,
-        changed_paths=[Path("own.py"), Path("queued1.py")],
+    monkeypatch.setattr(
+        transaction_mod, "close_if_queue_empty", queue_once_before_close
     )
-    assert ok is True
 
-    # The first inner call must have received the merged + deduped set:
-    # own.py first (caller's order preserved), then drained queued1/queued2,
-    # with queued1.py deduped against own's prior occurrence.
-    assert inner_calls, "inner _rebuild_code should have been called"
-    assert inner_calls[0] == ["own.py", "queued1.py", "queued2.py"]
-
-    # And .pending_changes was drained.
-    assert not (out / watch_mod._PENDING_FILENAME).exists()
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="fcntl-only (POSIX)")
-def test_rebuild_code_drains_late_arrivals(tmp_path, monkeypatch):
-    """#1059: after the primary rebuild, the lock-holder must loop and drain
-    any paths queued by hooks that arrived mid-rebuild."""
-    from graphify import watch as watch_mod
-    from graphify.watch import _rebuild_code as orig_rebuild
-
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
     out = tmp_path / "graphify-out"
-    out.mkdir()
-
-    inner_calls: list[list[str]] = []
-    call_state = {"i": 0}
-
-    def fake_inner(watch_path, **kwargs):
-        if kwargs.get("acquire_lock") is False:
-            paths = [p.as_posix() for p in (kwargs.get("changed_paths") or [])]
-            inner_calls.append(paths)
-            # Simulate a late-arriving hook that queues during the FIRST
-            # inner rebuild only. The outer drain loop must see it.
-            call_state["i"] += 1
-            if call_state["i"] == 1:
-                watch_mod._queue_pending(out, [Path("late.py")])
-        return True
-
-    monkeypatch.setattr(watch_mod, "_rebuild_code", fake_inner)
-
-    ok = orig_rebuild(tmp_path, changed_paths=[Path("own.py")])
-    assert ok is True
-
-    # First inner call covers our own change set; second is the late-drain
-    # pass that picks up "late.py".
-    assert len(inner_calls) >= 2
-    assert inner_calls[0] == ["own.py"]
-    assert inner_calls[1] == ["late.py"]
-    # And the queue is now empty (no further late drains).
-    assert not (out / watch_mod._PENDING_FILENAME).exists()
-
-
-def test_rebuild_code_full_corpus_skips_pending_queue(tmp_path, monkeypatch):
-    """#1059: changed_paths=None means a full-corpus rebuild — the queue
-    must not be touched on the failure path because there is nothing
-    incremental to preserve."""
-    from graphify import watch as watch_mod
-    from graphify.watch import _rebuild_code as orig_rebuild
-
-    out = tmp_path / "graphify-out"
-    out.mkdir()
-
-    # Pre-existing queued paths from an earlier incremental hook.
-    watch_mod._queue_pending(out, [Path("earlier.py")])
-
-    # Force the inner call to record what it saw.
-    seen: list = []
-
-    def fake_inner(watch_path, **kwargs):
-        if kwargs.get("acquire_lock") is False:
-            seen.append(kwargs.get("changed_paths"))
-        return True
-
-    monkeypatch.setattr(watch_mod, "_rebuild_code", fake_inner)
-
-    ok = orig_rebuild(tmp_path, changed_paths=None)
-    assert ok is True
-    # Full-corpus rebuild passes None to the inner call (does not merge in
-    # the queued paths — a full rebuild already covers them).
-    assert seen == [None]
-    # The queue still gets drained on entry so stale entries don't leak,
-    # but no late-arrival loop runs for the full-corpus path.
-    assert not (out / watch_mod._PENDING_FILENAME).exists()
+    graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+    assert any(node.get("source_file", "").endswith("late.py") for node in graph["nodes"])
+    assert not (out / ".graphify_transaction.json").exists()
+    assert not (out / ".graphify_rebuild_queue.jsonl").read_text(encoding="utf-8")
+    followup = transaction_mod.begin_transaction("runtime", tmp_path, output=out)
+    assert followup.generation >= 2
 
 
 def test_merge_changed_paths_dedupes_in_order():

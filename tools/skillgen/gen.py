@@ -533,7 +533,7 @@ if ! _graphify_selected_usable "$PYTHON"; then
 fi
 _graphify_selected_usable "$PYTHON" || {{ echo "Graphify requires CPython 3.14.2 through the final 3.14.x release." >&2; exit 1; }}
 "$PYTHON" -E -P -B -c 'from pathlib import Path; Path("graphify-out").mkdir(parents=True, exist_ok=True)' || exit 1
-if ! "$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python; then echo "Graphify cannot safely publish the advisory interpreter pointer; continuing with the freshly discovered interpreter." >&2; fi
+if ! "$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python; then echo "Graphify cannot safely publish the advisory interpreter pointer; continuing with the freshly discovered interpreter." >&2; fi; if [ -n "${{GRAPHIFY_INPUT_PATH-}}" ]; then GRAPHIFY_TRANSACTION_TOKEN=$("$PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.transaction import begin_transaction, stage_transaction_handoff; root=Path(sys.argv[1]).resolve(strict=True); output=(Path.cwd() / "graphify-out").resolve(); print(stage_transaction_handoff(begin_transaction("full", root, output=output)).path, end="")' "$GRAPHIFY_INPUT_PATH") || exit $?; export GRAPHIFY_TRANSACTION_TOKEN; fi
 export PYTHONUTF8=1'''
 
 _POWERSHELL_DISCOVERY = r'''$GraphifyPython = $null
@@ -809,6 +809,18 @@ New-Item -ItemType Directory -Force -Path graphify-out -ErrorAction Stop | Out-N
 & $GraphifyPython -E -P -B -m graphify.interpreter_pointer write graphify-out\.graphify_python
 if ($LASTEXITCODE -ne 0) {{
     Write-Warning "Graphify cannot safely publish the advisory interpreter pointer on Windows; continuing with the freshly discovered interpreter."
+}}
+if ($env:GRAPHIFY_INPUT_PATH) {{
+$GraphifyTransactionToken = & $GraphifyPython -E -P -B -c @'
+import sys
+from pathlib import Path
+from graphify.transaction import begin_transaction, stage_transaction_handoff
+root = Path(sys.argv[1]).resolve(strict=True)
+output = (Path.cwd() / 'graphify-out').resolve()
+print(stage_transaction_handoff(begin_transaction('full', root, output=output)).path, end='')
+'@ $env:GRAPHIFY_INPUT_PATH
+if ($LASTEXITCODE -ne 0) {{ throw "Graphify transaction handoff failed." }}
+$Env:GRAPHIFY_TRANSACTION_TOKEN = [string]$GraphifyTransactionToken
 }}'''
 
 
@@ -1038,7 +1050,96 @@ def _render_saved_interpreter_commands(
     )
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
+    body = _route_full_build_transaction(body)
     return _render_advisory_pointer_prose(body)
+
+
+def _route_full_build_transaction(body: str) -> str:
+    """Route full-build Python blocks through the exact live token runner."""
+    start = body.find("### Step 2")
+    if start < 0:
+        return body
+    boundaries = [
+        value
+        for marker in ("## Interpreter guard", "## For --update")
+        if (value := body.find(marker, start)) >= 0
+    ]
+    end = min(boundaries) if boundaries else len(body)
+    section = body[start:end]
+
+    def route_bash(match: re.Match[str]) -> str:
+        block = match.group(1)
+        commands = (
+            '"$GRAPHIFY_PYTHON" -E -P -B -c',
+            '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
+        )
+        command = next((value for value in commands if value in block), None)
+        mutation_markers = (
+            "write_text(",
+            "write_bytes(",
+            "save_manifest(",
+            "to_json(",
+            "unlink(",
+        )
+        if command is None or not any(
+            marker in block for marker in mutation_markers
+        ):
+            return match.group(0)
+        interpreter = (
+            '"$GRAPHIFY_PYTHON"'
+            if "$GRAPHIFY_PYTHON" in command
+            else '"$(cat graphify-out/.graphify_python)"'
+        )
+        runner = (
+            f"GRAPHIFY_TRANSACTION_TOKEN=$({interpreter} -E -P -B -c "
+            "'from graphify.transaction import active_transaction_token_path; "
+            "print(active_transaction_token_path())') || exit $?; "
+            "export GRAPHIFY_TRANSACTION_TOKEN; "
+            f"{interpreter} -E -P -B -m graphify.transaction run-token "
+            '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
+        )
+        return match.group(0).replace(
+            block,
+            block.replace(command, runner),
+            1,
+        )
+
+    section = re.sub(
+        r"```(?:bash|sh)\n(.*?)\n```", route_bash, section, flags=re.DOTALL
+    )
+    section = re.sub(
+        r'(?m)^("\$GRAPHIFY_PYTHON" -E -P -B -m graphify export )(.*)$',
+        r'"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token '
+        r'"$GRAPHIFY_TRANSACTION_TOKEN" -- -m graphify export \2',
+        section,
+    )
+    section = re.sub(
+        r'(?m)^(& \$GraphifyPython -E -P -B -m graphify export )(.*)$',
+        r'& $GraphifyPython -E -P -B -m graphify.transaction run-token '
+        r'$Env:GRAPHIFY_TRANSACTION_TOKEN -- -m graphify export \2',
+        section,
+    )
+    step9 = section.find("### Step 9")
+    if step9 >= 0:
+        tail = section[step9:]
+        if "finalize_prepared_transaction" not in tail:
+            finalize = (
+                'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+                "'from graphify.transaction import active_transaction_token_path; "
+                "print(active_transaction_token_path())') || exit $?; "
+                "export GRAPHIFY_TRANSACTION_TOKEN; "
+                '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token '
+                '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c \'from graphify.transaction '
+                "import finalize_prepared_transaction; "
+                "finalize_prepared_transaction()'"
+            )
+            tail = tail.replace(
+                "\nrm -f ",
+                f"\n{finalize}; rm -f ",
+                1,
+            )
+        section = section[:step9] + tail
+    return body[:start] + section + body[end:]
 
 
 def load_platforms() -> dict[str, Platform]:
@@ -1932,7 +2033,21 @@ def _normalise_issue88_monolith_render(text: str) -> str:
         "fresh discovery binds the runtime interpreter; `graphify-out/.graphify_python` is advisory metadata only.",
         "`graphify-out/.graphify_python` is freshly validated and overwritten.",
     )
-    return text
+    text = re.sub(
+        r"GRAPHIFY_TRANSACTION_TOKEN=.*?active_transaction_token_path.*?; "
+        r"export GRAPHIFY_TRANSACTION_TOKEN; "
+        r'"\$\(cat graphify-out/\.graphify_python\)" -E -P -B -m '
+        r"graphify\.transaction run-token \"\$GRAPHIFY_TRANSACTION_TOKEN\" -- -c",
+        '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
+        text,
+    )
+    return re.sub(
+        r'"\$\(cat graphify-out/\.graphify_python\)" -E -P -B -c '
+        r"'from graphify\.transaction import finalize_prepared_transaction; "
+        r"finalize_prepared_transaction\(\)'; ?",
+        "",
+        text,
+    )
 
 
 def monolith_roundtrip(platform: Platform) -> list[str]:

@@ -102,7 +102,8 @@ def run_benchmark(
     graph_path = graph_path or _default_graph_json()
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(Path(graph_path))
-    data = json.loads(Path(graph_path).read_text(encoding="utf-8"))
+    from graphify.transaction import open_graph_snapshot
+    data = open_graph_snapshot(Path(graph_path), purpose="benchmark").data
     try:
         G = json_graph.node_link_graph(data, edges="links")
     except TypeError:

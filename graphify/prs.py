@@ -327,7 +327,8 @@ def _load_graph_json(graph_path: Path) -> dict | None:
     from graphify.security import check_graph_file_size_cap
     try:
         check_graph_file_size_cap(graph_path)
-        return json.loads(graph_path.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        return open_graph_snapshot(graph_path, purpose="pull-request-impact").data
     except (json.JSONDecodeError, OSError, ValueError):
         return None
 

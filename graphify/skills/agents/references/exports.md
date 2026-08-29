@@ -2,6 +2,11 @@
 
 Load this when the user passed one of the export flags (`--wiki`, `--neo4j`, `--neo4j-push`, `--falkordb`, `--falkordb-push`, `--svg`, `--graphml`, `--mcp`), or when the corpus is large enough for the token-reduction benchmark. Each step runs only for its own flag.
 
+Managed local exports use the selected graph's actual parent and remain behind
+the transaction boundary. External database pushes are outside the filesystem
+transaction. Readers (including MCP) reject pending, receiptless, stale, or
+`merge_pending` managed generations before consuming graph bytes.
+
 ### Step 6b - Wiki (only if --wiki flag)
 
 **Only run this step if `--wiki` was explicitly given in the original command.**
