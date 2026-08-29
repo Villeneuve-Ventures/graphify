@@ -1056,16 +1056,29 @@ def _render_saved_interpreter_commands(
 
 def _route_full_build_transaction(body: str) -> str:
     """Route full-build Python blocks through the exact live token runner."""
-    start = body.find("### Step 2")
-    if start < 0:
+    starts = [match.start() for match in re.finditer(r"(?m)^### Step 2(?:\s|$)", body)]
+    if not starts:
         return body
-    boundaries = [
-        value
-        for marker in ("## Interpreter guard", "## For --update")
-        if (value := body.find(marker, start)) >= 0
+    if len(starts) != 1:
+        raise ValueError("full-build transaction fence has duplicate Step 2 markers")
+    start = starts[0]
+    interpreter_boundaries = [
+        match.start()
+        for match in re.finditer(
+            r"(?m)^## Interpreter guard", body[start:]
+        )
     ]
-    end = min(boundaries) if boundaries else len(body)
+    update_boundaries = [
+        match.start()
+        for match in re.finditer(r"(?m)^## For --update", body[start:])
+    ]
+    boundaries = interpreter_boundaries or update_boundaries
+    if len(boundaries) != 1:
+        raise ValueError("full-build transaction fence must have one end marker")
+    end = start + boundaries[0]
     section = body[start:end]
+    if len(re.findall(r"(?m)^### Step 9(?:\s|$)", section)) != 1:
+        raise ValueError("full-build transaction fence must have one Step 9 marker")
 
     def route_bash(match: re.Match[str]) -> str:
         block = match.group(1)
@@ -1080,6 +1093,7 @@ def _route_full_build_transaction(body: str) -> str:
             "save_manifest(",
             "to_json(",
             "unlink(",
+            "> graphify-out/",
         )
         if command is None or not any(
             marker in block for marker in mutation_markers
@@ -1113,6 +1127,10 @@ def _route_full_build_transaction(body: str) -> str:
         r"```(?:bash|sh)\n(.*?)\n```", route_bash, section, flags=re.DOTALL
     )
     export_prefix = (
+        'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+        "'from graphify.transaction import active_transaction_token_path; "
+        "print(active_transaction_token_path())') || exit $?; "
+        "export GRAPHIFY_TRANSACTION_TOKEN; "
         'GRAPHIFY_TRANSACTION_WORKSPACE=$("$GRAPHIFY_PYTHON" -E -P -B -m '
         'graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c '
         "'from graphify.transaction import prepared_workspace_path; "
@@ -1175,7 +1193,10 @@ def _route_full_build_transaction(body: str) -> str:
                 "import finalize_prepared_transaction; "
                 "finalize_prepared_transaction()'"
             )
-            cleanup_start = tail.find("\nrm -f ")
+            cleanup_matches = list(re.finditer(r"(?m)^rm -f ", tail))
+            if not cleanup_matches:
+                raise ValueError("Step 9 cleanup boundary is missing")
+            cleanup_start = cleanup_matches[0].start() - 1
             cleanup_end = tail.find("\n```", cleanup_start)
             if cleanup_start < 0 or cleanup_end < 0:
                 raise ValueError("Step 9 cleanup boundary is missing")

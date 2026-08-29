@@ -650,13 +650,15 @@ def _transactional_extract() -> None:
         staging_output = staging_root / "graphify-out"
         staging_output.mkdir()
         if destination.graph.is_file():
-            open_graph_snapshot(destination.graph, purpose="extract-baseline")
+            snapshot = open_graph_snapshot(
+                destination.graph, purpose="extract-baseline"
+            )
             for name in MANAGED_PUBLICATION_PATHS:
                 if "/" in name:
                     continue
-                entry = destination.output / name
-                if entry.is_file() and not entry.is_symlink():
-                    shutil.copy2(entry, staging_output / entry.name)
+                payload = snapshot.artifacts.get(name)
+                if payload is not None:
+                    (staging_output / name).write_bytes(payload)
         staged_graph = staging_output / "graph.json"
         baseline_graph_data: dict | None = None
         if staged_graph.is_file():
@@ -943,10 +945,7 @@ def _transactional_export() -> None:
     captured_err = io.StringIO()
     original_argv = sys.argv
     success_exit: SystemExit | None = None
-    source_manifest = graph.parent / "manifest.json"
-    manifest_payload = (
-        source_manifest.read_bytes() if source_manifest.is_file() else b"{}"
-    )
+    manifest_payload = snapshot.manifest_payload or b"{}"
     with tempfile.TemporaryDirectory(prefix="graphify-export-prepare-") as staging_name:
         staging = Path(staging_name)
         staged_graph = staging / graph.name

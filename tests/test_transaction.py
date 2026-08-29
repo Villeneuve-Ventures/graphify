@@ -285,6 +285,49 @@ def test_token_cannot_install_successor_authority_during_takeover(tmp_path):
     assert not (output / "stale-token-publish").exists()
 
 
+def test_old_token_context_cannot_select_successor_drainer(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    takeover_drainer(output, now=time.time() + 100)
+    live = resume_transaction(tx.id, root, output=output)
+    with pytest.raises(PendingTransactionError, match="caller-selected|drainer"):
+        with owned_step(live, drainer=live.drainer):
+            pass
+
+
+def test_fresh_claim_lease_and_terminal_drainer_cannot_be_taken_over(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    queued = queue_rebuild(
+        "update", root, output=output, changed_paths=["fresh.py"], now=10.0
+    )
+    claim_rebuild_queue(tx, queued.drainer, now=10.0)
+    with pytest.raises(PendingTransactionError, match="lease"):
+        takeover_drainer(output, now=20.0)
+
+    live = resume_transaction(tx.id, root, output=output)
+    _commit_owner_generation(output, live)
+    finish_transaction(live)
+    with pytest.raises(PendingTransactionError, match="state"):
+        takeover_drainer(output, now=time.time() + 1000)
+
+
+def test_prepared_workspace_retarget_preserves_replacement_sentinel(tmp_path):
+    _root, output, _tx, token = _owner(tmp_path)
+    run_token(
+        token.path,
+        ["-c", "from graphify.transaction import prepared_workspace_path; prepared_workspace_path()"],
+    )
+    workspace = output.parent / f".graphify-prepare-{token.id}"
+    workspace.rename(output.parent / "retired-original")
+    workspace.mkdir()
+    (workspace / "sentinel").write_text("replacement", encoding="utf-8")
+    with pytest.raises(PendingTransactionError, match="identity|missing"):
+        run_token(
+            token.path,
+            ["-c", "from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()"],
+        )
+    assert (workspace / "sentinel").read_text(encoding="utf-8") == "replacement"
+
+
 def test_unexpired_unauthenticated_recovery_has_zero_mutation(tmp_path):
     root, output, tx, token = _owner(tmp_path)
     paths = {

@@ -848,6 +848,7 @@ def _rebuild_code(
             output=actual_out,
             changed_paths=changed_paths,
             source="watch",
+            legacy_pending_name=_PENDING_FILENAME,
         )
         # Compatibility signal for an already-running pre-transaction watcher:
         # probe the legacy lock, release it immediately, and rely exclusively

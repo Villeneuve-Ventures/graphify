@@ -1487,11 +1487,17 @@ def test_rebuild_code_queues_on_lock_contention(tmp_path, monkeypatch, capsys):
         assert "queued" in captured.lower()
         assert "skipping" not in captured.lower()
 
-        # And the paths must have been written to the pending file so the
-        # eventual lock-holder can drain them.
+        # The legacy pending file is migrated only after its paths are durable
+        # in the transaction queue, so the eventual owner cannot lose them.
         pending = out / _PENDING_FILENAME
-        assert pending.exists()
-        assert pending.read_text(encoding="utf-8").splitlines() == ["a.py", "b.py"]
+        assert not pending.exists()
+        queued = [
+            json.loads(line)
+            for line in (out / ".graphify_rebuild_queue.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert queued[0]["changed_paths"] == ["a.py", "b.py"]
 
 
 def test_rebuild_code_real_transaction_drains_arrival_before_close(

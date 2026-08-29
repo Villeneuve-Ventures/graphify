@@ -177,7 +177,41 @@ def test_full_build_token_runner_exports_before_final_commit(tmp_path):
     _assert_transactional_export(out)
 
 
-def test_direct_export_never_reports_success_when_close_race_queues_work(
+def test_rendered_style_prepare_detect_export_finalize_cleanup(tmp_path):
+    from graphify.transaction import begin_transaction, stage_transaction_handoff
+
+    out = _make_graph(tmp_path)
+    (out / "manifest.json").write_text("{}", encoding="utf-8")
+    token = stage_transaction_handoff(
+        begin_transaction("full", tmp_path, output=out)
+    )
+    script = r'''
+set -eu
+WORKSPACE=$("$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -c 'from graphify.transaction import prepared_workspace_path; print(prepared_workspace_path())')
+cd "$WORKSPACE"
+"$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -c 'from pathlib import Path; Path("graphify-out/.graphify_detect.json").write_text("{}")'
+test -f graphify-out/.graphify_detect.json
+"$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -m graphify export html
+"$PYTHON_BIN" -E -P -B -m graphify.transaction run-token "$TOKEN_PATH" -- -c 'from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()'
+'''
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHON_BIN": sys.executable,
+            "TOKEN_PATH": str(token.path),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (out / "graph.html").is_file()
+    assert not (out.parent / f".graphify-prepare-{token.id}").exists()
+
+
+def test_direct_export_transfers_close_race_to_claimable_successor(
     tmp_path, monkeypatch
 ):
     import graphify.transaction as transaction_module
@@ -197,10 +231,16 @@ def test_direct_export_never_reports_success_when_close_race_queues_work(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(transaction_module, "close_if_queue_empty", raced_close)
     monkeypatch.setattr(sys, "argv", ["graphify", "export", "html"])
-    with pytest.raises(transaction_module.PendingTransactionError, match="successor"):
-        dispatch_command("export")
-    assert (out / ".graphify_transaction.json").is_file()
+    dispatch_command("export")
+    assert not (out / ".graphify_transaction.json").exists()
     assert (out / ".graphify_rebuild_queue.jsonl").read_text().strip()
+    successor = transaction_module.begin_transaction(
+        "runtime", tmp_path, output=out
+    )
+    claim = transaction_module.claim_rebuild_queue(
+        successor, successor.drainer
+    )
+    assert [item["changed_paths"] for item in claim.items] == [["late.py"]]
 
 
 def test_extract_rejects_pending_existing_graph_before_dispatch(

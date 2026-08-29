@@ -89,7 +89,7 @@ def global_add(source_path: Path, repo_tag: str) -> dict:
 
     snapshot = open_graph_snapshot(source_path, purpose="global-add")
     manifest = _load_manifest()
-    src_hash = _file_hash(source_path)
+    src_hash = snapshot.digest[:16]
 
     existing = manifest["repos"].get(repo_tag, {})
     existing_path = existing.get("source_path", "")

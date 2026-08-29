@@ -1706,6 +1706,27 @@ def test_rendered_executable_blocks_reject_ambient_graphify_commands():
     assert checked > 100
 
 
+def test_transaction_fence_is_unique_ordered_and_preserves_outside_bytes():
+    source = gen.FRAGMENTS_DIR.joinpath("core", "core.md").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("### Step 2")
+    end = source.index("## Interpreter guard", start)
+    routed = gen._route_full_build_transaction(source)
+    assert routed[:start] == source[:start]
+    assert routed[routed.index("## Interpreter guard", start):] == source[end:]
+    detect_block = routed[start:routed.index("### Step 2.5", start)]
+    assert 'cd "$GRAPHIFY_TRANSACTION_WORKSPACE"' in detect_block
+    assert "> graphify-out/.graphify_detect.json" in detect_block
+
+    with pytest.raises(ValueError, match="duplicate Step 2"):
+        gen._route_full_build_transaction(source.replace("### Step 2", "### Step 2\n### Step 2", 1))
+    with pytest.raises(ValueError, match="Step 9"):
+        gen._route_full_build_transaction(source.replace("### Step 9", "### Missing 9", 1))
+    with pytest.raises(ValueError, match="end marker"):
+        gen._route_full_build_transaction(source.replace("## Interpreter guard", "## Missing guard", 1).replace("## For --update", "## Missing update", 1))
+
+
 def test_rendered_python_launches_require_exact_startup_policy():
     checked = 0
     for key, platform in gen.load_platforms().items():
