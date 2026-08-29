@@ -112,10 +112,11 @@ If the import succeeds, print nothing and move straight to Step 2.
 For a full build with an explicit `INPUT_PATH`, persist the scan root in a separate block:
 
 ```powershell
-$GraphifyActiveTokenCode = 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'; $GraphifyPreparedWorkspaceCode = 'from graphify.transaction import prepared_workspace_path; print(prepared_workspace_path())'
-$GraphifyTransactionToken = & $GraphifyPython -E -P -B -c $GraphifyActiveTokenCode; $GraphifyPreparedWorkspaceArgs = @('-E', '-P', '-B', '-m', 'graphify.transaction', 'run-token', $GraphifyTransactionToken, '--', '-c', $GraphifyPreparedWorkspaceCode)
-$GraphifyTransactionWorkspace = & $GraphifyPython @GraphifyPreparedWorkspaceArgs
-(Resolve-Path INPUT_PATH).Path | Out-File -FilePath (Join-Path $GraphifyTransactionWorkspace 'graphify-out\.graphify_root') -Encoding utf8 -NoNewline
+$GraphifyActiveTokenCode = 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'; $GraphifyPreparedRootCode = 'import sys; from pathlib import Path; Path(r"graphify-out\.graphify_root").write_text(str(Path(sys.argv[1]).resolve(strict=True)), encoding="utf-8")'
+$GraphifyTransactionToken = & $GraphifyPython -E -P -B -c $GraphifyActiveTokenCode
+$GraphifyPreparedRoot = (Resolve-Path INPUT_PATH).Path
+& $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $GraphifyTransactionToken '--' -c $GraphifyPreparedRootCode $GraphifyPreparedRoot
+if ($LASTEXITCODE -ne 0) { throw "Failed to write the prepared Graphify scan root." }
 ```
 
 Do not run that scan-root block for no-path subcommands such as `query`, `path`,

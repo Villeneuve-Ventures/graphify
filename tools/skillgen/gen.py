@@ -1109,12 +1109,7 @@ def _route_full_build_transaction(body: str) -> str:
             "'from graphify.transaction import active_transaction_token_path; "
             "print(active_transaction_token_path())') || exit $?; "
             "export GRAPHIFY_TRANSACTION_TOKEN; "
-            f"GRAPHIFY_TRANSACTION_WORKSPACE=$({interpreter} -E -P -B -m "
-            "graphify.transaction run-token \"$GRAPHIFY_TRANSACTION_TOKEN\" -- -c "
-            "'from graphify.transaction import prepared_workspace_path; "
-            "print(prepared_workspace_path())') || exit $?; "
-            "cd \"$GRAPHIFY_TRANSACTION_WORKSPACE\" || exit $?; "
-            f"{interpreter} -E -P -B -m graphify.transaction run-token "
+            f"{interpreter} -E -P -B -m graphify.transaction run-prepared-token "
             '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
         )
         return match.group(0).replace(
@@ -1131,12 +1126,7 @@ def _route_full_build_transaction(body: str) -> str:
         "'from graphify.transaction import active_transaction_token_path; "
         "print(active_transaction_token_path())') || exit $?; "
         "export GRAPHIFY_TRANSACTION_TOKEN; "
-        'GRAPHIFY_TRANSACTION_WORKSPACE=$("$GRAPHIFY_PYTHON" -E -P -B -m '
-        'graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c '
-        "'from graphify.transaction import prepared_workspace_path; "
-        "print(prepared_workspace_path())') || exit $?; "
-        'cd "$GRAPHIFY_TRANSACTION_WORKSPACE" || exit $?; '
-        '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token '
+        '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token '
         '"$GRAPHIFY_TRANSACTION_TOKEN" -- -m graphify export '
     )
     section = re.sub(
@@ -1151,24 +1141,11 @@ def _route_full_build_transaction(body: str) -> str:
             for value in shlex.split(arguments)
         )
         routed = (
-            "$GraphifyPreparedWorkspaceCode = 'from graphify.transaction import "
-            "prepared_workspace_path; print(prepared_workspace_path())'\n"
-            "$GraphifyPreparedWorkspaceArgs = @('-E', '-P', '-B', '-m', "
-            "'graphify.transaction', 'run-token', "
-            "$Env:GRAPHIFY_TRANSACTION_TOKEN, '--', '-c', "
-            "$GraphifyPreparedWorkspaceCode)\n"
-            "$GraphifyTransactionWorkspace = & $GraphifyPython "
-            "@GraphifyPreparedWorkspaceArgs\n"
-            "Push-Location $GraphifyTransactionWorkspace\n"
-            "try {\n"
-            "    $GraphifyExportArgs = @('-E', '-P', '-B', '-m', "
-            "'graphify.transaction', 'run-token', "
+            "$GraphifyExportArgs = @('-E', '-P', '-B', '-m', "
+            "'graphify.transaction', 'run-prepared-token', "
             "$Env:GRAPHIFY_TRANSACTION_TOKEN, '--', '-m', 'graphify', "
             f"'export') + @({export_arguments})\n"
-            "    & $GraphifyPython @GraphifyExportArgs\n"
-            "} finally {\n"
-            "    Pop-Location\n"
-            "}"
+            "& $GraphifyPython @GraphifyExportArgs"
         )
         if separator:
             routed = f"# {comment}\n{routed}"
@@ -1996,6 +1973,15 @@ def _is_semantic_cache_scope_fix_line(line: str) -> bool:
     ) or stripped.startswith("saved = save_semantic_cache(")
 
 
+def _is_prepared_transaction_runner_line(line: str) -> bool:
+    """Whether a monolith line routes a managed write through the pinned workspace."""
+    stripped = line.strip()
+    return (
+        "active_transaction_token_path" in stripped
+        and "graphify.transaction run-prepared-token" in stripped
+    )
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
@@ -2017,6 +2003,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_python314_bootstrap_fix_line,
     _is_saved_interpreter_subcommand_fix_line,
     _is_semantic_cache_scope_fix_line,
+    _is_prepared_transaction_runner_line,
 )
 
 

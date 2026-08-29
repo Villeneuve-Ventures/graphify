@@ -18,6 +18,7 @@ from graphify.transaction import (
     MANAGED_PUBLICATION_PATHS,
     PendingTransactionError,
     RecoverableTransactionError,
+    active_transaction_token_path,
     begin_transaction,
     claim_rebuild_queue,
     close_if_queue_empty,
@@ -35,6 +36,7 @@ from graphify.transaction import (
     recover_close,
     recover_transaction,
     resume_transaction,
+    run_prepared_token,
     run_token,
     stage_transaction_handoff,
     takeover_drainer,
@@ -86,6 +88,7 @@ def _commit_owner_generation(output: Path, tx) -> str:
 def test_finish_rejects_substituted_receipt_with_zero_mutation(tmp_path):
     _root, output, tx, _token = _owner(tmp_path)
     _commit_owner_generation(output, tx)
+    tx = resume_transaction(tx.id, _root, output=output)
     receipt_path = output / ".graphify_generation.json"
     receipt = json.loads(receipt_path.read_text())
     receipt["transaction_id"] = "0" * 64
@@ -131,6 +134,106 @@ def test_recovered_generation_and_drainer_converge_into_successor(tmp_path):
     queued = queue_rebuild("update", root, output=output, changed_paths=["next.py"])
     successor = begin_transaction("runtime", root, output=output)
     assert successor.generation == queued.drainer.generation
+
+
+def test_legacy_pending_bridge_retains_late_and_open_fd_appends(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    legacy = output / ".pending_changes"
+    legacy.write_text("first.py\n", encoding="utf-8")
+    open_writer = legacy.open("a", encoding="utf-8")
+    original = transaction_module._write_queue
+    appended = False
+
+    def append_during_bridge(capability, name, items):
+        nonlocal appended
+        original(capability, name, items)
+        if name == transaction_module.QUEUE_FILE and not appended:
+            appended = True
+            open_writer.write("late-open-fd.py\n")
+            open_writer.flush()
+            os.fsync(open_writer.fileno())
+
+    monkeypatch.setattr(transaction_module, "_write_queue", append_during_bridge)
+    queue_rebuild(
+        "update", root, output=output, legacy_pending_name=".pending_changes"
+    )
+    open_writer.close()
+    with legacy.open("a", encoding="utf-8") as stream:
+        stream.write("late-reopen.py\n")
+    queue_rebuild(
+        "update", root, output=output, legacy_pending_name=".pending_changes"
+    )
+    queued = [
+        json.loads(line)
+        for line in (output / ".graphify_rebuild_queue.jsonl").read_text().splitlines()
+    ]
+    durable_paths = {
+        path for item in queued for path in (item.get("changed_paths") or [])
+    }
+    assert durable_paths >= {"first.py", "late-open-fd.py", "late-reopen.py"}
+    assert legacy.exists(), "append-compatible bridge must retain the legacy inode"
+
+
+def test_finish_refreshes_lease_before_close_releases_lock(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    _commit_owner_generation(output, tx)
+    tx = resume_transaction(tx.id, _root, output=output)
+    original = transaction_module.close_if_queue_empty
+    takeover_errors: list[Exception] = []
+
+    def racing_close(transaction, *, receipt_digest, failpoint=None):
+        try:
+            takeover_drainer(output, now=time.time() + 1.0)
+        except Exception as exc:  # noqa: BLE001 - exact race result asserted below
+            takeover_errors.append(exc)
+        return original(
+            transaction, receipt_digest=receipt_digest, failpoint=failpoint
+        )
+
+    monkeypatch.setattr(transaction_module, "close_if_queue_empty", racing_close)
+    finish_transaction(tx)
+    assert len(takeover_errors) == 1
+    assert "lease has not expired" in str(takeover_errors[0])
+
+
+def test_takeover_rotates_token_and_installs_usable_successor_authority(tmp_path):
+    root, output, tx, old_token = _owner(tmp_path)
+    queued = queue_rebuild(
+        "update", root, output=output, changed_paths=["successor.py"], now=0.0
+    )
+    claim_rebuild_queue(tx, queued.drainer, now=0.0)
+    successor = takeover_drainer(output, now=100.0)
+    successor_token = active_transaction_token_path(output)
+    with pytest.raises(PendingTransactionError):
+        run_token(old_token.path, ["-c", "pass"])
+    queue_rebuild(
+        "update", root, output=output, changed_paths=["after-takeover.py"], now=100.0
+    )
+    proof = tmp_path / "successor-claim.json"
+    run_token(
+        successor_token,
+        [
+            "-c",
+            "import json; from pathlib import Path; "
+            "from graphify.transaction import current_transaction, claim_rebuild_queue; "
+            "tx=current_transaction(); claim=claim_rebuild_queue(tx, tx.drainer, now=100.0); "
+            f"Path({str(proof)!r}).write_text(json.dumps(list(claim.items)))",
+        ],
+    )
+    successor_items = json.loads(proof.read_text())
+    assert any(
+        "after-takeover.py" in (item.get("changed_paths") or [])
+        for item in successor_items
+    )
 
 
 def test_finalize_requires_prepared_manifest(tmp_path):
@@ -241,12 +344,15 @@ def test_stale_drainer_cannot_stage_handoff_token(tmp_path):
     tx = begin_transaction("runtime", root, output=output)
     transaction_before = (output / ".graphify_transaction.json").read_bytes()
     takeover_drainer(output, now=time.time() + 100.0)
+    successor_before = (output / ".graphify_transaction.json").read_bytes()
+    successor_tokens = list(output.glob(".graphify_transaction_token.*"))
 
     with pytest.raises(PendingTransactionError, match="drainer"):
         stage_transaction_handoff(tx)
 
-    assert not list(output.glob(".graphify_transaction_token.*"))
+    assert list(output.glob(".graphify_transaction_token.*")) == successor_tokens
     assert (output / ".graphify_transaction.json").read_bytes() != transaction_before
+    assert (output / ".graphify_transaction.json").read_bytes() == successor_before
     live = json.loads((output / ".graphify_transaction.json").read_text())
     assert live["drainer"]["claim_epoch"] == tx.drainer.claim_epoch + 1
 
@@ -288,10 +394,18 @@ def test_token_cannot_install_successor_authority_during_takeover(tmp_path):
 def test_old_token_context_cannot_select_successor_drainer(tmp_path):
     root, output, tx, _token = _owner(tmp_path)
     takeover_drainer(output, now=time.time() + 100)
-    live = resume_transaction(tx.id, root, output=output)
-    with pytest.raises(PendingTransactionError, match="caller-selected|drainer"):
-        with owned_step(live, drainer=live.drainer):
-            pass
+    with pytest.raises(PendingTransactionError, match="transaction id"):
+        resume_transaction(tx.id, root, output=output)
+    successor_token = active_transaction_token_path(output)
+    run_token(
+        successor_token,
+        [
+            "-c",
+            "from graphify.transaction import current_transaction, owned_step; "
+            "tx=current_transaction(); "
+            "owned_step(tx, drainer=tx.drainer).__enter__()",
+        ],
+    )
 
 
 def test_fresh_claim_lease_and_terminal_drainer_cannot_be_taken_over(tmp_path):
@@ -326,6 +440,127 @@ def test_prepared_workspace_retarget_preserves_replacement_sentinel(tmp_path):
             ["-c", "from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()"],
         )
     assert (workspace / "sentinel").read_text(encoding="utf-8") == "replacement"
+
+
+def test_prepared_runner_executes_from_retained_workspace_after_rename(tmp_path):
+    _root, output, _tx, token = _owner(tmp_path)
+    moved = tmp_path / "moved-prepared"
+    replacement = output.parent / f".graphify-prepare-{token.id}"
+    proof = tmp_path / "retained-proof"
+    code = (
+        "import os; from pathlib import Path; "
+        f"workspace=Path({str(replacement)!r}); moved=Path({str(moved)!r}); "
+        "workspace.rename(moved); workspace.mkdir(); "
+        "(workspace/'sentinel').write_text('replacement'); "
+        "Path('graphify-out/relative-proof').write_text('retained'); "
+        f"Path({str(proof)!r}).write_text(str(os.stat('.').st_ino))"
+    )
+    run_prepared_token(token.path, ["-c", code])
+    assert (moved / "graphify-out" / "relative-proof").read_text() == "retained"
+    assert (replacement / "sentinel").read_text() == "replacement"
+    assert int(proof.read_text()) == moved.stat().st_ino
+
+
+def test_prepared_runner_rejects_swap_before_fchdir(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    _root, output, _tx, token = _owner(tmp_path)
+    original = transaction_module._pin_prepared_workspace
+    moved = tmp_path / "moved-before-fchdir"
+
+    def swap_before_fchdir(transaction, capability):
+        prepared = original(transaction, capability)
+        prepared.path.rename(moved)
+        prepared.path.mkdir()
+        (prepared.path / "sentinel").write_text("replacement")
+        return prepared
+
+    monkeypatch.setattr(
+        transaction_module, "_pin_prepared_workspace", swap_before_fchdir
+    )
+    with pytest.raises(PendingTransactionError):
+        run_prepared_token(token.path, ["-c", "raise AssertionError('must not run')"])
+    workspace = output.parent / f".graphify-prepare-{token.id}"
+    assert (workspace / "sentinel").read_text() == "replacement"
+    assert not (workspace / "graphify-out").exists()
+
+
+def test_prepared_cost_is_receipt_bound_and_accumulates_across_generations(tmp_path):
+    from graphify.transaction import finalize_prepared_transaction
+
+    root, output, tx, token = _owner(tmp_path)
+    first_cost = {
+        "runs": [{"input_tokens": 3, "output_tokens": 2}],
+        "total_input_tokens": 3,
+        "total_output_tokens": 2,
+    }
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            "import json; from pathlib import Path; "
+            f"Path('graphify-out/graph.json').write_bytes({ _graph(tx.generation)!r}); "
+            "Path('graphify-out/manifest.json').write_text('{}'); "
+            f"Path('graphify-out/cost.json').write_text(json.dumps({first_cost!r}))",
+        ],
+    )
+    run_token(
+        token.path,
+        ["-c", "from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()"],
+    )
+    first_receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert "cost.json" in first_receipt["required_artifacts"]
+
+    second = begin_transaction("full", root, output=output)
+    second_token = stage_transaction_handoff(second)
+    run_prepared_token(
+        second_token.path,
+        [
+            "-c",
+            "import json; from pathlib import Path; "
+            "cost= json.loads(Path('graphify-out/cost.json').read_text()); "
+            "cost['runs'].append({'input_tokens': 5, 'output_tokens': 7}); "
+            "cost['total_input_tokens'] += 5; cost['total_output_tokens'] += 7; "
+            "Path('graphify-out/cost.json').write_text(json.dumps(cost)); "
+            f"Path('graphify-out/graph.json').write_bytes({_graph(second.generation)!r}); "
+            "Path('graphify-out/manifest.json').write_text('{}')",
+        ],
+    )
+    run_token(
+        second_token.path,
+        ["-c", "from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()"],
+    )
+    accumulated = json.loads((output / "cost.json").read_text())
+    assert accumulated["total_input_tokens"] == 8
+    assert accumulated["total_output_tokens"] == 9
+
+
+def test_recovery_identity_retires_expired_prepared_workspace(tmp_path):
+    root, output, _tx, token = _owner(tmp_path)
+    run_prepared_token(token.path, ["-c", "from pathlib import Path; Path('proof').write_text('old')"])
+    old_workspace = output.parent / f".graphify-prepare-{token.id}"
+    recovered = recover_transaction(
+        "full", root, output=output, now=time.time() + 100.0
+    )
+    assert not old_workspace.exists()
+    assert list(output.parent.glob(f".graphify-retired-{token.id}-*"))
+    recovered_token = stage_transaction_handoff(recovered)
+    run_prepared_token(
+        recovered_token.path,
+        ["-c", "from pathlib import Path; Path('proof').write_text('new')"],
+    )
+
+
+def test_next_generation_retires_prepared_workspace_left_after_close(tmp_path):
+    root, output, tx, token = _owner(tmp_path)
+    run_prepared_token(token.path, ["-c", "from pathlib import Path; Path('proof').write_text('old')"])
+    old_workspace = output.parent / f".graphify-prepare-{token.id}"
+    _commit_owner_generation(output, tx)
+    finish_transaction(resume_transaction(tx.id, root, output=output))
+    assert old_workspace.exists(), "simulated crash occurs before prepared cleanup"
+    begin_transaction("full", root, output=output)
+    assert not old_workspace.exists()
+    assert list(output.parent.glob(f".graphify-retired-{token.id}-*"))
 
 
 def test_unexpired_unauthenticated_recovery_has_zero_mutation(tmp_path):
@@ -896,7 +1131,7 @@ def test_detached_merge_parser_is_private_data_only_and_marks_pending(tmp_path):
 def test_detached_merge_rejects_oversize_and_unsupported_watermark(tmp_path):
     oversized = tmp_path / "oversized.json"
     with oversized.open("wb") as stream:
-        stream.truncate(512 * 1024 * 1024 + 1)
+        stream.truncate(50 * 1024 * 1024 + 1)
     with pytest.raises(PendingTransactionError, match="unsafe"):
         load_detached_merge_snapshot(oversized, role="current")
 
@@ -906,6 +1141,66 @@ def test_detached_merge_rejects_oversize_and_unsupported_watermark(tmp_path):
     unsupported.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(PendingTransactionError, match="watermark"):
         load_detached_merge_snapshot(unsupported, role="current")
+
+
+def test_detached_merge_rejects_more_than_one_hundred_thousand_nodes(tmp_path):
+    oversized = tmp_path / "too-many-nodes.json"
+    payload = json.loads(_graph(1))
+    payload["nodes"] = [{"id": str(index)} for index in range(100_001)]
+    oversized.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(PendingTransactionError, match="node count"):
+        load_detached_merge_snapshot(oversized, role="current")
+
+
+def test_detached_merge_preserves_multigraph_parallel_edges(tmp_path):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    template = json.loads(_graph(1))
+    template.update(multigraph=True)
+    template["nodes"] = [{"id": "a"}, {"id": "b"}]
+    base.write_text(json.dumps(template), encoding="utf-8")
+    current_payload = dict(template)
+    current_payload["links"] = [
+        {"source": "a", "target": "b", "key": "current", "kind": "one"}
+    ]
+    current.write_text(json.dumps(current_payload), encoding="utf-8")
+    other_payload = dict(template)
+    other_payload["links"] = [
+        {"source": "a", "target": "b", "key": "other", "kind": "two"}
+    ]
+    other.write_text(json.dumps(other_payload), encoding="utf-8")
+    merge_detached_snapshots(base, current, other)
+    merged = json.loads(current.read_text())
+    assert {(edge["key"], edge["kind"]) for edge in merged["links"]} == {
+        ("current", "one"),
+        ("other", "two"),
+    }
+
+
+def test_detached_merge_checks_identity_inside_final_replace(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    for path in (base, current, other):
+        path.write_bytes(_graph(3))
+    original_replace = transaction_module._replace_bytes
+    swapped = False
+
+    def swap_at_replace(capability, name, payload, **kwargs):
+        nonlocal swapped
+        if name == current.name and kwargs.get("expected_identity") and not swapped:
+            swapped = True
+            current.rename(tmp_path / "original-at-final-replace.json")
+            current.write_bytes(b"replacement")
+        return original_replace(capability, name, payload, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_replace_bytes", swap_at_replace)
+    with pytest.raises(PendingTransactionError, match="identity"):
+        merge_detached_snapshots(base, current, other)
+    assert current.read_bytes() == b"replacement"
 
 
 def test_detached_merge_refuses_retargeted_current_snapshot(

@@ -82,7 +82,7 @@ If the import succeeds, print nothing and move straight to Step 2.
 For a full build with an explicit `INPUT_PATH`, persist the scan root in a separate block:
 
 ```bash
-GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())') || exit $?; GRAPHIFY_TRANSACTION_WORKSPACE=$("$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c 'from graphify.transaction import prepared_workspace_path; print(prepared_workspace_path())') || exit $?; echo "$(cd INPUT_PATH && pwd)" > "$GRAPHIFY_TRANSACTION_WORKSPACE/graphify-out/.graphify_root"
+GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())') || exit $?; "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c 'import sys; from pathlib import Path; Path("graphify-out/.graphify_root").write_text(str(Path(sys.argv[1]).resolve(strict=True)), encoding="utf-8")' INPUT_PATH
 ```
 
 Do not run that scan-root block for no-path subcommands such as `query`, `path`,

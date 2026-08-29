@@ -1695,11 +1695,7 @@ def test_rendered_executable_blocks_reject_ambient_graphify_commands():
                         )
                         or (
                             line.lstrip().startswith("GRAPHIFY_TRANSACTION_TOKEN=$(")
-                            and " -m graphify.transaction run-token " in line
-                        )
-                        or (
-                            line.lstrip().startswith("GRAPHIFY_TRANSACTION_WORKSPACE=$(")
-                            and " -m graphify.transaction run-token " in line
+                            and " -m graphify.transaction run-" in line
                         )
                         for line in operational
                     ), f"{key}:{artifact.path}\n{block}"
@@ -1716,7 +1712,8 @@ def test_transaction_fence_is_unique_ordered_and_preserves_outside_bytes():
     assert routed[:start] == source[:start]
     assert routed[routed.index("## Interpreter guard", start):] == source[end:]
     detect_block = routed[start:routed.index("### Step 2.5", start)]
-    assert 'cd "$GRAPHIFY_TRANSACTION_WORKSPACE"' in detect_block
+    assert "graphify.transaction run-prepared-token" in detect_block
+    assert 'cd "$GRAPHIFY_TRANSACTION_WORKSPACE"' not in detect_block
     assert "> graphify-out/.graphify_detect.json" in detect_block
 
     with pytest.raises(ValueError, match="duplicate Step 2"):
@@ -5308,16 +5305,18 @@ def test_full_build_renders_consume_transaction_runner_and_finalize():
         ]
         full_build = core[start : min(boundaries) if boundaries else len(core)]
         assert "active_transaction_token_path" in full_build
-        assert "graphify.transaction run-token" in full_build
+        assert "graphify.transaction run-prepared-token" in full_build
+        assert "prepared_workspace_path" not in full_build
+        assert 'cd "$GRAPHIFY_TRANSACTION_WORKSPACE"' not in full_build
         assert full_build.count("finalize_prepared_transaction()") == 1
         for line in full_build.splitlines():
             if " -m graphify export " in line and not line.lstrip().startswith("#"):
-                assert "graphify.transaction run-token" in line
+                assert "graphify.transaction run-prepared-token" in line
         for block in re.findall(
             r"```(?:bash|sh)\n(.*?)\n```", full_build, flags=re.DOTALL
         ):
             if "write_text(" in block or "save_manifest(" in block:
-                assert "graphify.transaction run-token" in block
+                assert "graphify.transaction run-prepared-token" in block
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")

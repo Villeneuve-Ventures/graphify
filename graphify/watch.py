@@ -832,11 +832,14 @@ def _rebuild_code(
 
         actual_out = watch_path / _GRAPHIFY_OUT
         baseline_graph: dict | None = None
+        baseline_artifacts: dict[str, bytes] = {}
         if (actual_out / "graph.json").is_file():
             try:
-                baseline_graph = open_graph_snapshot(
+                baseline_snapshot = open_graph_snapshot(
                     actual_out / "graph.json", purpose="watch-prepare"
-                ).data
+                )
+                baseline_graph = baseline_snapshot.data
+                baseline_artifacts = dict(baseline_snapshot.artifacts)
             except PendingTransactionError as exc:
                 print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
@@ -904,9 +907,9 @@ def _rebuild_code(
                 for name in MANAGED_PUBLICATION_PATHS:
                     if "/" in name or name == "graph.json":
                         continue
-                    entry = actual_out / name
-                    if entry.is_file() and not entry.is_symlink():
-                        shutil.copy2(entry, prepared / entry.name)
+                    payload = baseline_artifacts.get(name)
+                    if payload is not None:
+                        (prepared / name).write_bytes(payload)
                 if baseline_graph is not None:
                     graph_metadata = baseline_graph.get("graph")
                     if isinstance(graph_metadata, dict):

@@ -1897,7 +1897,8 @@ def _dispatch_command(cmd: str) -> None:
                 file=sys.stderr,
             )
         from graphify.transaction import open_graph_snapshot
-        _raw = open_graph_snapshot(graph_json, purpose="cluster-only").data
+        _snapshot = open_graph_snapshot(graph_json, purpose="cluster-only")
+        _raw = _snapshot.data
         _directed = bool(_raw.get("directed", False))
         G = build_from_json(_raw, directed=_directed)
         print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
@@ -1928,11 +1929,12 @@ def _dispatch_command(cmd: str) -> None:
         out.mkdir(parents=True, exist_ok=True)
         labels_path = out / ".graphify_labels.json"
         existing_labels: dict[int, str] = {}
-        if labels_path.exists():
+        labels_payload = _snapshot.artifacts.get(".graphify_labels.json")
+        if labels_payload is not None:
             try:
                 existing_labels = {
                     int(k): v
-                    for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()
+                    for k, v in json.loads(labels_payload.decode("utf-8")).items()
                     if isinstance(v, str)
                 }
             except Exception:
@@ -1941,7 +1943,7 @@ def _dispatch_command(cmd: str) -> None:
         # reports real cost instead of a hardcoded zero (#1694). Stays {0, 0} on
         # the reuse / no-label paths, which make no LLM calls.
         label_token_usage = {"input": 0, "output": 0}
-        if labels_path.exists() and not force_relabel:
+        if labels_payload is not None and not force_relabel:
             # Reuse saved labels, but don't blindly trust them: the graph may have
             # been re-scoped/re-clustered since labeling, in which case a cid now
             # covers a DIFFERENT community and its old (LLM) name is wrong (#label-stale).
@@ -1954,11 +1956,12 @@ def _dispatch_command(cmd: str) -> None:
             from graphify.cluster import community_member_sigs, label_communities_by_hub
             sig_path = labels_path.parent / (labels_path.name + ".sig")
             saved_sigs: dict[int, str] = {}
-            if sig_path.exists():
+            sig_payload = _snapshot.artifacts.get(".graphify_labels.json.sig")
+            if sig_payload is not None:
                 try:
                     saved_sigs = {
                         int(k): v for k, v in
-                        json.loads(sig_path.read_text(encoding="utf-8")).items()
+                        json.loads(sig_payload.decode("utf-8")).items()
                         if isinstance(v, str)
                     }
                 except Exception:
@@ -2521,7 +2524,8 @@ def _dispatch_command(cmd: str) -> None:
                 print(f"error: {_cap_err}", file=sys.stderr)
                 sys.exit(1)
         from graphify.transaction import open_graph_snapshot
-        _raw = open_graph_snapshot(graph_path, purpose="export").data
+        _snapshot = open_graph_snapshot(graph_path, purpose="export")
+        _raw = _snapshot.data
         if "links" not in _raw and "edges" in _raw:
             _raw = dict(_raw, links=_raw["edges"])
         try:
@@ -2531,8 +2535,9 @@ def _dispatch_command(cmd: str) -> None:
 
         # Load optional analysis/labels
         communities: dict[int, list[str]] = {}
-        if analysis_path.exists():
-            _an = json.loads(analysis_path.read_text(encoding="utf-8"))
+        analysis_payload = _snapshot.artifacts.get(".graphify_analysis.json")
+        if analysis_payload is not None:
+            _an = json.loads(analysis_payload.decode("utf-8"))
             communities = {int(k): v for k, v in _an.get("communities", {}).items()}
             cohesion: dict[int, float] = {int(k): v for k, v in _an.get("cohesion", {}).items()}
             gods_data = _an.get("gods", [])
@@ -2564,8 +2569,9 @@ def _dispatch_command(cmd: str) -> None:
                 communities = reconstructed
 
         labels: dict[int, str] = {}
-        if labels_path.exists():
-            labels = {int(k): v for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()}
+        labels_payload = _snapshot.artifacts.get(".graphify_labels.json")
+        if labels_payload is not None:
+            labels = {int(k): v for k, v in json.loads(labels_payload.decode("utf-8")).items()}
 
         out_dir = graph_path.parent
 

@@ -1487,10 +1487,10 @@ def test_rebuild_code_queues_on_lock_contention(tmp_path, monkeypatch, capsys):
         assert "queued" in captured.lower()
         assert "skipping" not in captured.lower()
 
-        # The legacy pending file is migrated only after its paths are durable
-        # in the transaction queue, so the eventual owner cannot lose them.
+        # The append-compatible legacy inode is retained after its paths become
+        # durable so already-open legacy writer descriptors cannot be orphaned.
         pending = out / _PENDING_FILENAME
-        assert not pending.exists()
+        assert pending.read_text(encoding="utf-8").splitlines() == ["a.py", "b.py"]
         queued = [
             json.loads(line)
             for line in (out / ".graphify_rebuild_queue.jsonl")

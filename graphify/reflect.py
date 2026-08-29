@@ -170,26 +170,31 @@ def _load_node_community(graph_path: Path, analysis_path: Path,
     cited ``build_from_json()`` never finds its community and every lesson collapses
     into Uncategorized. Best-effort: any missing/unparseable artifact disables grouping.
     """
-    if not graph_path.exists() or not analysis_path.exists():
+    if not graph_path.exists():
         return None
     try:
-        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        snapshot = open_graph_snapshot(graph_path, purpose="reflect-community")
+        analysis_payload = snapshot.artifacts.get(".graphify_analysis.json")
+        if analysis_payload is None:
+            return None
+        analysis = json.loads(analysis_payload.decode("utf-8"))
     except (OSError, ValueError):
         return None
     communities = analysis.get("communities", {})
     if not communities:
         return None
     labels: dict[str, str] = {}
-    if labels_path.exists():
+    labels_payload = snapshot.artifacts.get(".graphify_labels.json")
+    if labels_payload is not None:
         try:
-            labels = json.loads(labels_path.read_text(encoding="utf-8"))
+            labels = json.loads(labels_payload.decode("utf-8"))
         except (OSError, ValueError):
             labels = {}
     # id -> label from the graph, so a label-form citation resolves to a community too.
     id_to_label: dict[str, str] = {}
     try:
-        from graphify.transaction import open_graph_snapshot
-        gdata = open_graph_snapshot(graph_path, purpose="reflect-community").data
+        gdata = snapshot.data
         for n in gdata.get("nodes", []):
             if isinstance(n, dict) and n.get("id") is not None and n.get("label") is not None:
                 id_to_label[str(n["id"])] = str(n["label"])
