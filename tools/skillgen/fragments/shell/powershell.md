@@ -112,7 +112,10 @@ If the import succeeds, print nothing and move straight to Step 2.
 For a full build with an explicit `INPUT_PATH`, persist the scan root in a separate block:
 
 ```powershell
-(Resolve-Path INPUT_PATH).Path | Out-File -FilePath graphify-out\.graphify_root -Encoding utf8 -NoNewline
+$GraphifyActiveTokenCode = 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'; $GraphifyPreparedWorkspaceCode = 'from graphify.transaction import prepared_workspace_path; print(prepared_workspace_path())'
+$GraphifyTransactionToken = & $GraphifyPython -E -P -B -c $GraphifyActiveTokenCode; $GraphifyPreparedWorkspaceArgs = @('-E', '-P', '-B', '-m', 'graphify.transaction', 'run-token', $GraphifyTransactionToken, '--', '-c', $GraphifyPreparedWorkspaceCode)
+$GraphifyTransactionWorkspace = & $GraphifyPython @GraphifyPreparedWorkspaceArgs
+(Resolve-Path INPUT_PATH).Path | Out-File -FilePath (Join-Path $GraphifyTransactionWorkspace 'graphify-out\.graphify_root') -Encoding utf8 -NoNewline
 ```
 
 Do not run that scan-root block for no-path subcommands such as `query`, `path`,

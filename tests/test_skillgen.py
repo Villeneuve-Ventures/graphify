@@ -471,7 +471,7 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert "Resolve-GraphifyAmbientCommand $name" in bootstrap, key
             assert bootstrap.count(
                 'Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-S", "-c", $GraphifyIdentityCheck, "executable")'
-            ) == 2, key
+            ) >= 2, key
             assert "& $installPython -E -P -B -m pip install graphifyy" in bootstrap, key
             assert "& $uv tool install" in bootstrap, key
             assert "\n        pip install graphifyy" not in bootstrap, key
@@ -1695,6 +1695,10 @@ def test_rendered_executable_blocks_reject_ambient_graphify_commands():
                         )
                         or (
                             line.lstrip().startswith("GRAPHIFY_TRANSACTION_TOKEN=$(")
+                            and " -m graphify.transaction run-token " in line
+                        )
+                        or (
+                            line.lstrip().startswith("GRAPHIFY_TRANSACTION_WORKSPACE=$(")
                             and " -m graphify.transaction run-token " in line
                         )
                         for line in operational

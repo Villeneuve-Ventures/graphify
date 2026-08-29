@@ -126,6 +126,28 @@ def test_global_add_skip_on_unchanged_hash(tmp_path):
     assert result2["skipped"] is True
 
 
+def test_global_add_unchanged_hash_still_honors_pending_protocol(tmp_path):
+    src_graph = tmp_path / "graph.json"
+    G = _make_graph([{"id": "userservice", "label": "UserService"}])
+    _graph_to_json(G, src_graph)
+    global_dir = tmp_path / ".graphify"
+    patches = (
+        patch("graphify.global_graph._GLOBAL_DIR", global_dir),
+        patch("graphify.global_graph._GLOBAL_GRAPH", global_dir / "global-graph.json"),
+        patch("graphify.global_graph._GLOBAL_MANIFEST", global_dir / "global-manifest.json"),
+    )
+    with patches[0], patches[1], patches[2]:
+        from graphify.global_graph import global_add
+        from graphify.transaction import PendingTransactionError
+
+        global_add(src_graph, "repoA")
+        (tmp_path / ".graphify_protocol.json").write_text(
+            '{"state":"INCOMPLETE"}', encoding="utf-8"
+        )
+        with pytest.raises(PendingTransactionError, match="protocol"):
+            global_add(src_graph, "repoA")
+
+
 def test_global_add_two_repos_no_collision(tmp_path):
     g1 = tmp_path / "graph1.json"
     g2 = tmp_path / "graph2.json"

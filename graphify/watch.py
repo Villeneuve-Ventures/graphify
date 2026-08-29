@@ -817,6 +817,7 @@ def _rebuild_code(
     if acquire_lock:
         from graphify.transaction import (
             GRAPH_WATERMARK_KEY,
+            MANAGED_PUBLICATION_PATHS,
             PendingTransactionError,
             begin_transaction,
             claim_rebuild_queue,
@@ -830,6 +831,15 @@ def _rebuild_code(
         )
 
         actual_out = watch_path / _GRAPHIFY_OUT
+        baseline_graph: dict | None = None
+        if (actual_out / "graph.json").is_file():
+            try:
+                baseline_graph = open_graph_snapshot(
+                    actual_out / "graph.json", purpose="watch-prepare"
+                ).data
+            except PendingTransactionError as exc:
+                print(f"[graphify watch] Rebuild deferred: {exc}")
+                return False
         if changed_paths is not None:
             _queue_pending(actual_out, list(changed_paths))
         queued = queue_rebuild(
@@ -848,15 +858,6 @@ def _rebuild_code(
                     "[graphify watch] Rebuild already in progress for "
                     f"{watch_path.resolve()} - changes queued."
                 )
-                return False
-        baseline_graph: dict | None = None
-        if (actual_out / "graph.json").is_file():
-            try:
-                baseline_graph = open_graph_snapshot(
-                    actual_out / "graph.json", purpose="watch-prepare"
-                ).data
-            except PendingTransactionError as exc:
-                print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
         try:
             transaction = begin_transaction("runtime", watch_path, output=actual_out)
@@ -899,23 +900,11 @@ def _rebuild_code(
                 prefix="graphify-prepare-"
             ) as prepared_name:
                 prepared = Path(prepared_name)
-                for entry in actual_out.iterdir():
-                    if entry.name.startswith(".graphify_transaction") or entry.name in {
-                        ".graphify_protocol.json",
-                        ".graphify_generation.json",
-                        ".graphify_drainer.json",
-                        ".graphify_rebuild_queue.jsonl",
-                        ".graphify_rebuild_quarantine.jsonl",
-                        ".graphify_state.lock",
-                        ".graphify_queue.lock",
-                        ".pending_changes",
-                    } or entry.name.startswith(".graphify_rebuild_inflight."):
+                for name in MANAGED_PUBLICATION_PATHS:
+                    if "/" in name or name == "graph.json":
                         continue
-                    if (
-                        entry.name != "graph.json"
-                        and entry.is_file()
-                        and not entry.is_symlink()
-                    ):
+                    entry = actual_out / name
+                    if entry.is_file() and not entry.is_symlink():
                         shutil.copy2(entry, prepared / entry.name)
                 if baseline_graph is not None:
                     graph_metadata = baseline_graph.get("graph")
@@ -961,15 +950,14 @@ def _rebuild_code(
                 with owned_step(transaction, drainer=claim.drainer):
                     commit_bytes(transaction, "graph.json", graph_payload)
                     artifacts.append("graph.json")
-                    for entry in sorted(prepared.iterdir(), key=lambda value: value.name):
-                        if not entry.is_file() or entry.name in {
-                            "graph.json",
-                            "manifest.json",
-                            ".graphify_state.lock",
-                        }:
+                    for name in MANAGED_PUBLICATION_PATHS:
+                        if "/" in name or name in {"graph.json", "manifest.json"}:
                             continue
-                        commit_bytes(transaction, entry.name, entry.read_bytes())
-                        artifacts.append(entry.name)
+                        entry = prepared / name
+                        if not entry.is_file():
+                            continue
+                        commit_bytes(transaction, name, entry.read_bytes())
+                        artifacts.append(name)
                     commit_bytes(transaction, "manifest.json", manifest_payload)
                     artifacts.append("manifest.json")
                     generation = commit_generation(

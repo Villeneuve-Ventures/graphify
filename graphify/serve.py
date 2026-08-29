@@ -1040,6 +1040,12 @@ def _build_server(graph_path: str):
         missing/corrupt file — it raises, so a bad project_path surfaces as a
         tool error instead of killing a server that is happily serving other
         projects."""
+        from graphify.transaction import open_graph_snapshot
+
+        try:
+            open_graph_snapshot(path, purpose="mcp-context-admission")
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"graph.json not found: {path}") from exc
         try:
             s = Path(path).stat()
             key = (s.st_mtime_ns, s.st_size)

@@ -1095,6 +1095,11 @@ def _route_full_build_transaction(body: str) -> str:
             "'from graphify.transaction import active_transaction_token_path; "
             "print(active_transaction_token_path())') || exit $?; "
             "export GRAPHIFY_TRANSACTION_TOKEN; "
+            f"GRAPHIFY_TRANSACTION_WORKSPACE=$({interpreter} -E -P -B -m "
+            "graphify.transaction run-token \"$GRAPHIFY_TRANSACTION_TOKEN\" -- -c "
+            "'from graphify.transaction import prepared_workspace_path; "
+            "print(prepared_workspace_path())') || exit $?; "
+            "cd \"$GRAPHIFY_TRANSACTION_WORKSPACE\" || exit $?; "
             f"{interpreter} -E -P -B -m graphify.transaction run-token "
             '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
         )
@@ -1107,16 +1112,53 @@ def _route_full_build_transaction(body: str) -> str:
     section = re.sub(
         r"```(?:bash|sh)\n(.*?)\n```", route_bash, section, flags=re.DOTALL
     )
-    section = re.sub(
-        r'(?m)^("\$GRAPHIFY_PYTHON" -E -P -B -m graphify export )(.*)$',
-        r'"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token '
-        r'"$GRAPHIFY_TRANSACTION_TOKEN" -- -m graphify export \2',
-        section,
+    export_prefix = (
+        'GRAPHIFY_TRANSACTION_WORKSPACE=$("$GRAPHIFY_PYTHON" -E -P -B -m '
+        'graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c '
+        "'from graphify.transaction import prepared_workspace_path; "
+        "print(prepared_workspace_path())') || exit $?; "
+        'cd "$GRAPHIFY_TRANSACTION_WORKSPACE" || exit $?; '
+        '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token '
+        '"$GRAPHIFY_TRANSACTION_TOKEN" -- -m graphify export '
     )
     section = re.sub(
-        r'(?m)^(& \$GraphifyPython -E -P -B -m graphify export )(.*)$',
-        r'& $GraphifyPython -E -P -B -m graphify.transaction run-token '
-        r'$Env:GRAPHIFY_TRANSACTION_TOKEN -- -m graphify export \2',
+        r'(?m)^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export (.*)$',
+        lambda match: export_prefix + match.group(1),
+        section,
+    )
+    def route_powershell_export(match: re.Match[str]) -> str:
+        arguments, separator, comment = match.group(2).partition(" #")
+        export_arguments = ", ".join(
+            "'" + value.replace("'", "''") + "'"
+            for value in shlex.split(arguments)
+        )
+        routed = (
+            "$GraphifyPreparedWorkspaceCode = 'from graphify.transaction import "
+            "prepared_workspace_path; print(prepared_workspace_path())'\n"
+            "$GraphifyPreparedWorkspaceArgs = @('-E', '-P', '-B', '-m', "
+            "'graphify.transaction', 'run-token', "
+            "$Env:GRAPHIFY_TRANSACTION_TOKEN, '--', '-c', "
+            "$GraphifyPreparedWorkspaceCode)\n"
+            "$GraphifyTransactionWorkspace = & $GraphifyPython "
+            "@GraphifyPreparedWorkspaceArgs\n"
+            "Push-Location $GraphifyTransactionWorkspace\n"
+            "try {\n"
+            "    $GraphifyExportArgs = @('-E', '-P', '-B', '-m', "
+            "'graphify.transaction', 'run-token', "
+            "$Env:GRAPHIFY_TRANSACTION_TOKEN, '--', '-m', 'graphify', "
+            f"'export') + @({export_arguments})\n"
+            "    & $GraphifyPython @GraphifyExportArgs\n"
+            "} finally {\n"
+            "    Pop-Location\n"
+            "}"
+        )
+        if separator:
+            routed = f"# {comment}\n{routed}"
+        return routed
+
+    section = re.sub(
+        r"(?m)^(& \$GraphifyPython -E -P -B -m graphify export )(.*)$",
+        route_powershell_export,
         section,
     )
     step9 = section.find("### Step 9")
@@ -1133,11 +1175,11 @@ def _route_full_build_transaction(body: str) -> str:
                 "import finalize_prepared_transaction; "
                 "finalize_prepared_transaction()'"
             )
-            tail = tail.replace(
-                "\nrm -f ",
-                f"\n{finalize}; rm -f ",
-                1,
-            )
+            cleanup_start = tail.find("\nrm -f ")
+            cleanup_end = tail.find("\n```", cleanup_start)
+            if cleanup_start < 0 or cleanup_end < 0:
+                raise ValueError("Step 9 cleanup boundary is missing")
+            tail = tail[:cleanup_start] + f"\n{finalize}" + tail[cleanup_end:]
         section = section[:step9] + tail
     return body[:start] + section + body[end:]
 
@@ -2036,6 +2078,8 @@ def _normalise_issue88_monolith_render(text: str) -> str:
     text = re.sub(
         r"GRAPHIFY_TRANSACTION_TOKEN=.*?active_transaction_token_path.*?; "
         r"export GRAPHIFY_TRANSACTION_TOKEN; "
+        r"(?:GRAPHIFY_TRANSACTION_WORKSPACE=.*?prepared_workspace_path.*?; "
+        r"cd \"\$GRAPHIFY_TRANSACTION_WORKSPACE\" \|\| exit \$\?; )?"
         r'"\$\(cat graphify-out/\.graphify_python\)" -E -P -B -m '
         r"graphify\.transaction run-token \"\$GRAPHIFY_TRANSACTION_TOKEN\" -- -c",
         '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
@@ -2044,9 +2088,13 @@ def _normalise_issue88_monolith_render(text: str) -> str:
     return re.sub(
         r'"\$\(cat graphify-out/\.graphify_python\)" -E -P -B -c '
         r"'from graphify\.transaction import finalize_prepared_transaction; "
-        r"finalize_prepared_transaction\(\)'; ?",
+        r"finalize_prepared_transaction\(\)'(?:; ?)?",
         "",
-        text,
+        re.sub(
+            r"(?m)^rm -f graphify-out/\.needs_update 2>/dev/null \|\| true\n?",
+            "",
+            text,
+        ),
     )
 
 

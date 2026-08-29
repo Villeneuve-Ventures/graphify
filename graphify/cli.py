@@ -498,7 +498,7 @@ def _parse_routing_args(
             continue
         option, separator, inline = argument.partition("=")
         if options_enabled and option in value_options:
-            if option in values:
+            if option in values and option != "--exclude":
                 raise _CliArgumentError(f"{option} may be specified only once")
             if separator:
                 if not inline:
@@ -564,6 +564,40 @@ def _resolve_extract_destination() -> _TransactionDestination:
     )
 
 
+def _canonical_extract_argv(root: Path) -> list[str]:
+    """Put the parsed extract target in argv[2] without dropping option spelling."""
+    arguments = sys.argv[2:]
+    options: list[str] = []
+    index = 0
+    options_enabled = True
+    skipped_target = False
+    while index < len(arguments):
+        value = arguments[index]
+        if options_enabled and value == "--":
+            options_enabled = False
+            index += 1
+            continue
+        option = value.partition("=")[0]
+        if options_enabled and option in _EXTRACT_VALUE_OPTIONS:
+            options.append(value)
+            if "=" not in value:
+                options.append(arguments[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        if options_enabled and value in _EXTRACT_FLAG_OPTIONS:
+            options.append(value)
+            index += 1
+            continue
+        if not skipped_target:
+            skipped_target = True
+        else:
+            options.append(value)
+        index += 1
+    return [sys.argv[0], "extract", str(root), *options]
+
+
 def _replace_graph_argument(arguments: list[str], graph: Path) -> list[str]:
     rewritten = list(arguments)
     index = 0
@@ -595,11 +629,13 @@ def _replace_out_argument(arguments: list[str], output_root: Path) -> list[str]:
 def _transactional_extract() -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,
+        MANAGED_PUBLICATION_PATHS,
         begin_transaction,
         cancel_unpublished_transaction,
         commit_bytes,
         commit_generation,
         finish_transaction,
+        open_graph_snapshot,
         owned_step,
     )
 
@@ -613,17 +649,13 @@ def _transactional_extract() -> None:
         staging_root = Path(staging_name)
         staging_output = staging_root / "graphify-out"
         staging_output.mkdir()
-        if destination.output.is_dir():
-            for entry in destination.output.iterdir():
-                if entry.is_file() and not entry.is_symlink() and not entry.name.startswith(
-                    (".graphify_transaction", ".graphify_rebuild_inflight.")
-                ) and entry.name not in {
-                    ".graphify_protocol.json",
-                    ".graphify_generation.json",
-                    ".graphify_drainer.json",
-                    ".graphify_rebuild_queue.jsonl",
-                    ".graphify_rebuild_quarantine.jsonl",
-                }:
+        if destination.graph.is_file():
+            open_graph_snapshot(destination.graph, purpose="extract-baseline")
+            for name in MANAGED_PUBLICATION_PATHS:
+                if "/" in name:
+                    continue
+                entry = destination.output / name
+                if entry.is_file() and not entry.is_symlink():
                     shutil.copy2(entry, staging_output / entry.name)
         staged_graph = staging_output / "graph.json"
         baseline_graph_data: dict | None = None
@@ -639,6 +671,7 @@ def _transactional_extract() -> None:
         transaction = begin_transaction(
             "full", destination.root, output=destination.output
         )
+        sys.argv = _canonical_extract_argv(destination.root)
         globals()["_TRANSACTION_OUTPUT_OVERRIDE"] = staging_output
         try:
             with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
@@ -696,11 +729,14 @@ def _transactional_extract() -> None:
         with owned_step(transaction):
             commit_bytes(transaction, "graph.json", graph_payload)
             artifacts.append("graph.json")
-            for entry in sorted(staging_output.iterdir(), key=lambda value: value.name):
-                if not entry.is_file() or entry.name in {"graph.json", "manifest.json"}:
+            for name in MANAGED_PUBLICATION_PATHS:
+                if name in {"graph.json", "manifest.json"}:
                     continue
-                commit_bytes(transaction, entry.name, entry.read_bytes())
-                artifacts.append(entry.name)
+                entry = staging_output / name
+                if not entry.is_file():
+                    continue
+                commit_bytes(transaction, name, entry.read_bytes())
+                artifacts.append(name)
             commit_bytes(transaction, "manifest.json", manifest_payload)
             artifacts.append("manifest.json")
             commit_generation(

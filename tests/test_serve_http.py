@@ -252,6 +252,29 @@ def test_bad_project_path_errors_without_killing_server(tmp_path):
         assert "Nodes: 2" in _call_tool(client, headers, "graph_stats", {}, rid=3)
 
 
+def test_cached_context_is_fenced_when_protocol_becomes_pending(tmp_path):
+    from graphify.transaction import begin_transaction
+
+    graph_path = _graph_file(tmp_path)
+    root = tmp_path / "corpus"
+    root.mkdir()
+    app = serve_mod._build_http_app(graph_path, json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        assert "Nodes: 2" in _call_tool(
+            client, headers, "graph_stats", {}, rid=2
+        )
+        before = Path(graph_path).stat()
+        begin_transaction("runtime", root, output=tmp_path)
+        after = Path(graph_path).stat()
+        assert (before.st_mtime_ns, before.st_size) == (
+            after.st_mtime_ns,
+            after.st_size,
+        )
+        blocked = _call_tool(client, headers, "graph_stats", {}, rid=3)
+        assert "protocol" in blocked.lower() or "pending" in blocked.lower()
+
+
 def test_stateless_mode_initialize(tmp_path):
     app = serve_mod._build_http_app(_graph_file(tmp_path), stateless=True, json_response=True)
     with _client(app) as client:

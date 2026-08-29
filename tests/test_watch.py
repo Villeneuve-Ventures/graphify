@@ -1536,6 +1536,32 @@ def test_rebuild_code_real_transaction_drains_arrival_before_close(
     assert followup.generation >= 2
 
 
+def test_transactional_watch_accepts_legacy_baseline_before_creating_markers(
+    tmp_path,
+):
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "legacy.py"
+    source.write_text("def legacy():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert graph["graph"]["_graphify_protocol"]["state"] == "active"
+
+
 def test_merge_changed_paths_dedupes_in_order():
     """_merge_changed_paths preserves first-seen order and drops dupes."""
     from graphify.watch import _merge_changed_paths

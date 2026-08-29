@@ -13,6 +13,7 @@ import json
 import os
 import runpy
 import secrets
+import shutil
 import stat
 import sys
 import threading
@@ -38,7 +39,7 @@ MANAGED_PUBLICATION_PATHS = (
     "graphify-callflow.html",
     ".graphify_semantic_marker",
     "needs_update",
-    ".graphify_build_config.json",
+    ".graphify_build.json",
     "wiki/index.md",
     "obsidian/graph.canvas",
     "graph.graphml",
@@ -323,6 +324,55 @@ def _read_bytes(capability: OutputCapability, name: str, limit: int = _MAX_STATE
         os.close(fd)
 
 
+def _read_relative_bytes(
+    capability: OutputCapability, relative_name: str, limit: int = 512 * 1024 * 1024
+) -> bytes:
+    relative = Path(relative_name)
+    if relative.is_absolute() or not relative.parts or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise PendingTransactionError(f"unsafe managed relative path: {relative_name}")
+    parent_fd = os.dup(capability.fd)
+    try:
+        for component in relative.parts[:-1]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+        leaf = relative.parts[-1]
+        before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+            raise PendingTransactionError(f"unsafe managed artifact: {relative_name}")
+        fd = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                raise PendingTransactionError(f"managed artifact identity changed: {relative_name}")
+            payload = bytearray()
+            while len(payload) <= limit:
+                chunk = os.read(fd, min(65536, limit + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > limit:
+                raise PendingTransactionError(f"managed artifact exceeds size limit: {relative_name}")
+            after = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+            if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+                raise PendingTransactionError(f"managed artifact replaced while reading: {relative_name}")
+            return bytes(payload)
+        finally:
+            os.close(fd)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise PendingTransactionError(f"required managed artifact is missing: {relative_name}") from exc
+    finally:
+        os.close(parent_fd)
+
+
 def _replace_bytes(capability: OutputCapability, name: str, payload: bytes) -> None:
     capability.validate()
     prior = _entry_stat(capability, name)
@@ -604,9 +654,10 @@ def resume_transaction(
 
 def current_transaction() -> Transaction:
     authority = _AUTHORITY.get()
-    if authority is None:
+    output = os.environ.get("GRAPHIFY_TRANSACTION_OUTPUT")
+    if authority is None or output is None:
         raise PendingTransactionError("exact owner context required")
-    with pin_output(Path(os.environ["GRAPHIFY_TRANSACTION_OUTPUT"])) as capability:
+    with pin_output(Path(output)) as capability:
         tx = _read_transaction(capability)
     if tx is None or tx.id != authority.transaction_id:
         raise PendingTransactionError("exact owner context required")
@@ -624,6 +675,30 @@ def active_transaction_token_path(output: Path | str = "graphify-out") -> Path:
         if info is None or (info.st_dev, info.st_ino) != live.token_identity:
             raise PendingTransactionError("live transaction token identity changed")
         return capability.path / name
+
+
+def prepared_workspace_path() -> Path:
+    """Return the durable external preparation workspace for the exact owner."""
+    transaction = current_transaction()
+    workspace = transaction.output.parent / f".graphify-prepare-{transaction.id}"
+    prepared_output = workspace / "graphify-out"
+    if workspace.exists():
+        if workspace.is_symlink() or not workspace.is_dir() or not prepared_output.is_dir():
+            raise PendingTransactionError("prepared workspace identity is unsafe")
+        return workspace
+    workspace.mkdir(mode=0o700)
+    prepared_output.mkdir(mode=0o700)
+    with pin_output(transaction.output) as capability, _locked(capability):
+        _validate_authority(capability, transaction)
+        for name in MANAGED_PUBLICATION_PATHS:
+            try:
+                payload = _read_relative_bytes(capability, name)
+            except PendingTransactionError:
+                continue
+            target = prepared_output / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+    return workspace
 
 
 def stage_transaction_handoff(transaction: Transaction) -> TransactionToken:
@@ -688,11 +763,15 @@ def _open_token(path: Path) -> tuple[dict[str, object], bytes, tuple[int, int]]:
 
 def run_token(token_path: Path | str, python_args: list[str]) -> None:
     path = Path(token_path).absolute()
-    raw, _payload, identity = _open_token(path)
     if len(python_args) < 2 or python_args[0] not in {"-c", "-m"}:
         raise PendingTransactionError("runner accepts only exact -c or -m shapes")
-    tx = resume_transaction(str(raw["id"]), str(raw["root"]), output=str(raw["output"]))
-    tx = replace(tx, token_identity=identity)
+    with pin_output(path.parent) as capability, _locked(capability):
+        raw, _payload, identity = _open_token(path)
+        tx = resume_transaction(
+            str(raw["id"]), str(raw["root"]), output=str(raw["output"])
+        )
+        tx = replace(tx, token_identity=identity)
+        authority_token = _AUTHORITY.set(_authority_for(tx))
     mode, target, *arguments = python_args
     if not target or (mode == "-m" and (target.startswith("-") or "/" in target or "\\" in target)):
         raise PendingTransactionError("ambiguous transaction runner target")
@@ -712,7 +791,6 @@ def run_token(token_path: Path | str, python_args: list[str]) -> None:
         GRAPHIFY_TRANSACTION_OUTPUT=str(tx.output),
         GRAPHIFY_TRANSACTION_TOKEN=str(path),
     )
-    authority_token = _AUTHORITY.set(_authority_for(tx))
     try:
         if mode == "-c":
             sys.argv = ["-c", *arguments]
@@ -903,6 +981,10 @@ def commit_generation(
     graph_name: str = "graph.json",
 ) -> GenerationReceipt:
     watermark = _watermark(graph_payload)
+    if graph_name not in required_artifacts or "manifest.json" not in required_artifacts:
+        raise PendingTransactionError(
+            "generation inventory must include graph and manifest"
+        )
     if watermark.get("generation") != transaction.generation or watermark.get("state") != "active":
         raise PendingTransactionError("graph watermark does not match transaction generation")
     with pin_output(transaction.output) as capability, _locked(capability):
@@ -911,6 +993,10 @@ def commit_generation(
             raise PendingTransactionError("published graph differs from prepared graph")
         if _read_bytes(capability, "manifest.json", max(len(manifest_payload), 1)) != manifest_payload:
             raise PendingTransactionError("published manifest differs from prepared manifest")
+        artifact_digests = {
+            name: hashlib.sha256(_read_relative_bytes(capability, name)).hexdigest()
+            for name in dict.fromkeys(required_artifacts)
+        }
         receipt_body = {
             "schema": 1,
             "protocol_epoch": 1,
@@ -924,6 +1010,7 @@ def commit_generation(
             "manifest_digest": hashlib.sha256(manifest_payload).hexdigest(),
             "watermark": watermark,
             "required_artifacts": list(required_artifacts),
+            "artifact_digests": artifact_digests,
         }
         receipt_payload = _json_bytes(receipt_body)
         digest = hashlib.sha256(receipt_payload).hexdigest()
@@ -936,11 +1023,86 @@ def commit_generation(
         return GenerationReceipt(digest, live.generation)
 
 
+def _validate_receipt_locked(
+    capability: OutputCapability,
+    *,
+    transaction: Transaction | None = None,
+    graph_payload: bytes | None = None,
+    require_closed: bool = False,
+) -> tuple[dict[str, Any], str]:
+    try:
+        receipt_payload = _read_bytes(capability, RECEIPT_FILE)
+    except FileNotFoundError as exc:
+        raise PendingTransactionError("generation receipt is missing") from exc
+    try:
+        receipt = json.loads(receipt_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError("generation receipt is malformed") from exc
+    protocol = _load_json(capability, PROTOCOL_FILE)
+    if not isinstance(receipt, dict) or protocol is None:
+        raise PendingTransactionError("generation receipt is missing")
+    digest = hashlib.sha256(receipt_payload).hexdigest()
+    drainer = _drainer_from_json(receipt.get("drainer"))
+    required = receipt.get("required_artifacts")
+    artifact_digests = receipt.get("artifact_digests")
+    if (
+        receipt.get("schema") != 1
+        or receipt.get("protocol_epoch") != 1
+        or protocol.get("state") != "COMPLETE"
+        or protocol.get("receipt_digest") != digest
+        or protocol.get("generation") != receipt.get("generation")
+        or protocol.get("transaction_id") != receipt.get("transaction_id")
+        or protocol.get("owner_capability_digest") != receipt.get("token_digest")
+        or _identity_from_json(protocol.get("output_identity")) != capability.identity
+        or _identity_from_json(receipt.get("output_identity")) != capability.identity
+        or not isinstance(required, list)
+        or not required
+        or not all(isinstance(name, str) for name in required)
+        or len(required) != len(set(required))
+        or receipt.get("graph_name", "graph.json") not in required
+        or "manifest.json" not in required
+        or not isinstance(artifact_digests, dict)
+        or set(artifact_digests) != set(required)
+    ):
+        raise PendingTransactionError("generation receipt does not match protocol")
+    if transaction is not None and (
+        receipt.get("transaction_id") != transaction.id
+        or receipt.get("generation") != transaction.generation
+        or receipt.get("token_digest") != transaction.token_digest
+        or drainer != transaction.drainer
+    ):
+        raise PendingTransactionError("generation receipt does not match live owner")
+    current_drainer = _read_drainer(capability)
+    if current_drainer is None or current_drainer[0] != drainer:
+        raise PendingTransactionError("generation receipt does not match live drainer")
+    if require_closed and (
+        current_drainer is None
+        or current_drainer[1] != "complete"
+        or current_drainer[2].get("receipt_digest") != digest
+    ):
+        raise PendingTransactionError("generation close is incomplete")
+    for name in required:
+        payload = _read_relative_bytes(capability, name)
+        if hashlib.sha256(payload).hexdigest() != artifact_digests[name]:
+            raise PendingTransactionError(f"managed artifact digest changed: {name}")
+    manifest = _read_relative_bytes(capability, "manifest.json")
+    if hashlib.sha256(manifest).hexdigest() != receipt.get("manifest_digest"):
+        raise PendingTransactionError("manifest digest changed after receipt")
+    graph_name = str(receipt.get("graph_name", "graph.json"))
+    actual_graph = graph_payload or _read_relative_bytes(capability, graph_name)
+    if hashlib.sha256(actual_graph).hexdigest() != receipt.get("graph_digest"):
+        raise PendingTransactionError("graph digest changed after receipt")
+    return receipt, digest
+
+
 def _coordination_present(capability: OutputCapability) -> bool:
-    return any(
-        _entry_stat(capability, name) is not None
-        for name in (PROTOCOL_FILE, TRANSACTION_FILE, RECEIPT_FILE, QUEUE_FILE, DRAINER_FILE)
-    )
+    markers = {PROTOCOL_FILE, TRANSACTION_FILE, RECEIPT_FILE, QUEUE_FILE, DRAINER_FILE, QUARANTINE_FILE}
+    for name in os.listdir(capability.fd):
+        if name in markers or name.startswith(
+            (".graphify_transaction_token.", ".graphify_rebuild_inflight.")
+        ):
+            return True
+    return False
 
 
 def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
@@ -949,7 +1111,7 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
     output = requested.parent.resolve(strict=True)
     graph_path = output / requested.name
     with pin_output(output) as capability, _locked(capability):
-        if not graph_path.exists():
+        if _entry_stat(capability, graph_path.name) is None:
             protocol = _load_json(capability, PROTOCOL_FILE)
             if protocol is not None:
                 label = (
@@ -981,21 +1143,16 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
             raise PendingTransactionError("unsupported graph watermark schema")
         if watermark.get("state") != "active":
             raise PendingTransactionError(f"graph watermark state {watermark.get('state')!r} is unavailable")
-        protocol = _load_json(capability, PROTOCOL_FILE)
-        receipt = _load_json(capability, RECEIPT_FILE)
-        if protocol is None or protocol.get("state") != "COMPLETE" or receipt is None:
-            raise PendingTransactionError("generation receipt is missing or incomplete")
         generation = watermark.get("generation")
         if not isinstance(generation, int):
             raise PendingTransactionError("graph watermark generation is invalid")
+        receipt, _digest = _validate_receipt_locked(
+            capability, graph_payload=payload
+        )
         if (
-            receipt.get("schema") != 1
-            or receipt.get("generation") != generation
-            or protocol.get("generation") != generation
-            or receipt.get("graph_digest") != hashlib.sha256(payload).hexdigest()
+            receipt.get("generation") != generation
             or receipt.get("graph_name", "graph.json") != graph_path.name
             or receipt.get("watermark") != watermark
-            or _identity_from_json(receipt.get("output_identity")) != capability.identity
         ):
             raise PendingTransactionError("generation receipt does not match graph watermark")
         return GraphSnapshot(data, int(generation), graph_path)
@@ -1049,6 +1206,14 @@ def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[di
 def _write_queue(capability: OutputCapability, name: str, items: list[dict[str, Any]]) -> None:
     payload = b"".join(_json_bytes(item) + b"\n" for item in items)
     _replace_bytes(capability, name, payload)
+
+
+def _merge_intents(*groups: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for group in groups:
+        for item in group:
+            merged.setdefault(str(item["id"]), item)
+    return list(merged.values())
 
 
 def _read_drainer(capability: OutputCapability) -> tuple[DrainerTuple, str, dict[str, Any]] | None:
@@ -1138,13 +1303,17 @@ def claim_rebuild_queue(
         inflight_path: Path | None = None
         if accepted:
             existing = _read_queue(capability, inflight_name)
-            _write_queue(capability, inflight_name, existing + accepted)
+            _write_queue(capability, inflight_name, _merge_intents(existing, accepted))
             inflight_path = capability.path / inflight_name
         if failpoint:
             failpoint("before_quarantine_durable")
         if quarantined:
             existing_quarantine = _read_queue(capability, QUARANTINE_FILE)
-            _write_queue(capability, QUARANTINE_FILE, existing_quarantine + quarantined)
+            _write_queue(
+                capability,
+                QUARANTINE_FILE,
+                _merge_intents(existing_quarantine, quarantined),
+            )
         if failpoint:
             failpoint("before_queue_durable")
         _write_queue(capability, QUEUE_FILE, [])
@@ -1366,10 +1535,10 @@ def recover_transaction(
             )
         generation = current.generation + 1
         drainer = (
-            DrainerTuple(0, 0, secrets.token_hex(16))
+            DrainerTuple(generation, 0, secrets.token_hex(16))
             if drainer_current is None
             else DrainerTuple(
-                drainer_current[0].generation,
+                generation,
                 claim_epoch,
                 secrets.token_hex(16),
             )
@@ -1409,16 +1578,34 @@ def recover_transaction(
         return tx
 
 
-def load_detached_merge_snapshot(path: Path | str, *, role: str) -> dict[str, Any]:
+def _load_detached_merge_snapshot_with_identity(
+    path: Path | str, *, role: str
+) -> tuple[dict[str, Any], tuple[int, int]]:
     if role not in {"ancestor", "current", "other"}:
         raise PendingTransactionError("invalid detached merge snapshot role")
-    target = Path(path)
-    info = target.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > 512 * 1024 * 1024:
-        raise PendingTransactionError("unsafe detached merge snapshot")
+    target = Path(path).absolute()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        fd = os.open(target, flags)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > 512 * 1024 * 1024:
+                raise PendingTransactionError("unsafe detached merge snapshot")
+            payload = bytearray()
+            while len(payload) <= 512 * 1024 * 1024:
+                chunk = os.read(fd, min(65536, 512 * 1024 * 1024 + 1 - len(payload)))
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > 512 * 1024 * 1024:
+                raise PendingTransactionError("unsafe detached merge snapshot")
+            named = target.stat(follow_symlinks=False)
+            if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+                raise PendingTransactionError("detached merge snapshot identity changed")
+        finally:
+            os.close(fd)
+        data = json.loads(bytes(payload).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("malformed detached merge snapshot") from exc
     if not isinstance(data, dict) or not isinstance(data.get("nodes"), list) or not isinstance(data.get("links", []), list):
         raise PendingTransactionError("malformed detached merge snapshot shape")
@@ -1430,17 +1617,38 @@ def load_detached_merge_snapshot(path: Path | str, *, role: str) -> dict[str, An
         or watermark.get("protocol_epoch") != 1
     ):
         raise PendingTransactionError("unsupported detached watermark schema")
-    return data
+    if isinstance(watermark, dict):
+        state = watermark.get("state")
+        if state == "active":
+            supported = isinstance(watermark.get("generation"), int)
+        elif state == "merge_pending":
+            supported = isinstance(watermark.get("snapshot_generation"), str) and isinstance(
+                watermark.get("input_digests"), list
+            )
+        else:
+            supported = False
+        if not supported:
+            raise PendingTransactionError("unsupported detached watermark shape")
+    return data, (opened.st_dev, opened.st_ino)
+
+
+def load_detached_merge_snapshot(path: Path | str, *, role: str) -> dict[str, Any]:
+    return _load_detached_merge_snapshot_with_identity(path, role=role)[0]
 
 
 def merge_detached_snapshots(
     ancestor: Path | str, current: Path | str, other: Path | str
 ) -> None:
-    snapshots = [
-        load_detached_merge_snapshot(ancestor, role="ancestor"),
-        load_detached_merge_snapshot(current, role="current"),
-        load_detached_merge_snapshot(other, role="other"),
-    ]
+    ancestor_snapshot, _ancestor_identity = _load_detached_merge_snapshot_with_identity(
+        ancestor, role="ancestor"
+    )
+    current_snapshot, current_identity = _load_detached_merge_snapshot_with_identity(
+        current, role="current"
+    )
+    other_snapshot, _other_identity = _load_detached_merge_snapshot_with_identity(
+        other, role="other"
+    )
+    snapshots = [ancestor_snapshot, current_snapshot, other_snapshot]
     digests = [
         hashlib.sha256(_json_bytes(snapshot)).hexdigest() for snapshot in snapshots
     ]
@@ -1467,20 +1675,28 @@ def merge_detached_snapshots(
         "input_digests": digests,
     }
     merged["graph"] = graph_meta
-    Path(current).write_text(json.dumps(merged, sort_keys=True), encoding="utf-8")
+    current_path = Path(current).absolute()
+    with pin_output(current_path.parent) as capability, _locked(capability):
+        current_entry = _entry_stat(capability, current_path.name)
+        if current_entry is None or (
+            current_entry.st_dev,
+            current_entry.st_ino,
+        ) != current_identity:
+            raise PendingTransactionError("detached current snapshot identity changed")
+        _replace_bytes(
+            capability,
+            current_path.name,
+            json.dumps(merged, sort_keys=True).encode("utf-8"),
+        )
 
 
 def finish_transaction(transaction: Transaction) -> None:
     """Close a direct transaction after a committed receipt."""
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
-        try:
-            receipt_payload = _read_bytes(capability, RECEIPT_FILE)
-        except FileNotFoundError as exc:
-            raise PendingTransactionError(
-                "generation receipt is required before finish"
-            ) from exc
-        receipt_digest = hashlib.sha256(receipt_payload).hexdigest()
+        _receipt, receipt_digest = _validate_receipt_locked(
+            capability, transaction=transaction
+        )
         current = _read_drainer(capability)
         if current is None:
             _write_drainer(capability, transaction.drainer, "claimed", acked_ids=[], receipt_digest=receipt_digest)
@@ -1496,17 +1712,29 @@ def finish_transaction(transaction: Transaction) -> None:
                 acked_ids=[],
                 receipt_digest=receipt_digest,
             )
-    close_if_queue_empty(transaction, receipt_digest=receipt_digest)
+    if not close_if_queue_empty(transaction, receipt_digest=receipt_digest):
+        raise PendingTransactionError(
+            "queued successor work remains owned by the live drainer"
+        )
 
 
 def finalize_prepared_transaction() -> None:
     """Capability-commit an owner-prepared full-build generation and close it."""
     transaction = current_transaction()
+    prepared_output = prepared_workspace_path() / "graphify-out"
+
+    def prepared_bytes(name: str) -> bytes:
+        target = prepared_output / name
+        info = target.stat(follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 512 * 1024 * 1024:
+            raise PendingTransactionError(f"unsafe prepared artifact: {name}")
+        return target.read_bytes()
+
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         graph_name = "graph.json"
         graph_data = json.loads(
-            _read_bytes(capability, graph_name, 512 * 1024 * 1024).decode("utf-8")
+            prepared_bytes(graph_name).decode("utf-8")
         )
         metadata = graph_data.get("graph")
         if not isinstance(metadata, dict):
@@ -1522,20 +1750,27 @@ def finalize_prepared_transaction() -> None:
             graph_data, ensure_ascii=False, separators=(",", ":")
         ).encode("utf-8")
         try:
-            manifest_payload = _read_bytes(capability, "manifest.json")
-        except FileNotFoundError:
-            manifest_payload = b"{}"
+            manifest_payload = prepared_bytes("manifest.json")
+        except FileNotFoundError as exc:
+            raise PendingTransactionError(
+                "prepared manifest is required before finalization"
+            ) from exc
         prepared: dict[str, bytes] = {}
         for name in MANAGED_PUBLICATION_PATHS:
-            if "/" in name or name in {graph_name, "manifest.json"}:
+            if name in {graph_name, "manifest.json"}:
                 continue
-            if _entry_stat(capability, name) is not None:
-                prepared[name] = _read_bytes(capability, name, 512 * 1024 * 1024)
+            try:
+                prepared[name] = prepared_bytes(name)
+            except FileNotFoundError:
+                continue
     artifacts = [graph_name]
     with owned_step(transaction):
         commit_bytes(transaction, graph_name, graph_payload)
         for name, payload in prepared.items():
-            commit_bytes(transaction, name, payload)
+            if "/" in name:
+                commit_relative_bytes(transaction, name, payload)
+            else:
+                commit_bytes(transaction, name, payload)
             artifacts.append(name)
         commit_bytes(transaction, "manifest.json", manifest_payload)
         artifacts.append("manifest.json")
@@ -1546,6 +1781,7 @@ def finalize_prepared_transaction() -> None:
             required_artifacts=tuple(artifacts),
         )
     finish_transaction(transaction)
+    shutil.rmtree(prepared_output.parent)
 
 
 def cancel_unpublished_transaction(transaction: Transaction) -> None:

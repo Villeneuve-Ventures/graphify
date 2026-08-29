@@ -70,6 +70,87 @@ def _owner(tmp_path: Path):
     return root, output, tx, token
 
 
+def _commit_owner_generation(output: Path, tx) -> str:
+    payload = _graph(tx.generation)
+    with owned_step(tx):
+        commit_bytes(tx, "graph.json", payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+        return commit_generation(
+            tx,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        ).digest
+
+
+def test_finish_rejects_substituted_receipt_with_zero_mutation(tmp_path):
+    _root, output, tx, _token = _owner(tmp_path)
+    _commit_owner_generation(output, tx)
+    receipt_path = output / ".graphify_generation.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["transaction_id"] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+    before = {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()}
+    with pytest.raises(PendingTransactionError, match="receipt"):
+        finish_transaction(tx)
+    assert {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()} == before
+
+
+def test_snapshot_rejects_deleted_required_artifact(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    _commit_owner_generation(output, tx)
+    finish_transaction(resume_transaction(tx.id, root, output=output))
+    (output / "manifest.json").unlink()
+    with pytest.raises(PendingTransactionError, match="artifact|manifest"):
+        open_graph_snapshot(output / "graph.json", purpose="deleted-artifact")
+
+
+def test_claim_retry_is_idempotent_at_inflight_boundary(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    receipt = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    with pytest.raises(RuntimeError, match="crash"):
+        claim_rebuild_queue(
+            tx,
+            receipt.drainer,
+            failpoint=lambda point: (_ for _ in ()).throw(RuntimeError("crash"))
+            if point == "before_quarantine_durable"
+            else None,
+        )
+    claim = claim_rebuild_queue(tx, receipt.drainer)
+    assert [item["id"] for item in claim.items] == [receipt.id]
+    inflight = claim.inflight_path.read_text().splitlines() if claim.inflight_path else []
+    assert len(inflight) == 1
+
+
+def test_recovered_generation_and_drainer_converge_into_successor(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    recovered = recover_transaction("runtime", root, output=output, now=time.time() + 100)
+    assert recovered.generation == recovered.drainer.generation
+    _commit_owner_generation(output, recovered)
+    finish_transaction(recovered)
+    queued = queue_rebuild("update", root, output=output, changed_paths=["next.py"])
+    successor = begin_transaction("runtime", root, output=output)
+    assert successor.generation == queued.drainer.generation
+
+
+def test_finalize_requires_prepared_manifest(tmp_path):
+    from graphify.transaction import finalize_prepared_transaction
+
+    _root, output, _tx, token = _owner(tmp_path)
+    (output / "graph.json").write_text('{"graph":{},"nodes":[],"links":[]}')
+    with pytest.raises(PendingTransactionError, match="manifest"):
+        run_token(
+            token.path,
+            [
+                "-c",
+                "from graphify.transaction import finalize_prepared_transaction; "
+                "finalize_prepared_transaction()",
+            ],
+        )
+    assert not (output / ".graphify_generation.json").exists()
+    assert (output / ".graphify_transaction.json").exists()
+
+
 def test_bootstrap_pending_is_the_first_protocol_byte_and_fences_reads(tmp_path):
     root = tmp_path / "corpus"
     root.mkdir()
@@ -168,6 +249,40 @@ def test_stale_drainer_cannot_stage_handoff_token(tmp_path):
     assert (output / ".graphify_transaction.json").read_bytes() != transaction_before
     live = json.loads((output / ".graphify_transaction.json").read_text())
     assert live["drainer"]["claim_epoch"] == tx.drainer.claim_epoch + 1
+
+
+def test_token_cannot_install_successor_authority_during_takeover(tmp_path):
+    _root, output, _tx, token = _owner(tmp_path)
+    entered = tmp_path / "entered"
+    release = tmp_path / "release"
+    errors: list[BaseException] = []
+    code = (
+        "from pathlib import Path; import time; "
+        "from graphify.transaction import current_transaction, commit_bytes; "
+        f"Path({str(entered)!r}).write_text('ready'); "
+        f"gate=Path({str(release)!r}); "
+        "\nwhile not gate.exists(): time.sleep(0.01)\n"
+        "commit_bytes(current_transaction(), 'stale-token-publish', b'no')"
+    )
+
+    def runner():
+        try:
+            run_token(token.path, ["-c", code])
+        except BaseException as exc:  # noqa: BLE001 - asserting interleaving result
+            errors.append(exc)
+
+    thread = threading.Thread(target=runner)
+    thread.start()
+    for _ in range(200):
+        if entered.exists():
+            break
+        time.sleep(0.01)
+    assert entered.exists()
+    takeover_drainer(output, now=time.time() + 100)
+    release.write_text("go")
+    thread.join(timeout=3)
+    assert errors and isinstance(errors[0], PendingTransactionError)
+    assert not (output / "stale-token-publish").exists()
 
 
 def test_unexpired_unauthenticated_recovery_has_zero_mutation(tmp_path):
@@ -733,6 +848,51 @@ def test_detached_merge_parser_is_private_data_only_and_marks_pending(tmp_path):
 
     with pytest.raises(PendingTransactionError, match="role"):
         load_detached_merge_snapshot(current, role="working-tree")
+
+
+def test_detached_merge_rejects_oversize_and_unsupported_watermark(tmp_path):
+    oversized = tmp_path / "oversized.json"
+    with oversized.open("wb") as stream:
+        stream.truncate(512 * 1024 * 1024 + 1)
+    with pytest.raises(PendingTransactionError, match="unsafe"):
+        load_detached_merge_snapshot(oversized, role="current")
+
+    unsupported = tmp_path / "unsupported.json"
+    payload = json.loads(_graph(1))
+    payload["graph"][GRAPH_WATERMARK_KEY]["state"] = "future"
+    unsupported.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(PendingTransactionError, match="watermark"):
+        load_detached_merge_snapshot(unsupported, role="current")
+
+
+def test_detached_merge_refuses_retargeted_current_snapshot(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    for path in (base, current, other):
+        path.write_bytes(_graph(3))
+    original = transaction_module._load_detached_merge_snapshot_with_identity
+    replaced = False
+
+    def retarget(path, *, role):
+        nonlocal replaced
+        result = original(path, role=role)
+        if role == "current" and not replaced:
+            replaced = True
+            current.rename(tmp_path / "original-current.json")
+            current.write_bytes(b"replacement")
+        return result
+
+    monkeypatch.setattr(
+        transaction_module, "_load_detached_merge_snapshot_with_identity", retarget
+    )
+    with pytest.raises(PendingTransactionError, match="identity"):
+        merge_detached_snapshots(base, current, other)
+    assert current.read_bytes() == b"replacement"
 
 
 def test_merge_driver_cli_accepts_exact_three_snapshots_only(tmp_path):

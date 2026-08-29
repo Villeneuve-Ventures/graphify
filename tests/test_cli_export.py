@@ -47,6 +47,38 @@ def test_issue89_cli_destination_rejects_ambiguous_options(argv, monkeypatch):
         _resolve_transaction_destination("cluster-only")
 
 
+def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
+    tmp_path, monkeypatch
+):
+    from graphify.cli import _canonical_extract_argv, _resolve_extract_destination
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            "--exclude",
+            "vendor",
+            "--exclude=generated",
+            "--",
+            str(corpus),
+        ],
+    )
+    destination = _resolve_extract_destination()
+    assert destination.root == corpus.resolve()
+    assert _canonical_extract_argv(destination.root) == [
+        "graphify",
+        "extract",
+        str(corpus.resolve()),
+        "--exclude",
+        "vendor",
+        "--exclude=generated",
+    ]
+
+
 PYTHON = sys.executable
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -130,11 +162,67 @@ def test_full_build_token_runner_exports_before_final_commit(tmp_path):
         token.path,
         [
             "-c",
+            "from graphify.transaction import prepared_workspace_path; "
+            "(prepared_workspace_path() / 'graphify-out' / 'manifest.json').write_text('{}')",
+        ],
+    )
+    run_token(
+        token.path,
+        [
+            "-c",
             "from graphify.transaction import finalize_prepared_transaction; "
             "finalize_prepared_transaction()",
         ],
     )
     _assert_transactional_export(out)
+
+
+def test_direct_export_never_reports_success_when_close_race_queues_work(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+    from graphify.cli import dispatch_command
+
+    out = _make_graph(tmp_path)
+    original_close = transaction_module.close_if_queue_empty
+
+    def raced_close(transaction, *, receipt_digest, failpoint=None):
+        transaction_module.queue_rebuild(
+            "update", tmp_path, output=out, changed_paths=["late.py"]
+        )
+        return original_close(
+            transaction, receipt_digest=receipt_digest, failpoint=failpoint
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(transaction_module, "close_if_queue_empty", raced_close)
+    monkeypatch.setattr(sys, "argv", ["graphify", "export", "html"])
+    with pytest.raises(transaction_module.PendingTransactionError, match="successor"):
+        dispatch_command("export")
+    assert (out / ".graphify_transaction.json").is_file()
+    assert (out / ".graphify_rebuild_queue.jsonl").read_text().strip()
+
+
+def test_extract_rejects_pending_existing_graph_before_dispatch(
+    tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    from graphify.transaction import PendingTransactionError, begin_transaction
+
+    out = _make_graph(tmp_path)
+    begin_transaction("runtime", tmp_path, output=out)
+    dispatched = False
+
+    def unexpected_dispatch(_command):
+        nonlocal dispatched
+        dispatched = True
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "_dispatch_command", unexpected_dispatch)
+    monkeypatch.setattr(sys, "argv", ["graphify", "extract", str(tmp_path)])
+    with pytest.raises(PendingTransactionError, match="protocol"):
+        cli_module.dispatch_command("extract")
+    assert not dispatched
 
 
 @pytest.mark.parametrize(

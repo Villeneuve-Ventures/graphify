@@ -85,6 +85,9 @@ def global_add(source_path: Path, repo_tag: str) -> dict:
     if not source_path.exists():
         raise FileNotFoundError(f"graph not found: {source_path}")
 
+    from graphify.transaction import open_graph_snapshot
+
+    snapshot = open_graph_snapshot(source_path, purpose="global-add")
     manifest = _load_manifest()
     src_hash = _file_hash(source_path)
 
@@ -103,8 +106,7 @@ def global_add(source_path: Path, repo_tag: str) -> dict:
     # Load source graph
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(source_path)
-    from graphify.transaction import open_graph_snapshot
-    data = open_graph_snapshot(source_path, purpose="global-add").data
+    data = snapshot.data
     if "links" not in data and "edges" in data:
         data = dict(data, links=data["edges"])
     try:
