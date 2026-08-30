@@ -4634,6 +4634,454 @@ tx.queue_rebuild("update", root, output=output, changed_paths=[name])
     }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_enqueue_journal",
+        "after_enqueue_queue",
+        "after_enqueue_drainer",
+        "after_enqueue_retired",
+    ],
+)
+def test_enqueue_journal_recovers_each_durable_boundary_exactly_once(
+    tmp_path, boundary
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    script = r'''
+import os
+from pathlib import Path
+from graphify.transaction import queue_rebuild
+
+boundary = os.environ["ENQUEUE_BOUNDARY"]
+def stop(name):
+    if name == boundary:
+        os._exit(91)
+
+queue_rebuild(
+    "update",
+    Path(os.environ["ENQUEUE_ROOT"]),
+    output=Path(os.environ["ENQUEUE_OUTPUT"]),
+    changed_paths=["a.py", "b.py"],
+    source="test",
+    intent="watch",
+    now=1.0,
+    failpoint=stop,
+)
+'''
+    env = os.environ.copy()
+    env.update(
+        ENQUEUE_BOUNDARY=boundary,
+        ENQUEUE_ROOT=str(root),
+        ENQUEUE_OUTPUT=str(output),
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 91
+
+    if (output / ".graphify_enqueue.json").exists():
+        status = transaction_status(output)
+        assert status["enqueue_transition"] == {
+            "state": json.loads(
+                (output / ".graphify_enqueue.json").read_text(encoding="utf-8")
+            )["state"],
+            "intent_id": json.loads(
+                (output / ".graphify_enqueue.json").read_text(encoding="utf-8")
+            )["item"]["id"],
+            "kind": "update",
+            "intent": "watch",
+            "root": str(root.resolve()),
+            "generation": 1,
+            "output_identity": status["output_identity"],
+        }
+
+    receipt = queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["a.py", "b.py"],
+        source="test",
+        intent="watch",
+        now=1.0,
+    )
+    queued = [
+        json.loads(line)
+        for line in (output / ".graphify_rebuild_queue.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [item["id"] for item in queued] == [receipt.id]
+    assert queued[0]["changed_paths"] == ["a.py", "b.py"]
+    assert not (output / ".graphify_enqueue.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_selected_recovery_resumes_enqueue_journal(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    with pytest.raises(RuntimeError, match="stop"):
+        queue_rebuild(
+            "full",
+            root,
+            output=output,
+            source="test",
+            now=1.0,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+            if name == "after_enqueue_journal"
+            else None,
+        )
+    status = transaction_status(output)
+    recovered = recover_selected_transaction(
+        "full",
+        root,
+        output=output,
+        expected_generation=1,
+        expected_output_identity=OutputIdentity(**status["output_identity"]),
+    )
+    assert recovered.generation == 1
+    assert recovered.root == str(root.resolve())
+    assert not (output / ".graphify_enqueue.json").exists()
+
+
+def test_enqueue_journal_rejects_coherently_forged_queue_transform(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    with pytest.raises(RuntimeError, match="stop"):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["a.py"],
+            now=1.0,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+            if name == "after_enqueue_journal"
+            else None,
+        )
+    journal_path = output / ".graphify_enqueue.json"
+    journal = json.loads(journal_path.read_text())
+    journal["successor_queue"] = []
+    journal["successor_queue_digest"] = hashlib.sha256(b"").hexdigest()
+    journal_path.write_text(json.dumps(journal, separators=(",", ":")))
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="malformed enqueue journal"):
+        transaction_status(output)
+    assert _file_bytes(output) == before
+
+
+def test_enqueue_journal_rejects_coherent_full_semantic_downgrade(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    queue_rebuild("full", root, output=output, semantic=True, now=1.0)
+    with pytest.raises(RuntimeError, match="stop"):
+        queue_rebuild(
+            "full",
+            root,
+            output=output,
+            semantic=False,
+            now=2.0,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+            if name == "after_enqueue_journal"
+            else None,
+        )
+    journal_path = output / ".graphify_enqueue.json"
+    journal = json.loads(journal_path.read_text())
+    forged_identity = {
+        key: journal["candidate"][key]
+        for key in (
+            "schema",
+            "kind",
+            "intent",
+            "root",
+            "changed_paths",
+            "semantic",
+            "source",
+        )
+    }
+    forged_identity["semantic"] = False
+    forged_id = hashlib.sha256(
+        json.dumps(forged_identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    forged = {**forged_identity, "id": forged_id, "time": 2.0}
+    journal["candidate"] = forged
+    journal["item"] = forged
+    journal["item_digest"] = hashlib.sha256(
+        json.dumps(forged, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    journal["successor_queue"] = [forged]
+    successor_payload = (
+        json.dumps(forged, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    journal["successor_queue_digest"] = hashlib.sha256(successor_payload).hexdigest()
+    journal_path.write_text(json.dumps(journal, separators=(",", ":")))
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="candidate identity"):
+        transaction_status(output)
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("predecessor", ["complete", "reserved"])
+def test_enqueue_journal_derives_predecessor_mode_zero_mutation(
+    tmp_path, predecessor
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    completed = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, completed)
+    finish_transaction(completed)
+    if predecessor == "reserved":
+        queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    with pytest.raises(RuntimeError, match="stop"):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["b.py"],
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+            if name == "after_enqueue_journal"
+            else None,
+        )
+    journal_path = output / ".graphify_enqueue.json"
+    journal = json.loads(journal_path.read_text())
+    assert journal["predecessor_mode"] == predecessor
+    journal["predecessor_mode"] = "missing"
+    journal_path.write_text(json.dumps(journal, separators=(",", ":")))
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="predecessor mode"):
+        transaction_status(output)
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "cancellation_phase",
+    [
+        "cancelling",
+        "after_cancel_protocol",
+        "after_cancel_drainer",
+        "after_cancel_prepared",
+        "after_cancel_token",
+        "after_cancel_live",
+    ],
+)
+def test_enqueue_requires_operational_recovery_for_every_cancellation_phase(
+    tmp_path, cancellation_phase
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    successor = begin_transaction("update", root, output=output)
+    if cancellation_phase == "cancelling":
+        record_path = output / ".graphify_predecessor.json"
+        record = json.loads(record_path.read_text())
+        record["state"] = "cancelling"
+        record["successor_transaction"] = json.loads(
+            (output / ".graphify_transaction.json").read_text()
+        )
+        record_path.write_text(
+            json.dumps(record, sort_keys=True, separators=(",", ":"))
+        )
+    else:
+        with pytest.raises(RuntimeError, match=cancellation_phase):
+            cancel_unpublished_transaction(
+                successor,
+                failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+                if name == cancellation_phase
+                else None,
+            )
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="operational recovery required"):
+        queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    assert _file_bytes(output) == before
+
+    status = transaction_status(output)
+    recovered = recover_selected_transaction(
+        "update",
+        root,
+        output=output,
+        expected_generation=successor.generation,
+        expected_output_identity=OutputIdentity(**status["output_identity"]),
+        expected_transaction_id=successor.id,
+    )
+    assert isinstance(recovered, CancellationRecovery)
+    receipt = queue_rebuild(
+        "update", root, output=output, changed_paths=["a.py"]
+    )
+    assert receipt.drainer.generation == successor.generation
+
+
+@pytest.mark.parametrize("corruption", ["malformed", "incoherent"])
+def test_enqueue_rejects_invalid_cancellation_record_zero_mutation(
+    tmp_path, corruption
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    successor = begin_transaction("update", root, output=output)
+    with pytest.raises(RuntimeError, match="after_cancel_protocol"):
+        cancel_unpublished_transaction(
+            successor,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_cancel_protocol"
+            else None,
+        )
+    if corruption == "malformed":
+        record_path = output / ".graphify_predecessor.json"
+        record = json.loads(record_path.read_text())
+        record["unexpected"] = True
+        record_path.write_text(
+            json.dumps(record, sort_keys=True, separators=(",", ":"))
+        )
+    else:
+        protocol_path = output / ".graphify_protocol.json"
+        protocol = json.loads(protocol_path.read_text())
+        protocol["bootstrap_nonce"] = "0" * 64
+        protocol_path.write_text(
+            json.dumps(protocol, sort_keys=True, separators=(",", ":"))
+        )
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["after_enqueue_journal", "after_enqueue_queue", "after_enqueue_drainer"],
+)
+@pytest.mark.parametrize(
+    "operation",
+    ["finish", "close", "cancel", "begin", "publication", "claim", "takeover"],
+)
+def test_pending_enqueue_fences_every_unrelated_mutation_until_recovery(
+    tmp_path, boundary, operation
+):
+    root = tmp_path / "corpus"
+    output = tmp_path / "graphify-out"
+    transaction = None
+    receipt_digest = None
+    if operation in {"finish", "close"}:
+        root, output, transaction, _token = _owner(tmp_path)
+        receipt_digest = _commit_owner_generation(output, transaction)
+    elif operation == "cancel":
+        root.mkdir()
+        predecessor = begin_transaction("full", root, output=output)
+        _commit_owner_generation(output, predecessor)
+        finish_transaction(predecessor)
+        transaction = begin_transaction("update", root, output=output)
+    elif operation in {"publication", "claim"}:
+        root, output, transaction, _token = _owner(tmp_path)
+    else:
+        root.mkdir()
+
+    with pytest.raises(RuntimeError, match=boundary):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["a.py"],
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+    before = _file_bytes(output)
+
+    def mutate() -> object:
+        if operation == "finish":
+            assert transaction is not None
+            return finish_transaction(transaction)
+        if operation == "close":
+            assert transaction is not None and receipt_digest is not None
+            return close_if_queue_empty(
+                transaction, receipt_digest=receipt_digest
+            )
+        if operation == "cancel":
+            assert transaction is not None
+            return cancel_unpublished_transaction(transaction)
+        if operation == "begin":
+            return begin_transaction("update", root, output=output)
+        if operation == "publication":
+            assert transaction is not None
+            return commit_bytes(transaction, "artifact.txt", b"artifact")
+        if operation == "claim":
+            assert transaction is not None
+            return claim_rebuild_queue(transaction, transaction.drainer)
+        return takeover_drainer(output, now=time.time() + 100.0)
+
+    with pytest.raises(PendingTransactionError, match="operational recovery"):
+        mutate()
+    assert _file_bytes(output) == before
+
+    recover_close(output)
+    queued = [
+        json.loads(line)
+        for line in (output / ".graphify_rebuild_queue.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(queued) == 1
+    assert queued[0]["changed_paths"] == ["a.py"]
+    assert not (output / ".graphify_enqueue.json").exists()
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["after_enqueue_journal", "after_enqueue_queue", "after_enqueue_drainer"],
+)
+def test_direct_recovery_replays_pending_enqueue_exactly_once(tmp_path, boundary):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    with pytest.raises(RuntimeError, match=boundary):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["a.py"],
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+    status = transaction_status(output)
+    with pytest.raises(PendingTransactionError, match="no live transaction"):
+        recover_transaction(
+            "update",
+            root,
+            output=output,
+            expected_generation=1,
+            expected_output_identity=OutputIdentity(**status["output_identity"]),
+        )
+    queued = [
+        json.loads(line)
+        for line in (output / ".graphify_rebuild_queue.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(queued) == 1
+    assert queued[0]["changed_paths"] == ["a.py"]
+    assert not (output / ".graphify_enqueue.json").exists()
+    transaction = begin_transaction("update", root, output=output)
+    assert transaction.generation == 1
+
+
 def test_manifest_failure_prevents_receipt_ack_and_close(tmp_path):
     root, output, tx, _token = _owner(tmp_path)
     receipt = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -4680,6 +5128,119 @@ def test_legacy_graph_without_any_protocol_marker_remains_readable(tmp_path):
     graph.write_text('{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}')
     snapshot = open_graph_snapshot(graph, purpose="legacy")
     assert snapshot.generation is None
+
+
+def test_legacy_snapshot_inventories_owned_dynamic_exports_only(tmp_path):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_bytes(_graph(1).replace(b'"state": "active"', b'"state": "legacy"'))
+    graph_data = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    graph_data["graph"].pop(GRAPH_WATERMARK_KEY)
+    (output / "graph.json").write_text(json.dumps(graph_data), encoding="utf-8")
+    (output / "wiki" / "nested").mkdir(parents=True)
+    (output / "wiki" / "index.md").write_text("index", encoding="utf-8")
+    (output / "wiki" / "nested" / "stale.md").write_text("stale", encoding="utf-8")
+    (output / "wiki" / "foreign.txt").write_text("foreign", encoding="utf-8")
+    (output / "obsidian").mkdir()
+    (output / "obsidian" / "owned.md").write_text("owned", encoding="utf-8")
+    (output / "obsidian" / "foreign.md").write_text("foreign", encoding="utf-8")
+    (output / "obsidian" / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["owned.md"]}), encoding="utf-8"
+    )
+
+    snapshot = open_graph_snapshot(output / "graph.json", purpose="legacy")
+
+    assert snapshot.artifacts["wiki/index.md"] == b"index"
+    assert snapshot.artifacts["wiki/nested/stale.md"] == b"stale"
+    assert snapshot.artifacts["obsidian/owned.md"] == b"owned"
+    assert "obsidian/.graphify_obsidian_manifest.json" in snapshot.artifacts
+    assert "wiki/foreign.txt" not in snapshot.artifacts
+    assert "obsidian/foreign.md" not in snapshot.artifacts
+
+
+def test_prepared_first_epoch_deletes_legacy_owned_dynamic_exports_only(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}',
+        encoding="utf-8",
+    )
+    (output / "manifest.json").write_text("{}", encoding="utf-8")
+    (output / "wiki" / "nested").mkdir(parents=True)
+    (output / "wiki" / "nested" / "stale.md").write_text("stale", encoding="utf-8")
+    (output / "wiki" / "foreign.txt").write_text("foreign", encoding="utf-8")
+    (output / "obsidian").mkdir()
+    (output / "obsidian" / "owned.md").write_text("owned", encoding="utf-8")
+    (output / "obsidian" / "foreign.md").write_text("foreign", encoding="utf-8")
+    (output / "obsidian" / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["owned.md"]}), encoding="utf-8"
+    )
+    tx = begin_transaction("full", root, output=output)
+    token = stage_transaction_handoff(tx)
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            (
+                "from graphify.transaction import current_transaction,commit_prepared_bytes,"
+                "unlink_prepared,finalize_prepared_transaction; tx=current_transaction(); "
+                "unlink_prepared(tx,'wiki/nested/stale.md'); unlink_prepared(tx,'obsidian/owned.md'); "
+                "commit_prepared_bytes(tx,'obsidian/.graphify_obsidian_manifest.json',b'{\"files\":[]}'); "
+                f"commit_prepared_bytes(tx,'graph.json',{_graph(1)!r}); "
+                "commit_prepared_bytes(tx,'manifest.json',b'{}'); "
+                "finalize_prepared_transaction()"
+            ),
+        ],
+    )
+
+    assert not (output / "wiki" / "nested" / "stale.md").exists()
+    assert not (output / "obsidian" / "owned.md").exists()
+    assert (output / "wiki" / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+    assert (output / "obsidian" / "foreign.md").read_text(encoding="utf-8") == "foreign"
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert "wiki/nested/stale.md" not in receipt["required_artifacts"]
+    assert "obsidian/owned.md" not in receipt["required_artifacts"]
+
+
+def test_legacy_inventory_combines_graph_fixed_and_dynamic_budget(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    graph = output / "graph.json"
+    graph.write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    (output / "manifest.json").write_bytes(b"fixed")
+    (output / "wiki").mkdir()
+    (output / "wiki" / "owned.md").write_bytes(b"dynamic")
+    monkeypatch.setattr(
+        transaction_module,
+        "_MAX_RECEIPT_AGGREGATE_BYTES",
+        len(graph.read_bytes()) + len(b"fixed") + len(b"dynamic") - 1,
+    )
+    with pytest.raises(PendingTransactionError, match="inventory exceeds bounds|unsafe legacy"):
+        open_graph_snapshot(graph, purpose="combined-budget")
+
+
+def test_legacy_wiki_depth_is_bounded_before_leaf_read(tmp_path):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    graph = output / "graph.json"
+    graph.write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    nested = output / "wiki"
+    for index in range(33):
+        nested /= f"d{index}"
+    nested.mkdir(parents=True)
+    (nested / "owned.md").write_text("owned")
+    with pytest.raises(PendingTransactionError, match="path exceeds bound"):
+        open_graph_snapshot(graph, purpose="depth-bound")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory retarget behavior")

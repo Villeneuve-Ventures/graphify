@@ -55,6 +55,7 @@ PROTOCOL_FILE = ".graphify_protocol.json"
 TRANSACTION_FILE = ".graphify_transaction.json"
 RECEIPT_FILE = ".graphify_generation.json"
 QUEUE_FILE = ".graphify_rebuild_queue.jsonl"
+ENQUEUE_FILE = ".graphify_enqueue.json"
 QUARANTINE_FILE = ".graphify_rebuild_quarantine.jsonl"
 PREPARED_FILE = ".graphify_prepared.json"
 LEGACY_PENDING_STATE_FILE = ".graphify_legacy_pending_state.json"
@@ -68,6 +69,7 @@ _COORDINATION_FILES = frozenset(
         TRANSACTION_FILE,
         RECEIPT_FILE,
         QUEUE_FILE,
+        ENQUEUE_FILE,
         DRAINER_FILE,
         QUARANTINE_FILE,
         PREPARED_FILE,
@@ -2716,6 +2718,7 @@ def begin_transaction(
     capability = pin_output(output, create=True)
     try:
         with _locked(capability):
+            _fence_pending_enqueue_locked(capability)
             token_transition = _read_token_transition(capability)
             if token_transition is not None:
                 _validate_token_transition_current(capability, token_transition)
@@ -3013,6 +3016,25 @@ def _pin_prepared_workspace(
                 prior_inventory = tuple(
                     _validated_relative_name(str(name)) for name in raw_required
                 )
+            else:
+                legacy_budget = _LegacyInventoryBudget()
+                legacy_inventory = _legacy_owned_dynamic_inventory(
+                    capability, budget=legacy_budget
+                )
+                for name in MANAGED_PUBLICATION_PATHS:
+                    if name in legacy_inventory:
+                        continue
+                    try:
+                        payload = _read_relative_bytes(
+                            capability, name, legacy_budget.remaining
+                        )
+                    except PendingTransactionError as exc:
+                        if isinstance(exc.__cause__, FileNotFoundError):
+                            continue
+                        raise
+                    legacy_budget.retain(name, payload)
+                    legacy_inventory[name] = payload
+                prior_inventory = tuple(sorted(legacy_inventory))
             marker = {
                 "schema": 1,
                 "transaction_id": transaction.id,
@@ -3559,6 +3581,7 @@ def run_token(
 ) -> None:
     path = Path(token_path).absolute()
     with pin_output(path.parent) as capability, _locked(capability):
+        _fence_pending_enqueue_locked(capability)
         token_transition = _read_token_transition(capability)
         if token_transition is not None:
             _validate_token_transition_current(capability, token_transition)
@@ -3695,6 +3718,7 @@ def _validate_authority(
     *,
     allow_complete: bool = False,
 ) -> Transaction:
+    _fence_pending_enqueue_locked(capability)
     token_transition = _read_token_transition(capability)
     if token_transition is not None:
         _validate_token_transition_current(capability, token_transition)
@@ -4517,6 +4541,266 @@ def commit_unmanaged_bytes(
     return destination
 
 
+@dataclass
+class _LegacyInventoryBudget:
+    remaining: int = -1
+    count: int = 0
+
+    def __post_init__(self) -> None:
+        if self.remaining < 0:
+            self.remaining = _MAX_RECEIPT_AGGREGATE_BYTES
+
+    def retain(self, name: str, payload: bytes) -> None:
+        if self.count >= _MAX_RECEIPT_ARTIFACTS or len(payload) > self.remaining:
+            raise PendingTransactionError("legacy managed inventory exceeds bounds")
+        self.count += 1
+        self.remaining -= len(payload)
+
+
+def _read_open_regular(fd: int, *, limit: int, label: str) -> bytes:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_size > limit:
+        raise PendingTransactionError(f"unsafe legacy artifact: {label}")
+    payload = bytearray()
+    while len(payload) <= limit:
+        chunk = os.read(fd, min(65536, limit + 1 - len(payload)))
+        if not chunk:
+            break
+        payload.extend(chunk)
+    after = os.fstat(fd)
+    if (
+        len(payload) > limit
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+    ):
+        raise PendingTransactionError(f"legacy artifact identity changed: {label}")
+    return bytes(payload)
+
+
+def _legacy_owned_dynamic_inventory(
+    capability: OutputCapability,
+    *,
+    budget: _LegacyInventoryBudget | None = None,
+) -> dict[str, bytes]:
+    """Inventory receiptless dynamic exports through pinned relative handles."""
+    inventory: dict[str, bytes] = {}
+    ledger = _LegacyInventoryBudget() if budget is None else budget
+    scanned = 0
+
+    def retain(name: str, payload: bytes) -> None:
+        name = _validated_relative_name(name)
+        if (
+            len(name) > _MAX_QUEUE_PATH_LENGTH
+            or len(Path(name).parts) > 32
+            or len(inventory) >= _MAX_RECEIPT_ARTIFACTS
+        ):
+            raise PendingTransactionError("legacy dynamic path exceeds bound")
+        ledger.retain(name, payload)
+        inventory[name] = payload
+
+    def walk_wiki(parent: OutputCapability, parts: tuple[str, ...]) -> None:
+        nonlocal scanned
+        if len(parts) > 32:
+            raise PendingTransactionError("legacy dynamic path exceeds bound")
+        for child in sorted(_list_entries(parent)):
+            if child in {".", ".."}:
+                continue
+            scanned += 1
+            if scanned > _MAX_RECEIPT_ARTIFACTS:
+                raise PendingTransactionError("legacy dynamic inventory exceeds bounds")
+            relative = (*parts, child)
+            parent.validate()
+            if _PLATFORM == "windows":
+                try:
+                    child_fd = _open_windows_relative_fd(
+                        parent, child, directory=True
+                    )
+                except OSError:
+                    child_fd = _open_windows_relative_fd(
+                        parent, child, directory=False
+                    )
+            else:
+                info = os.stat(child, dir_fd=parent.fd, follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise PendingTransactionError("legacy wiki contains a symlink")
+                child_fd = os.open(
+                    child,
+                    os.O_RDONLY
+                    | (getattr(os, "O_DIRECTORY", 0) if stat.S_ISDIR(info.st_mode) else 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent.fd,
+                )
+            try:
+                opened = os.fstat(child_fd)
+                if bool(getattr(opened, "st_reparse_tag", 0)):
+                    raise PendingTransactionError(
+                        "legacy wiki contains a reparse point"
+                    )
+                if stat.S_ISDIR(opened.st_mode):
+                    nested = OutputCapability(
+                        parent.path / child,
+                        OutputIdentity(opened.st_dev, opened.st_ino),
+                        child_fd,
+                    )
+                    child_fd = -1
+                    try:
+                        walk_wiki(nested, relative)
+                    finally:
+                        nested.close()
+                elif stat.S_ISREG(opened.st_mode) and child.endswith(".md"):
+                    label = Path(*relative).as_posix()
+                    retain(
+                        label,
+                        _read_open_regular(
+                            child_fd, limit=ledger.remaining, label=label
+                        ),
+                    )
+                elif not stat.S_ISREG(opened.st_mode):
+                    raise PendingTransactionError("legacy wiki contains an unsafe entry")
+                parent.validate()
+            finally:
+                if child_fd >= 0:
+                    os.close(child_fd)
+
+    try:
+        wiki_fd = (
+            _open_windows_relative_fd(capability, "wiki", directory=True)
+            if _PLATFORM == "windows"
+            else os.open(
+                "wiki",
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=capability.fd,
+            )
+        )
+    except FileNotFoundError:
+        pass
+    else:
+        wiki_info = os.fstat(wiki_fd)
+        wiki = OutputCapability(
+            capability.path / "wiki",
+            OutputIdentity(wiki_info.st_dev, wiki_info.st_ino),
+            wiki_fd,
+        )
+        try:
+            walk_wiki(wiki, ("wiki",))
+        finally:
+            wiki.close()
+
+    manifest_name = ".graphify_obsidian_manifest.json"
+
+    def retain_vault_manifest(vault: OutputCapability, parts: tuple[str, ...]) -> None:
+        if _entry_stat(vault, manifest_name) is None:
+            return
+        scoped_manifest = Path(*parts, manifest_name).as_posix()
+        if ledger.count >= _MAX_RECEIPT_ARTIFACTS or ledger.remaining <= 0:
+            raise PendingTransactionError("legacy dynamic inventory exceeds bounds")
+        manifest_payload = _read_bytes(
+            vault, manifest_name, min(_MAX_STATE_BYTES, ledger.remaining)
+        )
+        try:
+            manifest = json.loads(manifest_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PendingTransactionError("legacy Obsidian manifest is malformed") from exc
+        files = manifest.get("files") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != {"files"}
+            or not isinstance(files, list)
+            or len(files) > _MAX_RECEIPT_ARTIFACTS
+            or not all(type(name) is str for name in files)
+        ):
+            raise PendingTransactionError("legacy Obsidian manifest is malformed")
+        scoped_manifest = _validated_relative_name(scoped_manifest)
+        if scoped_manifest in inventory:
+            raise PendingTransactionError("legacy Obsidian manifest is malformed")
+        ledger.retain(scoped_manifest, manifest_payload)
+        inventory[scoped_manifest] = manifest_payload
+        scoped_names: list[str] = []
+        for raw_name in files:
+            name = _validated_relative_name(cast(str, raw_name))
+            scoped = _validated_relative_name(Path(*parts, name).as_posix())
+            if name == manifest_name or scoped in inventory:
+                raise PendingTransactionError("legacy Obsidian manifest is malformed")
+            scoped_names.append(scoped)
+        _reject_casefold_collisions((scoped_manifest, *scoped_names))
+        for raw_name, scoped in zip(cast(list[str], files), scoped_names, strict=True):
+            retain(
+                scoped,
+                _read_relative_bytes(vault, raw_name, ledger.remaining),
+            )
+
+    def discover_vaults(parent: OutputCapability, parts: tuple[str, ...]) -> None:
+        nonlocal scanned
+        if len(parts) > 32:
+            raise PendingTransactionError("legacy dynamic path exceeds bound")
+        retain_vault_manifest(parent, parts)
+        for child in sorted(_list_entries(parent)):
+            scanned += 1
+            if scanned > _MAX_RECEIPT_ARTIFACTS:
+                raise PendingTransactionError("legacy dynamic inventory exceeds bounds")
+            if child in {"wiki", ".", ".."} or child.startswith(".graphify"):
+                continue
+            try:
+                if _PLATFORM == "windows":
+                    child_fd = _open_windows_relative_fd(
+                        parent, child, directory=True
+                    )
+                else:
+                    info = os.stat(child, dir_fd=parent.fd, follow_symlinks=False)
+                    if not stat.S_ISDIR(info.st_mode):
+                        continue
+                    child_fd = os.open(
+                        child,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent.fd,
+                    )
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                if _PLATFORM != "windows":
+                    raise
+                try:
+                    file_fd = _open_windows_relative_fd(
+                        parent, child, directory=False
+                    )
+                except FileNotFoundError:
+                    continue
+                try:
+                    file_info = os.fstat(file_fd)
+                    if bool(getattr(file_info, "st_reparse_tag", 0)):
+                        raise PendingTransactionError(
+                            "legacy vault contains a reparse point"
+                        )
+                finally:
+                    os.close(file_fd)
+                continue
+            opened = os.fstat(child_fd)
+            if not stat.S_ISDIR(opened.st_mode):
+                os.close(child_fd)
+                continue
+            if bool(getattr(opened, "st_reparse_tag", 0)):
+                os.close(child_fd)
+                raise PendingTransactionError("legacy vault contains a reparse point")
+            nested = OutputCapability(
+                parent.path / child,
+                OutputIdentity(opened.st_dev, opened.st_ino),
+                child_fd,
+            )
+            try:
+                parent.validate()
+                discover_vaults(nested, (*parts, child))
+                parent.validate()
+            finally:
+                nested.close()
+
+    discover_vaults(capability, ())
+    _reject_casefold_collisions(tuple(inventory))
+    return inventory
+
+
 def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
     requested = Path(path).expanduser()
     output = requested.parent.resolve(strict=True)
@@ -4573,20 +4857,30 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
                     state = None if protocol is None else protocol.get("state")
                     label = "bootstrap" if state == "BOOTSTRAP_PENDING" else "protocol"
                     raise PendingTransactionError(f"{label} state exists without a graph receipt")
+            legacy_budget = _LegacyInventoryBudget()
+            legacy_budget.retain(graph_path.name, payload)
             legacy_inventory = {graph_path.name: payload}
             manifest_payload = None
             for name in MANAGED_PUBLICATION_PATHS:
                 if name == graph_path.name:
                     continue
                 try:
-                    artifact_payload = _read_relative_bytes(capability, name)
+                    artifact_payload = _read_relative_bytes(
+                        capability, name, legacy_budget.remaining
+                    )
                 except PendingTransactionError as exc:
                     if "is missing" in str(exc):
                         continue
                     raise
+                legacy_budget.retain(name, artifact_payload)
                 legacy_inventory[name] = artifact_payload
                 if name == "manifest.json":
                     manifest_payload = artifact_payload
+            legacy_inventory.update(
+                _legacy_owned_dynamic_inventory(
+                    capability, budget=legacy_budget
+                )
+            )
             return GraphSnapshot(
                 data,
                 None,
@@ -4662,7 +4956,9 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
                 _validated_relative_name(str(name))
                 for name in marker["prior_inventory"]
             )
-            for name in prior_inventory or MANAGED_PUBLICATION_PATHS:
+            for name in tuple(
+                dict.fromkeys((*prior_inventory, *MANAGED_PUBLICATION_PATHS))
+            ):
                 if name == requested.name:
                     continue
                 try:
@@ -4768,6 +5064,9 @@ def _queue_payload(items: list[dict[str, Any]]) -> bytes:
     if len(items) > _MAX_QUEUE_ITEMS:
         raise PendingTransactionError("rebuild queue exceeds item bound")
     validated = [_validate_queue_item(item) for item in items]
+    ids = [str(item["id"]) for item in validated]
+    if len(ids) != len(set(ids)):
+        raise PendingTransactionError("duplicate rebuild intent id")
     payload = b"".join(_json_bytes(item) + b"\n" for item in validated)
     if len(payload) > _MAX_STATE_BYTES:
         raise PendingTransactionError("rebuild queue exceeds serialized budget")
@@ -4777,6 +5076,430 @@ def _queue_payload(items: list[dict[str, Any]]) -> bytes:
 def _write_queue(capability: OutputCapability, name: str, items: list[dict[str, Any]]) -> None:
     payload = _queue_payload(items)
     _replace_bytes(capability, name, payload)
+
+
+def _canonical_enqueue_transform(
+    predecessor: list[dict[str, Any]],
+    candidate: dict[str, Any],
+    operation: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return the one legal queue successor and represented receipt item."""
+    _queue_payload(predecessor)
+    candidate = _validate_queue_item(candidate)
+    candidate_identity = {
+        "schema": candidate["schema"],
+        "kind": candidate["kind"],
+        "intent": candidate["intent"],
+        "root": candidate["root"],
+        "changed_paths": candidate["changed_paths"],
+        "semantic": candidate["semantic"]
+        or (
+            candidate["kind"] == "full"
+            and any(
+                value["root"] == candidate["root"] and value["semantic"]
+                for value in predecessor
+            )
+        ),
+        "source": candidate["source"],
+    }
+    canonical_candidate = {
+        **candidate_identity,
+        "id": hashlib.sha256(_json_bytes(candidate_identity)).hexdigest(),
+        "time": candidate["time"],
+    }
+    if candidate != canonical_candidate:
+        raise PendingTransactionError("enqueue candidate identity changed")
+    candidate = canonical_candidate
+    existing = next(
+        (value for value in predecessor if value["id"] == candidate["id"]), None
+    )
+    represented = candidate if existing is None else existing
+    successor = list(predecessor)
+    covering = next(
+        (
+            value
+            for value in predecessor
+            if value["root"] == candidate["root"] and value["kind"] == "full"
+        ),
+        None,
+    )
+    expected_operation = (
+        "replace-root"
+        if candidate["kind"] == "full"
+        else "covered-by-full"
+        if covering is not None
+        else "append"
+    )
+    if operation != expected_operation:
+        raise PendingTransactionError("enqueue operation is malformed")
+    if operation == "replace-root":
+        successor = [
+            value for value in predecessor if value["root"] != candidate["root"]
+        ]
+        successor.append(represented)
+    elif operation == "covered-by-full":
+        represented = cast(dict[str, Any], covering)
+    elif existing is None:
+        successor.append(candidate)
+    _queue_payload(successor)
+    return successor, represented
+
+
+def _derive_enqueue_predecessor_mode(
+    capability: OutputCapability,
+    *,
+    expected: tuple[DrainerTuple, str, dict[str, Any]] | None,
+    protocol: Mapping[str, object] | None,
+) -> str:
+    """Derive the only predecessor class admitted by pinned durable authority."""
+    live = _read_transaction(capability)
+    preserved = _read_predecessor_authority(capability)
+    if preserved is not None and preserved[3]["state"] != "preserved-complete":
+        _validate_cancellation_state_locked(capability, preserved)
+        raise PendingTransactionError("operational recovery required")
+    if protocol is None:
+        if live is not None or preserved is not None:
+            raise PendingTransactionError("enqueue pristine predecessor is incomplete")
+        if expected is None:
+            return "pristine"
+        if (
+            expected[1] == "reserved"
+            and expected[0].generation == 1
+            and expected[2].get("predecessor_receipt") is None
+        ):
+            return "pristine"
+        raise PendingTransactionError("enqueue pristine predecessor is malformed")
+    if protocol.get("state") == "COMPLETE":
+        if live is not None:
+            if expected is None or expected[0] != live.drainer:
+                raise PendingTransactionError("enqueue live predecessor changed")
+            return "live"
+        if expected is None:
+            return "missing"
+        if expected[1] == "complete":
+            return "complete"
+        if expected[1] == "reserved":
+            if (
+                preserved is None
+                or preserved[3].get("successor_generation")
+                != expected[0].generation
+                or expected[2].get("predecessor_receipt") != preserved[2]
+            ):
+                raise PendingTransactionError("enqueue reserved predecessor changed")
+            return "reserved"
+        raise PendingTransactionError("enqueue completed predecessor is malformed")
+    if live is None or expected is None or expected[0] != live.drainer:
+        raise PendingTransactionError("enqueue live predecessor changed")
+    return "live"
+
+
+def _enqueue_journal_from_json(
+    capability: OutputCapability, raw: object
+) -> dict[str, Any]:
+    if not isinstance(raw, dict) or set(raw) != {
+        "schema",
+        "protocol_epoch",
+        "state",
+        "output_identity",
+        "item",
+        "item_digest",
+        "operation",
+        "candidate",
+        "predecessor_queue",
+        "predecessor_queue_digest",
+        "successor_queue",
+        "successor_queue_digest",
+        "predecessor_mode",
+        "predecessor_protocol",
+        "predecessor_receipt_digest",
+        "predecessor_graph_digest",
+        "legacy_pending_name",
+        "expected_drainer",
+        "successor_drainer",
+        "mutate_drainer",
+    }:
+        raise PendingTransactionError("malformed enqueue journal")
+    item = _validate_queue_item(raw.get("item"))
+    candidate = _validate_queue_item(raw.get("candidate"))
+    predecessor_queue = raw.get("predecessor_queue")
+    successor_queue = raw.get("successor_queue")
+    if not isinstance(predecessor_queue, list) or not isinstance(successor_queue, list):
+        raise PendingTransactionError("malformed enqueue journal")
+    predecessor_payload = _queue_payload(cast(list[dict[str, Any]], predecessor_queue))
+    successor_payload = _queue_payload(cast(list[dict[str, Any]], successor_queue))
+    canonical_successor, canonical_item = _canonical_enqueue_transform(
+        cast(list[dict[str, Any]], predecessor_queue),
+        candidate,
+        cast(str, raw.get("operation")),
+    )
+    item_identity = {
+        key: item[key]
+        for key in (
+            "schema",
+            "kind",
+            "intent",
+            "root",
+            "changed_paths",
+            "semantic",
+            "source",
+        )
+    }
+    expected_raw = raw.get("expected_drainer")
+    expected = (
+        None
+        if expected_raw is None
+        else _drainer_state_from_json(capability, expected_raw)
+    )
+    successor = _drainer_state_from_json(capability, raw.get("successor_drainer"))
+    raw_legacy_name = raw.get("legacy_pending_name")
+    if (
+        raw.get("schema") != 1
+        or raw.get("protocol_epoch") != 1
+        or raw.get("state") not in {"planned", "queued", "reserved"}
+        or raw.get("output_identity") != capability.identity.json()
+        or item["id"] != hashlib.sha256(_json_bytes(item_identity)).hexdigest()
+        or raw.get("item_digest") != hashlib.sha256(_json_bytes(item)).hexdigest()
+        or item != canonical_item
+        or successor_queue != canonical_successor
+        or raw.get("predecessor_queue_digest")
+        != hashlib.sha256(predecessor_payload).hexdigest()
+        or raw.get("successor_queue_digest")
+        != hashlib.sha256(successor_payload).hexdigest()
+        or raw.get("predecessor_mode")
+        not in {"pristine", "missing", "complete", "reserved", "live"}
+        or (
+            raw.get("predecessor_protocol") is not None
+            and not isinstance(raw.get("predecessor_protocol"), dict)
+        )
+        or (
+            raw.get("predecessor_receipt_digest") is not None
+            and not _is_hex(raw.get("predecessor_receipt_digest"))
+        )
+        or (
+            raw.get("predecessor_graph_digest") is not None
+            and not _is_hex(raw.get("predecessor_graph_digest"))
+        )
+        or (
+            raw_legacy_name is not None
+            and (
+                type(raw_legacy_name) is not str
+                or _validated_shallow_name(cast(str, raw_legacy_name))
+                != raw_legacy_name
+            )
+        )
+        or type(raw.get("mutate_drainer")) is not bool
+        or (raw["mutate_drainer"] and successor[1] != "reserved")
+        or (
+            raw["mutate_drainer"]
+            and expected is not None
+            and (
+                expected[1] != "complete"
+                or successor[0].generation != expected[0].generation + 1
+            )
+        )
+        or (
+            not raw["mutate_drainer"]
+            and (expected is None or successor != expected)
+        )
+    ):
+        raise PendingTransactionError("malformed enqueue journal")
+    return dict(raw)
+
+
+def _read_enqueue_journal(capability: OutputCapability) -> dict[str, Any] | None:
+    raw = _load_json(capability, ENQUEUE_FILE)
+    return None if raw is None else _enqueue_journal_from_json(capability, raw)
+
+
+def _validate_enqueue_journal_current(
+    capability: OutputCapability, journal: Mapping[str, object]
+) -> None:
+    """Validate one exact durable enqueue phase without changing it."""
+    item = cast(dict[str, Any], journal["item"])
+    queue = _read_queue(capability)
+    predecessor_queue = cast(list[dict[str, Any]], journal["predecessor_queue"])
+    successor_queue = cast(list[dict[str, Any]], journal["successor_queue"])
+    expected_raw = journal["expected_drainer"]
+    expected = (
+        None
+        if expected_raw is None
+        else _drainer_state_from_json(capability, expected_raw)
+    )
+    successor = _drainer_state_from_json(capability, journal["successor_drainer"])
+    current = _read_drainer(capability)
+    state = journal["state"]
+    if state == "planned":
+        valid = current == expected and queue in (predecessor_queue, successor_queue)
+    elif state == "queued":
+        valid = queue == successor_queue and (current == expected or current == successor)
+    else:
+        valid = state == "reserved" and queue == successor_queue and current == successor
+    if not valid:
+        raise PendingTransactionError("enqueue journal durable state changed")
+    protocol = _read_protocol(capability)
+    mode = _derive_enqueue_predecessor_mode(
+        capability, expected=expected, protocol=protocol
+    )
+    if mode != journal["predecessor_mode"]:
+        raise PendingTransactionError("enqueue predecessor mode changed")
+    if mode == "pristine" and (
+        successor[0].generation != 1
+        or successor[2].get("predecessor_receipt") is not None
+    ):
+        raise PendingTransactionError("enqueue pristine successor is malformed")
+    if protocol != journal["predecessor_protocol"]:
+        raise PendingTransactionError("enqueue predecessor protocol changed")
+    if mode == "pristine":
+        allowed = [ENQUEUE_FILE, *_SAFE_GRAPHLESS_RUNTIME_ENTRIES]
+        if queue:
+            allowed.append(QUEUE_FILE)
+        if current is not None:
+            allowed.append(DRAINER_FILE)
+        legacy_name = journal.get("legacy_pending_name")
+        if isinstance(legacy_name, str):
+            allowed.append(legacy_name)
+            if _entry_stat(capability, LEGACY_PENDING_STATE_FILE) is not None:
+                _validated_legacy_pending_bridge(
+                    capability, selected_name=legacy_name
+                )
+                allowed.append(LEGACY_PENDING_STATE_FILE)
+        _validate_pristine_or_legacy_graph(
+            capability, allowed_without_graph=allowed
+        )
+        graph_info = _entry_stat(capability, "graph.json")
+        from graphify.security import _max_graph_file_bytes
+
+        graph_digest = (
+            None
+            if graph_info is None
+            else hashlib.sha256(
+                _read_relative_bytes(
+                    capability, "graph.json", _max_graph_file_bytes()
+                )
+            ).hexdigest()
+        )
+        if graph_digest != journal["predecessor_graph_digest"]:
+            raise PendingTransactionError("enqueue predecessor graph changed")
+    elif protocol is not None and protocol.get("state") == "COMPLETE":
+        live = _read_transaction(capability) if mode == "live" else None
+        receipt, receipt_digest, _inventory = _validate_receipt_locked(
+            capability,
+            transaction=live,
+            require_closed=mode == "complete" and current == expected,
+            allow_missing_completed_drainer=mode == "missing",
+        )
+        graph_name = cast(str, receipt.get("graph_name", "graph.json"))
+        if (
+            receipt_digest != journal["predecessor_receipt_digest"]
+            or receipt["artifact_digests"].get(graph_name)
+            != journal["predecessor_graph_digest"]
+            or (
+                mode == "complete"
+                and (
+                    expected is None
+                    or expected[1] != "complete"
+                    or _drainer_from_json(receipt.get("drainer")) != expected[0]
+                )
+            )
+        ):
+            raise PendingTransactionError("enqueue completed predecessor changed")
+        if journal["mutate_drainer"] and (
+            successor[0].generation != int(receipt["generation"]) + 1
+            or successor[2].get("predecessor_receipt") != receipt_digest
+        ):
+            raise PendingTransactionError("enqueue completed successor changed")
+        if mode == "reserved":
+            preserved = _read_predecessor_authority(capability)
+            if (
+                expected is None
+                or expected[1] != "reserved"
+                or preserved is None
+                or preserved[2] != receipt_digest
+            ):
+                raise PendingTransactionError("enqueue reserved predecessor changed")
+    else:
+        live = _read_transaction(capability)
+        if live is None:
+            raise PendingTransactionError("enqueue live predecessor disappeared")
+        _validate_durable_live_binding(
+            capability, live, protocol=protocol, drainer=current
+        )
+
+
+def _recover_enqueue_journal(
+    capability: OutputCapability,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> QueueReceipt | None:
+    journal = _read_enqueue_journal(capability)
+    if journal is None:
+        return None
+    _validate_enqueue_journal_current(capability, journal)
+    item = cast(dict[str, Any], journal["item"])
+    queue = _read_queue(capability)
+    predecessor_queue = cast(list[dict[str, Any]], journal["predecessor_queue"])
+    successor_queue = cast(list[dict[str, Any]], journal["successor_queue"])
+    if queue == predecessor_queue:
+        _write_queue(capability, QUEUE_FILE, successor_queue)
+    elif queue != successor_queue:
+        raise PendingTransactionError("enqueue queue predecessor changed")
+    journal["state"] = "queued"
+    _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
+    if failpoint is not None:
+        failpoint("after_enqueue_queue")
+    expected_raw = journal["expected_drainer"]
+    expected = (
+        None
+        if expected_raw is None
+        else _drainer_state_from_json(capability, expected_raw)
+    )
+    successor = _drainer_state_from_json(capability, journal["successor_drainer"])
+    current = _read_drainer(capability)
+    if current != successor:
+        if current != expected:
+            raise PendingTransactionError("enqueue drainer predecessor changed")
+        if not journal["mutate_drainer"]:
+            raise PendingTransactionError("enqueue drainer authority changed")
+        if expected is not None and expected[1] == "complete":
+            protocol = _read_protocol(capability)
+            receipt, receipt_digest, _inventory = _validate_receipt_locked(
+                capability, require_closed=True
+            )
+            if protocol is None or int(receipt["generation"]) + 1 != successor[0].generation:
+                raise PendingTransactionError("enqueue predecessor authority changed")
+            _write_predecessor_authority(
+                capability, protocol, expected, receipt_digest
+            )
+        _replace_bytes(
+            capability,
+            DRAINER_FILE,
+            _json_bytes(cast(dict[str, Any], journal["successor_drainer"])),
+        )
+    journal["state"] = "reserved"
+    _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
+    if failpoint is not None:
+        failpoint("after_enqueue_drainer")
+    _unlink(capability, ENQUEUE_FILE)
+    if failpoint is not None:
+        failpoint("after_enqueue_retired")
+    return QueueReceipt(str(item["id"]), successor[0])
+
+
+def _fence_pending_enqueue_locked(
+    capability: OutputCapability,
+    *,
+    recover: bool = False,
+) -> QueueReceipt | None:
+    """Validate one pending enqueue before any unrelated mutation."""
+    journal = _read_enqueue_journal(capability)
+    if journal is None:
+        return None
+    _validate_enqueue_journal_current(capability, journal)
+    if not recover:
+        raise PendingTransactionError(
+            "enqueue transition requires operational recovery"
+        )
+    return _recover_enqueue_journal(capability)
 
 
 def _merge_intents(*groups: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -5067,6 +5790,7 @@ def queue_rebuild(
     intent: str | None = None,
     now: float | None = None,
     legacy_pending_name: str | None = None,
+    failpoint: Callable[[str], None] | None = None,
 ) -> QueueReceipt:
     if type(kind) is not str or kind not in {"full", "update", "runtime"}:
         raise PendingTransactionError("malformed rebuild kind")
@@ -5098,6 +5822,7 @@ def queue_rebuild(
         raise PendingTransactionError("malformed rebuild root")
     root_path = _canonical_directory(Path(root_value))
     with pin_output(output, create=True) as capability, _locked(capability):
+        _recover_enqueue_journal(capability, failpoint=failpoint)
         protocol = _read_protocol(capability)
         receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
         existing_drainer = _read_drainer(capability)
@@ -5135,6 +5860,7 @@ def queue_rebuild(
             existing_drainer = _read_drainer(capability)
         reserve_drainer = existing_drainer is None or existing_drainer[1] == "complete"
         predecessor_receipt: str | None = None
+        predecessor_graph_digest: str | None = None
         if reserve_drainer:
             if existing_drainer is None:
                 if _read_transaction(capability) is not None:
@@ -5148,6 +5874,10 @@ def queue_rebuild(
                         capability,
                         allow_missing_completed_drainer=True,
                     )
+                    graph_name = cast(str, receipt.get("graph_name", "graph.json"))
+                    predecessor_graph_digest = cast(
+                        str, receipt["artifact_digests"][graph_name]
+                    )
                     generation = int(receipt["generation"]) + 1
                 else:
                     raise PendingTransactionError(
@@ -5157,6 +5887,10 @@ def queue_rebuild(
                 receipt, predecessor_receipt, _inventory = _validate_receipt_locked(
                     capability,
                     require_closed=True,
+                )
+                graph_name = cast(str, receipt.get("graph_name", "graph.json"))
+                predecessor_graph_digest = cast(
+                    str, receipt["artifact_digests"][graph_name]
                 )
                 generation = int(receipt["generation"]) + 1
                 raw_generation = existing_drainer[2].get("successor_generation")
@@ -5202,54 +5936,126 @@ def queue_rebuild(
                 "identity": identity,
                 "offset": offset + complete_length,
             }
-        item = {
+        predecessor_queue = _read_queue(capability)
+        candidate_identity = {
             "schema": 1,
-            "id": secrets.token_hex(32),
             "kind": kind,
             "intent": intent or kind,
             "root": str(root_path),
             "changed_paths": None if changed_paths is None and not durable_paths else durable_paths,
-            "semantic": bool(semantic),
+            "semantic": bool(semantic) or (
+                kind == "full"
+                and any(
+                    value["root"] == str(root_path) and value["semantic"]
+                    for value in predecessor_queue
+                )
+            ),
             "source": source,
+        }
+        candidate = {
+            **candidate_identity,
+            "id": hashlib.sha256(_json_bytes(candidate_identity)).hexdigest(),
             "time": time.time() if now is None else now,
         }
-        queued = _read_queue(capability)
-        if kind == "full":
-            item["semantic"] = bool(semantic) or any(
-                value.get("root") == item["root"] and value.get("semantic") for value in queued
+        operation = (
+            "replace-root"
+            if kind == "full"
+            else "covered-by-full"
+            if any(
+                value["root"] == candidate["root"] and value["kind"] == "full"
+                for value in predecessor_queue
             )
-            queued = [value for value in queued if value.get("root") != item["root"]]
-            queued.append(item)
-        elif not any(value.get("root") == item["root"] and value.get("kind") == "full" for value in queued):
-            queued.append(item)
-        _queue_payload(queued)
-        if reserve_drainer:
-            if existing_drainer is not None and existing_drainer[1] == "complete":
-                if protocol is None or predecessor_receipt is None:
-                    raise PendingTransactionError(
-                        "completed predecessor authority is missing"
+            else "append"
+        )
+        queued, item = _canonical_enqueue_transform(
+            predecessor_queue, candidate, operation
+        )
+        if protocol is None and not receipt_present:
+            predecessor_mode = "pristine"
+            graph_info = _entry_stat(capability, "graph.json")
+            if graph_info is not None:
+                from graphify.security import _max_graph_file_bytes
+
+                predecessor_graph_digest = hashlib.sha256(
+                    _read_relative_bytes(
+                        capability, "graph.json", _max_graph_file_bytes()
                     )
-                _write_predecessor_authority(
-                    capability,
-                    protocol,
-                    existing_drainer,
-                    predecessor_receipt,
-                )
-            _write_drainer(
-                capability,
-                drainer,
-                "reserved",
-                lease_deadline=(time.time() if now is None else now) + 30,
-                predecessor_receipt=predecessor_receipt,
+                ).hexdigest()
+        elif protocol is not None and protocol.get("state") == "COMPLETE":
+            predecessor_mode = _derive_enqueue_predecessor_mode(
+                capability, expected=existing_drainer, protocol=protocol
             )
-        _write_queue(capability, QUEUE_FILE, queued)
+            if predecessor_mode in {"live", "reserved"}:
+                live = _read_transaction(capability)
+                completed, predecessor_receipt, _inventory = _validate_receipt_locked(
+                    capability,
+                    transaction=live if predecessor_mode == "live" else None,
+                )
+                graph_name = cast(
+                    str, completed.get("graph_name", "graph.json")
+                )
+                predecessor_graph_digest = cast(
+                    str, completed["artifact_digests"][graph_name]
+                )
+        else:
+            predecessor_mode = _derive_enqueue_predecessor_mode(
+                capability, expected=existing_drainer, protocol=protocol
+            )
+        successor_drainer = (
+            {
+                "schema": 1,
+                "protocol_epoch": 1,
+                **_drainer_json(drainer),
+                "state": "reserved",
+                "lease_deadline": (time.time() if now is None else now) + 30,
+                "predecessor_receipt": predecessor_receipt,
+            }
+            if reserve_drainer
+            else cast(tuple[DrainerTuple, str, dict[str, Any]], existing_drainer)[2]
+        )
+        journal = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "state": "planned",
+            "output_identity": capability.identity.json(),
+            "item": item,
+            "item_digest": hashlib.sha256(_json_bytes(item)).hexdigest(),
+            "operation": operation,
+            "candidate": candidate,
+            "predecessor_queue": predecessor_queue,
+            "predecessor_queue_digest": hashlib.sha256(
+                _queue_payload(predecessor_queue)
+            ).hexdigest(),
+            "successor_queue": queued,
+            "successor_queue_digest": hashlib.sha256(
+                _queue_payload(queued)
+            ).hexdigest(),
+            "predecessor_mode": predecessor_mode,
+            "predecessor_protocol": protocol,
+            "predecessor_receipt_digest": predecessor_receipt,
+            "predecessor_graph_digest": predecessor_graph_digest,
+            "legacy_pending_name": legacy_pending_name,
+            "expected_drainer": (
+                None if existing_drainer is None else existing_drainer[2]
+            ),
+            "successor_drainer": successor_drainer,
+            "mutate_drainer": reserve_drainer,
+        }
+        _enqueue_journal_from_json(capability, journal)
+        _validate_enqueue_journal_current(capability, journal)
+        _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
+        if failpoint is not None:
+            failpoint("after_enqueue_journal")
+        receipt = _recover_enqueue_journal(capability, failpoint=failpoint)
+        if receipt is None:
+            raise PendingTransactionError("enqueue journal disappeared")
         if legacy_checkpoint is not None:
             _replace_bytes(
                 capability,
                 LEGACY_PENDING_STATE_FILE,
                 _json_bytes(legacy_checkpoint),
             )
-        return QueueReceipt(str(item["id"]), drainer)
+        return receipt
 
 
 def claim_rebuild_queue(
@@ -5321,6 +6127,7 @@ def takeover_drainer(
             transition_failpoint(alias)
 
     with pin_output(output) as capability, _locked(capability):
+        _fence_pending_enqueue_locked(capability)
         pending = _read_pending_transition(capability)
         if pending is not None:
             _validate_pending_transition_current(capability, pending)
@@ -5688,6 +6495,7 @@ def _finish_close_locked(
 
 def recover_close(output: Path | str) -> None:
     with pin_output(output) as capability, _locked(capability):
+        _fence_pending_enqueue_locked(capability, recover=True)
         token_transition = _read_token_transition(capability)
         if token_transition is not None:
             _validate_token_transition_current(capability, token_transition)
@@ -5746,6 +6554,20 @@ def recover_selected_transaction(
     with pin_output(output) as capability, _locked(capability):
         if capability.identity != expected_output_identity:
             raise PendingTransactionError("stale output identity selector")
+        enqueue = _read_enqueue_journal(capability)
+        if enqueue is not None:
+            enqueue_item = cast(dict[str, Any], enqueue["item"])
+            enqueue_successor = _drainer_state_from_json(
+                capability, enqueue["successor_drainer"]
+            )[0]
+            if (
+                enqueue_item["root"] != str(root_path)
+                or enqueue_successor.generation != expected_generation
+                or (kind is not None and enqueue_item["kind"] != kind)
+                or expected_transaction_id is not None
+            ):
+                raise PendingTransactionError("stale enqueue recovery selector")
+            _recover_enqueue_journal(capability)
         pending_before_token = _read_pending_transition(capability)
         if pending_before_token is not None:
             _validate_pending_transition_current(capability, pending_before_token)
@@ -5808,7 +6630,11 @@ def recover_selected_transaction(
             if pending_successor is not None
             else current.generation
             if current is not None
-            else int((protocol or {}).get("generation", -1))
+            else int(protocol["generation"])
+            if protocol is not None
+            else drainer[0].generation
+            if drainer is not None
+            else -1
         )
         if selected_generation != expected_generation:
             raise PendingTransactionError("stale transaction generation selector")
@@ -5908,12 +6734,31 @@ def recover_transaction(
         raise RecoverableTransactionError("recovery attempt bound exhausted")
     root_path = _canonical_directory(Path(root))
     cancellation_successor: Transaction | None = None
+    recovered_enqueue_generation: int | None = None
     with pin_output(output) as capability, _locked(capability):
         if (
             expected_output_identity is not None
             and capability.identity != expected_output_identity
         ):
             raise PendingTransactionError("stale output identity selector")
+        enqueue = _read_enqueue_journal(capability)
+        if enqueue is not None:
+            enqueue_item = cast(dict[str, Any], enqueue["item"])
+            enqueue_successor = _drainer_state_from_json(
+                capability, enqueue["successor_drainer"]
+            )[0]
+            if (
+                enqueue_item["root"] != str(root_path)
+                or enqueue_item["kind"] != kind
+                or (
+                    expected_generation is not None
+                    and enqueue_successor.generation != expected_generation
+                )
+                or expected_transaction_id is not None
+            ):
+                raise PendingTransactionError("stale enqueue recovery selector")
+            _fence_pending_enqueue_locked(capability, recover=True)
+            recovered_enqueue_generation = enqueue_successor.generation
         pending_before_token = _read_pending_transition(capability)
         if pending_before_token is not None:
             _validate_pending_transition_current(capability, pending_before_token)
@@ -5972,6 +6817,8 @@ def recover_transaction(
         selected_generation = (
             selected.generation
             if selected is not None
+            else recovered_enqueue_generation
+            if recovered_enqueue_generation is not None
             else int((_read_protocol(capability) or {}).get("generation", -1))
         )
         if expected_generation is not None and selected_generation != expected_generation:
@@ -6309,6 +7156,9 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
     with pin_output(output, mutation=False) as capability, _locked(capability):
         protocol = _read_protocol(capability)
         live = _read_transaction(capability)
+        enqueue = _read_enqueue_journal(capability)
+        if enqueue is not None:
+            _validate_enqueue_journal_current(capability, enqueue)
         token_transition = _read_token_transition(capability)
         token_target = (
             None
@@ -6427,6 +7277,19 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
                 None
                 if live is None
                 else {"id": live.id, "kind": live.kind, "root": live.root}
+            ),
+            "enqueue_transition": (
+                None
+                if enqueue is None
+                else {
+                    "state": enqueue["state"],
+                    "intent_id": enqueue["item"]["id"],
+                    "kind": enqueue["item"]["kind"],
+                    "intent": enqueue["item"]["intent"],
+                    "root": enqueue["item"]["root"],
+                    "generation": enqueue["successor_drainer"]["generation"],
+                    "output_identity": enqueue["output_identity"],
+                }
             ),
             "token_transition": (
                 None
@@ -6601,6 +7464,7 @@ def finish_transaction(transaction: Transaction) -> None:
     """Close a direct transaction after a committed receipt."""
     lease_deadline = time.time() + 30.0
     with pin_output(transaction.output) as capability, _locked(capability):
+        _fence_pending_enqueue_locked(capability)
         token_transition = _read_token_transition(capability)
         if token_transition is not None:
             _validate_token_transition_current(capability, token_transition)
@@ -6982,6 +7846,7 @@ def cancel_unpublished_transaction(
     plus previous receipt prove the immediately preceding complete generation.
     """
     with pin_output(transaction.output) as capability, _locked(capability):
+        _fence_pending_enqueue_locked(capability)
         token_transition = _read_token_transition(capability)
         if token_transition is not None:
             _validate_token_transition_current(capability, token_transition)
