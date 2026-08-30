@@ -7746,6 +7746,99 @@ def test_claim_queue_transitions_reject_same_inode_predecessor_drift(
     assert (output / target_name).is_file()
 
 
+@pytest.mark.parametrize("target", ["primary", "inflight", "quarantine"])
+def test_existing_queue_exchange_crash_retains_recoverable_predecessor(
+    tmp_path, target
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    primary = output / transaction_module.QUEUE_FILE
+    target_name = {
+        "primary": transaction_module.QUEUE_FILE,
+        "inflight": f".graphify_rebuild_inflight.{tx.id}.jsonl",
+        "quarantine": transaction_module.QUARANTINE_FILE,
+    }[target]
+    target_path = output / target_name
+    if target != "primary":
+        target_path.write_bytes(primary.read_bytes())
+    original_payload = target_path.read_bytes()
+    script = "\n".join(
+        [
+            "import os, sys",
+            "import graphify.transaction as t",
+            "output, name = sys.argv[1:]",
+            "with t.pin_output(output) as cap, t._locked(cap):",
+            "    predecessor = t._read_queue_record(cap, name)",
+            "    t._transition_queue(cap, predecessor, (), failpoint=lambda phase: os._exit(91) if phase == 'after_queue_exchange' else None)",
+        ]
+    )
+    crashed = subprocess.run(
+        [sys.executable, "-c", script, str(output), target_name],
+        check=False,
+    )
+    assert crashed.returncode == 91
+    assert target_path.read_bytes() == b""
+    stages = list(output.glob(".graphify_queue_stage.*"))
+    journals = [
+        path
+        for path in output.glob(".graphify_queue_transition.*.json")
+        if not path.name.endswith(".bound.json")
+    ]
+    bindings = list(output.glob(".graphify_queue_transition.*.bound.json"))
+    assert len(stages) == len(journals) == len(bindings) == 1
+    assert stages[0].read_bytes() == original_payload
+
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        transaction_module._recover_queue_transitions_locked(capability)
+
+    assert target_path.read_bytes() == b""
+    assert not list(output.glob(".graphify_queue_stage.*"))
+    assert not list(output.glob(".graphify_queue_transition.*.json"))
+
+
+def test_replace_bytes_fsyncs_and_revalidates_after_vanished_winner_restore(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    queue_path = output / transaction_module.QUEUE_FILE
+    original = queue_path.read_bytes()
+    real_link = transaction_module.os.link
+    real_fsync = transaction_module.os.fsync
+    fsyncs = 0
+
+    def vanished_winner(*args, **kwargs):
+        if kwargs.get("dst_dir_fd") is not None and args[1] == transaction_module.QUEUE_FILE:
+            raise FileExistsError("injected vanished winner")
+        return real_link(*args, **kwargs)
+
+    def count_fsync(fd):
+        nonlocal fsyncs
+        fsyncs += 1
+        return real_fsync(fd)
+
+    monkeypatch.setattr(transaction_module.os, "link", vanished_winner)
+    monkeypatch.setattr(transaction_module.os, "fsync", count_fsync)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        predecessor = transaction_module._read_queue_record(capability)
+        with pytest.raises(PendingTransactionError, match="replacement disappeared"):
+            transaction_module._replace_bytes(
+                capability,
+                transaction_module.QUEUE_FILE,
+                b"replacement\n",
+                expected_identity=predecessor.identity,
+                expected_digest=predecessor.digest,
+            )
+        capability.validate()
+
+    assert fsyncs >= 3
+    assert queue_path.read_bytes() == original
+
+
 @pytest.mark.parametrize("substitution", ["replacement", "inplace"])
 def test_enqueue_replay_rejects_same_inode_primary_queue_drift(
     tmp_path, monkeypatch, substitution
