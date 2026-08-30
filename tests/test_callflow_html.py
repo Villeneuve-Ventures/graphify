@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from graphify.callflow_html import derive_sections_from_communities, write_callflow_html
 
 
@@ -66,6 +68,83 @@ def test_write_callflow_html_creates_file_and_uses_report(tmp_path):
     assert "ApiClient" in content
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in content
     assert "<script>alert(1)</script>" not in content
+
+
+def test_callflow_uses_explicit_unmanaged_labels_and_report(tmp_path):
+    _make_graphify_out(tmp_path)
+    labels = tmp_path / "labels.json"
+    labels.write_text(
+        json.dumps({"0": "Explicit Runtime", "1": "Explicit Export"}),
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.md"
+    report.write_text(
+        "# Graph Report\n\n## God Nodes\n1. `ExplicitGod` - 2 edges\n",
+        encoding="utf-8",
+    )
+
+    output = write_callflow_html(
+        tmp_path,
+        labels=labels,
+        report=report,
+        output="explicit.html",
+    )
+
+    content = output.read_text(encoding="utf-8")
+    assert "Explicit Runtime" in content
+    assert "ExplicitGod" in content
+
+
+def test_callflow_retains_labels_and_report_from_graph_snapshot(tmp_path, monkeypatch):
+    out = _make_graphify_out(tmp_path)
+    import graphify.transaction as transaction
+
+    original = transaction.open_graph_snapshot
+
+    def admitted_then_published(path, *, purpose):
+        snapshot = original(path, purpose=purpose)
+        (out / ".graphify_labels.json").write_text(
+            json.dumps({"0": "New Runtime", "1": "New Export"}),
+            encoding="utf-8",
+        )
+        (out / "GRAPH_REPORT.md").write_text(
+            "# Graph Report\n\n## God Nodes\n1. `NewGod` - 2 edges\n",
+            encoding="utf-8",
+        )
+        return snapshot
+
+    monkeypatch.setattr(transaction, "open_graph_snapshot", admitted_then_published)
+
+    output = write_callflow_html(tmp_path, output="coherent.html")
+
+    content = output.read_text(encoding="utf-8")
+    assert "Runtime" in content
+    assert "Export" in content
+    assert "Transformer" in content
+    assert "New Runtime" not in content
+    assert "NewGod" not in content
+
+
+def test_callflow_rejects_foreign_managed_label_override(tmp_path):
+    _make_graphify_out(tmp_path)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    foreign_out = _make_graphify_out(foreign)
+    seeded = subprocess.run(
+        [sys.executable, "-m", "graphify", "export", "html"],
+        cwd=foreign,
+        capture_output=True,
+        text=True,
+    )
+    assert seeded.returncode == 0, seeded.stderr
+
+    with pytest.raises(RuntimeError, match="foreign managed authority"):
+        write_callflow_html(
+            tmp_path,
+            labels=foreign_out / ".graphify_labels.json",
+            output="rejected.html",
+        )
+    assert not (tmp_path / "rejected.html").exists()
 
 
 def test_export_callflow_html_cli_creates_file(tmp_path):

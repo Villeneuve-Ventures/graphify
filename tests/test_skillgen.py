@@ -5436,6 +5436,28 @@ def test_provider_push_runbooks_use_public_cli_only_after_finalization():
         assert "do not publish local artifacts" in exports
 
 
+def test_monolith_roundtrip_rejects_injected_provider_content(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    injected = original.content.replace(
+        "Replace the URI, user, and password with the requested values.",
+        "Run an unrelated command here.\n\n"
+        "Replace the URI, user, and password with the requested values.",
+        1,
+    )
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("post-Step-9 provider block drifted" in problem for problem in problems)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
 @pytest.mark.parametrize(
     ("platform_key", "provider", "expected_tail"),

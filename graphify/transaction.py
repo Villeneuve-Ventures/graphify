@@ -6620,6 +6620,8 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
         if not isinstance(generation, int):
             raise PendingTransactionError("graph watermark generation is invalid")
         retain_by_purpose = {
+            "callflow-html": (".graphify_labels.json", "GRAPH_REPORT.md"),
+            "reflect": (".graphify_analysis.json", ".graphify_labels.json"),
             "reflect-community": (".graphify_analysis.json", ".graphify_labels.json"),
             "reflect-lessons": (".graphify_analysis.json", ".graphify_labels.json"),
             "cluster-only": (".graphify_labels.json", ".graphify_labels.json.sig"),
@@ -6656,6 +6658,64 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
             inventory["manifest.json"],
             inventory,
         )
+
+
+def admit_snapshot_artifact(
+    snapshot: GraphSnapshot,
+    path: Path | str,
+    *,
+    canonical_name: str,
+    limit: int = _MAX_STATE_BYTES,
+) -> bytes | None:
+    """Admit one canonical receipt artifact or an identity-pinned unmanaged override."""
+    if not isinstance(snapshot, GraphSnapshot):
+        raise TypeError("artifact admission requires a graph snapshot")
+    name = _validated_shallow_name(canonical_name)
+    if type(limit) is not int or isinstance(limit, bool) or limit < 1:
+        raise ValueError("artifact admission limit must be a positive integer")
+    requested = Path(path).expanduser().absolute()
+    parent = requested.parent.resolve(strict=True)
+    leaf = _validated_shallow_name(requested.name)
+    resolved = parent / leaf
+    source_output = snapshot.graph_path.parent.resolve(strict=True)
+    canonical = source_output / name
+    source_authority = managed_output_containing(snapshot.graph_path)
+    requested_authority = managed_output_containing(resolved)
+
+    if requested_authority is not None:
+        if source_authority != requested_authority:
+            raise PendingTransactionError(
+                "artifact override has foreign managed authority"
+            )
+        if resolved != canonical:
+            raise PendingTransactionError(
+                "artifact override is inconsistent with managed authority"
+            )
+        return snapshot.artifacts.get(name)
+    if resolved == canonical and name in snapshot.artifacts:
+        return snapshot.artifacts[name]
+    if source_authority is not None and source_output in resolved.parents:
+        raise PendingTransactionError(
+            "artifact override is inconsistent with managed authority"
+        )
+
+    with pin_output(parent, mutation=False) as capability, _locked(capability):
+        if _managed_authority_present(capability):
+            raise PendingTransactionError(
+                "artifact override has foreign managed authority"
+            )
+        before = _entry_stat(capability, leaf)
+        if before is None:
+            return None
+        payload = _read_bytes(capability, leaf, limit)
+        after = _entry_stat(capability, leaf)
+        identity = (before.st_dev, before.st_ino)
+        if after is None or (after.st_dev, after.st_ino) != identity:
+            raise PendingTransactionError("artifact override identity changed")
+        capability.validate()
+    if managed_output_containing(resolved) is not None:
+        raise PendingTransactionError("artifact override gained managed authority")
+    return payload
 
 
 def open_external_graph_snapshot(

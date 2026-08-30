@@ -969,6 +969,7 @@ def _transactional_export() -> None:
         GRAPH_WATERMARK_KEY,
         PendingTransactionError,
         PublicationPlan,
+        admit_snapshot_artifact,
         begin_transaction,
         commit_unmanaged_obsidian_batch,
         commit_unmanaged_bytes,
@@ -1031,6 +1032,22 @@ def _transactional_export() -> None:
                 graph, purpose="export-admission"
             )
             source_managed = True
+    explicit_artifacts: dict[str, tuple[str, bytes | None]] = {}
+    for option, canonical_name in (
+        ("--labels", ".graphify_labels.json"),
+        ("--report", "GRAPH_REPORT.md"),
+    ):
+        override = _export_option_path(sys.argv[3:], option)
+        if override is None or (option == "--report" and sys.argv[2] != "callflow-html"):
+            continue
+        explicit_artifacts[option] = (
+            canonical_name,
+            admit_snapshot_artifact(
+                source_snapshot,
+                override,
+                canonical_name=canonical_name,
+            ),
+        )
     requested_destination = _export_destination_path(graph).resolve()
     destination_authority = managed_output_containing(requested_destination)
     prepared_destination = active_transaction is not None and (
@@ -1079,8 +1096,12 @@ def _transactional_export() -> None:
         # export bootstraps their first coordinated generation with the same
         # empty-manifest compatibility payload used by legacy extraction.
         manifest_payload = b"{}"
-    with tempfile.TemporaryDirectory(prefix="graphify-export-prepare-") as staging_name:
+    with (
+        tempfile.TemporaryDirectory(prefix="graphify-export-prepare-") as staging_name,
+        tempfile.TemporaryDirectory(prefix="graphify-export-overrides-") as overrides_name,
+    ):
         staging = Path(staging_name)
+        overrides = Path(overrides_name)
         external_target: Path | None = None
         for name, payload in snapshot.artifacts.items():
             target = staging / name
@@ -1116,6 +1137,13 @@ def _transactional_export() -> None:
         rewritten = _replace_export_graph_argument(
             original_argv[3:], staged_graph, subcmd=original_argv[2]
         )
+        for option, (canonical_name, payload) in explicit_artifacts.items():
+            override_path = overrides / canonical_name
+            if payload is not None:
+                override_path.write_bytes(payload)
+            rewritten = _replace_export_path_argument(
+                rewritten, option, override_path
+            )
         subcmd = original_argv[2]
         if subcmd == "obsidian":
             requested = _export_option_path(original_argv[3:], "--dir")
@@ -2877,7 +2905,7 @@ def _dispatch_command(cmd: str) -> None:
             else:
                 print(f"error: {_cap_err}", file=sys.stderr)
                 sys.exit(1)
-        from graphify.transaction import open_graph_snapshot
+        from graphify.transaction import admit_snapshot_artifact, open_graph_snapshot
         _snapshot = open_graph_snapshot(graph_path, purpose="export")
         _raw = _snapshot.data
         if "links" not in _raw and "edges" in _raw:
@@ -2923,7 +2951,11 @@ def _dispatch_command(cmd: str) -> None:
                 communities = reconstructed
 
         labels: dict[int, str] = {}
-        labels_payload = _snapshot.artifacts.get(".graphify_labels.json")
+        labels_payload = admit_snapshot_artifact(
+            _snapshot,
+            labels_path,
+            canonical_name=".graphify_labels.json",
+        )
         if labels_payload is not None:
             labels = {int(k): v for k, v in json.loads(labels_payload.decode("utf-8")).items()}
 

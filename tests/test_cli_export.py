@@ -815,6 +815,74 @@ def test_export_html_error_without_graph(tmp_path):
     assert r.returncode != 0
 
 
+@pytest.mark.parametrize(
+    ("subcommand", "artifact"),
+    (
+        ("html", "graph.html"),
+        ("svg", "graph.svg"),
+        ("wiki", "wiki/index.md"),
+        ("obsidian", "obsidian/graph.canvas"),
+    ),
+)
+def test_export_visual_formats_honor_explicit_unmanaged_labels(
+    tmp_path, subcommand, artifact
+):
+    out = _make_graph(tmp_path)
+    graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+    custom = tmp_path / "custom-labels.json"
+    custom.write_text(
+        json.dumps(
+            {
+                str(node["community"]): "Explicit Override Topic"
+                for node in graph["nodes"]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(["export", subcommand, "--labels", str(custom)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    if subcommand in {"wiki", "obsidian"}:
+        rendered = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (out / artifact).parent.rglob("*")
+            if path.is_file()
+        )
+    else:
+        rendered = (out / artifact).read_text(encoding="utf-8")
+    assert "Explicit Override Topic" in rendered
+
+
+def test_export_rejects_foreign_managed_labels_without_mutation(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_out = _make_graph(source)
+    assert _run(["export", "html"], source).returncode == 0
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    foreign_out = _make_graph(foreign)
+    assert _run(["export", "html"], foreign).returncode == 0
+    before = {
+        path.relative_to(source_out).as_posix(): path.read_bytes()
+        for path in source_out.rglob("*")
+        if path.is_file()
+    }
+
+    result = _run(
+        ["export", "svg", "--labels", str(foreign_out / ".graphify_labels.json")],
+        source,
+    )
+
+    assert result.returncode != 0
+    after = {
+        path.relative_to(source_out).as_posix(): path.read_bytes()
+        for path in source_out.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
 # ── graphify export obsidian ─────────────────────────────────────────────────
 
 def test_export_obsidian_creates_vault(tmp_path):

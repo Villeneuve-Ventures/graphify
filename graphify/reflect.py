@@ -176,7 +176,12 @@ def _load_node_community(graph_path: Path, analysis_path: Path,
         if snapshot is None:
             from graphify.transaction import open_graph_snapshot
             snapshot = open_graph_snapshot(graph_path, purpose="reflect-community")
-        analysis_payload = snapshot.artifacts.get(".graphify_analysis.json")
+        from graphify.transaction import admit_snapshot_artifact
+        analysis_payload = admit_snapshot_artifact(
+            snapshot,
+            analysis_path,
+            canonical_name=".graphify_analysis.json",
+        )
         if analysis_payload is None:
             return None
         analysis = json.loads(analysis_payload.decode("utf-8"))
@@ -186,7 +191,11 @@ def _load_node_community(graph_path: Path, analysis_path: Path,
     if not communities:
         return None
     labels: dict[str, str] = {}
-    labels_payload = snapshot.artifacts.get(".graphify_labels.json")
+    labels_payload = admit_snapshot_artifact(
+        snapshot,
+        labels_path,
+        canonical_name=".graphify_labels.json",
+    )
     if labels_payload is not None:
         try:
             labels = json.loads(labels_payload.decode("utf-8"))
