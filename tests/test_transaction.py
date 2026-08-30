@@ -7475,6 +7475,129 @@ def test_claim_acknowledgement_is_durable_before_inflight_retirement(tmp_path):
     recover_close(output)
 
 
+def test_complete_claim_rejects_same_name_inflight_substitution(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
+    with owned_step(tx, drainer=claim.drainer):
+        payload = _graph(tx.generation)
+        commit_bytes(tx, "graph.json", payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+        generation = commit_generation(
+            tx,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+        replacement = inflight.read_bytes()
+        inflight.unlink()
+        inflight.write_bytes(replacement)
+        replacement_identity = (inflight.stat().st_dev, inflight.stat().st_ino)
+        before = _file_bytes(output)
+
+        with pytest.raises(PendingTransactionError, match="inflight record"):
+            complete_rebuild_claim(tx, claim, receipt_digest=generation.digest)
+
+    assert _file_bytes(output) == before
+    assert (inflight.stat().st_dev, inflight.stat().st_ino) == replacement_identity
+
+
+def test_takeover_rejects_same_name_inflight_substitution(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
+    original = transaction_module._write_queue
+    replaced = False
+
+    def substitute_before_queue_write(capability, name, items, **kwargs):
+        nonlocal replaced
+        if name == transaction_module.QUEUE_FILE and not replaced:
+            replaced = True
+            body = inflight.read_bytes()
+            inflight.unlink()
+            inflight.write_bytes(body)
+        return original(capability, name, items, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_write_queue", substitute_before_queue_write)
+    with pytest.raises(PendingTransactionError, match="identity changed"):
+        takeover_drainer(output, now=10**12)
+    assert replaced is True
+    assert inflight.is_file()
+
+
+def test_close_replay_rejects_same_name_inflight_substitution(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    with owned_step(tx, drainer=claim.drainer):
+        payload = _graph(tx.generation)
+        commit_bytes(tx, "graph.json", payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+        generation = commit_generation(
+            tx,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+        with pytest.raises(RuntimeError, match="after_claim_acknowledgement"):
+            complete_rebuild_claim(
+                tx,
+                claim,
+                receipt_digest=generation.digest,
+                failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+                if name == "after_claim_acknowledgement"
+                else None,
+            )
+        with pytest.raises(RuntimeError, match="after_close_pending"):
+            close_if_queue_empty(
+                tx,
+                receipt_digest=generation.digest,
+                failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+                if name == "after_close_pending"
+                else None,
+            )
+    inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
+    body = inflight.read_bytes()
+    inflight.unlink()
+    inflight.write_bytes(body)
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="inflight identity"):
+        recover_close(output)
+
+    assert _file_bytes(output) == before
+
+
+def test_recovery_retires_only_frozen_inflight_identity(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
+    original = transaction_module._write_queue
+    replaced = False
+
+    def substitute_after_freeze(capability, name, items, **kwargs):
+        nonlocal replaced
+        if name == transaction_module.QUEUE_FILE and not replaced:
+            replaced = True
+            body = inflight.read_bytes()
+            inflight.unlink()
+            inflight.write_bytes(body)
+        return original(capability, name, items, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_write_queue", substitute_after_freeze)
+    with pytest.raises(PendingTransactionError, match="identity changed"):
+        recover_transaction("runtime", root, output=output, now=10**12)
+    assert replaced is True
+    assert inflight.is_file()
+
+
 @pytest.mark.parametrize(
     "boundary", ["after_protocol_complete", "after_ack", "after_inflight_retirement"]
 )

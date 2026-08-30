@@ -264,6 +264,8 @@ class RebuildClaim:
     items: tuple[dict[str, object], ...]
     quarantined: tuple[dict[str, object], ...]
     inflight_path: Path | None
+    inflight_identity: tuple[int, int] | None
+    inflight_digest: str | None
     drainer: DrainerTuple
 
     def __iter__(self):
@@ -275,6 +277,14 @@ class RebuildClaim:
 class GenerationReceipt:
     digest: str
     generation: int
+
+
+@dataclass(frozen=True)
+class QueueFileRecord:
+    name: str
+    items: tuple[dict[str, Any], ...]
+    identity: tuple[int, int] | None
+    digest: str | None
 
 
 @dataclass(frozen=True)
@@ -8246,11 +8256,13 @@ def _validate_queue_item(item: object) -> dict[str, Any]:
     return item
 
 
-def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[dict[str, Any]]:
-    if _entry_stat(capability, name) is None:
-        return []
+def _parse_queue_payload(payload: bytes) -> list[dict[str, Any]]:
     try:
-        values = [json.loads(line) for line in _read_bytes(capability, name).decode().splitlines() if line]
+        values = [
+            json.loads(line)
+            for line in payload.decode().splitlines()
+            if line
+        ]
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("malformed rebuild queue") from exc
     if len(values) > _MAX_QUEUE_ITEMS:
@@ -8267,6 +8279,54 @@ def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[di
     return result
 
 
+def _read_queue_record(
+    capability: OutputCapability, name: str = QUEUE_FILE
+) -> QueueFileRecord:
+    if _entry_stat(capability, name) is None:
+        return QueueFileRecord(name, (), None, None)
+    try:
+        fd = (
+            _open_windows_relative_fd(capability, name)
+            if _PLATFORM == "windows"
+            else os.open(
+                name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=capability.fd,
+            )
+        )
+    except FileNotFoundError as exc:
+        raise PendingTransactionError("rebuild queue identity changed") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_STATE_BYTES:
+            raise PendingTransactionError("malformed rebuild queue")
+        payload = bytearray()
+        while len(payload) <= _MAX_STATE_BYTES:
+            chunk = os.read(fd, min(65536, _MAX_STATE_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if len(payload) > _MAX_STATE_BYTES:
+            raise PendingTransactionError("rebuild queue exceeds serialized budget")
+        current = _entry_stat(capability, name)
+        identity = (opened.st_dev, opened.st_ino)
+        if current is None or (current.st_dev, current.st_ino) != identity:
+            raise PendingTransactionError("rebuild queue identity changed")
+        body = bytes(payload)
+        return QueueFileRecord(
+            name,
+            tuple(_parse_queue_payload(body)),
+            identity,
+            hashlib.sha256(body).hexdigest(),
+        )
+    finally:
+        os.close(fd)
+
+
+def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[dict[str, Any]]:
+    return list(_read_queue_record(capability, name).items)
+
+
 def _queue_payload(items: list[dict[str, Any]]) -> bytes:
     if len(items) > _MAX_QUEUE_ITEMS:
         raise PendingTransactionError("rebuild queue exceeds item bound")
@@ -8280,9 +8340,23 @@ def _queue_payload(items: list[dict[str, Any]]) -> bytes:
     return payload
 
 
-def _write_queue(capability: OutputCapability, name: str, items: list[dict[str, Any]]) -> None:
+def _write_queue(
+    capability: OutputCapability,
+    name: str,
+    items: list[dict[str, Any]],
+    *,
+    expected_identity: tuple[int, int] | None = None,
+) -> None:
     payload = _queue_payload(items)
-    _replace_bytes(capability, name, payload)
+    if expected_identity is None:
+        _replace_bytes(capability, name, payload)
+    else:
+        _replace_bytes(
+            capability,
+            name,
+            payload,
+            expected_identity=expected_identity,
+        )
 
 
 def _canonical_enqueue_transform(
@@ -8717,6 +8791,47 @@ def _merge_intents(*groups: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
+def _queue_record_binding(record: QueueFileRecord) -> dict[str, object] | None:
+    if record.identity is None:
+        if record.items or record.digest is not None:
+            raise PendingTransactionError("inflight queue absence binding is malformed")
+        return None
+    if record.digest is None:
+        raise PendingTransactionError("inflight queue digest is missing")
+    return {
+        "device": record.identity[0],
+        "inode": record.identity[1],
+        "digest": record.digest,
+    }
+
+
+def _queue_identity_binding(value: object) -> tuple[tuple[int, int], str] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"device", "inode", "digest"}
+        or type(value.get("device")) is not int
+        or type(value.get("inode")) is not int
+        or not _is_hex(value.get("digest"))
+    ):
+        raise PendingTransactionError("close inflight binding is malformed")
+    return (
+        (int(value["device"]), int(value["inode"])),
+        str(value["digest"]),
+    )
+
+
+def _retire_queue_record(
+    capability: OutputCapability, record: QueueFileRecord
+) -> None:
+    if record.identity is None:
+        if _entry_stat(capability, record.name) is not None:
+            raise PendingTransactionError("rebuild queue appeared after absence admission")
+        return
+    _unlink(capability, record.name, expected=record.identity)
+
+
 def _drainer_state_from_json(
     capability: OutputCapability, raw: object
 ) -> tuple[DrainerTuple, str, dict[str, Any]]:
@@ -8764,6 +8879,7 @@ def _drainer_state_from_json(
                 "successor_generation",
                 "transaction_id",
                 "token_identity",
+                "inflight",
             }
         )
     if set(raw) != expected_fields:
@@ -8809,6 +8925,7 @@ def _drainer_state_from_json(
         ):
             raise PendingTransactionError("malformed close drainer binding")
         _token_identity_from_json(raw.get("token_identity"))
+        _queue_identity_binding(raw.get("inflight"))
     return drainer, str(state), raw
 
 
@@ -9292,10 +9409,12 @@ def claim_rebuild_queue(
             failpoint("before_inflight_durable")
         inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
         inflight_path: Path | None = None
+        inflight_record = QueueFileRecord(inflight_name, (), None, None)
         if accepted:
             existing = _read_queue(capability, inflight_name)
             _write_queue(capability, inflight_name, _merge_intents(existing, accepted))
             inflight_path = capability.path / inflight_name
+            inflight_record = _read_queue_record(capability, inflight_name)
         if failpoint:
             failpoint("before_quarantine_durable")
         if quarantined:
@@ -9318,7 +9437,15 @@ def claim_rebuild_queue(
         live = replace(live, drainer=drainer)
         _write_transaction(capability, live)
         _AUTHORITY.set(_authority_for(live))
-        return RebuildClaim(live.id, tuple(accepted), tuple(quarantined), inflight_path, drainer)
+        return RebuildClaim(
+            live.id,
+            tuple(accepted),
+            tuple(quarantined),
+            inflight_path,
+            inflight_record.identity,
+            inflight_record.digest,
+            drainer,
+        )
 
 
 def takeover_drainer(
@@ -9419,14 +9546,15 @@ def takeover_drainer(
             predecessor_live = live
             _retire_prepared_locked(capability)
             inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
-            inflight = _read_queue(capability, inflight_name)
+            inflight_record = _read_queue_record(capability, inflight_name)
+            inflight = list(inflight_record.items)
             if inflight:
                 _write_queue(
                     capability,
                     QUEUE_FILE,
                     _merge_intents(_read_queue(capability), inflight),
                 )
-            _unlink(capability, inflight_name)
+            _retire_queue_record(capability, inflight_record)
             successor_id = secrets.token_hex(32)
             token_name = f".graphify_transaction_token.{successor_id}"
             token_payload = _json_bytes(
@@ -9522,10 +9650,13 @@ def complete_rebuild_claim(
         expected_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
         expected_path = capability.path / expected_name
         expected_claim_path = expected_path if claim.items else None
+        inflight_record = _read_queue_record(capability, expected_name)
         if (
             claim.transaction_id != live.id
             or claim.drainer != live.drainer
             or claim.inflight_path != expected_claim_path
+            or claim.inflight_identity != inflight_record.identity
+            or claim.inflight_digest != inflight_record.digest
             or receipt.get("transaction_id") != live.id
             or receipt.get("generation") != live.generation
             or receipt.get("token_digest") != live.token_digest
@@ -9535,7 +9666,7 @@ def complete_rebuild_claim(
         current = _read_drainer(capability)
         if current is None or current[0] != claim.drainer or current[1] != "claimed":
             raise PendingTransactionError("claim drainer no longer matches")
-        inflight = _read_queue(capability, expected_name)
+        inflight = list(inflight_record.items)
         claimed_by_id = {str(item["id"]): item for item in claim.items}
         inflight_by_id = {str(item["id"]): item for item in inflight}
         if (
@@ -9561,9 +9692,18 @@ def complete_rebuild_claim(
             failpoint("after_claim_acknowledgement")
         residual = [item for item in inflight if str(item["id"]) not in claimed_by_id]
         if residual:
-            _write_queue(capability, expected_name, residual)
+            _write_queue(
+                capability,
+                expected_name,
+                residual,
+                expected_identity=inflight_record.identity,
+            )
         elif claim.items:
-            _unlink(capability, expected_name)
+            _unlink(
+                capability,
+                expected_name,
+                expected=inflight_record.identity,
+            )
         if failpoint:
             failpoint("after_inflight_retirement")
 
@@ -9602,6 +9742,12 @@ def close_if_queue_empty(
                 None
                 if live.token_identity is None
                 else {"device": live.token_identity[0], "inode": live.token_identity[1]}
+            ),
+            "inflight": _queue_record_binding(
+                _read_queue_record(
+                    capability,
+                    f".graphify_rebuild_inflight.{live.id}.jsonl",
+                )
             ),
         }
         _replace_bytes(capability, DRAINER_FILE, _json_bytes(pending))
@@ -9670,9 +9816,20 @@ def _validate_close_pending_locked(
         raise PendingTransactionError("unexpected token remains after owner retirement")
     inflight_name = f".graphify_rebuild_inflight.{pending['transaction_id']}.jsonl"
     try:
-        inflight = _read_queue(capability, inflight_name)
+        inflight_record = _read_queue_record(capability, inflight_name)
     except PendingTransactionError as exc:
         raise PendingTransactionError("close-pending inflight work is malformed") from exc
+    expected_inflight = _queue_identity_binding(pending.get("inflight"))
+    if inflight_record.identity is None:
+        if inflight_record.items or inflight_record.digest is not None:
+            raise PendingTransactionError("close-pending inflight absence changed")
+    elif (
+        expected_inflight is None
+        or inflight_record.identity != expected_inflight[0]
+        or inflight_record.digest != expected_inflight[1]
+    ):
+        raise PendingTransactionError("close-pending inflight identity changed")
+    inflight = list(inflight_record.items)
     acked_ids = pending.get("acked_ids")
     if not isinstance(acked_ids, list):
         raise PendingTransactionError("close-pending acknowledgements are malformed")
@@ -9713,8 +9870,11 @@ def _finish_close_locked(
     live = _validate_close_pending_locked(capability, pending)
     transaction_id = str(pending["transaction_id"])
     inflight_name = f".graphify_rebuild_inflight.{transaction_id}.jsonl"
+    expected_inflight = _queue_identity_binding(pending.get("inflight"))
     if _entry_stat(capability, inflight_name) is not None:
-        _unlink(capability, inflight_name)
+        if expected_inflight is None:
+            raise PendingTransactionError("unexpected close-pending inflight record")
+        _unlink(capability, inflight_name, expected=expected_inflight[0])
     if failpoint:
         failpoint("after_inflight_remove")
     if live is not None and live.id == transaction_id:
@@ -9770,7 +9930,8 @@ def _recover_completed_live_locked(
             capability, transaction=live
         )
         inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
-        inflight = _read_queue(capability, inflight_name)
+        inflight_record = _read_queue_record(capability, inflight_name)
+        inflight = list(inflight_record.items)
         acked_ids = [str(value) for value in drainer[2].get("acked_ids", [])]
         inflight_ids = [str(item["id"]) for item in inflight]
         requeue_ids = [item_id for item_id in inflight_ids if item_id not in acked_ids]
@@ -9799,6 +9960,7 @@ def _recover_completed_live_locked(
                 if live.token_identity is None
                 else {"device": live.token_identity[0], "inode": live.token_identity[1]}
             ),
+            "inflight": _queue_record_binding(inflight_record),
         }
         if receipt.get("transaction_id") != live.id:
             raise PendingTransactionError("completed live receipt owner changed")
@@ -10545,15 +10707,17 @@ def recover_transaction(
         else:
             generation = current.generation + 1
         queued = _read_queue(capability)
+        frozen_inflight: list[QueueFileRecord] = []
         for name in _list_entries(capability):
             if name.startswith(".graphify_rebuild_inflight.") and name.endswith(".jsonl"):
-                queued.extend(_read_queue(capability, name))
+                record = _read_queue_record(capability, name)
+                frozen_inflight.append(record)
+                queued.extend(record.items)
         if queued:
             deduplicated = {str(item["id"]): item for item in queued}
             _write_queue(capability, QUEUE_FILE, list(deduplicated.values()))
-        for name in list(_list_entries(capability)):
-            if name.startswith(".graphify_rebuild_inflight.") and name.endswith(".jsonl"):
-                _unlink(capability, name)
+        for record in frozen_inflight:
+            _retire_queue_record(capability, record)
         _retire_prepared_locked(capability)
         drainer = DrainerTuple(generation, claim_epoch, secrets.token_hex(16))
         secret = secrets.token_bytes(32)
@@ -11026,6 +11190,12 @@ def finish_transaction(transaction: Transaction) -> None:
                         "device": transaction.token_identity[0],
                         "inode": transaction.token_identity[1],
                     }
+                ),
+                "inflight": _queue_record_binding(
+                    _read_queue_record(
+                        capability,
+                        f".graphify_rebuild_inflight.{transaction.id}.jsonl",
+                    )
                 ),
             }
             _replace_bytes(capability, DRAINER_FILE, _json_bytes(pending))
