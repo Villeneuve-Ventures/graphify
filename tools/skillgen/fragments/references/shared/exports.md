@@ -27,15 +27,6 @@ Run this before Step 9 (cleanup) so `.graphify_labels.json` is still available.
 @@GRAPHIFY_CMD@@ export neo4j
 ```
 
-**If `--neo4j-push <uri>`** - push directly to a running Neo4j instance. Ask the user for credentials if not provided:
-
-```@@GRAPHIFY_SHELL@@
-@@GRAPHIFY_GUARD@@
-@@GRAPHIFY_CMD@@ export neo4j --push bolt://localhost:7687 --user neo4j --password PASSWORD
-```
-
-Default URI is `bolt://localhost:7687`, default user is `neo4j`. Uses MERGE - safe to re-run without creating duplicates.
-
 ### Step 7a - FalkorDB export (only if --falkordb or --falkordb-push flag)
 
 **If `--falkordb`** - generate a Cypher file. The statements are OpenCypher, but FalkorDB's `GRAPH.QUERY` runs one statement at a time (no bulk script import like Neo4j's `cypher-shell`), so prefer `--falkordb-push` to load a graph. Use this only when you want the portable `cypher.txt` artifact:
@@ -44,15 +35,6 @@ Default URI is `bolt://localhost:7687`, default user is `neo4j`. Uses MERGE - sa
 @@GRAPHIFY_GUARD@@
 @@GRAPHIFY_CMD@@ export falkordb
 ```
-
-**If `--falkordb-push <uri>`** - push directly to a running FalkorDB instance. Credentials are optional; ask the user only if the instance requires auth:
-
-```@@GRAPHIFY_SHELL@@
-@@GRAPHIFY_GUARD@@
-@@GRAPHIFY_CMD@@ export falkordb --push falkordb://localhost:6379
-```
-
-Default URI is `falkordb://localhost:6379` (the scheme is informational - `redis://` or a bare `host:port` work too), auth is optional, and the target graph defaults to `graphify`. Uses MERGE - safe to re-run without creating duplicates.
 
 ### Step 7b - SVG export (only if --svg flag)
 
@@ -104,3 +86,27 @@ run:
 ```
 
 Print the output directly in chat. If `total_words <= 5000`, skip silently - the graph value is structural clarity, not token compression, for small corpora.
+
+### After Step 9 - Provider pushes (only on their push flags)
+
+Run these blocks only after Step 9 has successfully finalized the prepared
+generation. They use the canonical public export CLI to admit the finalized
+snapshot and push it to the provider; they do not publish local artifacts.
+
+**If `--neo4j-push <uri>`** - push directly to a running Neo4j instance. Ask the user for credentials if not provided:
+
+```@@GRAPHIFY_SHELL@@
+@@GRAPHIFY_GUARD@@
+@@GRAPHIFY_CMD@@ export neo4j --push bolt://localhost:7687 --user neo4j --password PASSWORD
+```
+
+Default URI is `bolt://localhost:7687`, default user is `neo4j`. Uses MERGE - safe to re-run without creating duplicates.
+
+**If `--falkordb-push <uri>`** - push directly to a running FalkorDB instance. Credentials are optional; ask the user only if the instance requires auth:
+
+```@@GRAPHIFY_SHELL@@
+@@GRAPHIFY_GUARD@@
+@@GRAPHIFY_CMD@@ export falkordb --push falkordb://localhost:6379
+```
+
+Default URI is `falkordb://localhost:6379` (the scheme is informational - `redis://` or a bare `host:port` work too), auth is optional, and the target graph defaults to `graphify`. Uses MERGE - safe to re-run without creating duplicates.

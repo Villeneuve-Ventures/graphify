@@ -704,26 +704,8 @@ print('cypher.txt written - import with: cypher-shell < graphify-out/cypher.txt'
 "
 ```
 
-**If `--neo4j-push <uri>`** - push directly to a running Neo4j instance. Ask the user for credentials if not provided:
-
-```bash
-"$(cat graphify-out/.graphify_python)" -E -P -B -c "
-import sys, json
-from graphify.build import build_from_json
-from graphify.export import push_to_neo4j
-from pathlib import Path
-
-extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text())
-analysis   = json.loads(Path('graphify-out/.graphify_analysis.json').read_text())
-G = build_from_json(extraction, directed=IS_DIRECTED)
-communities = {int(k): v for k, v in analysis['communities'].items()}
-
-result = push_to_neo4j(G, uri='NEO4J_URI', user='NEO4J_USER', password='NEO4J_PASSWORD', communities=communities)
-print(f'Pushed to Neo4j: {result[\"nodes\"]} nodes, {result[\"edges\"]} edges')
-"
-```
-
-Replace `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD` with actual values. Default URI is `bolt://localhost:7687`, default user is `neo4j`. Uses MERGE - safe to re-run without creating duplicates.
+If `--neo4j-push <uri>` was requested, defer it until the post-finalization
+provider block after Step 9.
 
 ### Step 7b - SVG export (only if --svg flag)
 
@@ -851,6 +833,18 @@ print(f'All time: {cost[\"total_input_tokens\"]:,} input, {cost[\"total_output_t
 rm -f graphify-out/.graphify_detect.json graphify-out/.graphify_extract.json graphify-out/.graphify_ast.json graphify-out/.graphify_semantic.json graphify-out/.graphify_analysis.json graphify-out/.graphify_labels.json graphify-out/.graphify_incremental.json graphify-out/.graphify_transcripts.json graphify-out/.graphify_old.json; find graphify-out -maxdepth 1 -name '.graphify_chunk_*.json' -delete 2>/dev/null
 rm -f graphify-out/.needs_update 2>/dev/null || true
 ```
+
+### After Step 9 - Neo4j push (only if --neo4j-push flag)
+
+Run this only after Step 9 has successfully finalized the prepared generation.
+It uses the public CLI to admit the finalized snapshot and does not publish a
+local artifact:
+
+```bash
+"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify export neo4j --push bolt://localhost:7687 --user neo4j --password PASSWORD
+```
+
+Replace the URI, user, and password with the requested values. Uses MERGE - safe to re-run without creating duplicates.
 
 Tell the user (omit the obsidian line unless --obsidian was given; omit the wiki line unless --wiki was given):
 ```

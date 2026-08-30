@@ -1182,7 +1182,7 @@ def _route_full_build_transaction(body: str) -> str:
         '"$GRAPHIFY_TRANSACTION_TOKEN" -- -m graphify export '
     )
     section = re.sub(
-        r'(?m)^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export (.*)$',
+        r'(?m)^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export ((?![^\n]*--push).*)$',
         lambda match: export_prefix + match.group(1),
         section,
     )
@@ -1204,7 +1204,7 @@ def _route_full_build_transaction(body: str) -> str:
         return routed
 
     section = re.sub(
-        r"(?m)^(& \$GraphifyPython -E -P -B -m graphify export )(.*)$",
+        r"(?m)^(& \$GraphifyPython -E -P -B -m graphify export )((?![^\n]*--push).*)$",
         route_powershell_export,
         section,
     )
@@ -2179,6 +2179,67 @@ def _normalise_issue88_monolith_render(text: str) -> str:
     )
 
 
+def _normalise_provider_push_sequence(
+    text: str, *, validate_current: bool
+) -> tuple[str, str | None]:
+    """Collapse the reviewed post-finalization provider migration for v8 audit."""
+    public_push_pattern = re.compile(
+        r'^"(?:\$\(cat graphify-out/\.graphify_python\)|\$GRAPHIFY_PYTHON)" '
+        r"-E -P -B -m graphify export neo4j --push bolt://localhost:7687 "
+        r"--user neo4j --password PASSWORD$",
+        re.MULTILINE,
+    )
+    if validate_current:
+        push_matches = list(public_push_pattern.finditer(text))
+        if len(push_matches) != 1:
+            return text, "monolith must contain one public Neo4j push command"
+        if "push_to_neo4j" in text:
+            return text, "monolith retained the direct Neo4j provider script"
+        if text.count("### After Step 9 - Neo4j push") != 1:
+            return text, "monolith must contain one post-Step-9 provider section"
+        finalize = text.find("finalize_prepared_transaction()")
+        push = push_matches[0].start()
+        if finalize < 0 or push < finalize:
+            return text, "monolith provider push precedes transaction finalization"
+        push_line = text[text.rfind("\n", 0, push) + 1 : text.find("\n", push)]
+        if "run-prepared-token" in push_line or "run-token" in push_line:
+            return text, "monolith provider push entered local publication"
+
+    heading = re.search(
+        r"(?m)^### Step 7 - Neo4j export \(only if --neo4j(?: or --neo4j-push)? flag\)$",
+        text,
+    )
+    step7b = text.find("### Step 7b - SVG export", heading.end() if heading else 0)
+    push_markers = (
+        "**If `--neo4j-push <uri>`**",
+        "If `--neo4j-push <uri>` was requested",
+    )
+    push_start = min(
+        (
+            position
+            for marker in push_markers
+            if (position := text.find(marker, heading.end() if heading else 0)) >= 0
+        ),
+        default=-1,
+    )
+    if heading is None or push_start < 0 or step7b < 0 or push_start >= step7b:
+        return text, "monolith Neo4j push section is malformed"
+    text = (
+        text[: heading.start()]
+        + "### Step 7 - Neo4j export (provider push deferred)"
+        + text[heading.end() : push_start]
+        + "@@POST_FINALIZATION_NEO4J_PUSH@@\n\n"
+        + text[step7b:]
+    )
+    post_heading = text.find("### After Step 9 - Neo4j push")
+    if post_heading >= 0:
+        tell = text.find("Tell the user", post_heading)
+        if tell < 0:
+            return text, "post-Step-9 provider section has no terminal boundary"
+        text = text[:post_heading] + text[tell:]
+    return text, None
+
+
 def monolith_roundtrip(platform: Platform) -> list[str]:
     """Assert a monolith renders diff-clean vs its v8 blob modulo allowed changes.
 
@@ -2202,13 +2263,21 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     if platform.roundtrip_ref is None:
         return [f"[{platform.key}] monolith is missing roundtrip_ref"]
 
-    rendered_text = _normalise_issue88_monolith_render(render(platform)[0].content)
+    rendered_text, provider_error = _normalise_provider_push_sequence(
+        render(platform)[0].content, validate_current=True
+    )
+    if provider_error:
+        return [f"[{platform.key}] {provider_error}"]
+    rendered_text = _normalise_issue88_monolith_render(rendered_text)
     rendered_lines = rendered_text.splitlines()
     # Strip trigger lines from the original — they are non-spec and their removal
     # (#1180) is a permitted diff.
-    original_text = _normalise_issue88_monolith_render(
-        _normalise(_git_show(platform.roundtrip_ref))
+    original_text, provider_error = _normalise_provider_push_sequence(
+        _normalise(_git_show(platform.roundtrip_ref)), validate_current=False
     )
+    if provider_error:
+        return [f"[{platform.key}] v8 baseline {provider_error}"]
+    original_text = _normalise_issue88_monolith_render(original_text)
     original_lines = [
         l for l in original_text.splitlines()
         if not _is_trigger_line(l)

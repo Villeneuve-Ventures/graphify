@@ -5368,7 +5368,13 @@ def test_full_build_renders_consume_transaction_runner_and_finalize():
         assert full_build.count("finalize_prepared_transaction()") == 1
         for line in full_build.splitlines():
             if " -m graphify export " in line and not line.lstrip().startswith("#"):
-                assert "graphify.transaction run-prepared-token" in line
+                if " --push " in line:
+                    assert full_build.index(line) > full_build.index(
+                        "finalize_prepared_transaction()"
+                    )
+                    assert "graphify.transaction run-" not in line
+                else:
+                    assert "graphify.transaction run-prepared-token" in line
         for block in re.findall(
             r"```(?:bash|sh)\n(.*?)\n```", full_build, flags=re.DOTALL
         ):
@@ -5398,6 +5404,123 @@ def test_split_references_route_pre_finalization_writes_through_prepared_runner(
         assert "Path('.graphify_transcripts.json')" in transcribe
         assert "Path('graphify-out/.graphify_detect.json')" not in transcribe
         assert "after Step 9" in exports
+
+
+def test_provider_push_runbooks_use_public_cli_only_after_finalization():
+    for key, platform in gen.load_platforms().items():
+        rendered = {Path(item.path).name: item.content for item in gen.render(platform)}
+        core = next(
+            item.content
+            for item in gen.render(platform)
+            if "/references/" not in item.path
+        )
+        assert "push_to_neo4j" not in core, key
+        assert "push_to_falkordb" not in core, key
+        if platform.bucket == "monolith":
+            finalize = core.index("finalize_prepared_transaction()")
+            push = core.index(" -m graphify export neo4j --push ")
+            assert push > finalize, key
+            push_line = core[core.rfind("\n", 0, push) + 1 : core.find("\n", push)]
+            assert "graphify.transaction run-" not in push_line, key
+            continue
+
+        exports = rendered["exports.md"]
+        post_finalize = exports.index("### After Step 9 - Provider pushes")
+        for provider in ("neo4j", "falkordb"):
+            push = exports.index(f" -m graphify export {provider} --push ")
+            assert push > post_finalize, (key, provider)
+            push_line = exports[
+                exports.rfind("\n", 0, push) + 1 : exports.find("\n", push)
+            ]
+            assert "graphify.transaction run-" not in push_line, (key, provider)
+        assert "do not publish local artifacts" in exports
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+@pytest.mark.parametrize(
+    ("platform_key", "provider", "expected_tail"),
+    (
+        (
+            "claude",
+            "neo4j",
+            [
+                "neo4j",
+                "--push",
+                "bolt://localhost:7687",
+                "--user",
+                "neo4j",
+                "--password",
+                "PASSWORD",
+            ],
+        ),
+        ("claude", "falkordb", ["falkordb", "--push", "falkordb://localhost:6379"]),
+        (
+            "aider",
+            "neo4j",
+            [
+                "neo4j",
+                "--push",
+                "bolt://localhost:7687",
+                "--user",
+                "neo4j",
+                "--password",
+                "PASSWORD",
+            ],
+        ),
+    ),
+)
+def test_rendered_provider_push_executes_as_public_cli(
+    tmp_path: Path,
+    platform_key: str,
+    provider: str,
+    expected_tail: list[str],
+):
+    platform = gen.load_platforms()[platform_key]
+    artifacts = gen.render(platform)
+    artifact = (
+        next(item for item in artifacts if Path(item.path).name == "exports.md")
+        if platform.bucket == "split"
+        else artifacts[0]
+    )
+    block = _block_containing(
+        artifact.content, f" -m graphify export {provider} --push "
+    )
+    command = next(
+        line
+        for line in block.splitlines()
+        if f" -m graphify export {provider} --push " in line
+    )
+    assert "graphify.transaction run-" not in command
+
+    log = tmp_path / "provider-args"
+    shim = tmp_path / "python-shim"
+    shim.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$GRAPHIFY_PUSH_LOG\"\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    result = subprocess.run(
+        ["/bin/bash", "-c", command],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "GRAPHIFY_PYTHON": str(shim),
+            "GRAPHIFY_PUSH_LOG": str(log),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "-E",
+        "-P",
+        "-B",
+        "-m",
+        "graphify",
+        "export",
+        *expected_tail,
+    ]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
