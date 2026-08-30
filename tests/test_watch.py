@@ -202,6 +202,18 @@ def test_check_update_does_not_observe_marker_created_after_snapshot(
     assert capsys.readouterr().out == ""
 
 
+def test_check_update_surfaces_managed_coordination_failure(tmp_path, capsys):
+    from graphify.transaction import begin_transaction
+    from graphify.watch import check_update
+
+    output = _managed_watch_graph(tmp_path)
+    begin_transaction("runtime", tmp_path, output=output)
+    assert check_update(tmp_path) is True
+    message = capsys.readouterr().out
+    assert "coordination is unavailable" in message
+    assert "receipt does not match protocol" in message
+
+
 def test_watch_raises_without_watchdog(tmp_path, monkeypatch):
     import builtins
     real_import = builtins.__import__

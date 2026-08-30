@@ -1105,6 +1105,7 @@ def _transactional_export() -> None:
         begin_transaction,
         commit_unmanaged_obsidian_batch,
         commit_unmanaged_bytes,
+        commit_unmanaged_unlink,
         commit_prepared_bytes,
         commit_publication_plan,
         current_transaction,
@@ -1113,6 +1114,7 @@ def _transactional_export() -> None:
         open_external_graph_snapshot,
         open_graph_snapshot,
         open_unmanaged_obsidian_inventory,
+        open_unmanaged_file,
         open_prepared_graph,
         owned_step,
         publication_plan_from_directory,
@@ -1233,6 +1235,14 @@ def _transactional_export() -> None:
         external_obsidian_inventory = open_unmanaged_obsidian_inventory(
             requested_destination
         )
+    external_html_predecessor = None
+    external_html_target = graph.parent / "graph.html"
+    if (
+        not managed_delivery
+        and export_subcmd == "html"
+        and "--no-viz" in original_argv
+    ):
+        external_html_predecessor = open_unmanaged_file(external_html_target)
     snapshot = source_snapshot
     captured_out = io.StringIO()
     captured_err = io.StringIO()
@@ -1388,6 +1398,17 @@ def _transactional_export() -> None:
                     external_payloads.items(), key=lambda item: str(item[0])
                 ):
                     commit_unmanaged_bytes(destination, payload)
+            if subcmd == "html" and "--no-viz" in original_argv:
+                if external_html_predecessor is not None:
+                    outcome = commit_unmanaged_unlink(
+                        external_html_target,
+                        expected_identity=external_html_predecessor.identity,
+                        expected_digest=external_html_predecessor.digest,
+                    )
+                    if outcome != "deleted":
+                        raise PendingTransactionError(
+                            "external graph.html changed before deletion"
+                        )
             rendered_out = captured_out.getvalue()
             rendered_err = captured_err.getvalue()
             if exact_output_mapping is not None:

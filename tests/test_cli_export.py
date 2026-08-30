@@ -961,6 +961,33 @@ def test_export_html_no_viz_removes_file(tmp_path):
     assert not (out / "graph.html").exists()
 
 
+def test_explicit_external_export_html_no_viz_removes_only_admitted_stale_html(
+    tmp_path,
+):
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    managed = _make_graph(seed)
+    external = tmp_path / "external"
+    external.mkdir()
+    graph = external / "graph.json"
+    graph_data = json.loads((managed / "graph.json").read_text(encoding="utf-8"))
+    graph_data["graph"] = {}
+    graph.write_text(json.dumps(graph_data), encoding="utf-8")
+    stale = external / "graph.html"
+    stale.write_text("<html>stale</html>", encoding="utf-8")
+    unrelated = external / "keep.txt"
+    unrelated.write_text("preserve", encoding="utf-8")
+
+    result = _run(
+        ["export", "html", "--graph", str(graph), "--no-viz"], tmp_path
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not stale.exists()
+    assert unrelated.read_text(encoding="utf-8") == "preserve"
+    assert not list(external.glob(".graphify_transaction*"))
+
+
 def test_export_html_error_without_graph(tmp_path):
     r = _run(["export", "html"], tmp_path)
     assert r.returncode != 0

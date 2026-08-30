@@ -1465,7 +1465,11 @@ def check_update(watch_path: Path) -> bool:
             retain_limits={"needs_update": 1},
         )
         pending = "needs_update" in snapshot.artifacts
-    except PendingTransactionError:
+    except PendingTransactionError as exc:
+        print(
+            "[graphify check-update] Managed graph coordination is unavailable: "
+            f"{exc}"
+        )
         pending = False
     if pending:
         print(f"[graphify check-update] Pending non-code changes in {watch_path}.")
