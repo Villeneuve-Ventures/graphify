@@ -325,10 +325,16 @@ def _load_graph_json(graph_path: Path) -> dict | None:
     if not graph_path.exists():
         return None
     from graphify.security import check_graph_file_size_cap
+    from graphify.transaction import PendingTransactionError
+
     try:
         check_graph_file_size_cap(graph_path)
         from graphify.transaction import open_graph_snapshot
         return open_graph_snapshot(graph_path, purpose="pull-request-impact").data
+    except PendingTransactionError as exc:
+        if isinstance(exc.__cause__, (UnicodeDecodeError, json.JSONDecodeError)):
+            return None
+        raise
     except (json.JSONDecodeError, OSError, ValueError):
         return None
 

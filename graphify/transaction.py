@@ -493,9 +493,9 @@ def pin_output(
 ) -> OutputCapability:
     """Pin one physical output directory for the operation lifetime.
 
-    Windows is intentionally blocked until the final replace/unlink primitive
-    is proven handle-relative on a native runner.  A check-then-use named path
-    is not represented as equivalent protection.
+    Windows reads use identity-pinned, handle-relative admission. Mutation is
+    intentionally blocked until the final replace/unlink primitive is proven
+    handle-relative on a native runner.
     """
     path = Path(output)
     if _PLATFORM == "windows" and mutation:
@@ -5211,6 +5211,79 @@ def commit_publication_plan(
         )
 
 
+def _publish_single_derived_artifact(
+    snapshot: GraphSnapshot,
+    *,
+    graph_path: Path,
+    output_path: Path,
+    payload: bytes,
+    source_managed: bool,
+    artifact_kind: str,
+) -> None:
+    """Publish one graph-derived artifact through its exact output authority."""
+    graph_output = graph_path.expanduser().resolve().parent
+    resolved_output = output_path.expanduser().resolve()
+    destination_authority = managed_output_containing(resolved_output)
+    contained_by_source = (
+        resolved_output.parent == graph_output
+        or graph_output in resolved_output.parents
+    )
+    managed_destination = destination_authority == graph_output or (
+        source_managed
+        and destination_authority is None
+        and contained_by_source
+    )
+    if destination_authority is not None and not managed_destination:
+        raise PendingTransactionError(
+            f"{artifact_kind} destination is controlled by foreign managed authority"
+        )
+    if not managed_destination:
+        commit_unmanaged_bytes(resolved_output, payload)
+        return
+
+    relative = resolved_output.relative_to(graph_output).as_posix()
+    active = optional_current_transaction(graph_output)
+    if active is not None:
+        if active.output != graph_output:
+            raise PendingTransactionError(
+                f"{artifact_kind} destination does not match exact transaction output"
+            )
+        commit_relative_bytes(active, relative, payload)
+        return
+
+    transaction_root = (
+        graph_output.parent if graph_output.name == "graphify-out" else graph_output
+    )
+    transaction = begin_transaction(
+        "runtime",
+        transaction_root,
+        output=graph_output,
+        expected_snapshot=snapshot,
+    )
+    graph_data = dict(snapshot.data)
+    metadata = dict(graph_data.get("graph") or {})
+    metadata[GRAPH_WATERMARK_KEY] = {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "generation": transaction.generation,
+        "state": "active",
+    }
+    graph_data["graph"] = metadata
+    graph_payload = json.dumps(
+        graph_data, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    payloads = dict(snapshot.artifacts)
+    payloads[graph_path.name] = graph_payload
+    payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
+    payloads[relative] = payload
+    commit_publication_plan(
+        transaction,
+        PublicationPlan(payloads),
+        graph_name=graph_path.name,
+    )
+    finish_transaction(transaction)
+
+
 def _watermark(payload: bytes) -> dict[str, object]:
     try:
         graph = json.loads(payload.decode("utf-8"))
@@ -6335,19 +6408,6 @@ def _obsidian_leaf_journal_present(
             os.close(parent_fd)
         elif "parent" in locals():
             parent.close()
-
-
-def _unmanaged_directory_stat(
-    capability: OutputCapability, name: str
-) -> os.stat_result | None:
-    name = _validated_shallow_name(name)
-    try:
-        info = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISDIR(info.st_mode):
-        raise PendingTransactionError("external Obsidian vault path is unsafe")
-    return info
 
 
 def _open_unmanaged_directory_relative(

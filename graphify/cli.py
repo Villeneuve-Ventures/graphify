@@ -613,20 +613,6 @@ def _replace_graph_argument(arguments: list[str], graph: Path) -> list[str]:
     return [*rewritten, "--graph", str(graph)]
 
 
-def _replace_out_argument(arguments: list[str], output_root: Path) -> list[str]:
-    rewritten = list(arguments)
-    index = 0
-    while index < len(rewritten):
-        if rewritten[index] == "--out" and index + 1 < len(rewritten):
-            rewritten[index + 1] = str(output_root)
-            return rewritten
-        if rewritten[index].startswith("--out="):
-            rewritten[index] = f"--out={output_root}"
-            return rewritten
-        index += 1
-    return [*rewritten, "--out", str(output_root)]
-
-
 def _transactional_extract() -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,

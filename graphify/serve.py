@@ -57,6 +57,8 @@ def _graph_from_snapshot(snapshot) -> nx.Graph:
 
 
 def _load_graph(graph_path: str) -> nx.Graph:
+    from graphify.transaction import PendingTransactionError
+
     try:
         resolved = Path(graph_path).resolve()
         if resolved.suffix != ".json":
@@ -67,6 +69,11 @@ def _load_graph(graph_path: str) -> nx.Graph:
         from graphify.transaction import open_graph_snapshot
         snapshot = open_graph_snapshot(resolved, purpose="serve")
         return _graph_from_snapshot(snapshot)
+    except PendingTransactionError as exc:
+        if not isinstance(exc.__cause__, (UnicodeDecodeError, json.JSONDecodeError)):
+            raise
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1036,8 +1043,8 @@ def _build_server(graph_path: str):
     # Per-graph context cache: resolved graph.json path -> exact consumed snapshot.
     # The server's default graph is just the first entry; a tool call carrying a
     # project_path adds its own. Routing every graph through one cache means the
-    # eager trigram index and the mtime+size hot-reload behave identically for
-    # the default graph and for any project graph.
+    # eager trigram index and digest-bound snapshot refresh behave identically
+    # for the default graph and for any project graph.
     _default_graph_path = graph_path
     _ctx_lock = threading.Lock()
     _ctx_cache: dict[str, dict] = {}

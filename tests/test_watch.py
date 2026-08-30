@@ -1520,10 +1520,8 @@ def test_rebuild_code_incremental_rename_preserves_symlink_source_path(tmp_path)
 # --- #1059: pending-changes queue prevents commit drops under lock contention ---
 
 
-def test_queue_and_drain_pending_round_trip(tmp_path):
-    """_queue_pending writes one path per line; _drain_pending reads + unlinks
-    and returns the same set of paths."""
-    from graphify.watch import _queue_pending, _drain_pending, _PENDING_FILENAME
+def test_queue_pending_writes_legacy_compatibility_signal(tmp_path):
+    from graphify.watch import _queue_pending, _PENDING_FILENAME
 
     out = tmp_path / "graphify-out"
     paths = [Path("a.py"), Path("sub/b.py"), Path("c.md")]
@@ -1536,27 +1534,7 @@ def test_queue_and_drain_pending_round_trip(tmp_path):
         "a.py", "sub/b.py", "c.md",
     ]
 
-    drained = _drain_pending(out)
-    assert drained == paths
-    # Drain unlinks so subsequent callers see an empty queue.
-    assert not pending_file.exists()
-    assert _drain_pending(out) == []
-
-
-def test_drain_pending_dedupes_and_skips_blank_lines(tmp_path):
-    """Repeated appends across concurrent contenders must dedupe; partial
-    writes leaving blank lines must not poison the merge."""
-    from graphify.watch import _queue_pending, _drain_pending
-
-    out = tmp_path / "graphify-out"
-    _queue_pending(out, [Path("a.py"), Path("b.py")])
-    _queue_pending(out, [Path("b.py"), Path("c.py")])
-    # Simulate a torn write leaving an empty line.
-    with open(out / ".pending_changes", "a", encoding="utf-8") as fh:
-        fh.write("\n   \n")
-
-    drained = _drain_pending(out)
-    assert drained == [Path("a.py"), Path("b.py"), Path("c.py")]
+    assert pending_file.exists()
 
 
 def test_queue_pending_noop_on_empty_list(tmp_path):
@@ -1844,9 +1822,7 @@ def test_transactional_watch_uses_report_memory_without_receipt_ownership(tmp_pa
     } == memory_before
 
 
-def test_transactional_watch_consumes_checkpointed_legacy_paths_without_drain(
-    tmp_path, monkeypatch
-):
+def test_transactional_watch_preserves_checkpointed_legacy_paths(tmp_path):
     import graphify.watch as watch_module
 
     source = tmp_path / "source.py"
@@ -1857,10 +1833,6 @@ def test_transactional_watch_consumes_checkpointed_legacy_paths_without_drain(
     output.mkdir()
     (output / ".pending_changes").write_text(str(late) + "\n", encoding="utf-8")
 
-    def forbidden_drain(_output):
-        raise AssertionError("transactional claim must not unlink legacy pending state")
-
-    monkeypatch.setattr(watch_module, "_drain_pending", forbidden_drain)
     assert watch_module._rebuild_code(tmp_path, changed_paths=[source]) is True
     graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
     assert any(

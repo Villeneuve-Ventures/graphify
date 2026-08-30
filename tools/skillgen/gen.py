@@ -2038,26 +2038,6 @@ def _is_prepared_transaction_runner_line(line: str) -> bool:
     }
 
 
-def _is_prepared_workspace_path_line(line: str) -> bool:
-    """Whether a routed monolith line names a managed prepared-workspace file."""
-    names = (
-        ".graphify_detect.json",
-        ".graphify_transcripts.json",
-        ".graphify_chunk_",
-        ".graphify_semantic_new.json",
-        "GRAPH_REPORT.md",
-        "cost.json",
-        "graph.json",
-    )
-    return (
-        any(name in line for name in names)
-        or "Path('.graphify_" in line
-        or "Path('graphify-out/.graphify_" in line
-        or "glob.glob('.graphify_" in line
-        or "glob.glob('graphify-out/.graphify_" in line
-    )
-
-
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing

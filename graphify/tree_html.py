@@ -573,17 +573,8 @@ def write_tree_html(
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(graph_path)
     from graphify.transaction import (
-        GRAPH_WATERMARK_KEY,
-        PendingTransactionError,
-        PublicationPlan,
-        begin_transaction,
-        commit_publication_plan,
-        commit_relative_bytes,
-        commit_unmanaged_bytes,
-        finish_transaction,
-        managed_output_containing,
+        _publish_single_derived_artifact,
         open_graph_snapshot,
-        optional_current_transaction,
     )
     snapshot = open_graph_snapshot(graph_path, purpose="tree-prepare")
     if source_managed is None:
@@ -595,62 +586,12 @@ def write_tree_html(
     header = f"{tree['name']} — Knowledge Graph"
     html = emit_html(tree, title=title, header=header)
     payload = html.encode("utf-8")
-    graph_parent = graph_path.expanduser().resolve().parent
-    resolved_output = output_path.expanduser().resolve()
-    destination_output = managed_output_containing(resolved_output)
-    contained_by_source_output = (
-        resolved_output.parent == graph_parent or graph_parent in resolved_output.parents
+    _publish_single_derived_artifact(
+        snapshot,
+        graph_path=graph_path,
+        output_path=output_path,
+        payload=payload,
+        source_managed=source_managed,
+        artifact_kind="tree",
     )
-    managed_destination = destination_output == graph_parent or (
-        source_managed
-        and destination_output is None
-        and contained_by_source_output
-    )
-    if destination_output is not None and not managed_destination:
-        raise PendingTransactionError(
-            "tree destination is controlled by foreign managed authority"
-        )
-    if managed_destination:
-        relative = resolved_output.relative_to(graph_parent).as_posix()
-        active = optional_current_transaction(graph_parent)
-        if active is not None:
-            if active.output != graph_parent:
-                raise PendingTransactionError(
-                    "tree destination does not match exact transaction output"
-                )
-            commit_relative_bytes(active, relative, payload)
-        else:
-            transaction_root = (
-                graph_parent.parent if graph_parent.name == "graphify-out" else graph_parent
-            )
-            transaction = begin_transaction(
-                "runtime",
-                transaction_root,
-                output=graph_parent,
-                expected_snapshot=snapshot,
-            )
-            graph_data = dict(snapshot.data)
-            metadata = dict(graph_data.get("graph") or {})
-            metadata[GRAPH_WATERMARK_KEY] = {
-                "schema": 1,
-                "protocol_epoch": 1,
-                "generation": transaction.generation,
-                "state": "active",
-            }
-            graph_data["graph"] = metadata
-            graph_payload = json.dumps(
-                graph_data, ensure_ascii=False, separators=(",", ":")
-            ).encode("utf-8")
-            payloads = dict(snapshot.artifacts)
-            payloads[graph_path.name] = graph_payload
-            payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
-            payloads[relative] = payload
-            commit_publication_plan(
-                transaction,
-                PublicationPlan(payloads),
-                graph_name=graph_path.name,
-            )
-            finish_transaction(transaction)
-    else:
-        commit_unmanaged_bytes(resolved_output, payload)
     return output_path

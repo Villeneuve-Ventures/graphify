@@ -14,21 +14,19 @@ from pathlib import Path
 # Single source of truth in graphify.paths (#1423); re-exported as _GRAPHIFY_OUT.
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 _PENDING_FILENAME = ".pending_changes"
-_PENDING_DRAIN_MAX_PASSES = 20
 
 
 def _queue_pending(out_dir: Path, changed_paths: list[Path]) -> None:
     """Append ``changed_paths`` to ``out_dir/.pending_changes`` (one per line).
 
-    Used by a post-commit hook process that cannot acquire ``_rebuild_lock``
-    so its change set is not silently dropped (#1059). The lock-holding
-    process drains this file before and after its rebuild and merges the
-    contents with its own change set.
+    This is an old-process compatibility signal for clients that predate the
+    canonical durable rebuild queue.  Current rebuilds checkpoint the file
+    without unlinking it and coordinate through the transaction protocol.
 
     Opened in append mode so concurrent writers do not clobber each other on
     POSIX; each ``write()`` of a small payload is effectively atomic. A
     trailing newline is always written so partial-line corruption stays
-    confined to the offending entry and is skipped on drain.
+    confined to the offending entry.
     """
     if not changed_paths:
         return
@@ -37,40 +35,6 @@ def _queue_pending(out_dir: Path, changed_paths: list[Path]) -> None:
     payload = "".join(f"{os.fspath(p)}\n" for p in changed_paths)
     with open(pending, "a", encoding="utf-8") as fh:
         fh.write(payload)
-
-
-def _drain_pending(out_dir: Path) -> list[Path]:
-    """Read + unlink ``out_dir/.pending_changes`` and return deduplicated paths.
-
-    Returns an empty list if the file does not exist. Empty/whitespace lines
-    are silently skipped so a partial concurrent write that left only a
-    fragment cannot poison the merge.
-    """
-    pending = out_dir / _PENDING_FILENAME
-    if not pending.exists():
-        return []
-    try:
-        raw = pending.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    # Unlink BEFORE returning so a crash between read and process retains the
-    # data in the next caller's view via the lines we are about to return —
-    # i.e. losing the file after reading is fine, losing it before would be a
-    # bug. Use missing_ok to tolerate a racing drain on platforms where
-    # rename/unlink may interleave.
-    with contextlib.suppress(FileNotFoundError):
-        pending.unlink()
-    seen: set[str] = set()
-    out: list[Path] = []
-    for line in raw.splitlines():
-        s = line.strip()
-        if not s or s in seen:
-            continue
-        seen.add(s)
-        out.append(Path(s))
-    return out
-
-
 # Build options that must survive into later rebuilds. The initial `extract`
 # scan honours `--exclude`, but `update`/`watch`/hook rebuilds re-run detect()
 # and would silently re-include excluded paths unless the patterns are persisted
