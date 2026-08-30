@@ -1925,11 +1925,18 @@ def test_retired_gc_never_replaces_destination_appearing_during_move(
     real_move = transaction_module._move_identity_no_replace
 
     if phase == "resume":
-        def stop_before_move(capability, source, target, expected, *, label):
+        def stop_before_move(
+            capability, source, target, expected, *, label, failpoint=None
+        ):
             if label == "retired workspace quarantine":
                 raise RuntimeError("before quarantine move")
             return real_move(
-                capability, source, target, expected, label=label
+                capability,
+                source,
+                target,
+                expected,
+                label=label,
+                failpoint=failpoint,
             )
 
         monkeypatch.setattr(
@@ -1967,9 +1974,6 @@ def test_retired_gc_never_replaces_destination_appearing_during_move(
             else:
                 target_path.mkdir()
                 (target_path / "foreign").write_text("preserve", encoding="utf-8")
-        elif phase == "restore" and target == workspace.name:
-            target_path.mkdir()
-            (target_path / "winner").write_text("preserve", encoding="utf-8")
         return original(capability, source, target)
 
     monkeypatch.setattr(transaction_module, "_atomic_rename_no_replace", race)
@@ -1986,7 +1990,7 @@ def test_retired_gc_never_replaces_destination_appearing_during_move(
     assert foreign_target is not None
     if phase == "restore":
         assert detached is not None and detached.is_dir()
-        assert (workspace / "winner").read_text(encoding="utf-8") == "preserve"
+        assert not workspace.exists()
         assert (foreign_target / "foreign-moved").read_text(encoding="utf-8") == "preserve"
     else:
         assert workspace.is_dir()
@@ -6249,6 +6253,48 @@ def test_prepared_retirement_never_replaces_destination_appearing_after_marker(
     assert (raced_target / "foreign").read_text(encoding="utf-8") == "preserve"
 
 
+def test_prepared_post_move_foreign_target_is_not_restored_as_workspace(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        prepared = transaction_module._pin_prepared_workspace(tx, capability)
+        prepared.close()
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    workspace = output.parent / marker["workspace_name"]
+    original = transaction_module._atomic_rename_no_replace
+    foreign: Path | None = None
+    displaced: Path | None = None
+
+    def replace_after_move(capability, source, target):
+        nonlocal foreign, displaced
+        original(capability, source, target)
+        if target.startswith(".graphify-retired-"):
+            candidate = capability.path / target
+            moved = candidate.with_name(candidate.name + ".displaced")
+            foreign = candidate
+            displaced = moved
+            candidate.rename(moved)
+            candidate.mkdir()
+            (candidate / "foreign").write_text("preserve", encoding="utf-8")
+
+    monkeypatch.setattr(
+        transaction_module, "_atomic_rename_no_replace", replace_after_move
+    )
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="identity changed"):
+            transaction_module._retire_prepared_locked(capability)
+
+    assert not workspace.exists()
+    assert foreign is not None
+    assert (foreign / "foreign").read_text(encoding="utf-8") == "preserve"
+    assert displaced is not None
+    assert (displaced / ".graphify_retired.json").is_file()
+    assert (output / transaction_module.PREPARED_FILE).is_file()
+
+
 def test_prepared_retirement_rejects_traversal_transaction_id(tmp_path):
     import graphify.transaction as transaction_module
 
@@ -8161,6 +8207,43 @@ def test_queue_retirement_never_replaces_destination_appearing_after_journal(
     assert b"a.py" in durable
     if mode == "replacement":
         assert b"b.py" in durable
+
+
+def test_queue_post_move_foreign_target_is_never_inferred_as_predecessor(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    retirement: Path | None = None
+    displaced: Path | None = None
+
+    def replace_after_move(phase: str) -> None:
+        nonlocal retirement, displaced
+        if phase != "after_identity_no_replace_move":
+            return
+        retirement = next(output.glob(".graphify_queue_retire.*"))
+        displaced = retirement.with_name(retirement.name + ".displaced")
+        retirement.rename(displaced)
+        retirement.write_bytes(b"foreign")
+
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        record = transaction_module._read_queue_record(capability)
+        with pytest.raises(PendingTransactionError, match="identity changed"):
+            transaction_module._retire_queue_record(
+                capability, record, failpoint=replace_after_move
+            )
+
+    assert retirement is not None and retirement.read_bytes() == b"foreign"
+    assert displaced is not None and b"a.py" in displaced.read_bytes()
+    assert not (output / transaction_module.QUEUE_FILE).exists()
+    assert list(output.glob(".graphify_queue_transition.*.json"))
+    before = _file_bytes(output)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError):
+            transaction_module._recover_queue_transitions_locked(capability)
+    assert _file_bytes(output) == before
 
 
 def test_enqueue_retirement_crash_preserves_each_intent_once(tmp_path):

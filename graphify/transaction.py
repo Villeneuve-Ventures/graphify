@@ -1445,6 +1445,7 @@ def _move_identity_no_replace(
     expected: OutputIdentity | tuple[int, int],
     *,
     label: str,
+    failpoint: Callable[[str], None] | None = None,
 ) -> None:
     """Move one exact entry without replacing a concurrent destination."""
     expected_pair = (
@@ -1470,23 +1471,10 @@ def _move_identity_no_replace(
             capability.validate()
             return
         raise PendingTransactionError(f"{label} destination changed") from exc
+    if failpoint is not None:
+        failpoint("after_identity_no_replace_move")
     moved_identity = _relative_identity(capability, target)
     source_identity = _relative_identity(capability, source)
-    if (
-        source_identity is None
-        and moved_identity is not None
-        and moved_identity != expected_pair
-    ):
-        try:
-            _move_identity_no_replace(
-                capability,
-                target,
-                source,
-                moved_identity,
-                label=f"{label} restoration",
-            )
-        except PendingTransactionError:
-            pass
     if source_identity is not None or moved_identity != expected_pair:
         raise PendingTransactionError(f"{label} identity changed")
     os.fsync(capability.fd)
@@ -3022,20 +3010,6 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
             expected.device,
             expected.inode,
         ):
-            try:
-                os.stat(
-                    workspace.name,
-                    dir_fd=parent_capability.fd,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                _move_identity_no_replace(
-                    parent_capability,
-                    tombstone,
-                    workspace.name,
-                    OutputIdentity(retired_info.st_dev, retired_info.st_ino),
-                    label="prepared workspace restoration",
-                )
             raise PendingTransactionError(
                 "prepared workspace changed during identity retirement"
             )
@@ -3440,6 +3414,7 @@ def gc_retired_workspaces(
                         quarantine,
                         identity,
                         label="retired workspace quarantine",
+                        failpoint=failpoint,
                     )
                 else:
                     quarantine = str(marker["quarantine_name"])
@@ -3461,16 +3436,10 @@ def gc_retired_workspaces(
                             quarantine,
                             identity,
                             label="retired workspace quarantine",
+                            failpoint=failpoint,
                         )
                 moved = os.stat(quarantine, dir_fd=parent.fd, follow_symlinks=False)
                 if (moved.st_dev, moved.st_ino) != (identity.device, identity.inode):
-                    _move_identity_no_replace(
-                        parent,
-                        quarantine,
-                        selected_name,
-                        OutputIdentity(moved.st_dev, moved.st_ino),
-                        label="retired workspace restoration",
-                    )
                     raise PendingTransactionError("retired workspace identity changed")
                 with pin_output(parent.path / quarantine) as retired:
                     quarantined_marker = dict(marker)
@@ -8840,6 +8809,7 @@ def _recover_queue_retirement(
                 retirement_name,
                 predecessor.identity,
                 label="queue retirement",
+                failpoint=failpoint,
             )
             os.fsync(capability.fd)
             if failpoint is not None:
@@ -9018,6 +8988,7 @@ def _recover_queue_transition(
             retirement_name,
             predecessor_identity,
             label="queue transition retirement",
+            failpoint=failpoint,
         )
         os.fsync(capability.fd)
         if failpoint is not None:
