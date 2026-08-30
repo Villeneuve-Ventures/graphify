@@ -836,16 +836,6 @@ def _rebuild_code(
 
         actual_out = watch_path / _GRAPHIFY_OUT
         baseline_snapshot = None
-        if not actual_out.exists():
-            try:
-                baseline_snapshot = open_graph_snapshot(
-                    actual_out / "graph.json",
-                    purpose="watch-prepare",
-                    allow_absent=True,
-                )
-            except PendingTransactionError as exc:
-                print(f"[graphify watch] Rebuild deferred: {exc}")
-                return False
         queued = queue_rebuild(
             "update" if changed_paths is not None else "full",
             watch_path,
@@ -853,12 +843,6 @@ def _rebuild_code(
             changed_paths=changed_paths,
             source="watch",
             legacy_pending_name=_PENDING_FILENAME,
-            expected_snapshot=(
-                baseline_snapshot
-                if baseline_snapshot is not None
-                and not baseline_snapshot.graph_present
-                else None
-            ),
         )
         baseline_graph: dict | None = None
         baseline_artifacts: dict[str, bytes] = {}
