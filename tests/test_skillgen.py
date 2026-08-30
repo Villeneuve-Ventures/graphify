@@ -1906,6 +1906,9 @@ def test_posix_path_shadow_flows_use_fresh_interpreter_and_ignore_pointer(tmp_pa
             '"$GRAPHIFY_PYTHON" -E -P -B -m graphify --help',
             block,
         )
+        safe_block = re.sub(
+            r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", ".", safe_block
+        )
         result = subprocess.run(
             ["/bin/bash", "-c", safe_block],
             cwd=tmp_path,
@@ -5665,9 +5668,11 @@ def test_rendered_posix_handoff_honors_graphify_out_override(tmp_path, absolute)
     assert list(expected.glob(".graphify_transaction_token.*"))
     assert not list((root / "graphify-out").glob(".graphify_transaction_token.*"))
 
+    caller = tmp_path / "different-cwd"
+    caller.mkdir()
     followup = subprocess.run(
         ["/bin/bash", "-c", _posix_root_persistence_script(str(root))],
-        cwd=root,
+        cwd=caller,
         env={
             **os.environ,
             "GRAPHIFY_OUT": str(configured),
@@ -5712,6 +5717,8 @@ def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path, absolut
     assert list(expected.glob(".graphify_transaction_token.*"))
     assert not list((tmp_path / "graphify-out").glob(".graphify_transaction_token.*"))
 
+    caller = tmp_path / "different-cwd"
+    caller.mkdir()
     followup = subprocess.run(
         [
             str(shutil.which("pwsh")),
@@ -5721,7 +5728,7 @@ def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path, absolut
             "-Command",
             _powershell_root_persistence_script(str(tmp_path)),
         ],
-        cwd=tmp_path,
+        cwd=caller,
         env={
             **os.environ,
             "GRAPHIFY_OUT": str(configured),

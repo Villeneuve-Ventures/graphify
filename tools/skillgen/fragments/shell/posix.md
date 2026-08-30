@@ -74,7 +74,7 @@ export GRAPHIFY_TRANSACTION_TOKEN; graphify_transaction_python() { [ -n "${GRAPH
 ```
 On success, continue to Step 2. For a full build with `INPUT_PATH`, persist its root:
 ```bash
-GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())') || exit $?; "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c 'import sys; from pathlib import Path; Path(".graphify_root").write_text(str(Path(sys.argv[1]).resolve(strict=True)), encoding="utf-8")' INPUT_PATH
+GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c 'import sys; from pathlib import Path; Path(".graphify_root").write_text(str(Path(sys.argv[1]).resolve(strict=True)), encoding="utf-8")' INPUT_PATH
 ```
 Skip scan-root persistence for no-path commands; `.graphify_python` remains independent of `.graphify_root`.
 **In every subsequent bash block, replace `python3` with `"$(cat graphify-out/.graphify_python)" -E -P -B` to use the correct interpreter without importing project-local or `PYTHONPATH` shadows or writing bytecode.**

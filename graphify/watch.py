@@ -1453,8 +1453,21 @@ def check_update(watch_path: Path) -> bool:
     re-extraction via `/graphify --update` — this function only signals
     that the update is needed.
     """
-    flag = Path(watch_path) / _GRAPHIFY_OUT / "needs_update"
-    if flag.exists():
+    from graphify.transaction import PendingTransactionError, open_graph_snapshot
+
+    output = Path(watch_path) / _GRAPHIFY_OUT
+    try:
+        snapshot = open_graph_snapshot(
+            output / "graph.json",
+            purpose="watch-check-update",
+            allow_absent=True,
+            retain_artifacts=("needs_update",),
+            retain_limits={"needs_update": 1},
+        )
+        pending = "needs_update" in snapshot.artifacts
+    except PendingTransactionError:
+        pending = False
+    if pending:
         print(f"[graphify check-update] Pending non-code changes in {watch_path}.")
         print("[graphify check-update] Run `/graphify --update` to apply semantic re-extraction.")
     return True
@@ -1485,6 +1498,7 @@ def _notify_only(
         semantic=True,
         source="watch-notify",
     )
+    marker_published = False
     try:
         snapshot = open_graph_snapshot(
             output / "graph.json", purpose="watch-prepare", allow_absent=True
@@ -1520,6 +1534,7 @@ def _notify_only(
         commit_publication_plan(
             transaction, PublicationPlan(payloads=payloads, deletions=())
         )
+        marker_published = True
         recover_selected_transaction(
             transaction.kind,
             watch_path,
@@ -1533,7 +1548,7 @@ def _notify_only(
     print(f"\n[graphify watch] New or changed files detected in {watch_path}")
     print("[graphify watch] Non-code files changed - semantic re-extraction requires LLM.")
     print("[graphify watch] Run `/graphify --update` in Claude Code to update the graph.")
-    if (output / "needs_update").is_file():
+    if marker_published:
         print(f"[graphify watch] Flag published to {output / 'needs_update'}")
 
 

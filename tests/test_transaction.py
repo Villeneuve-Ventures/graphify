@@ -41,6 +41,7 @@ from graphify.transaction import (
     owned_step,
     pin_output,
     PublicationPlan,
+    publication_plan_from_directory,
     queue_rebuild,
     recover_close,
     recover_transaction,
@@ -5632,7 +5633,7 @@ def test_repeated_build_recovery_keeps_receipt_successor_generation(tmp_path):
     assert receipt["generation"] == second.generation
 
 
-def test_prepared_workspace_creation_resumes_after_binding_interruption(
+def test_prepared_workspace_binding_interruption_never_adopts_unowned_directory(
     tmp_path, monkeypatch
 ):
     import graphify.transaction as transaction_module
@@ -5664,17 +5665,16 @@ def test_prepared_workspace_creation_resumes_after_binding_interruption(
         "generation": tx.generation,
         "workspace_name": f".graphify-prepare-{tx.id}",
     }
+    workspace = output.parent / f".graphify-prepare-{tx.id}"
+    (workspace / "foreign").write_text("preserve", encoding="utf-8")
     monkeypatch.setattr(transaction_module, "_replace_bytes", original)
     with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
-        prepared = transaction_module._pin_prepared_workspace(tx, capability)
-        workspace = prepared.path
-        prepared.close()
-    assert workspace == output.parent / f".graphify-prepare-{tx.id}"
-    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
-    assert marker["state"] == "ready"
+        with pytest.raises(PendingTransactionError, match="unexpectedly exists"):
+            transaction_module._pin_prepared_workspace(tx, capability)
+    assert (workspace / "foreign").read_text(encoding="utf-8") == "preserve"
 
 
-def test_recovery_retires_planned_prepared_workspace(tmp_path, monkeypatch):
+def test_recovery_rejects_unbound_planned_prepared_workspace(tmp_path, monkeypatch):
     import graphify.transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
@@ -5694,19 +5694,91 @@ def test_recovery_retires_planned_prepared_workspace(tmp_path, monkeypatch):
             transaction_module._pin_prepared_workspace(tx, capability)
     monkeypatch.setattr(transaction_module, "_replace_bytes", original)
 
-    recovered = recover_transaction(
-        "runtime", root, output=output, now=time.time() + 100.0
-    )
+    workspace = output.parent / f".graphify-prepare-{tx.id}"
+    (workspace / "foreign").write_text("preserve", encoding="utf-8")
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="unexpectedly exists"):
+        recover_transaction("runtime", root, output=output, now=time.time() + 100.0)
+    assert _file_bytes(output) == before
+    assert (workspace / "foreign").read_text(encoding="utf-8") == "preserve"
 
-    assert not (output.parent / f".graphify-prepare-{tx.id}").exists()
-    retained = transaction_status(output)["retained_workspaces"]
-    assert any(item["name"].startswith(f".graphify-retired-{tx.id}-") for item in retained)
-    stage_transaction_handoff(recovered)
-    recovered = resume_transaction(recovered.id, root, output=output)
+
+def test_prepared_retirement_rejects_traversal_transaction_id(tmp_path):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
     with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
-        prepared = transaction_module._pin_prepared_workspace(recovered, capability)
-        assert prepared.path.is_dir()
+        prepared = transaction_module._pin_prepared_workspace(tx, capability)
         prepared.close()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel").write_text("preserve", encoding="utf-8")
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    marker["transaction_id"] = "../outside"
+    (output / transaction_module.PREPARED_FILE).write_text(json.dumps(marker))
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="transaction id is malformed"):
+            transaction_module._retire_prepared_locked(capability)
+    assert (outside / "sentinel").read_text(encoding="utf-8") == "preserve"
+
+
+def test_publication_plan_rejects_leaf_replacement(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    leaf = prepared / "graph.json"
+    leaf.write_bytes(b"old")
+    original = transaction_module._read_bytes
+
+    def replace_after_read(capability, name, limit=transaction_module._MAX_STATE_BYTES):
+        payload = original(capability, name, limit)
+        replacement = prepared / "replacement"
+        replacement.write_bytes(b"new")
+        replacement.replace(leaf)
+        return payload
+
+    monkeypatch.setattr(transaction_module, "_read_bytes", replace_after_read)
+    with pytest.raises(PendingTransactionError, match="changed while reading"):
+        publication_plan_from_directory(prepared)
+
+
+def test_publication_plan_rejects_symlink_substitution(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    leaf = prepared / "graph.json"
+    leaf.write_bytes(b"old")
+    target = tmp_path / "target"
+    target.write_bytes(b"foreign")
+    original = transaction_module._read_bytes
+
+    def substitute(capability, name, limit=transaction_module._MAX_STATE_BYTES):
+        leaf.unlink()
+        leaf.symlink_to(target)
+        return original(capability, name, limit)
+
+    monkeypatch.setattr(transaction_module, "_read_bytes", substitute)
+    with pytest.raises((PendingTransactionError, OSError)):
+        publication_plan_from_directory(prepared)
+    assert target.read_bytes() == b"foreign"
+
+
+def test_publication_plan_rejects_oversized_leaf_before_read(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    (prepared / "graph.json").write_bytes(b"12345")
+    monkeypatch.setattr(transaction_module, "_MAX_RECEIPT_AGGREGATE_BYTES", 4)
+    monkeypatch.setattr(
+        transaction_module,
+        "_read_bytes",
+        lambda *_args, **_kwargs: pytest.fail("oversized leaf was materialized"),
+    )
+    with pytest.raises(PendingTransactionError, match="bounded inventory"):
+        publication_plan_from_directory(prepared)
 
 
 def test_next_generation_retires_prepared_workspace_left_after_close(tmp_path):
@@ -7595,6 +7667,7 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
         ("tree_html.py", "write_tree_html", "tree-prepare"),
         ("watch.py", "_rebuild_code", "watch-prepare"),
         ("watch.py", "_notify_only", "watch-prepare"),
+        ("watch.py", "check_update", "watch-check-update"),
     }
     discovered: set[tuple[str, str, str]] = set()
     source_root = Path(__file__).parents[1] / "graphify"

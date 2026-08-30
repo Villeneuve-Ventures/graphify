@@ -236,7 +236,7 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export wiki
 ```
@@ -468,7 +468,7 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export neo4j
 ```
@@ -700,7 +700,7 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export falkordb
 ```
@@ -930,7 +930,7 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export svg
 ```
@@ -1160,7 +1160,7 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
-$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -m graphify export graphml
 ```

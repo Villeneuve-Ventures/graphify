@@ -121,9 +121,9 @@ If the import succeeds, print nothing and move straight to Step 2.
 For a full build with an explicit `INPUT_PATH`, persist the scan root in a separate block:
 
 ```powershell
-$GraphifyActiveTokenCode = 'from graphify.transaction import active_transaction_token_path; print(active_transaction_token_path())'; $GraphifyPreparedRootCode = 'import sys; from pathlib import Path; Path(".graphify_root").write_text(str(Path(sys.argv[1]).resolve(strict=True)), encoding="utf-8")'
-$GraphifyTransactionToken = & $GraphifyPython -E -P -B -c $GraphifyActiveTokenCode
+$GraphifyActiveTokenCode = 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))'; $GraphifyPreparedRootCode = 'import sys; from pathlib import Path; Path(".graphify_root").write_text(str(Path(sys.argv[1]).resolve(strict=True)), encoding="utf-8")'
 $GraphifyPreparedRoot = (Resolve-Path INPUT_PATH).Path
+$GraphifyTransactionToken = & $GraphifyPython -E -P -B -c $GraphifyActiveTokenCode $GraphifyPreparedRoot
 & $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $GraphifyTransactionToken '--' -c $GraphifyPreparedRootCode $GraphifyPreparedRoot
 if ($LASTEXITCODE -ne 0) { throw "Failed to write the prepared Graphify scan root." }
 ```

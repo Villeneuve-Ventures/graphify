@@ -1053,8 +1053,7 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
             rf"(?m)^& \$GraphifyPython -E -P -B -m graphify export ({local_exports})\s*$",
             lambda match: (
                 "$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B "
-                "-c 'from graphify.transaction import active_transaction_token_path; "
-                "print(active_transaction_token_path())'\n"
+                "-c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH\n"
                 "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
                 "& $GraphifyPython -E -P -B -m graphify.transaction "
                 "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' "
@@ -1067,8 +1066,7 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
             rf'(?m)^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export ({local_exports})\s*$',
             lambda match: (
                 'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
-                "'from graphify.transaction import active_transaction_token_path; "
-                "print(active_transaction_token_path())') || exit $?; "
+                "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
                 "export GRAPHIFY_TRANSACTION_TOKEN; "
                 '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction '
                 'run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- '
@@ -1081,8 +1079,7 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
         body = body.replace(
             '"$GRAPHIFY_PYTHON" -E -P -B -c "\nimport json, os, sys',
             'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
-            "'from graphify.transaction import active_transaction_token_path; "
-            "print(active_transaction_token_path())') || exit $?; "
+            "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
             "export GRAPHIFY_TRANSACTION_TOKEN; "
             '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction '
             'run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "\n'
@@ -1092,8 +1089,7 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
         body = body.replace(
             '& $GraphifyPython -E -P -B -c "\nimport json, os, sys',
             "$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B "
-            "-c 'from graphify.transaction import active_transaction_token_path; "
-            "print(active_transaction_token_path())'\n"
+            "-c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH\n"
             "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
             "& $GraphifyPython -E -P -B -m graphify.transaction "
             "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -c \"\n"
@@ -1159,8 +1155,7 @@ def _route_full_build_transaction(body: str) -> str:
         )
         runner = (
             f"GRAPHIFY_TRANSACTION_TOKEN=$({interpreter} -E -P -B -c "
-            "'from graphify.transaction import active_transaction_token_path; "
-            "print(active_transaction_token_path())') || exit $?; "
+            "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
             "export GRAPHIFY_TRANSACTION_TOKEN; "
             f"{interpreter} -E -P -B -m graphify.transaction run-prepared-token "
             '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
@@ -1175,8 +1170,7 @@ def _route_full_build_transaction(body: str) -> str:
     )
     export_prefix = (
         'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
-        "'from graphify.transaction import active_transaction_token_path; "
-        "print(active_transaction_token_path())') || exit $?; "
+        "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
         "export GRAPHIFY_TRANSACTION_TOKEN; "
         '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token '
         '"$GRAPHIFY_TRANSACTION_TOKEN" -- -m graphify export '
@@ -1214,8 +1208,7 @@ def _route_full_build_transaction(body: str) -> str:
         if "finalize_prepared_transaction" not in tail:
             finalize = (
                 'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
-                "'from graphify.transaction import active_transaction_token_path; "
-                "print(active_transaction_token_path())') || exit $?; "
+                "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
                 "export GRAPHIFY_TRANSACTION_TOKEN; "
                 '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token '
                 '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c \'from graphify.transaction '
@@ -2030,8 +2023,11 @@ def _is_prepared_transaction_runner_line(line: str) -> bool:
     """Whether a monolith line routes a managed write through the pinned workspace."""
     stripped = line.strip()
     suffix = (
-        " -E -P -B -c 'from graphify.transaction import "
-        "active_transaction_token_path; print(active_transaction_token_path())') "
+        " -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import "
+        "GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; "
+        "root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); "
+        "output=(configured if configured.is_absolute() else root / configured).resolve(); "
+        "print(active_transaction_token_path(output))' INPUT_PATH) "
         '|| exit $?; export GRAPHIFY_TRANSACTION_TOKEN; {interpreter} -E -P -B '
         '-m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" '
         '-- -c "'

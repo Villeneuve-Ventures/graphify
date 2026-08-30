@@ -60,6 +60,18 @@ QUEUE_FILE = ".graphify_rebuild_queue.jsonl"
 ENQUEUE_FILE = ".graphify_enqueue.json"
 QUARANTINE_FILE = ".graphify_rebuild_quarantine.jsonl"
 PREPARED_FILE = ".graphify_prepared.json"
+_PREPARED_MARKER_FIELDS = {
+    "schema",
+    "protocol_epoch",
+    "state",
+    "transaction_id",
+    "generation",
+    "token_digest",
+    "workspace_name",
+    "identity",
+    "output_identity",
+    "prior_inventory",
+}
 LEGACY_PENDING_STATE_FILE = ".graphify_legacy_pending_state.json"
 DRAINER_FILE = ".graphify_drainer.json"
 TRANSITION_FILE = ".graphify_transition.json"
@@ -2200,6 +2212,15 @@ def _is_hex(value: object, length: int = 64) -> bool:
     )
 
 
+def _validated_transaction_id(value: object) -> str:
+    if not _is_hex(value):
+        raise PendingTransactionError("transaction id is malformed")
+    transaction_id = cast(str, value)
+    if Path(transaction_id).name != transaction_id:
+        raise PendingTransactionError("transaction id is malformed")
+    return transaction_id
+
+
 def _drainer_from_json(value: object) -> DrainerTuple:
     if not isinstance(value, dict):
         raise PendingTransactionError("malformed drainer authority")
@@ -2585,12 +2606,23 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
     marker = _load_json(capability, PREPARED_FILE)
     if marker is None:
         return None
-    transaction_id = marker.get("transaction_id")
+    transaction_id = _validated_transaction_id(marker.get("transaction_id"))
+    if (
+        set(marker) != _PREPARED_MARKER_FIELDS
+        or type(marker.get("generation")) is not int
+        or not _is_hex(marker.get("token_digest"))
+        or not isinstance(marker.get("prior_inventory"), list)
+        or not all(type(name) is str for name in marker["prior_inventory"])
+    ):
+        raise PendingTransactionError("prepared workspace binding is malformed")
     workspace = capability.path.parent / f".graphify-prepare-{transaction_id}"
     if marker.get("state") == "planned":
         if (
-            not isinstance(transaction_id, str)
+            marker.get("schema") != 1
+            or marker.get("protocol_epoch") != 1
             or marker.get("workspace_name") != workspace.name
+            or marker.get("identity") is not None
+            or marker.get("output_identity") is not None
         ):
             raise PendingTransactionError("prepared workspace binding is malformed")
         with pin_output(workspace.parent) as parent_capability:
@@ -2603,31 +2635,36 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
             except FileNotFoundError:
                 _unlink(capability, PREPARED_FILE)
                 return None
-            if not stat.S_ISDIR(info.st_mode):
-                raise PendingTransactionError("planned prepared workspace was replaced")
-            with pin_output(workspace) as workspace_capability:
-                entries = _list_entries(workspace_capability)
-                if not entries:
-                    workspace_capability.validate()
-                    os.rmdir(workspace.name, dir_fd=parent_capability.fd)
-                    os.fsync(parent_capability.fd)
-                    _unlink(capability, PREPARED_FILE)
-                    return None
-                if entries != ["graphify-out"]:
-                    raise PendingTransactionError(
-                        "planned prepared workspace contains unexpected state"
-                    )
-                with pin_output(workspace / "graphify-out") as prepared_output:
-                    marker = {
-                        **marker,
-                        "state": "workspace-created",
-                        "identity": workspace_capability.identity.json(),
-                        "output_identity": prepared_output.identity.json(),
-                    }
-                    _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
+            raise PendingTransactionError(
+                "planned prepared workspace unexpectedly exists"
+            )
     expected = _identity_from_json(marker.get("identity"))
     expected_output = _identity_from_json(marker.get("output_identity"))
-    if not isinstance(transaction_id, str) or expected is None or expected_output is None:
+    live = _read_transaction(capability)
+    protocol = _read_protocol(capability)
+    live_bound = (
+        live is not None
+        and live.id == transaction_id
+        and marker.get("generation") == live.generation
+        and marker.get("token_digest") == live.token_digest
+    )
+    complete_bound = (
+        live is None
+        and protocol is not None
+        and protocol.get("state") == "COMPLETE"
+        and protocol.get("transaction_id") == transaction_id
+        and protocol.get("generation") == marker.get("generation")
+        and protocol.get("owner_capability_digest") == marker.get("token_digest")
+    )
+    if (
+        marker.get("schema") != 1
+        or marker.get("protocol_epoch") != 1
+        or marker.get("state") not in {"workspace-created", "ready"}
+        or marker.get("workspace_name") != workspace.name
+        or expected is None
+        or expected_output is None
+        or not (live_bound or complete_bound)
+    ):
         raise PendingTransactionError("prepared workspace binding is malformed")
     with pin_output(workspace.parent) as parent_capability:
         try:
@@ -3477,7 +3514,8 @@ def _pin_prepared_workspace(
 ) -> PreparedWorkspaceCapability:
     """Open the exact preparation directory while the owner lock is held."""
     _validate_authority(capability, transaction)
-    workspace = transaction.output.parent / f".graphify-prepare-{transaction.id}"
+    transaction_id = _validated_transaction_id(transaction.id)
+    workspace = transaction.output.parent / f".graphify-prepare-{transaction_id}"
     marker = _load_json(capability, PREPARED_FILE)
     if marker is None:
         prior_receipt = _load_json(capability, RECEIPT_FILE)
@@ -3530,18 +3568,7 @@ def _pin_prepared_workspace(
             "prior_inventory": list(prior_inventory),
         }
         _create_bytes(capability, PREPARED_FILE, _json_bytes(marker))
-    marker_fields = {
-        "schema",
-        "protocol_epoch",
-        "state",
-        "transaction_id",
-        "generation",
-        "token_digest",
-        "workspace_name",
-        "identity",
-        "output_identity",
-        "prior_inventory",
-    }
+    marker_fields = _PREPARED_MARKER_FIELDS
     legacy_fields = marker_fields - {"protocol_epoch", "state", "workspace_name"}
     legacy_marker = set(marker) == legacy_fields
     marker_state = "ready" if legacy_marker else marker.get("state")
@@ -3551,18 +3578,21 @@ def _pin_prepared_workspace(
         or (not legacy_marker and marker.get("protocol_epoch") != 1)
         or marker_state not in {"planned", "workspace-created", "ready"}
         or marker.get("transaction_id") != transaction.id
+        or type(marker.get("generation")) is not int
         or marker.get("generation") != transaction.generation
+        or not _is_hex(marker.get("token_digest"))
         or marker.get("token_digest") != transaction.token_digest
         or (
             not legacy_marker
             and marker.get("workspace_name") != workspace.name
         )
         or not isinstance(marker.get("prior_inventory"), list)
+        or not all(type(name) is str for name in marker["prior_inventory"])
         or len(marker["prior_inventory"]) > _MAX_RECEIPT_ARTIFACTS
     ):
         raise PendingTransactionError("prepared workspace owner binding changed")
     prior_inventory = tuple(
-        _validated_relative_name(str(name)) for name in marker["prior_inventory"]
+        _validated_relative_name(name) for name in marker["prior_inventory"]
     )
     if len(prior_inventory) != len(set(prior_inventory)):
         raise PendingTransactionError("prepared workspace inventory is malformed")
@@ -3573,22 +3603,13 @@ def _pin_prepared_workspace(
                 os.mkdir(workspace.name, 0o700, dir_fd=parent_capability.fd)
                 os.fsync(parent_capability.fd)
             except FileExistsError:
-                info = os.stat(
-                    workspace.name,
-                    dir_fd=parent_capability.fd,
-                    follow_symlinks=False,
-                )
-                if not stat.S_ISDIR(info.st_mode):
-                    raise PendingTransactionError(
-                        "planned prepared workspace was replaced"
-                    )
+                raise PendingTransactionError(
+                    "planned prepared workspace unexpectedly exists"
+                ) from None
         workspace_capability = pin_output(workspace)
         try:
-            try:
-                os.mkdir("graphify-out", 0o700, dir_fd=workspace_capability.fd)
-                os.fsync(workspace_capability.fd)
-            except FileExistsError:
-                pass
+            os.mkdir("graphify-out", 0o700, dir_fd=workspace_capability.fd)
+            os.fsync(workspace_capability.fd)
             output_capability = pin_output(workspace / "graphify-out")
             marker = {
                 **marker,
@@ -4507,20 +4528,66 @@ def publication_plan_from_directory(
     prior_inventory: Mapping[str, bytes] | Sequence[str] = (),
 ) -> PublicationPlan:
     """Inventory every prepared regular file and reconcile only prior managed paths."""
-    root = Path(directory).resolve(strict=True)
     payloads: dict[str, bytes] = {}
     aggregate = 0
-    for entry in sorted(root.rglob("*")):
-        if entry.is_symlink():
-            raise PendingTransactionError("prepared publication contains a symlink")
-        if not entry.is_file():
-            continue
-        relative = _validated_relative_name(entry.relative_to(root).as_posix())
-        payload = entry.read_bytes()
-        aggregate += len(payload)
-        if len(payloads) >= _MAX_RECEIPT_ARTIFACTS or aggregate > _MAX_RECEIPT_AGGREGATE_BYTES:
-            raise PendingTransactionError("publication plan exceeds bounded inventory")
-        payloads[relative] = payload
+
+    def inventory(capability: OutputCapability, prefix: tuple[str, ...]) -> None:
+        nonlocal aggregate
+        for name in sorted(_list_entries(capability)):
+            if Path(name).name != name or name in {".", ".."}:
+                raise PendingTransactionError("prepared publication path is unsafe")
+            relative = _validated_relative_name("/".join((*prefix, name)))
+            before = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
+            if stat.S_ISLNK(before.st_mode):
+                raise PendingTransactionError("prepared publication contains a symlink")
+            if stat.S_ISDIR(before.st_mode):
+                fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=capability.fd,
+                )
+                child = OutputCapability(
+                    capability.path / name,
+                    OutputIdentity(before.st_dev, before.st_ino),
+                    fd,
+                )
+                try:
+                    child.validate()
+                    inventory(child, (*prefix, name))
+                    child.validate()
+                finally:
+                    child.close()
+                after = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
+                if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+                    raise PendingTransactionError(
+                        "prepared publication directory identity changed"
+                    )
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                raise PendingTransactionError(
+                    "prepared publication contains a non-regular entry"
+                )
+            if len(payloads) >= _MAX_RECEIPT_ARTIFACTS:
+                raise PendingTransactionError("publication plan exceeds bounded inventory")
+            remaining = _MAX_RECEIPT_AGGREGATE_BYTES - aggregate
+            if before.st_size > remaining:
+                raise PendingTransactionError("publication plan exceeds bounded inventory")
+            payload = _read_bytes(capability, name, remaining)
+            after = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
+            if (
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            ):
+                raise PendingTransactionError(
+                    "prepared publication artifact changed while reading"
+                )
+            aggregate += len(payload)
+            payloads[relative] = payload
+
+    with pin_output(directory) as root_capability:
+        inventory(root_capability, ())
     prior_names = (
         tuple(prior_inventory)
         if isinstance(prior_inventory, Mapping)

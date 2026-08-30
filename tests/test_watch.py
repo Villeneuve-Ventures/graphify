@@ -164,9 +164,9 @@ def test_check_update_no_flag_returns_true(tmp_path):
 def test_check_update_with_flag_returns_true_and_prints(tmp_path, capsys):
     """check_update returns True and prints notification when flag exists."""
     from graphify.watch import check_update
-    flag = tmp_path / "graphify-out" / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1")
+    _managed_watch_graph(tmp_path)
+    _notify_only(tmp_path, [tmp_path / "notes.md"])
+    capsys.readouterr()
     result = check_update(tmp_path)
     assert result is True
     out = capsys.readouterr().out
@@ -176,11 +176,30 @@ def test_check_update_with_flag_returns_true_and_prints(tmp_path, capsys):
 def test_check_update_does_not_clear_flag(tmp_path):
     """check_update never removes the needs_update flag (clearing is LLM's job)."""
     from graphify.watch import check_update
-    flag = tmp_path / "graphify-out" / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1")
+    output = _managed_watch_graph(tmp_path)
+    _notify_only(tmp_path, [tmp_path / "notes.md"])
+    flag = output / "needs_update"
     check_update(tmp_path)
     assert flag.exists()
+
+
+def test_check_update_does_not_observe_marker_created_after_snapshot(
+    tmp_path, monkeypatch, capsys
+):
+    from types import SimpleNamespace
+    import graphify.transaction as transaction_module
+    from graphify.watch import check_update
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+
+    def admitted_snapshot(*_args, **_kwargs):
+        (output / "needs_update").write_text("1", encoding="utf-8")
+        return SimpleNamespace(artifacts={})
+
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", admitted_snapshot)
+    assert check_update(tmp_path) is True
+    assert capsys.readouterr().out == ""
 
 
 def test_watch_raises_without_watchdog(tmp_path, monkeypatch):
