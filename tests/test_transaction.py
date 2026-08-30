@@ -6804,6 +6804,7 @@ tx.queue_rebuild("update", root, output=output, changed_paths=[name])
     "boundary",
     [
         "after_enqueue_journal",
+        "after_enqueue_stage_created",
         "after_enqueue_queue",
         "after_enqueue_drainer",
         "after_enqueue_retired",
@@ -6884,6 +6885,47 @@ queue_rebuild(
     assert [item["id"] for item in queued] == [receipt.id]
     assert queued[0]["changed_paths"] == ["a.py", "b.py"]
     assert not (output / ".graphify_enqueue.json").exists()
+    assert not list(output.glob(".graphify_queue_stage.*"))
+    assert not list(output.glob(".graphify_queue_transition.*"))
+
+
+def test_enqueue_recovery_never_adopts_unselected_foreign_stage(tmp_path):
+    import graphify.transaction as transaction_module
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    with pytest.raises(RuntimeError, match="stop"):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["a.py"],
+            now=1.0,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+            if name == "after_enqueue_journal"
+            else None,
+        )
+    journal = json.loads((output / transaction_module.ENQUEUE_FILE).read_text())
+    selected = str(journal["staged_queue_name"])
+    foreign_name = transaction_module._QUEUE_STAGE_PREFIX + "f" * 64
+    assert foreign_name != selected
+    (output / foreign_name).write_bytes(
+        transaction_module._queue_payload(journal["successor_queue"])
+    )
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["a.py"],
+            now=1.0,
+        )
+
+    assert _file_bytes(output) == before
+    assert not (output / selected).exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")

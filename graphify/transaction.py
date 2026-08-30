@@ -9081,7 +9081,6 @@ def _transition_queue(
     items: Sequence[dict[str, Any]],
     *,
     staged: QueueFileRecord | None = None,
-    staged_callback: Callable[[QueueFileRecord], None] | None = None,
     failpoint: Callable[[str], None] | None = None,
 ) -> QueueFileRecord:
     """CAS one complete durable queue record into its exact successor."""
@@ -9126,25 +9125,18 @@ def _transition_queue(
     if not _queue_record_matches(current, predecessor):
         raise PendingTransactionError("queue predecessor changed before transition")
 
-    if staged is not None or staged_callback is not None:
-        if staged is None:
-            stage_name = f"{_QUEUE_STAGE_PREFIX}{secrets.token_hex(32)}"
-            _create_bytes(capability, stage_name, payload)
-            staged = _read_queue_record(capability, stage_name)
-            if staged_callback is not None:
-                staged_callback(staged)
-        else:
-            staged_current = _read_queue_record(capability, staged.name)
-            if not _queue_record_matches(staged_current, staged):
-                public = _read_queue_record(capability, predecessor.name)
-                if (
-                    staged.identity is not None
-                    and public.identity == staged.identity
-                    and public.digest == staged.digest
-                    and public.items == tuple(successor_items)
-                ):
-                    return public
-                raise PendingTransactionError("queue successor stage changed")
+    if staged is not None:
+        staged_current = _read_queue_record(capability, staged.name)
+        if not _queue_record_matches(staged_current, staged):
+            public = _read_queue_record(capability, predecessor.name)
+            if (
+                staged.identity is not None
+                and public.identity == staged.identity
+                and public.digest == staged.digest
+                and public.items == tuple(successor_items)
+            ):
+                return public
+            raise PendingTransactionError("queue successor stage changed")
         if staged.items != tuple(successor_items) or staged.digest != hashlib.sha256(payload).hexdigest():
             raise PendingTransactionError("queue successor stage payload changed")
         if predecessor.identity is None:
@@ -9327,6 +9319,7 @@ def _enqueue_journal_from_json(
         "predecessor_queue_record",
         "successor_queue",
         "successor_queue_digest",
+        "staged_queue_name",
         "staged_queue_record",
         "successor_queue_record",
         "predecessor_mode",
@@ -9352,13 +9345,9 @@ def _enqueue_journal_from_json(
         items=cast(list[dict[str, Any]], predecessor_queue),
         expected_name=QUEUE_FILE,
     )
+    staged_name = raw.get("staged_queue_name")
     staged_raw = raw.get("staged_queue_record")
-    staged_name = (
-        None
-        if not isinstance(staged_raw, dict)
-        else staged_raw.get("name")
-    )
-    if staged_name is not None and (
+    if (
         type(staged_name) is not str
         or not staged_name.startswith(_QUEUE_STAGE_PREFIX)
         or not _is_hex(staged_name.removeprefix(_QUEUE_STAGE_PREFIX))
@@ -9370,7 +9359,7 @@ def _enqueue_journal_from_json(
         else _queue_record_from_json(
             staged_raw,
             items=cast(list[dict[str, Any]], successor_queue),
-            expected_name=cast(str, staged_name),
+            expected_name=staged_name,
         )
     )
     successor_raw = raw.get("successor_queue_record")
@@ -9423,8 +9412,7 @@ def _enqueue_journal_from_json(
         != hashlib.sha256(successor_payload).hexdigest()
         or predecessor_record.name != QUEUE_FILE
         or (
-            staged_record is not None
-            and not staged_record.name.startswith(_QUEUE_STAGE_PREFIX)
+            staged_record is not None and staged_record.name != staged_name
         )
         or (
             raw.get("state") == "planned"
@@ -9494,6 +9482,7 @@ def _validate_enqueue_journal_current(
         items=predecessor_queue,
         expected_name=QUEUE_FILE,
     )
+    staged_name = cast(str, journal["staged_queue_name"])
     staged_raw = journal["staged_queue_record"]
     staged_record = (
         None
@@ -9525,7 +9514,15 @@ def _validate_enqueue_journal_current(
     state = journal["state"]
     if state == "planned":
         queue_valid = _queue_record_matches(queue_record, predecessor_record)
-        if staged_record is not None:
+        if staged_record is None:
+            staged_current = _read_queue_record(capability, staged_name)
+            staged_valid = staged_current.identity is None or (
+                staged_current.items == tuple(successor_queue)
+                and staged_current.digest
+                == hashlib.sha256(_queue_payload(successor_queue)).hexdigest()
+            )
+            queue_valid = queue_valid and staged_valid
+        else:
             staged_current = _read_queue_record(capability, staged_record.name)
             published_from_stage = (
                 queue_record.identity == staged_record.identity
@@ -9584,8 +9581,8 @@ def _validate_enqueue_journal_current(
             allowed.append(QUEUE_FILE)
         if current is not None:
             allowed.append(DRAINER_FILE)
-        if staged_record is not None and _entry_stat(capability, staged_record.name) is not None:
-            allowed.append(staged_record.name)
+        if _entry_stat(capability, staged_name) is not None:
+            allowed.append(staged_name)
         legacy_name = journal.get("legacy_pending_name")
         if isinstance(legacy_name, str):
             allowed.append(legacy_name)
@@ -9674,6 +9671,7 @@ def _recover_enqueue_journal(
         items=predecessor_queue,
         expected_name=QUEUE_FILE,
     )
+    staged_name = cast(str, journal["staged_queue_name"])
     staged_raw = journal["staged_queue_record"]
     staged_record = (
         None
@@ -9695,8 +9693,24 @@ def _recover_enqueue_journal(
         )
     )
     if successor_record is None:
-        def persist_stage(record: QueueFileRecord) -> None:
-            journal["staged_queue_record"] = _queue_record_json(record)
+        if staged_record is None:
+            staged_record = _read_queue_record(capability, staged_name)
+            if staged_record.identity is None:
+                _create_bytes(
+                    capability,
+                    staged_name,
+                    _queue_payload(successor_queue),
+                )
+                if failpoint is not None:
+                    failpoint("after_enqueue_stage_created")
+                staged_record = _read_queue_record(capability, staged_name)
+            if (
+                staged_record.items != tuple(successor_queue)
+                or staged_record.digest
+                != hashlib.sha256(_queue_payload(successor_queue)).hexdigest()
+            ):
+                raise PendingTransactionError("enqueue queue stage changed")
+            journal["staged_queue_record"] = _queue_record_json(staged_record)
             _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
 
         successor_record = _transition_queue(
@@ -9704,9 +9718,15 @@ def _recover_enqueue_journal(
             predecessor_record,
             successor_queue,
             staged=staged_record,
-            staged_callback=persist_stage,
             failpoint=failpoint,
         )
+        remaining_stage = _read_queue_record(capability, staged_name)
+        if remaining_stage.identity is not None:
+            if not _queue_record_matches(remaining_stage, staged_record):
+                raise PendingTransactionError("enqueue queue stage changed")
+            _retire_queue_record(
+                capability, remaining_stage, failpoint=failpoint
+            )
     elif not _queue_record_matches(
         _read_queue_record(capability), successor_record
     ):
@@ -10366,6 +10386,7 @@ def queue_rebuild(
             if reserve_drainer
             else cast(tuple[DrainerTuple, str, dict[str, Any]], existing_drainer)[2]
         )
+        staged_queue_name = f"{_QUEUE_STAGE_PREFIX}{secrets.token_hex(32)}"
         journal = {
             "schema": 1,
             "protocol_epoch": 1,
@@ -10386,6 +10407,7 @@ def queue_rebuild(
             "successor_queue_digest": hashlib.sha256(
                 _queue_payload(queued)
             ).hexdigest(),
+            "staged_queue_name": staged_queue_name,
             "staged_queue_record": None,
             "successor_queue_record": None,
             "predecessor_mode": predecessor_mode,
