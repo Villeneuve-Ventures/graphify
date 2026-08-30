@@ -1901,6 +1901,98 @@ def test_retired_gc_quarantine_is_visible_and_resumable(tmp_path):
     assert not list(output.parent.glob(".graphify-gc-root-*"))
 
 
+@pytest.mark.parametrize("phase", ["initial", "resume", "restore"])
+def test_retired_gc_never_replaces_destination_appearing_during_move(
+    tmp_path, monkeypatch, phase
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, _tx, token = _owner(tmp_path)
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            "from graphify.transaction import current_transaction,commit_prepared_bytes,"
+            "finalize_prepared_transaction; tx=current_transaction(); "
+            f"commit_prepared_bytes(tx,'graph.json',{_graph(1)!r}); "
+            "commit_prepared_bytes(tx,'manifest.json',b'{}'); finalize_prepared_transaction()",
+        ],
+    )
+    workspace = next(output.parent.glob(".graphify-retired-*"))
+    workspace_info = workspace.stat(follow_symlinks=False)
+    output_identity = OutputIdentity(**transaction_status(output)["output_identity"])
+    workspace_identity = OutputIdentity(workspace_info.st_dev, workspace_info.st_ino)
+    real_move = transaction_module._move_identity_no_replace
+
+    if phase == "resume":
+        def stop_before_move(capability, source, target, expected, *, label):
+            if label == "retired workspace quarantine":
+                raise RuntimeError("before quarantine move")
+            return real_move(
+                capability, source, target, expected, label=label
+            )
+
+        monkeypatch.setattr(
+            transaction_module, "_move_identity_no_replace", stop_before_move
+        )
+        with pytest.raises(RuntimeError, match="before quarantine move"):
+            gc_retired_workspaces(
+                output,
+                expected_output_identity=output_identity,
+                workspace=workspace,
+                expected_workspace_identity=workspace_identity,
+                dry_run=False,
+            )
+        monkeypatch.setattr(
+            transaction_module, "_move_identity_no_replace", real_move
+        )
+
+    original = transaction_module._atomic_rename_no_replace
+    foreign_target: Path | None = None
+    detached: Path | None = None
+
+    def race(capability, source, target):
+        nonlocal foreign_target, detached
+        source_path = capability.path / source
+        target_path = capability.path / target
+        if target.startswith(".graphify-gc-root-"):
+            foreign_target = target_path
+            if phase == "restore":
+                detached = source_path.with_name(source_path.name + ".detached")
+                source_path.rename(detached)
+                source_path.mkdir()
+                (source_path / "foreign-moved").write_text(
+                    "preserve", encoding="utf-8"
+                )
+            else:
+                target_path.mkdir()
+                (target_path / "foreign").write_text("preserve", encoding="utf-8")
+        elif phase == "restore" and target == workspace.name:
+            target_path.mkdir()
+            (target_path / "winner").write_text("preserve", encoding="utf-8")
+        return original(capability, source, target)
+
+    monkeypatch.setattr(transaction_module, "_atomic_rename_no_replace", race)
+    with pytest.raises(PendingTransactionError):
+        gc_retired_workspaces(
+            output,
+            expected_output_identity=output_identity,
+            workspace=workspace,
+            expected_workspace_identity=workspace_identity,
+            dry_run=False,
+        )
+
+    assert list(output.parent.glob(".graphify-gc-journal-*.json"))
+    assert foreign_target is not None
+    if phase == "restore":
+        assert detached is not None and detached.is_dir()
+        assert (workspace / "winner").read_text(encoding="utf-8") == "preserve"
+        assert (foreign_target / "foreign-moved").read_text(encoding="utf-8") == "preserve"
+    else:
+        assert workspace.is_dir()
+        assert (foreign_target / "foreign").read_text(encoding="utf-8") == "preserve"
+
+
 def test_retired_gc_rejects_identity_moved_to_unrecorded_controlled_name(
     tmp_path,
 ):
@@ -2106,69 +2198,6 @@ def test_gc_journal_traversal_and_forged_filename_are_zero_new_mutation(tmp_path
     with pytest.raises(PendingTransactionError, match="journal"):
         transaction_status(output)
     assert journal_path.read_bytes() == before
-
-
-def test_retired_gc_final_identity_check_preserves_replacement(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
-
-    _root, output, _tx, token = _owner(tmp_path)
-    run_prepared_token(
-        token.path,
-        [
-            "-c",
-            "from graphify.transaction import current_transaction,commit_prepared_bytes,"
-            "finalize_prepared_transaction; tx=current_transaction(); "
-            f"commit_prepared_bytes(tx,'graph.json',{_graph(1)!r}); "
-            "commit_prepared_bytes(tx,'manifest.json',b'{}'); finalize_prepared_transaction()",
-        ],
-    )
-    workspace = next(output.parent.glob(".graphify-retired-*"))
-    workspace_info = workspace.stat(follow_symlinks=False)
-    output_identity = OutputIdentity(**transaction_status(output)["output_identity"])
-    workspace_identity = OutputIdentity(workspace_info.st_dev, workspace_info.st_ino)
-    real_stat = transaction_module.os.stat
-    root_stats = 0
-
-    def replace_before_terminal_stat(path, *args, **kwargs):
-        nonlocal root_stats
-        if (
-            isinstance(path, str)
-            and path.startswith(".graphify-gc-root-")
-            and kwargs.get("dir_fd") is not None
-        ):
-            root_stats += 1
-            if root_stats == 2:
-                parent_fd = kwargs["dir_fd"]
-                preserved = f"{path}.preserved"
-                os.rename(path, preserved, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-                os.mkdir(path, dir_fd=parent_fd)
-                replacement_fd = os.open(
-                    path,
-                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-                    dir_fd=parent_fd,
-                )
-                try:
-                    fd = os.open("sentinel", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=replacement_fd)
-                    os.close(fd)
-                finally:
-                    os.close(replacement_fd)
-        return real_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(transaction_module.os, "stat", replace_before_terminal_stat)
-    with pytest.raises(PendingTransactionError, match="identity changed"):
-        gc_retired_workspaces(
-            output,
-            expected_output_identity=output_identity,
-            workspace=workspace,
-            expected_workspace_identity=workspace_identity,
-            dry_run=False,
-        )
-    replacement = next(
-        path
-        for path in output.parent.glob(".graphify-gc-root-*")
-        if not path.name.endswith(".preserved")
-    )
-    assert replacement.joinpath("sentinel").exists()
 
 
 def test_status_surfaces_bound_retired_corruption_but_ignores_proven_sibling(tmp_path):
@@ -6186,6 +6215,40 @@ def test_prepared_retirement_preserves_unbound_nonce_stage(tmp_path, monkeypatch
     assert (stage / "foreign").read_text(encoding="utf-8") == "preserve"
 
 
+def test_prepared_retirement_never_replaces_destination_appearing_after_marker(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        prepared = transaction_module._pin_prepared_workspace(tx, capability)
+        prepared.close()
+    original = transaction_module._atomic_rename_no_replace
+    raced_target: Path | None = None
+
+    def race(capability, source, target):
+        nonlocal raced_target
+        if target.startswith(".graphify-retired-"):
+            raced_target = capability.path / target
+            assert raced_target is not None
+            raced_target.mkdir()
+            (raced_target / "foreign").write_text("preserve", encoding="utf-8")
+        return original(capability, source, target)
+
+    monkeypatch.setattr(transaction_module, "_atomic_rename_no_replace", race)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="destination changed"):
+            transaction_module._retire_prepared_locked(capability)
+
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    workspace = output.parent / marker["workspace_name"]
+    assert workspace.is_dir()
+    assert (workspace / ".graphify_retired.json").is_file()
+    assert raced_target is not None
+    assert (raced_target / "foreign").read_text(encoding="utf-8") == "preserve"
+
+
 def test_prepared_retirement_rejects_traversal_transaction_id(tmp_path):
     import graphify.transaction as transaction_module
 
@@ -7322,6 +7385,77 @@ def test_legacy_snapshot_inventories_owned_dynamic_exports_only(tmp_path):
     assert "obsidian/foreign.md" not in snapshot.artifacts
 
 
+def test_legacy_snapshot_inventories_only_proven_top_level_callflow(tmp_path):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    graph = output / "graph.json"
+    graph.write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    generated = output / "My_Project-callflow.html"
+    generated.write_text(
+        "<html><footer>graphify callflow-html</footer></html>", encoding="utf-8"
+    )
+    external = output / "external-callflow.html"
+    external.write_text("<html>foreign report</html>", encoding="utf-8")
+    nested = output / "custom"
+    nested.mkdir()
+    (nested / "nested-callflow.html").write_text(
+        "<html>graphify callflow-html</html>", encoding="utf-8"
+    )
+
+    snapshot = open_graph_snapshot(graph, purpose="legacy-callflow")
+
+    assert snapshot.artifacts[generated.name] == generated.read_bytes()
+    assert external.name not in snapshot.artifacts
+    assert "custom/nested-callflow.html" not in snapshot.artifacts
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "directory", "collision"])
+def test_legacy_callflow_discovery_rejects_unsafe_candidates(tmp_path, unsafe):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    graph = output / "graph.json"
+    graph.write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    if unsafe == "symlink":
+        foreign = tmp_path / "foreign.html"
+        foreign.write_text("graphify callflow-html", encoding="utf-8")
+        (output / "Project-callflow.html").symlink_to(foreign)
+    elif unsafe == "directory":
+        (output / "Project-callflow.html").mkdir()
+    else:
+        (output / "GRAPHIFY-callflow.html").write_text(
+            "graphify callflow-html", encoding="utf-8"
+        )
+
+    with pytest.raises(PendingTransactionError):
+        open_graph_snapshot(graph, purpose="legacy-callflow")
+
+
+def test_legacy_callflow_discovery_enforces_aggregate_budget(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    graph = output / "graph.json"
+    graph.write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    (output / "Project-callflow.html").write_bytes(
+        b"graphify callflow-html" + b"x" * 64
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_MAX_RECEIPT_AGGREGATE_BYTES",
+        len(graph.read_bytes()) + 8,
+    )
+
+    with pytest.raises(PendingTransactionError, match="unsafe legacy artifact"):
+        open_graph_snapshot(graph, purpose="legacy-callflow")
+
+
 def test_prepared_first_epoch_deletes_legacy_owned_dynamic_exports_only(tmp_path):
     root = tmp_path / "corpus"
     root.mkdir()
@@ -7982,6 +8116,51 @@ def test_direct_queue_retirement_rejects_foreign_quarantine_identity(tmp_path):
             transaction_module._recover_queue_transitions_locked(capability)
 
     assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("mode", ["direct", "replacement"])
+def test_queue_retirement_never_replaces_destination_appearing_after_journal(
+    tmp_path, monkeypatch, mode
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"], now=1.0)
+    original = transaction_module._atomic_rename_no_replace
+    raced_target: Path | None = None
+
+    def race(capability, source, target):
+        nonlocal raced_target
+        if target.startswith(transaction_module._QUEUE_RETIRE_PREFIX):
+            raced_target = output / target
+            assert raced_target is not None
+            raced_target.write_bytes(b"foreign")
+        return original(capability, source, target)
+
+    monkeypatch.setattr(transaction_module, "_atomic_rename_no_replace", race)
+    with pytest.raises(PendingTransactionError, match="destination changed"):
+        if mode == "direct":
+            with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+                record = transaction_module._read_queue_record(capability)
+                transaction_module._retire_queue_record(capability, record)
+        else:
+            queue_rebuild(
+                "update", root, output=output, changed_paths=["b.py"], now=2.0
+            )
+
+    assert raced_target is not None
+    assert raced_target.read_bytes() == b"foreign"
+    assert list(output.glob(".graphify_queue_transition.*.json"))
+    durable = b"\n".join(
+        path.read_bytes()
+        for path in output.iterdir()
+        if path.name.startswith(
+            (".graphify_rebuild_queue", ".graphify_queue_stage")
+        )
+    )
+    assert b"a.py" in durable
+    if mode == "replacement":
+        assert b"b.py" in durable
 
 
 def test_enqueue_retirement_crash_preserves_each_intent_once(tmp_path):

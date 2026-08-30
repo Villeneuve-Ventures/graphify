@@ -1438,6 +1438,61 @@ def _atomic_rename_no_replace(
         raise OSError(error, os.strerror(error), target)
 
 
+def _move_identity_no_replace(
+    capability: OutputCapability,
+    source: str,
+    target: str,
+    expected: OutputIdentity | tuple[int, int],
+    *,
+    label: str,
+) -> None:
+    """Move one exact entry without replacing a concurrent destination."""
+    expected_pair = (
+        (expected.device, expected.inode)
+        if isinstance(expected, OutputIdentity)
+        else expected
+    )
+    source_identity = _relative_identity(capability, source)
+    target_identity = _relative_identity(capability, target)
+    if source_identity is None and target_identity == expected_pair:
+        os.fsync(capability.fd)
+        capability.validate()
+        return
+    if source_identity != expected_pair or target_identity is not None:
+        raise PendingTransactionError(f"{label} destination changed")
+    try:
+        _atomic_rename_no_replace(capability, source, target)
+    except FileExistsError as exc:
+        source_identity = _relative_identity(capability, source)
+        target_identity = _relative_identity(capability, target)
+        if source_identity is None and target_identity == expected_pair:
+            os.fsync(capability.fd)
+            capability.validate()
+            return
+        raise PendingTransactionError(f"{label} destination changed") from exc
+    moved_identity = _relative_identity(capability, target)
+    source_identity = _relative_identity(capability, source)
+    if (
+        source_identity is None
+        and moved_identity is not None
+        and moved_identity != expected_pair
+    ):
+        try:
+            _move_identity_no_replace(
+                capability,
+                target,
+                source,
+                moved_identity,
+                label=f"{label} restoration",
+            )
+        except PendingTransactionError:
+            pass
+    if source_identity is not None or moved_identity != expected_pair:
+        raise PendingTransactionError(f"{label} identity changed")
+    os.fsync(capability.fd)
+    capability.validate()
+
+
 def _unmanaged_aux_name(leaf: str, suffix: str) -> str:
     return f".{leaf}.graphify-unmanaged-{secrets.token_hex(16)}.{suffix}"
 
@@ -2953,11 +3008,12 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
                 ".graphify_retired.json",
                 _json_bytes(retirement_marker),
             )
-        os.rename(
+        _move_identity_no_replace(
+            parent_capability,
             workspace.name,
             tombstone,
-            src_dir_fd=parent_capability.fd,
-            dst_dir_fd=parent_capability.fd,
+            expected,
+            label="prepared workspace retirement",
         )
         retired_info = os.stat(
             tombstone, dir_fd=parent_capability.fd, follow_symlinks=False
@@ -2973,11 +3029,12 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
                     follow_symlinks=False,
                 )
             except FileNotFoundError:
-                os.rename(
+                _move_identity_no_replace(
+                    parent_capability,
                     tombstone,
                     workspace.name,
-                    src_dir_fd=parent_capability.fd,
-                    dst_dir_fd=parent_capability.fd,
+                    OutputIdentity(retired_info.st_dev, retired_info.st_ino),
+                    label="prepared workspace restoration",
                 )
             raise PendingTransactionError(
                 "prepared workspace changed during identity retirement"
@@ -3377,11 +3434,12 @@ def gc_retired_workspaces(
                     with pin_output(parent.path / selected_name) as retired:
                         _replace_bytes(retired, ".graphify_retired.json", _json_bytes(pending_marker))
                     os.fsync(parent.fd)
-                    os.rename(
+                    _move_identity_no_replace(
+                        parent,
                         selected_name,
                         quarantine,
-                        src_dir_fd=parent.fd,
-                        dst_dir_fd=parent.fd,
+                        identity,
+                        label="retired workspace quarantine",
                     )
                 else:
                     quarantine = str(marker["quarantine_name"])
@@ -3397,21 +3455,22 @@ def gc_retired_workspaces(
                         }
                         _replace_bytes(parent, journal_name, _json_bytes(journal))
                     if selected_name != quarantine:
-                        os.rename(
+                        _move_identity_no_replace(
+                            parent,
                             selected_name,
                             quarantine,
-                            src_dir_fd=parent.fd,
-                            dst_dir_fd=parent.fd,
+                            identity,
+                            label="retired workspace quarantine",
                         )
                 moved = os.stat(quarantine, dir_fd=parent.fd, follow_symlinks=False)
                 if (moved.st_dev, moved.st_ino) != (identity.device, identity.inode):
-                    with contextlib.suppress(FileExistsError):
-                        os.rename(
-                            quarantine,
-                            selected_name,
-                            src_dir_fd=parent.fd,
-                            dst_dir_fd=parent.fd,
-                        )
+                    _move_identity_no_replace(
+                        parent,
+                        quarantine,
+                        selected_name,
+                        OutputIdentity(moved.st_dev, moved.st_ino),
+                        label="retired workspace restoration",
+                    )
                     raise PendingTransactionError("retired workspace identity changed")
                 with pin_output(parent.path / quarantine) as retired:
                     quarantined_marker = dict(marker)
@@ -7416,6 +7475,61 @@ def _legacy_owned_dynamic_inventory(
                 if child_fd >= 0:
                     os.close(child_fd)
 
+    callflow_candidates = [
+        name
+        for name in sorted(_list_entries(capability))
+        if name.casefold().endswith("-callflow.html")
+        and name != "graphify-callflow.html"
+    ]
+    _reject_casefold_collisions(
+        (*MANAGED_PUBLICATION_PATHS, *callflow_candidates)
+    )
+    for name in callflow_candidates:
+        scanned += 1
+        if (
+            scanned > _MAX_RECEIPT_ARTIFACTS
+            or len(name) > _MAX_QUEUE_PATH_LENGTH
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*-callflow\.html", name)
+            is None
+        ):
+            raise PendingTransactionError("legacy callflow inventory is unsafe")
+        info = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode):
+            raise PendingTransactionError("legacy callflow inventory is unsafe")
+        fd = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=capability.fd,
+        )
+        try:
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+            ):
+                raise PendingTransactionError("legacy callflow identity changed")
+            os.lseek(fd, max(0, opened.st_size - 65536), os.SEEK_SET)
+            signature = os.read(fd, min(65536, opened.st_size))
+            after_signature = os.fstat(fd)
+            if (after_signature.st_dev, after_signature.st_ino) != (
+                opened.st_dev,
+                opened.st_ino,
+            ):
+                raise PendingTransactionError("legacy callflow identity changed")
+            if b"graphify callflow-html" not in signature:
+                continue
+            os.lseek(fd, 0, os.SEEK_SET)
+            payload = _read_open_regular(
+                fd,
+                limit=min(ledger.remaining, _artifact_read_limit(name)),
+                label=name,
+            )
+            if b"graphify callflow-html" not in payload:
+                raise PendingTransactionError("legacy callflow identity changed")
+            retain(name, payload)
+        finally:
+            os.close(fd)
+
     try:
         wiki_fd = (
             _open_windows_relative_fd(capability, "wiki", directory=True)
@@ -8718,11 +8832,14 @@ def _recover_queue_retirement(
         raise PendingTransactionError("queue retirement state is ambiguous")
     if state == "planned":
         if public_matches and retirement.identity is None:
-            os.rename(
+            if predecessor.identity is None:
+                raise PendingTransactionError("queue retirement predecessor changed")
+            _move_identity_no_replace(
+                capability,
                 name,
                 retirement_name,
-                src_dir_fd=capability.fd,
-                dst_dir_fd=capability.fd,
+                predecessor.identity,
+                label="queue retirement",
             )
             os.fsync(capability.fd)
             if failpoint is not None:
@@ -8895,11 +9012,12 @@ def _recover_queue_transition(
     if stage.identity is not None:
         if not stage_is_predecessor:
             raise PendingTransactionError("queue transition predecessor stage changed")
-        os.rename(
+        _move_identity_no_replace(
+            capability,
             stage_name,
             retirement_name,
-            src_dir_fd=capability.fd,
-            dst_dir_fd=capability.fd,
+            predecessor_identity,
+            label="queue transition retirement",
         )
         os.fsync(capability.fd)
         if failpoint is not None:

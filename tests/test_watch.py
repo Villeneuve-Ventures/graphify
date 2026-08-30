@@ -1768,6 +1768,51 @@ def test_transactional_watch_accepts_legacy_baseline_before_creating_markers(
     assert graph["graph"]["_graphify_protocol"]["state"] == "active"
 
 
+def test_transactional_watch_first_epoch_regenerates_historical_callflow(
+    tmp_path, monkeypatch
+):
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "legacy.py"
+    source.write_text("def legacy():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    historical = output / "Legacy_Project-callflow.html"
+    historical.write_text(
+        "<html><footer>graphify callflow-html</footer>stale</html>",
+        encoding="utf-8",
+    )
+    regenerated = b"<html><footer>graphify callflow-html</footer>fresh</html>"
+
+    def render_callflow(*_args, output, **_kwargs):
+        destination = Path(output)
+        destination.write_bytes(regenerated)
+        return destination
+
+    monkeypatch.setattr(
+        "graphify.callflow_html.write_callflow_html", render_callflow
+    )
+
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
+
+    assert historical.read_bytes() == regenerated
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert historical.name in receipt["required_artifacts"]
+    assert receipt["artifact_digests"][historical.name]
+
+
 def test_transactional_watch_uses_report_memory_without_receipt_ownership(tmp_path):
     from graphify.ingest import save_query_result
     from graphify.watch import _rebuild_code
