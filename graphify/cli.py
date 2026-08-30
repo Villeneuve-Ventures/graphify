@@ -938,7 +938,6 @@ def _normalize_export_routing(arguments: list[str]) -> list[str]:
     subcmd = arguments[0]
     normalized = [subcmd]
     seen: set[str] = set()
-    positionals: list[str] = []
     index = 1
     while index < len(arguments):
         argument = arguments[index]
@@ -946,8 +945,6 @@ def _normalize_export_routing(arguments: list[str]) -> list[str]:
             normalized.append(argument)
             boundary_values = arguments[index + 1 :]
             normalized.extend(boundary_values)
-            if subcmd == "callflow-html":
-                positionals.extend(boundary_values)
             break
         option, separator, inline = argument.partition("=")
         if option in _EXPORT_PATH_OPTIONS:
@@ -967,8 +964,6 @@ def _normalize_export_routing(arguments: list[str]) -> list[str]:
             normalized.extend((option, value))
             continue
         normalized.append(argument)
-        if subcmd == "callflow-html" and not argument.startswith("-"):
-            positionals.append(argument)
         index += 1
     if subcmd == "callflow-html":
         # Value arguments are not positional source candidates.

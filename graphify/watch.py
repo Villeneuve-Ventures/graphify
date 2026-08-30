@@ -811,7 +811,7 @@ def _rebuild_code(
         baseline_graph: dict | None = None
         baseline_artifacts: dict[str, bytes] = {}
         report_auxiliaries: dict[str, bytes] = {}
-        if baseline_snapshot is None and (actual_out / "graph.json").is_file():
+        if (actual_out / "graph.json").is_file():
             try:
                 baseline_snapshot = open_graph_snapshot(
                     actual_out / "graph.json",

@@ -8532,6 +8532,10 @@ def _valid_queue_transition_public_name(name: object) -> bool:
     return type(name) is str and (
         name in {QUEUE_FILE, QUARANTINE_FILE}
         or (
+            name.startswith(_QUEUE_STAGE_PREFIX)
+            and _is_hex(name.removeprefix(_QUEUE_STAGE_PREFIX))
+        )
+        or (
             name.startswith(".graphify_rebuild_inflight.")
             and name.endswith(".jsonl")
             and _is_hex(
@@ -8607,7 +8611,7 @@ def _read_queue_transition(
         )
     except PendingTransactionError as exc:
         raise PendingTransactionError("malformed queue transition journal") from exc
-    expected = {
+    replacement_fields = {
         "schema",
         "protocol_epoch",
         "public_name",
@@ -8617,7 +8621,20 @@ def _read_queue_transition(
         "stage_name",
         "retirement_name",
     }
-    if not isinstance(raw, dict) or set(raw) != expected:
+    retirement_fields = {
+        "schema",
+        "protocol_epoch",
+        "operation",
+        "state",
+        "public_name",
+        "predecessor",
+        "retirement_name",
+    }
+    fields = frozenset(raw) if isinstance(raw, dict) else frozenset()
+    if not isinstance(raw, dict) or fields not in {
+        frozenset(replacement_fields),
+        frozenset(retirement_fields),
+    }:
         raise PendingTransactionError("malformed queue transition journal")
     public_name = raw.get("public_name")
     stage_name = raw.get("stage_name")
@@ -8627,9 +8644,6 @@ def _read_queue_transition(
     if (
         public_name != name
         or not _valid_queue_transition_public_name(public_name)
-        or type(stage_name) is not str
-        or not stage_name.startswith(_QUEUE_STAGE_PREFIX)
-        or not _is_hex(stage_name.removeprefix(_QUEUE_STAGE_PREFIX))
         or type(retirement_name) is not str
         or not retirement_name.startswith(_QUEUE_RETIRE_PREFIX)
         or not _is_hex(retirement_name.removeprefix(_QUEUE_RETIRE_PREFIX))
@@ -8639,6 +8653,27 @@ def _read_queue_transition(
         or type(predecessor.get("device")) is not int
         or type(predecessor.get("inode")) is not int
         or not _is_hex(predecessor.get("digest"))
+    ):
+        raise PendingTransactionError("malformed queue transition journal")
+    if fields == frozenset(retirement_fields):
+        if (
+            type(raw.get("schema")) is not int
+            or raw.get("schema") != 1
+            or type(raw.get("protocol_epoch")) is not int
+            or raw.get("protocol_epoch") != 1
+            or raw.get("operation") != "retire"
+            or raw.get("state") not in {
+                "planned",
+                "quarantined",
+                "retired",
+            }
+        ):
+            raise PendingTransactionError("malformed queue transition journal")
+        return cast(dict[str, Any], raw)
+    if (
+        type(stage_name) is not str
+        or not stage_name.startswith(_QUEUE_STAGE_PREFIX)
+        or not _is_hex(stage_name.removeprefix(_QUEUE_STAGE_PREFIX))
         or not isinstance(successor, list)
     ):
         raise PendingTransactionError("malformed queue transition journal")
@@ -8651,6 +8686,93 @@ def _read_queue_transition(
     ):
         raise PendingTransactionError("malformed queue transition journal")
     return cast(dict[str, Any], raw)
+
+
+def _recover_queue_retirement(
+    capability: OutputCapability,
+    name: str,
+    raw: dict[str, Any],
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> QueueFileRecord:
+    predecessor_raw = cast(dict[str, Any], raw["predecessor"])
+    predecessor = QueueFileRecord(
+        name,
+        (),
+        (int(predecessor_raw["device"]), int(predecessor_raw["inode"])),
+        str(predecessor_raw["digest"]),
+    )
+    retirement_name = str(raw["retirement_name"])
+    public = _read_queue_record(capability, name)
+    retirement = _read_queue_record(capability, retirement_name)
+    public_matches = (
+        public.identity == predecessor.identity
+        and public.digest == predecessor.digest
+    )
+    retirement_matches = (
+        retirement.identity == predecessor.identity
+        and retirement.digest == predecessor.digest
+    )
+    state = str(raw["state"])
+    if public.identity is not None and retirement.identity is not None:
+        raise PendingTransactionError("queue retirement state is ambiguous")
+    if state == "planned":
+        if public_matches and retirement.identity is None:
+            os.rename(
+                name,
+                retirement_name,
+                src_dir_fd=capability.fd,
+                dst_dir_fd=capability.fd,
+            )
+            os.fsync(capability.fd)
+            if failpoint is not None:
+                failpoint("after_queue_retirement_rename")
+            public = _read_queue_record(capability, name)
+            retirement = _read_queue_record(capability, retirement_name)
+            retirement_matches = (
+                retirement.identity == predecessor.identity
+                and retirement.digest == predecessor.digest
+            )
+        elif public.identity is not None or not retirement_matches:
+            raise PendingTransactionError("queue retirement predecessor changed")
+        raw["state"] = "quarantined"
+        _replace_bytes(
+            capability,
+            _queue_transition_journal_name(name),
+            _json_bytes(raw),
+        )
+        state = "quarantined"
+    if state == "quarantined":
+        if public.identity is not None:
+            raise PendingTransactionError("queue retirement public name reappeared")
+        if retirement.identity is not None:
+            if not retirement_matches:
+                raise PendingTransactionError("queue retirement identity changed")
+            confirmed = _read_queue_record(capability, retirement_name)
+            if not _queue_record_matches(confirmed, retirement):
+                raise PendingTransactionError("queue retirement changed")
+            os.unlink(retirement_name, dir_fd=capability.fd)
+            os.fsync(capability.fd)
+            capability.validate()
+            if failpoint is not None:
+                failpoint("after_queue_predecessor_retired")
+        raw["state"] = "retired"
+        _replace_bytes(
+            capability,
+            _queue_transition_journal_name(name),
+            _json_bytes(raw),
+        )
+    if (
+        _entry_stat(capability, name) is not None
+        or _entry_stat(capability, retirement_name) is not None
+    ):
+        raise PendingTransactionError("queue retirement did not finish")
+    _unlink(capability, _queue_transition_journal_name(name))
+    os.fsync(capability.fd)
+    if failpoint is not None:
+        failpoint("after_queue_transition_journal_retired")
+    capability.validate()
+    return _read_queue_record(capability, name)
 
 
 def _recover_queue_transition(
@@ -8671,6 +8793,10 @@ def _recover_queue_transition(
         os.fsync(capability.fd)
         capability.validate()
         return public
+    if raw.get("operation") == "retire":
+        return _recover_queue_retirement(
+            capability, name, raw, failpoint=failpoint
+        )
     predecessor_raw = cast(dict[str, Any], raw["predecessor"])
     predecessor_identity = (
         int(predecessor_raw["device"]),
@@ -8889,6 +9015,9 @@ def _transition_queue(
         and current.digest == staged.digest
         and current.items == tuple(successor_items)
     ):
+        _recover_queue_transition(
+            capability, staged.name, failpoint=failpoint
+        )
         displaced = _read_queue_record(capability, staged.name)
         expected_displaced = QueueFileRecord(
             staged.name,
@@ -8899,7 +9028,7 @@ def _transition_queue(
         if displaced.identity is not None:
             if not _queue_record_matches(displaced, expected_displaced):
                 raise PendingTransactionError("queue displaced predecessor changed")
-            _retire_queue_record(capability, displaced)
+            _retire_queue_record(capability, displaced, failpoint=failpoint)
         return current
     if predecessor.items == tuple(successor_items):
         if not _queue_record_matches(current, predecessor):
@@ -8942,7 +9071,7 @@ def _transition_queue(
             )):
                 _atomic_exchange(capability, predecessor.name, staged.name)
                 raise PendingTransactionError("queue predecessor changed during exchange")
-            _retire_queue_record(capability, displaced)
+            _retire_queue_record(capability, displaced, failpoint=failpoint)
     else:
         if predecessor.identity is None:
             _create_bytes(capability, predecessor.name, payload)
@@ -9487,6 +9616,7 @@ def _recover_enqueue_journal(
             successor_queue,
             staged=staged_record,
             staged_callback=persist_stage,
+            failpoint=failpoint,
         )
     elif not _queue_record_matches(
         _read_queue_record(capability), successor_record
@@ -9592,8 +9722,16 @@ def _queue_identity_binding(value: object) -> tuple[tuple[int, int], str] | None
 
 
 def _retire_queue_record(
-    capability: OutputCapability, record: QueueFileRecord
+    capability: OutputCapability,
+    record: QueueFileRecord,
+    *,
+    failpoint: Callable[[str], None] | None = None,
 ) -> None:
+    recovered = _recover_queue_transition(
+        capability, record.name, failpoint=failpoint
+    )
+    if recovered is not None and recovered.identity is None:
+        return
     if record.identity is None:
         if _entry_stat(capability, record.name) is not None:
             raise PendingTransactionError("rebuild queue appeared after absence admission")
@@ -9603,31 +9741,27 @@ def _retire_queue_record(
     current = _read_queue_record(capability, record.name)
     if current.identity != record.identity or current.digest != record.digest:
         raise PendingTransactionError("rebuild queue changed before retirement")
-    quarantine = f"{record.name}.graphify-retire.{secrets.token_hex(16)}"
-    os.rename(
-        record.name,
-        quarantine,
-        src_dir_fd=capability.fd,
-        dst_dir_fd=capability.fd,
+    journal = {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "operation": "retire",
+        "state": "planned",
+        "public_name": record.name,
+        "predecessor": _queue_transition_binding(record),
+        "retirement_name": f"{_QUEUE_RETIRE_PREFIX}{secrets.token_hex(32)}",
+    }
+    _create_bytes(
+        capability,
+        _queue_transition_journal_name(record.name),
+        _json_bytes(journal),
     )
-    os.fsync(capability.fd)
-    quarantined = _read_queue_record(capability, quarantine)
-    if (
-        quarantined.identity != record.identity
-        or quarantined.digest != record.digest
-    ):
-        if _entry_stat(capability, record.name) is None:
-            os.rename(
-                quarantine,
-                record.name,
-                src_dir_fd=capability.fd,
-                dst_dir_fd=capability.fd,
-            )
-            os.fsync(capability.fd)
-        raise PendingTransactionError("rebuild queue changed during retirement")
-    os.unlink(quarantine, dir_fd=capability.fd)
-    os.fsync(capability.fd)
-    capability.validate()
+    if failpoint is not None:
+        failpoint("after_queue_transition_journal")
+    retired = _recover_queue_transition(
+        capability, record.name, failpoint=failpoint
+    )
+    if retired is None or retired.identity is not None:
+        raise PendingTransactionError("queue retirement journal disappeared")
 
 
 def _drainer_state_from_json(
@@ -10291,10 +10425,9 @@ def takeover_drainer(
             raise PendingTransactionError(
                 "pending transition requires transaction recovery"
             )
-        if _read_token_transition(capability) is not None:
-            token_transition = _read_token_transition(capability)
-            if token_transition is not None:
-                _validate_token_transition_current(capability, token_transition)
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            _validate_token_transition_current(capability, token_transition)
             raise PendingTransactionError(
                 "token publication transition requires transaction recovery"
             )
@@ -10372,7 +10505,9 @@ def takeover_drainer(
                     _merge_intents(queue_predecessor.items, inflight),
                     failpoint=transition_failpoint,
                 )
-            _retire_queue_record(capability, inflight_record)
+            _retire_queue_record(
+                capability, inflight_record, failpoint=transition_failpoint
+            )
             successor_id = secrets.token_hex(32)
             token_name = f".graphify_transaction_token.{successor_id}"
             token_payload = _json_bytes(
@@ -10470,6 +10605,28 @@ def complete_rebuild_claim(
         expected_path = capability.path / expected_name
         expected_claim_path = expected_path if claim.items else None
         inflight_record = _read_queue_record(capability, expected_name)
+        current = _read_drainer(capability)
+        if current is None or current[0] != claim.drainer or current[1] != "claimed":
+            raise PendingTransactionError("claim drainer no longer matches")
+        if inflight_record.identity is None and claim.items:
+            claimed_ids = [str(item["id"]) for item in claim.items]
+            if (
+                claim.transaction_id != live.id
+                or claim.drainer != live.drainer
+                or claim.inflight_path != expected_claim_path
+                or claim.inflight_identity is None
+                or claim.inflight_digest is None
+                or receipt.get("transaction_id") != live.id
+                or receipt.get("generation") != live.generation
+                or receipt.get("token_digest") != live.token_digest
+                or _drainer_from_json(receipt.get("drainer")) != claim.drainer
+                or current[2].get("acked_ids") != claimed_ids
+                or current[2].get("receipt_digest") != receipt_digest
+            ):
+                raise PendingTransactionError(
+                    "retired claim is not durably acknowledged"
+                )
+            return
         if (
             claim.transaction_id != live.id
             or claim.drainer != live.drainer
@@ -10482,9 +10639,6 @@ def complete_rebuild_claim(
             or _drainer_from_json(receipt.get("drainer")) != claim.drainer
         ):
             raise PendingTransactionError("claim is not bound to the exact live inflight record")
-        current = _read_drainer(capability)
-        if current is None or current[0] != claim.drainer or current[1] != "claimed":
-            raise PendingTransactionError("claim drainer no longer matches")
         inflight = list(inflight_record.items)
         claimed_by_id = {str(item["id"]): item for item in claim.items}
         inflight_by_id = {str(item["id"]): item for item in inflight}
@@ -10515,7 +10669,7 @@ def complete_rebuild_claim(
                 capability, inflight_record, residual, failpoint=failpoint
             )
         elif claim.items:
-            _retire_queue_record(capability, inflight_record)
+            _retire_queue_record(capability, inflight_record, failpoint=failpoint)
         else:
             _transition_queue(
                 capability, inflight_record, (), failpoint=failpoint
@@ -10688,10 +10842,16 @@ def _finish_close_locked(
     transaction_id = str(pending["transaction_id"])
     inflight_name = f".graphify_rebuild_inflight.{transaction_id}.jsonl"
     expected_inflight = _queue_identity_binding(pending.get("inflight"))
-    if _entry_stat(capability, inflight_name) is not None:
+    inflight_record = _read_queue_record(capability, inflight_name)
+    if inflight_record.identity is not None:
         if expected_inflight is None:
             raise PendingTransactionError("unexpected close-pending inflight record")
-        _unlink(capability, inflight_name, expected=expected_inflight[0])
+        if (
+            inflight_record.identity != expected_inflight[0]
+            or inflight_record.digest != expected_inflight[1]
+        ):
+            raise PendingTransactionError("close-pending inflight identity changed")
+        _retire_queue_record(capability, inflight_record, failpoint=failpoint)
     if failpoint:
         failpoint("after_inflight_remove")
     if live is not None and live.id == transaction_id:
@@ -11545,7 +11705,9 @@ def recover_transaction(
                 failpoint=transition_failpoint,
             )
         for record in frozen_inflight:
-            _retire_queue_record(capability, record)
+            _retire_queue_record(
+                capability, record, failpoint=transition_failpoint
+            )
         _retire_prepared_locked(capability)
         drainer = DrainerTuple(generation, claim_epoch, secrets.token_hex(16))
         secret = secrets.token_bytes(32)

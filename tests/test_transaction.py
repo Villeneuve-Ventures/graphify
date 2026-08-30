@@ -7911,6 +7911,191 @@ def test_queue_transition_binding_only_rejects_foreign_successor_identity(tmp_pa
     assert _file_bytes(output) == before
 
 
+@pytest.mark.parametrize("target", ["primary", "inflight", "quarantine"])
+@pytest.mark.parametrize(
+    "crash_phase",
+    ["after_queue_retirement_rename", "after_queue_predecessor_retired"],
+)
+def test_direct_queue_retirement_crash_replays_exact_record(
+    tmp_path, target, crash_phase
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    primary = output / transaction_module.QUEUE_FILE
+    target_name = {
+        "primary": transaction_module.QUEUE_FILE,
+        "inflight": f".graphify_rebuild_inflight.{tx.id}.jsonl",
+        "quarantine": transaction_module.QUARANTINE_FILE,
+    }[target]
+    target_path = output / target_name
+    if target != "primary":
+        target_path.write_bytes(primary.read_bytes())
+    script = "\n".join(
+        [
+            "import os, sys",
+            "import graphify.transaction as t",
+            "output, name, phase = sys.argv[1:]",
+            "with t.pin_output(output) as cap, t._locked(cap):",
+            "    record = t._read_queue_record(cap, name)",
+            "    t._retire_queue_record(cap, record, failpoint=lambda current: os._exit(92) if current == phase else None)",
+        ]
+    )
+    crashed = subprocess.run(
+        [sys.executable, "-c", script, str(output), target_name, crash_phase],
+        check=False,
+    )
+    assert crashed.returncode == 92
+
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        transaction_module._recover_queue_transitions_locked(capability)
+
+    assert not target_path.exists()
+    assert not list(output.glob(".graphify_queue_retire.*"))
+    assert not list(output.glob(".graphify_queue_transition.*.json"))
+
+
+def test_direct_queue_retirement_rejects_foreign_quarantine_identity(tmp_path):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        record = transaction_module._read_queue_record(capability)
+        with pytest.raises(RuntimeError, match="after_queue_retirement_rename"):
+            transaction_module._retire_queue_record(
+                capability,
+                record,
+                failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                if phase == "after_queue_retirement_rename"
+                else None,
+            )
+    retirement = next(output.glob(".graphify_queue_retire.*"))
+    payload = retirement.read_bytes()
+    retirement.unlink()
+    retirement.write_bytes(payload)
+    before = _file_bytes(output)
+
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="retirement predecessor"):
+            transaction_module._recover_queue_transitions_locked(capability)
+
+    assert _file_bytes(output) == before
+
+
+def test_enqueue_retirement_crash_preserves_each_intent_once(tmp_path):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild(
+        "update", root, output=output, changed_paths=["a.py"], now=1.0
+    )
+    script = "\n".join(
+        [
+            "import os, sys",
+            "from pathlib import Path",
+            "import graphify.transaction as t",
+            "root, output = map(Path, sys.argv[1:])",
+            "t.queue_rebuild('update', root, output=output, changed_paths=['b.py'], now=2.0, failpoint=lambda phase: os._exit(93) if phase == 'after_queue_retirement_rename' else None)",
+        ]
+    )
+    crashed = subprocess.run(
+        [sys.executable, "-c", script, str(root), str(output)], check=False
+    )
+    assert crashed.returncode == 93
+
+    queue_rebuild(
+        "update", root, output=output, changed_paths=["b.py"], now=2.0
+    )
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        items = transaction_module._read_queue_record(capability).items
+    changed: list[tuple[str, ...]] = [
+        tuple(item.get("changed_paths") or ()) for item in items
+    ]
+    assert changed.count(("a.py",)) == 1
+    assert changed.count(("b.py",)) == 1
+    assert not list(output.glob(".graphify_queue_retire.*"))
+    assert not list(output.glob(".graphify_queue_transition.*.json"))
+
+
+def test_complete_claim_replays_interrupted_shared_inflight_retirement(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    queued = queue_rebuild(
+        "update", root, output=output, changed_paths=["complete.py"]
+    )
+    claim = claim_rebuild_queue(tx, queued.drainer)
+    with owned_step(tx, drainer=claim.drainer):
+        payload = _graph(tx.generation)
+        commit_bytes(tx, "graph.json", payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+        generation = commit_generation(
+            tx,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+        with pytest.raises(RuntimeError, match="after_queue_retirement_rename"):
+            complete_rebuild_claim(
+                tx,
+                claim,
+                receipt_digest=generation.digest,
+                failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                if phase == "after_queue_retirement_rename"
+                else None,
+            )
+        complete_rebuild_claim(tx, claim, receipt_digest=generation.digest)
+
+    assert claim.inflight_path is not None
+    assert not claim.inflight_path.exists()
+    assert not list(output.glob(".graphify_queue_retire.*"))
+    assert not list(output.glob(".graphify_queue_transition.*.json"))
+
+
+@pytest.mark.parametrize("operation", ["takeover", "recovery"])
+def test_live_recovery_retirement_crash_preserves_inflight_intent(
+    tmp_path, operation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    queued = queue_rebuild(
+        "update", root, output=output, changed_paths=["inflight.py"], now=0.0
+    )
+    claim_rebuild_queue(tx, queued.drainer, now=0.0)
+    call = (
+        "t.takeover_drainer(output, now=100.0, transition_failpoint=failpoint)"
+        if operation == "takeover"
+        else "t.recover_transaction('runtime', root, output=output, now=10**12, transition_failpoint=failpoint)"
+    )
+    script = "\n".join(
+        [
+            "import os, sys",
+            "from pathlib import Path",
+            "import graphify.transaction as t",
+            "root, output = map(Path, sys.argv[1:])",
+            "failpoint = lambda phase: os._exit(94) if phase == 'after_queue_retirement_rename' else None",
+            call,
+        ]
+    )
+    crashed = subprocess.run(
+        [sys.executable, "-c", script, str(root), str(output)], check=False
+    )
+    assert crashed.returncode == 94
+
+    if operation == "takeover":
+        takeover_drainer(output, now=100.0)
+    else:
+        recover_transaction("runtime", root, output=output, now=10**12)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        items = transaction_module._read_queue_record(capability).items
+    assert sum(
+        item.get("changed_paths") == ["inflight.py"] for item in items
+    ) == 1
+    assert not list(output.glob(".graphify_queue_retire.*"))
+    assert not list(output.glob(".graphify_queue_transition.*.json"))
+
+
 @pytest.mark.parametrize("kind", ["journal", "binding"])
 @pytest.mark.parametrize("payload", [b"\xff", b"{"])
 def test_queue_transition_discovery_maps_malformed_state(
