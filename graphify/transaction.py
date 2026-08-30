@@ -219,6 +219,15 @@ class CancellationRecovery(Transaction):
 
 
 @dataclass(frozen=True)
+class CompletedRecovery(Transaction):
+    """An exact selected live generation was durably closed by recovery."""
+
+    @property
+    def transaction_id(self) -> str:
+        return self.id
+
+
+@dataclass(frozen=True)
 class TransactionToken:
     id: str
     path: Path
@@ -321,11 +330,24 @@ def _canonical_directory(path: Path) -> Path:
     return path.expanduser().resolve(strict=True)
 
 
+def _directory_entry_identity(
+    capability: OutputCapability, name: str
+) -> OutputIdentity | None:
+    try:
+        info = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise PendingTransactionError(f"unsafe output directory entry: {name}")
+    return OutputIdentity(info.st_dev, info.st_ino)
+
+
 def _create_output_chain(
     path: Path,
     *,
     expected_parent_identity: OutputIdentity | None = None,
     expected_relative: str | None = None,
+    failpoint: Callable[[str], None] | None = None,
 ) -> None:
     """Create a missing output chain from one pinned existing ancestor."""
     absolute = path.expanduser().absolute()
@@ -349,35 +371,82 @@ def _create_output_chain(
             raise PendingTransactionError("admitted absent output appeared before begin")
         return
     opened: list[OutputCapability] = []
+    created: list[tuple[OutputCapability, str, OutputIdentity]] = []
     with pin_output(ancestor) as parent, _locked(parent):
         if expected_parent_identity is not None and parent.identity != expected_parent_identity:
             raise PendingTransactionError("admitted output parent identity changed")
         current = parent
         try:
             for part in reversed(missing):
+                stage = f".graphify-output-stage-{secrets.token_hex(16)}"
+                stage_identity: OutputIdentity | None = None
                 try:
-                    os.mkdir(part, mode=0o700, dir_fd=current.fd)
-                except FileExistsError as exc:
+                    os.mkdir(stage, mode=0o700, dir_fd=current.fd)
+                    os.fsync(current.fd)
+                    flags = (
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0)
+                    )
+                    child_fd = os.open(stage, flags, dir_fd=current.fd)
+                    child_info = os.fstat(child_fd)
+                    stage_identity = OutputIdentity(
+                        child_info.st_dev, child_info.st_ino
+                    )
+                    named_stage = _directory_entry_identity(current, stage)
+                    if named_stage != stage_identity:
+                        os.close(child_fd)
+                        raise PendingTransactionError(
+                            "staged output directory identity changed"
+                        )
+                    try:
+                        _atomic_rename_no_replace(current, stage, part)
+                    except FileExistsError as exc:
+                        os.close(child_fd)
+                        raise PendingTransactionError(
+                            "admitted absent output appeared before begin"
+                        ) from exc
+                    named_child = _directory_entry_identity(current, part)
+                    if named_child != stage_identity:
+                        os.close(child_fd)
+                        raise PendingTransactionError(
+                            "published output directory identity changed"
+                        )
+                    os.fsync(current.fd)
+                except Exception:
+                    if stage_identity is not None:
+                        staged = _directory_entry_identity(current, stage)
+                        if staged == stage_identity:
+                            with contextlib.suppress(OSError):
+                                os.rmdir(stage, dir_fd=current.fd)
+                                os.fsync(current.fd)
+                    raise
+                if stage_identity is None:
+                    os.close(child_fd)
                     raise PendingTransactionError(
-                        "admitted absent output appeared before begin"
-                    ) from exc
-                os.fsync(current.fd)
-                flags = (
-                    os.O_RDONLY
-                    | getattr(os, "O_DIRECTORY", 0)
-                    | getattr(os, "O_NOFOLLOW", 0)
-                )
-                child_fd = os.open(part, flags, dir_fd=current.fd)
-                child_info = os.fstat(child_fd)
+                        "staged output directory identity is unavailable"
+                    )
                 child = OutputCapability(
                     current.path / part,
-                    OutputIdentity(child_info.st_dev, child_info.st_ino),
+                    stage_identity,
                     child_fd,
                 )
                 opened.append(child)
+                created.append((current, part, stage_identity))
                 current = child
+                if failpoint is not None:
+                    failpoint(f"after_output_component:{part}")
             for capability in opened:
                 capability.validate()
+        except Exception:
+            for created_parent, created_name, created_identity in reversed(created):
+                named = _directory_entry_identity(created_parent, created_name)
+                if named != created_identity:
+                    continue
+                with contextlib.suppress(OSError):
+                    os.rmdir(created_name, dir_fd=created_parent.fd)
+                    os.fsync(created_parent.fd)
+            raise
         finally:
             for capability in reversed(opened):
                 capability.close()
@@ -3056,6 +3125,7 @@ def _materialize_absent_snapshot_output(
     snapshot: GraphSnapshot | None,
     *,
     allow_watch_reservation: bool = False,
+    failpoint: Callable[[str], None] | None = None,
 ) -> None:
     if (
         snapshot is None
@@ -3075,6 +3145,7 @@ def _materialize_absent_snapshot_output(
         output_path,
         expected_parent_identity=snapshot.output_parent_identity,
         expected_relative=relative_output,
+        failpoint=failpoint,
     )
 
 
@@ -3091,7 +3162,10 @@ def begin_transaction(
     root_path = _canonical_directory(Path(root))
     output_path = Path(output).expanduser().absolute()
     _materialize_absent_snapshot_output(
-        output_path, expected_snapshot, allow_watch_reservation=True
+        output_path,
+        expected_snapshot,
+        allow_watch_reservation=True,
+        failpoint=transition_failpoint,
     )
     capability = pin_output(output_path, create=True)
     try:
@@ -6998,6 +7072,7 @@ def open_graph_snapshot(
             )
         )
         if purpose in {
+            "callflow-html",
             "extract-baseline",
             "watch-prepare",
             "publication-prepare",
@@ -8255,7 +8330,9 @@ def queue_rebuild(
         raise PendingTransactionError("malformed rebuild root")
     root_path = _canonical_directory(Path(root_value))
     output_path = Path(output).expanduser().absolute()
-    _materialize_absent_snapshot_output(output_path, expected_snapshot)
+    _materialize_absent_snapshot_output(
+        output_path, expected_snapshot, failpoint=failpoint
+    )
     with pin_output(output_path, create=True) as capability, _locked(capability):
         if expected_snapshot is not None:
             _validate_expected_snapshot_locked(capability, expected_snapshot)
@@ -8951,6 +9028,75 @@ def _finish_close_locked(
         failpoint("after_complete")
 
 
+def _recover_completed_live_locked(
+    capability: OutputCapability,
+    live: Transaction,
+    protocol: Mapping[str, object],
+    drainer: tuple[DrainerTuple, str, dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> CompletedRecovery:
+    """Close one exact receipt-backed live generation after process loss."""
+    _validate_durable_live_binding(
+        capability,
+        live,
+        protocol=protocol,
+        drainer=drainer,
+        allowed_protocol_states=frozenset({"COMPLETE"}),
+    )
+    if drainer[1] != "claimed":
+        raise PendingTransactionError(
+            "completed live recovery requires an exact claimed drainer"
+        )
+    receipt, receipt_digest, _inventory = _validate_receipt_locked(
+        capability, transaction=live
+    )
+    inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
+    inflight = _read_queue(capability, inflight_name)
+    acked_ids = [str(value) for value in drainer[2].get("acked_ids", [])]
+    for item in inflight:
+        item_id = str(item["id"])
+        if item_id not in acked_ids:
+            acked_ids.append(item_id)
+    pending = {
+        "schema": 1,
+        "protocol_epoch": 1,
+        **_drainer_json(live.drainer),
+        "state": "CLOSE_PENDING",
+        "receipt_digest": receipt_digest,
+        "acked_ids": acked_ids,
+        "queue_epoch": live.drainer.generation,
+        "output_identity": capability.identity.json(),
+        "successor_generation": live.drainer.generation + 1,
+        "transaction_id": live.id,
+        "token_identity": (
+            None
+            if live.token_identity is None
+            else {"device": live.token_identity[0], "inode": live.token_identity[1]}
+        ),
+    }
+    if receipt.get("transaction_id") != live.id:
+        raise PendingTransactionError("completed live receipt owner changed")
+    _replace_bytes(capability, DRAINER_FILE, _json_bytes(pending))
+    _finish_close_locked(capability, pending)
+    completed = _read_drainer(capability)
+    if completed is None or completed[1] != "complete":
+        raise PendingTransactionError("completed live recovery did not close")
+    if _read_queue(capability):
+        _write_predecessor_authority(
+            capability, dict(protocol), completed, receipt_digest
+        )
+        successor = DrainerTuple(live.generation + 1, 0, secrets.token_hex(16))
+        _write_drainer(
+            capability,
+            successor,
+            "reserved",
+            lease_deadline=(time.time() if now is None else now) + 30.0,
+            predecessor_receipt=receipt_digest,
+        )
+    return CompletedRecovery(**{**live.__dict__, "phase": "complete"})
+
+
 def recover_close(output: Path | str) -> None:
     with pin_output(output) as capability, _locked(capability):
         _fence_pending_enqueue_locked(capability, recover=True)
@@ -9074,13 +9220,6 @@ def recover_selected_transaction(
         pending_successor = None if pending is None else pending[3]
         protocol = _read_protocol(capability)
         drainer = _read_drainer(capability)
-        if pending is None and current is not None:
-            _validate_durable_live_binding(
-                capability,
-                current,
-                protocol=protocol,
-                drainer=drainer,
-            )
         queue = _read_queue(capability)
         matching_queue = [
             item for item in queue if item.get("root") == str(root_path)
@@ -9115,6 +9254,8 @@ def recover_selected_transaction(
             and selected_transaction_id != expected_transaction_id
         ):
             raise PendingTransactionError("stale transaction id selector")
+        if current is not None and current.root != str(root_path):
+            raise PendingTransactionError("selected transaction root does not match durable state")
         if (
             pending_successor is None
             and current is None
@@ -9150,6 +9291,24 @@ def recover_selected_transaction(
             raise PendingTransactionError("completed generation has no recoverable work")
         if kind is not None and kind != durable_kind:
             raise PendingTransactionError("selected transaction kind does not match durable state")
+        if (
+            pending is None
+            and current is not None
+            and protocol is not None
+            and protocol.get("state") == "COMPLETE"
+        ):
+            if drainer is None:
+                raise PendingTransactionError("completed live drainer is missing")
+            return _recover_completed_live_locked(
+                capability, current, protocol, drainer, now=now
+            )
+        if pending is None and current is not None:
+            _validate_durable_live_binding(
+                capability,
+                current,
+                protocol=protocol,
+                drainer=drainer,
+            )
         if pending_successor is not None:
             return recover_transaction(
                 durable_kind,
@@ -9287,6 +9446,31 @@ def recover_transaction(
             selected is None or selected.id != expected_transaction_id
         ):
             raise PendingTransactionError("stale transaction id selector")
+        protocol = _read_protocol(capability)
+        if (
+            pending is None
+            and current is not None
+            and protocol is not None
+            and protocol.get("state") == "COMPLETE"
+        ):
+            if (
+                expected_output_identity is None
+                or expected_generation is None
+                or expected_transaction_id is None
+            ):
+                raise PendingTransactionError(
+                    "completed live recovery requires exact selectors"
+                )
+            if current.root != str(root_path) or current.kind != kind:
+                raise PendingTransactionError(
+                    "completed live recovery root or kind changed"
+                )
+            drainer = _read_drainer(capability)
+            if drainer is None:
+                raise PendingTransactionError("completed live drainer is missing")
+            return _recover_completed_live_locked(
+                capability, current, protocol, drainer, now=now
+            )
         if pending is not None:
             _validate_pending_transition_current(capability, pending)
             predecessor, predecessor_protocol, predecessor_tx, successor, successor_protocol = pending

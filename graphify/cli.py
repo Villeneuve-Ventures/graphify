@@ -929,6 +929,14 @@ def _replace_export_graph_argument(
         if positional is not None:
             rewritten[positional] = str(graph)
             return rewritten
+    if "--" in rewritten:
+        boundary = rewritten.index("--")
+        return [
+            *rewritten[:boundary],
+            "--graph",
+            str(graph),
+            *rewritten[boundary:],
+        ]
     return [*rewritten, "--graph", str(graph)]
 
 
@@ -1484,6 +1492,7 @@ def _transaction_command() -> None:
     """Bounded operational surface for status, exact recovery, and retired GC."""
     from graphify.transaction import (
         CancellationRecovery,
+        CompletedRecovery,
         OutputIdentity,
         active_transaction_token_path,
         gc_retired_workspaces,
@@ -1504,10 +1513,14 @@ def _transaction_command() -> None:
     while index < len(arguments):
         argument = arguments[index]
         if argument == "--apply":
+            if apply:
+                raise SystemExit("duplicate transaction selector: --apply")
             apply = True
             index += 1
             continue
         if argument.startswith("--") and index + 1 < len(arguments):
+            if argument in values:
+                raise SystemExit(f"duplicate transaction selector: {argument}")
             values[argument] = arguments[index + 1]
             index += 2
             continue
@@ -1586,6 +1599,20 @@ def _transaction_command() -> None:
                     "transaction_id": recovered.transaction_id,
                     "generation": recovered.generation,
                     "predecessor_generation": recovered.predecessor_generation,
+                    "protocol_state": "COMPLETE",
+                    "output_identity": recovered.output_identity.json(),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    if isinstance(recovered, CompletedRecovery):
+        print(
+            json.dumps(
+                {
+                    "state": "completed",
+                    "transaction_id": recovered.transaction_id,
+                    "generation": recovered.generation,
                     "protocol_state": "COMPLETE",
                     "output_identity": recovered.output_identity.json(),
                 },

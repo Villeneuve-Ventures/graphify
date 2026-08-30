@@ -571,9 +571,11 @@ if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trust
 $GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c @'
 import sys
 from pathlib import Path
+from graphify.paths import GRAPHIFY_OUT
 from graphify.transaction import begin_transaction, stage_transaction_handoff
 root = Path(sys.argv[1]).resolve(strict=True)
-output = (root / 'graphify-out').resolve()
+configured = Path(GRAPHIFY_OUT).expanduser()
+output = (configured if configured.is_absolute() else root / configured).resolve()
 print(stage_transaction_handoff(begin_transaction('full', root, output=output)).path, end='')
 '@ INPUT_PATH
 if ($LASTEXITCODE -ne 0) { throw "Graphify transaction handoff failed." }

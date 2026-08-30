@@ -2029,10 +2029,17 @@ def _is_semantic_cache_scope_fix_line(line: str) -> bool:
 def _is_prepared_transaction_runner_line(line: str) -> bool:
     """Whether a monolith line routes a managed write through the pinned workspace."""
     stripped = line.strip()
-    return (
-        "active_transaction_token_path" in stripped
-        and "graphify.transaction run-prepared-token" in stripped
+    suffix = (
+        " -E -P -B -c 'from graphify.transaction import "
+        "active_transaction_token_path; print(active_transaction_token_path())') "
+        '|| exit $?; export GRAPHIFY_TRANSACTION_TOKEN; {interpreter} -E -P -B '
+        '-m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" '
+        '-- -c "'
     )
+    return stripped in {
+        f'GRAPHIFY_TRANSACTION_TOKEN=$({interpreter}{suffix.format(interpreter=interpreter)}'
+        for interpreter in ('"$GRAPHIFY_PYTHON"', '"$(cat graphify-out/.graphify_python)"')
+    }
 
 
 def _is_prepared_workspace_path_line(line: str) -> bool:

@@ -5481,6 +5481,31 @@ def test_monolith_roundtrip_rejects_unrelated_artifact_name_command(monkeypatch)
     assert any("unsanctioned monolith change" in problem for problem in problems)
 
 
+def test_monolith_roundtrip_rejects_prepared_runner_suffix(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    canonical = next(
+        line
+        for line in original.content.splitlines()
+        if "active_transaction_token_path" in line
+        and "graphify.transaction run-prepared-token" in line
+    )
+    injected = original.content.replace(
+        canonical, f"{canonical}; run-unrelated-command", 1
+    )
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("unsanctioned monolith change" in problem for problem in problems)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
 @pytest.mark.parametrize(
     ("platform_key", "provider", "expected_tail"),
@@ -5599,8 +5624,35 @@ graphify_transaction_python -c "from graphify.transaction import current_transac
     assert (output / "runner-proof").read_bytes() == b"ok"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+@pytest.mark.parametrize("absolute", [False, True])
+def test_rendered_posix_handoff_honors_graphify_out_override(tmp_path, absolute):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    configured = tmp_path / "absolute-output" if absolute else Path("relative-output")
+    expected = configured if absolute else root / configured
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_transaction_handoff_script()],
+        cwd=root,
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert list(expected.glob(".graphify_transaction_token.*"))
+    assert not list((root / "graphify-out").glob(".graphify_transaction_token.*"))
+
+
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell runtime unavailable")
-def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path):
+@pytest.mark.parametrize("absolute", [False, True])
+def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path, absolute):
+    configured = tmp_path / "absolute-output" if absolute else Path("relative-output")
+    expected = configured if absolute else tmp_path / configured
     result = subprocess.run(
         [
             str(shutil.which("pwsh")),
@@ -5611,10 +5663,15 @@ def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path):
             _powershell_transaction_handoff_script(),
         ],
         cwd=tmp_path,
-        env={**os.environ, "VIRTUAL_ENV": str(Path(sys.executable).parent.parent)},
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert list((tmp_path / "graphify-out").glob(".graphify_transaction_token.*"))
+    assert list(expected.glob(".graphify_transaction_token.*"))
+    assert not list((tmp_path / "graphify-out").glob(".graphify_transaction_token.*"))

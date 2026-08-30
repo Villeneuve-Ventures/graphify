@@ -69,7 +69,7 @@ For full builds only, begin this immutable handoff; every read-only fast path
 (`query`, `path`, `explain`, and others) must skip it:
 ```bash
 @@GRAPHIFY_GUARD@@
-GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.transaction import begin_transaction, stage_transaction_handoff; root=Path(sys.argv[1]).resolve(strict=True); output=(root / "graphify-out").resolve(); print(stage_transaction_handoff(begin_transaction("full", root, output=output)).path, end="")' INPUT_PATH) || exit $?
+GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import begin_transaction, stage_transaction_handoff; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(stage_transaction_handoff(begin_transaction("full", root, output=output)).path, end="")' INPUT_PATH) || exit $?
 export GRAPHIFY_TRANSACTION_TOKEN; graphify_transaction_python() { [ -n "${GRAPHIFY_TRANSACTION_TOKEN-}" ] || { echo "missing immutable Graphify transaction token" >&2; return 1; }; "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- "$@"; }
 ```
 On success, continue to Step 2. For a full build with `INPUT_PATH`, persist its root:

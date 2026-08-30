@@ -76,6 +76,24 @@ def test_export_routing_normalizes_inline_paths_and_rejects_duplicates():
         )
 
 
+@pytest.mark.parametrize("subcmd", ["html", "neo4j"])
+def test_staged_export_graph_is_inserted_before_option_boundary(subcmd, tmp_path):
+    from graphify.cli import _replace_export_graph_argument
+
+    staged = tmp_path / "staged" / "graph.json"
+    rewritten = _replace_export_graph_argument(
+        ["--", "--push", "bolt://provider"], staged, subcmd=subcmd
+    )
+
+    assert rewritten == [
+        "--graph",
+        str(staged),
+        "--",
+        "--push",
+        "bolt://provider",
+    ]
+
+
 def test_external_callflow_admits_explicit_same_parent_sidecars_once(
     tmp_path, monkeypatch
 ):

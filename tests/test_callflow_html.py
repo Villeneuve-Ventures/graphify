@@ -70,6 +70,27 @@ def test_write_callflow_html_creates_file_and_uses_report(tmp_path):
     assert "<script>alert(1)</script>" not in content
 
 
+def test_direct_managed_callflow_preserves_complete_receipt_inventory(tmp_path):
+    out = _make_graphify_out(tmp_path)
+    seeded = subprocess.run(
+        [sys.executable, "-m", "graphify", "export", "html"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert seeded.returncode == 0, seeded.stderr
+    before = json.loads((out / ".graphify_generation.json").read_text())
+    assert "graph.html" in before["required_artifacts"]
+    graph_html_digest = before["artifact_digests"]["graph.html"]
+
+    write_callflow_html(tmp_path, output="graphify-out/callflow.html")
+
+    after = json.loads((out / ".graphify_generation.json").read_text())
+    assert "graph.html" in after["required_artifacts"]
+    assert after["artifact_digests"]["graph.html"] == graph_html_digest
+    assert (out / "graph.html").is_file()
+
+
 def test_callflow_uses_explicit_unmanaged_labels_and_report(tmp_path):
     _make_graphify_out(tmp_path)
     labels = tmp_path / "labels.json"
