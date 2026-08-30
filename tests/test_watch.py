@@ -1542,6 +1542,59 @@ def test_rebuild_code_real_transaction_drains_arrival_before_close(
     assert followup.generation >= 2
 
 
+def test_watch_rolls_back_unpublished_successor_for_foreign_root(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_mod
+    from graphify.watch import _rebuild_code
+
+    watched = tmp_path / "watched"
+    foreign = tmp_path / "foreign"
+    watched.mkdir()
+    foreign.mkdir()
+    source = watched / "own.py"
+    source.write_text("def own():\n    return 1\n", encoding="utf-8")
+    output = watched / "graphify-out"
+    real_close = transaction_mod.close_if_queue_empty
+    injected = False
+
+    def queue_foreign_before_close(transaction, *, receipt_digest, failpoint=None):
+        nonlocal injected
+        if not injected:
+            injected = True
+            transaction_mod.queue_rebuild(
+                "update",
+                foreign,
+                output=output,
+                changed_paths=["foreign.py"],
+                source="foreign-test",
+            )
+        return real_close(
+            transaction, receipt_digest=receipt_digest, failpoint=failpoint
+        )
+
+    monkeypatch.setattr(
+        transaction_mod, "close_if_queue_empty", queue_foreign_before_close
+    )
+    assert _rebuild_code(watched, changed_paths=[source]) is True
+    assert not (output / ".graphify_transaction.json").exists()
+    assert not (output / ".graphify_rebuild_queue.jsonl").read_text(
+        encoding="utf-8"
+    )
+    quarantined = [
+        json.loads(line)
+        for line in (output / ".graphify_rebuild_quarantine.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [item["root"] for item in quarantined] == [str(foreign.resolve())]
+    restored = json.loads((output / ".graphify_protocol.json").read_text())
+    assert restored["state"] == "COMPLETE"
+    assert restored["root"] == str(watched.resolve())
+    assert restored["kind"] == "runtime"
+    assert not (output / ".graphify_predecessor.json").exists()
+
+
 def test_transactional_watch_accepts_legacy_baseline_before_creating_markers(
     tmp_path,
 ):

@@ -20,6 +20,7 @@ def _make_receiptless_legacy_fixture(graphify_out):
         ".graphify_protocol.json",
         ".graphify_generation.json",
         ".graphify_drainer.json",
+        ".graphify_predecessor.json",
     ):
         (graphify_out / name).unlink(missing_ok=True)
 

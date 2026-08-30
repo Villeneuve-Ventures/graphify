@@ -625,6 +625,27 @@ def test_load_graph_accepts_under_cap(monkeypatch, tmp_path):
     assert G2.number_of_nodes() == G.number_of_nodes()
 
 
+def test_load_graph_restores_optional_learning_overlay_after_admission(tmp_path):
+    graph_path = tmp_path / "graph.json"
+    _write_graph(graph_path, ["n1"])
+    (tmp_path / ".graphify_learning.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "n1": {
+                        "status": "confirmed",
+                        "source_file": "",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    graph = _load_graph(str(graph_path))
+    assert graph.graph["_learning_overlay"]["n1"]["status"] == "confirmed"
+    assert graph.graph["_learning_overlay"]["n1"]["stale"] is False
+
+
 # --- #874: MCP hot-reload ---
 
 def _write_graph(path, nodes: list[str]) -> None:

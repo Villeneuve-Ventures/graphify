@@ -10,7 +10,9 @@ import contextlib
 import contextvars
 import hashlib
 import json
+import math
 import os
+import re
 import runpy
 import secrets
 import stat
@@ -19,7 +21,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, cast
 
 import networkx as nx
 
@@ -58,6 +60,7 @@ PREPARED_FILE = ".graphify_prepared.json"
 LEGACY_PENDING_STATE_FILE = ".graphify_legacy_pending_state.json"
 DRAINER_FILE = ".graphify_drainer.json"
 TRANSITION_FILE = ".graphify_transition.json"
+PREDECESSOR_FILE = ".graphify_predecessor.json"
 _COORDINATION_FILES = frozenset(
     {
         PROTOCOL_FILE,
@@ -69,6 +72,7 @@ _COORDINATION_FILES = frozenset(
         PREPARED_FILE,
         LEGACY_PENDING_STATE_FILE,
         TRANSITION_FILE,
+        PREDECESSOR_FILE,
     }
 )
 _COORDINATION_PREFIXES = (
@@ -85,6 +89,9 @@ _DETACHED_MAX_BYTES = 50 * 1024 * 1024
 _DETACHED_MAX_NODES = 100_000
 _MAX_RECEIPT_ARTIFACTS = 4096
 _MAX_RECEIPT_AGGREGATE_BYTES = 1024 * 1024 * 1024
+_MAX_QUEUE_ITEMS = 4096
+_MAX_QUEUE_PATHS = 4096
+_MAX_QUEUE_PATH_LENGTH = 4096
 
 
 class PendingTransactionError(RuntimeError):
@@ -179,6 +186,16 @@ class Transaction:
     token_digest: str
     token_identity: tuple[int, int] | None
     drainer: DrainerTuple
+    phase: str = "building"
+
+
+@dataclass(frozen=True)
+class CancellationRecovery(Transaction):
+    predecessor_generation: int = 0
+
+    @property
+    def transaction_id(self) -> str:
+        return self.id
 
 
 @dataclass(frozen=True)
@@ -241,6 +258,9 @@ class _Authority:
     token_identity: tuple[int, int] | None
     output_identity: OutputIdentity
     drainer: DrainerTuple
+    root: str
+    kind: TransactionKind
+    phase: str
 
 
 _AUTHORITY = contextvars.ContextVar[_Authority | None](
@@ -343,6 +363,126 @@ def _open_windows_read_directory(path: Path) -> int:
     return open_osfhandle(handle, os.O_RDONLY)
 
 
+def _open_windows_component(parent_fd: int, name: str, *, directory: bool) -> int:
+    """Open one child relative to an already pinned Windows directory handle."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+    if not name or name in {".", ".."} or "\\" in name or "/" in name:
+        raise PendingTransactionError("unsafe Windows managed path component")
+    buffer = ctypes.create_unicode_buffer(name)
+    encoded_length = len(name.encode("utf-16-le"))
+    object_name = UnicodeString(
+        encoded_length,
+        encoded_length + 2,
+        ctypes.cast(buffer, wintypes.LPWSTR),
+    )
+    get_osfhandle: Any = getattr(msvcrt, "get_osfhandle")
+    attributes = ObjectAttributes(
+        ctypes.sizeof(ObjectAttributes),
+        wintypes.HANDLE(get_osfhandle(parent_fd)),
+        ctypes.pointer(object_name),
+        0x40,
+        None,
+        None,
+    )
+    handle = wintypes.HANDLE()
+    io_status = IoStatusBlock()
+    ntdll: Any = getattr(ctypes, "windll").ntdll
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    )
+    nt_create_file.restype = ctypes.c_long
+    status_code = nt_create_file(
+        ctypes.byref(handle),
+        0x0001 | 0x0080 | 0x100000,
+        ctypes.byref(attributes),
+        ctypes.byref(io_status),
+        None,
+        0,
+        0x1 | 0x2 | 0x4,
+        1,
+        0x20 | 0x00200000 | (0x1 if directory else 0x40),
+        None,
+        0,
+    )
+    if status_code < 0:
+        rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
+        rtl_status_to_dos_error.argtypes = (ctypes.c_long,)
+        rtl_status_to_dos_error.restype = wintypes.ULONG
+        dos_error = int(rtl_status_to_dos_error(status_code))
+        if dos_error in {2, 3}:
+            raise FileNotFoundError(dos_error, name)
+        raise OSError(dos_error, f"cannot open Windows managed component: {name}")
+    open_osfhandle: Any = getattr(msvcrt, "open_osfhandle")
+    return open_osfhandle(handle.value, os.O_RDONLY)
+
+
+def _open_windows_relative_fd(
+    capability: OutputCapability, relative_name: str, *, directory: bool = False
+) -> int:
+    relative = Path(relative_name)
+    if relative.is_absolute() or not relative.parts or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise PendingTransactionError(f"unsafe managed relative path: {relative_name}")
+    parent_fd = os.dup(capability.fd)
+    try:
+        for component in relative.parts[:-1]:
+            child_fd = _open_windows_component(parent_fd, component, directory=True)
+            os.close(parent_fd)
+            parent_fd = child_fd
+            info = os.fstat(parent_fd)
+            if not stat.S_ISDIR(info.st_mode) or bool(
+                getattr(info, "st_reparse_tag", 0)
+            ):
+                raise PendingTransactionError(
+                    f"unsafe managed artifact: {relative_name}"
+                )
+        result = _open_windows_component(
+            parent_fd, relative.parts[-1], directory=directory
+        )
+        info = os.fstat(result)
+        if bool(getattr(info, "st_reparse_tag", 0)):
+            os.close(result)
+            raise PendingTransactionError(f"unsafe managed artifact: {relative_name}")
+        return result
+    finally:
+        os.close(parent_fd)
+
+
 def _list_entries(capability: OutputCapability) -> list[str]:
     capability.validate()
     entries = os.listdir(capability.path if _PLATFORM == "windows" else capability.fd)
@@ -394,31 +534,55 @@ def _locked(capability: OutputCapability) -> Iterator[None]:
 def _entry_stat(capability: OutputCapability, name: str) -> os.stat_result | None:
     if Path(name).name != name:
         raise PendingTransactionError(f"unsafe managed entry name: {name}")
+    fd: int | None = None
     try:
-        info = (
-            (capability.path / name).stat(follow_symlinks=False)
-            if _PLATFORM == "windows"
-            else os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
-        )
+        if _PLATFORM == "windows":
+            fd = _open_windows_relative_fd(capability, name)
+            info = os.fstat(fd)
+        else:
+            info = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
+    finally:
+        if fd is not None:
+            os.close(fd)
     if not stat.S_ISREG(info.st_mode):
         raise PendingTransactionError(f"unsafe non-regular managed entry: {name}")
     return info
 
 
 def _read_bytes(capability: OutputCapability, name: str, limit: int = _MAX_STATE_BYTES) -> bytes:
+    if _PLATFORM == "windows":
+        fd = _open_windows_relative_fd(capability, name)
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > limit:
+                raise PendingTransactionError(f"unsafe managed entry: {name}")
+            chunks: list[bytes] = []
+            remaining = limit + 1
+            while remaining:
+                chunk = os.read(fd, min(65536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if len(payload) > limit:
+                raise PendingTransactionError(f"managed entry exceeds size limit: {name}")
+            capability.validate()
+            return payload
+        finally:
+            os.close(fd)
     before = _entry_stat(capability, name)
     if before is None:
         raise FileNotFoundError(name)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(capability.path / name, flags) if _PLATFORM == "windows" else os.open(name, flags, dir_fd=capability.fd)
+    fd = os.open(name, flags, dir_fd=capability.fd)
     try:
         opened = os.fstat(fd)
-        if (
-            (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-            or opened.st_size > limit
-        ):
+        if opened.st_size > limit:
+            raise PendingTransactionError(f"managed entry exceeds size limit: {name}")
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
             raise PendingTransactionError(f"managed entry identity changed: {name}")
         chunks: list[bytes] = []
         remaining = limit + 1
@@ -582,42 +746,16 @@ def _hash_windows_relative(
     retain: bool,
     aggregate_remaining: int,
 ) -> tuple[str, int, bytes | None]:
-    relative = Path(relative_name)
-    if relative.is_absolute() or not relative.parts or any(
-        part in {"", ".", ".."} for part in relative.parts
-    ):
-        raise PendingTransactionError(f"unsafe managed relative path: {relative_name}")
-    target = capability.path.joinpath(*relative.parts)
-    current = capability.path
     try:
-        for component in relative.parts[:-1]:
-            current /= component
-            info = current.stat(follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or current.is_symlink()
-                or bool(getattr(info, "st_reparse_tag", 0))
-            ):
-                raise PendingTransactionError(f"unsafe managed artifact: {relative_name}")
-        before = target.stat(follow_symlinks=False)
+        fd = _open_windows_relative_fd(capability, relative_name)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise PendingTransactionError(
             f"required managed artifact is missing: {relative_name}"
         ) from exc
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or target.is_symlink()
-        or bool(getattr(before, "st_reparse_tag", 0))
-        or before.st_size > aggregate_remaining
-    ):
-        raise PendingTransactionError(f"unsafe managed artifact: {relative_name}")
-    fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     try:
         opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
-            raise PendingTransactionError(
-                f"managed artifact identity changed: {relative_name}"
-            )
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > aggregate_remaining:
+            raise PendingTransactionError(f"unsafe managed artifact: {relative_name}")
         digest = hashlib.sha256()
         body = bytearray() if retain else None
         size = 0
@@ -633,11 +771,6 @@ def _hash_windows_relative(
             digest.update(chunk)
             if body is not None:
                 body.extend(chunk)
-        after = target.stat(follow_symlinks=False)
-        if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
-            raise PendingTransactionError(
-                f"managed artifact replaced while reading: {relative_name}"
-            )
         capability.validate()
         return digest.hexdigest(), size, None if body is None else bytes(body)
     finally:
@@ -735,6 +868,16 @@ def _replace_bytes(
                         src_dir_fd=capability.fd,
                         dst_dir_fd=capability.fd,
                     )
+                else:
+                    quarantined = _entry_stat(capability, quarantine)
+                    if quarantined is None or (
+                        quarantined.st_dev,
+                        quarantined.st_ino,
+                    ) != expected_identity:
+                        raise PendingTransactionError(
+                            f"managed entry quarantine identity changed: {name}"
+                        )
+                    os.unlink(quarantine, dir_fd=capability.fd)
                 os.fsync(capability.fd)
                 capability.validate()
                 raise
@@ -852,13 +995,108 @@ def _load_json(capability: OutputCapability, name: str) -> dict[str, Any] | None
     return value
 
 
+_PROTOCOL_COMMON_FIELDS = {
+    "schema",
+    "protocol_epoch",
+    "generation",
+    "kind",
+    "root",
+    "state",
+    "output_identity",
+    "owner_capability_digest",
+    "bootstrap_claim_epoch",
+    "bootstrap_nonce",
+    "lease_deadline",
+}
+
+
+def _protocol_from_json(
+    capability: OutputCapability, raw: object
+) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise PendingTransactionError("malformed protocol state")
+    state = raw.get("state")
+    fields = set(_PROTOCOL_COMMON_FIELDS)
+    if state == "INCOMPLETE":
+        fields.update(("transaction_id", "token_identity"))
+    elif state == "COMPLETE":
+        fields.update(("transaction_id", "token_identity", "receipt_digest"))
+    elif state != "BOOTSTRAP_PENDING":
+        raise PendingTransactionError("malformed protocol state")
+    if set(raw) != fields:
+        raise PendingTransactionError("malformed protocol state")
+    generation = raw.get("generation")
+    root_value = raw.get("root")
+    lease_deadline = raw.get("lease_deadline")
+    if (
+        type(raw.get("schema")) is not int
+        or raw["schema"] != 1
+        or type(raw.get("protocol_epoch")) is not int
+        or raw["protocol_epoch"] != 1
+        or type(generation) is not int
+        or generation < 1
+        or raw.get("kind") not in {"full", "update", "runtime"}
+        or type(root_value) is not str
+        or not _is_hex(raw.get("owner_capability_digest"))
+        or type(raw.get("bootstrap_claim_epoch")) is not int
+        or raw["bootstrap_claim_epoch"] < 0
+        or type(raw.get("bootstrap_nonce")) is not str
+        or len(raw["bootstrap_nonce"]) < 16
+        or type(lease_deadline) not in {int, float}
+        or _identity_from_json(raw.get("output_identity")) != capability.identity
+    ):
+        raise PendingTransactionError("malformed protocol state")
+    if not math.isfinite(float(cast(int | float, lease_deadline))):
+        raise PendingTransactionError("malformed protocol state")
+    root = Path(root_value)
+    try:
+        canonical_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise PendingTransactionError("malformed protocol root") from exc
+    if not root.is_absolute() or canonical_root != root:
+        raise PendingTransactionError("malformed protocol root")
+    if state in {"INCOMPLETE", "COMPLETE"}:
+        if not _is_hex(raw.get("transaction_id")):
+            raise PendingTransactionError("malformed protocol owner")
+        try:
+            _token_identity_from_json(raw.get("token_identity"))
+        except PendingTransactionError as exc:
+            raise PendingTransactionError(
+                "malformed protocol token identity"
+            ) from exc
+    if state == "COMPLETE" and not _is_hex(raw.get("receipt_digest")):
+        raise PendingTransactionError("malformed protocol receipt")
+    return dict(raw)
+
+
+def _read_protocol(capability: OutputCapability) -> dict[str, Any] | None:
+    raw = _load_json(capability, PROTOCOL_FILE)
+    return None if raw is None else _protocol_from_json(capability, raw)
+
+
 def _identity_from_json(value: object) -> OutputIdentity:
     if not isinstance(value, dict) or set(value) != {"device", "inode"}:
         raise PendingTransactionError("malformed output identity")
-    try:
-        return OutputIdentity(int(value["device"]), int(value["inode"]))
-    except (TypeError, ValueError) as exc:
-        raise PendingTransactionError("malformed output identity") from exc
+    if type(value["device"]) is not int or type(value["inode"]) is not int:
+        raise PendingTransactionError("malformed output identity")
+    if value["device"] < 0 or value["inode"] <= 0:
+        raise PendingTransactionError("malformed output identity")
+    return OutputIdentity(value["device"], value["inode"])
+
+
+def _token_identity_from_json(value: object) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    identity = _identity_from_json(value)
+    return identity.device, identity.inode
+
+
+def _is_hex(value: object, length: int = 64) -> bool:
+    return (
+        type(value) is str
+        and len(value) == length
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _drainer_from_json(value: object) -> DrainerTuple:
@@ -874,7 +1112,7 @@ def _drainer_from_json(value: object) -> DrainerTuple:
     ):
         raise PendingTransactionError("malformed drainer authority")
     result = DrainerTuple(generation, claim_epoch, launch_nonce)
-    if result.generation < 0 or result.claim_epoch < 0 or len(result.launch_nonce) < 16:
+    if result.generation < 1 or result.claim_epoch < 0 or len(result.launch_nonce) < 16:
         raise PendingTransactionError("malformed drainer authority")
     return result
 
@@ -887,38 +1125,82 @@ def _drainer_json(value: DrainerTuple) -> dict[str, object]:
     }
 
 
-def _read_transaction(capability: OutputCapability) -> Transaction | None:
-    raw = _load_json(capability, TRANSACTION_FILE)
-    if raw is None:
-        return None
-    try:
-        token_identity_raw = raw["token_identity"]
-        token_identity = (
-            None
-            if token_identity_raw is None
-            else (int(token_identity_raw["device"]), int(token_identity_raw["inode"]))
-        )
-        tx = Transaction(
-            id=str(raw["id"]),
-            kind=str(raw["kind"]),  # type: ignore[arg-type]
-            root=str(raw["root"]),
-            output=capability.path,
-            output_identity=_identity_from_json(raw["output_identity"]),
-            generation=int(raw["generation"]),
-            token_digest=str(raw["token_digest"]),
-            token_identity=token_identity,
-            drainer=_drainer_from_json(raw["drainer"]),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise PendingTransactionError("malformed live transaction") from exc
+_TRANSACTION_FIELDS = {
+    "schema",
+    "protocol_epoch",
+    "id",
+    "kind",
+    "root",
+    "output",
+    "phase",
+    "pid",
+    "generation",
+    "output_identity",
+    "token_digest",
+    "token_identity",
+    "drainer",
+}
+_TRANSACTION_PHASES = {"awaiting-drainer", "building", "bootstrap-recovered"}
+
+
+def _transaction_from_json(
+    capability: OutputCapability,
+    raw: object,
+    *,
+    allowed_phases: set[str] = _TRANSACTION_PHASES,
+) -> Transaction:
+    if not isinstance(raw, dict) or set(raw) != _TRANSACTION_FIELDS:
+        raise PendingTransactionError("malformed live transaction")
     if (
-        len(tx.id) != 64
-        or tx.kind not in {"full", "update", "runtime"}
-        or tx.output_identity != capability.identity
-        or len(tx.token_digest) != 64
+        type(raw.get("schema")) is not int
+        or raw.get("schema") != 1
+        or type(raw.get("protocol_epoch")) is not int
+        or raw.get("protocol_epoch") != 1
+        or not _is_hex(raw.get("id"))
+        or raw.get("kind") not in {"full", "update", "runtime"}
+        or type(raw.get("root")) is not str
+        or type(raw.get("output")) is not str
+        or raw.get("phase") not in allowed_phases
+        or type(raw.get("pid")) is not int
+        or raw["pid"] <= 0
+        or type(raw.get("generation")) is not int
+        or raw["generation"] < 1
+        or not _is_hex(raw.get("token_digest"))
     ):
         raise PendingTransactionError("malformed live transaction")
+    root = Path(raw["root"])
+    output = Path(raw["output"])
+    try:
+        canonical_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise PendingTransactionError("malformed live transaction root") from exc
+    if (
+        not root.is_absolute()
+        or canonical_root != root
+        or not output.is_absolute()
+        or output != capability.path
+    ):
+        raise PendingTransactionError("malformed live transaction path binding")
+    tx = Transaction(
+        id=raw["id"],
+        kind=raw["kind"],
+        root=raw["root"],
+        output=output,
+        output_identity=_identity_from_json(raw["output_identity"]),
+        generation=raw["generation"],
+        token_digest=raw["token_digest"],
+        token_identity=_token_identity_from_json(raw["token_identity"]),
+        drainer=_drainer_from_json(raw["drainer"]),
+        phase=raw["phase"],
+    )
+    if tx.output_identity != capability.identity or tx.drainer.generation != tx.generation:
+        raise PendingTransactionError("malformed live transaction binding")
     return tx
+
+
+def _read_transaction(capability: OutputCapability) -> Transaction | None:
+    raw = _load_json(capability, TRANSACTION_FILE)
+    return None if raw is None else _transaction_from_json(capability, raw)
 
 
 def _transaction_json(tx: Transaction, *, phase: str) -> dict[str, object]:
@@ -928,6 +1210,7 @@ def _transaction_json(tx: Transaction, *, phase: str) -> dict[str, object]:
         "id": tx.id,
         "kind": tx.kind,
         "root": tx.root,
+        "output": str(tx.output),
         "phase": phase,
         "pid": os.getpid(),
         "generation": tx.generation,
@@ -987,40 +1270,20 @@ def _write_pending_transition(
     _replace_bytes(capability, TRANSITION_FILE, _json_bytes(record))
 
 
-def _transaction_from_record(capability: OutputCapability, value: object) -> Transaction:
-    if not isinstance(value, dict):
-        raise PendingTransactionError("malformed pending transition")
-    token_identity_raw = value.get("token_identity")
+def _transaction_from_record(
+    capability: OutputCapability,
+    value: object,
+    *,
+    allowed_phases: set[str] | None = None,
+) -> Transaction:
     try:
-        token_identity = (
-            None
-            if token_identity_raw is None
-            else (int(token_identity_raw["device"]), int(token_identity_raw["inode"]))
+        return _transaction_from_json(
+            capability,
+            value,
+            allowed_phases=allowed_phases or {"awaiting-drainer"},
         )
-        tx = Transaction(
-            id=str(value["id"]),
-            kind=str(value["kind"]),  # type: ignore[arg-type]
-            root=str(value["root"]),
-            output=capability.path,
-            output_identity=_identity_from_json(value["output_identity"]),
-            generation=int(value["generation"]),
-            token_digest=str(value["token_digest"]),
-            token_identity=token_identity,
-            drainer=_drainer_from_json(value["drainer"]),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
+    except PendingTransactionError as exc:
         raise PendingTransactionError("malformed pending transition") from exc
-    if (
-        value.get("schema") != 1
-        or value.get("protocol_epoch") != 1
-        or value.get("phase") != "awaiting-drainer"
-        or tx.output_identity != capability.identity
-        or tx.kind not in {"full", "update", "runtime"}
-        or len(tx.id) != 64
-        or len(tx.token_digest) != 64
-    ):
-        raise PendingTransactionError("malformed pending transition")
-    return tx
 
 
 def _read_pending_transition(
@@ -1055,18 +1318,36 @@ def _read_pending_transition(
     prior_tx_raw = record.get("predecessor_transaction")
     prior_tx = None
     if prior_tx_raw is not None:
-        prior_copy = dict(prior_tx_raw) if isinstance(prior_tx_raw, dict) else {}
-        prior_copy["phase"] = "awaiting-drainer"
-        prior_tx = _transaction_from_record(capability, prior_copy)
+        prior_tx = _transaction_from_record(
+            capability,
+            prior_tx_raw,
+            allowed_phases={"building", "bootstrap-recovered"},
+        )
     successor = _transaction_from_record(capability, record.get("successor_transaction"))
-    predecessor_protocol = dict(record["predecessor_protocol"])
-    successor_protocol = dict(record["successor_protocol"])
+    try:
+        predecessor_protocol = _protocol_from_json(
+            capability, record["predecessor_protocol"]
+        )
+    except PendingTransactionError as exc:
+        raise PendingTransactionError(
+            "pending transition protocol predecessor is malformed"
+        ) from exc
+    try:
+        successor_protocol = _protocol_from_json(
+            capability, record["successor_protocol"]
+        )
+    except PendingTransactionError as exc:
+        raise PendingTransactionError(
+            "pending transition protocol successor is malformed"
+        ) from exc
     if (
         successor_protocol.get("schema") != 1
         or successor_protocol.get("protocol_epoch") != 1
         or successor_protocol.get("state") != "INCOMPLETE"
         or successor_protocol.get("generation") != successor.generation
         or successor_protocol.get("transaction_id") != successor.id
+        or successor_protocol.get("root") != successor.root
+        or successor_protocol.get("kind") != successor.kind
         or successor_protocol.get("owner_capability_digest") != successor.token_digest
         or successor_protocol.get("output_identity") != capability.identity.json()
         or successor_protocol.get("token_identity")
@@ -1077,6 +1358,32 @@ def _read_pending_transition(
         )
     ):
         raise PendingTransactionError("malformed pending transition successor binding")
+    if prior_tx is not None:
+        prior_token_identity = (
+            None
+            if prior_tx.token_identity is None
+            else {
+                "device": prior_tx.token_identity[0],
+                "inode": prior_tx.token_identity[1],
+            }
+        )
+        if (
+            predecessor is None
+            or predecessor[0] != prior_tx.drainer
+            or predecessor_protocol.get("state") != "INCOMPLETE"
+            or predecessor_protocol.get("generation") != prior_tx.generation
+            or predecessor_protocol.get("transaction_id") != prior_tx.id
+            or predecessor_protocol.get("root") != prior_tx.root
+            or predecessor_protocol.get("kind") != prior_tx.kind
+            or predecessor_protocol.get("owner_capability_digest")
+            != prior_tx.token_digest
+            or predecessor_protocol.get("token_identity") != prior_token_identity
+            or predecessor_protocol.get("output_identity")
+            != capability.identity.json()
+        ):
+            raise PendingTransactionError(
+                "malformed pending transition predecessor binding"
+            )
     if successor.token_identity is not None:
         token = _entry_stat(capability, f".graphify_transaction_token.{successor.id}")
         if token is None or (token.st_dev, token.st_ino) != successor.token_identity:
@@ -1098,8 +1405,10 @@ def _validate_pending_transition_current(
 ) -> None:
     """Prove the current state is one exact point on the recorded transition."""
     predecessor, predecessor_protocol, predecessor_tx, successor, successor_protocol = pending
-    protocol = _load_json(capability, PROTOCOL_FILE)
-    if protocol != predecessor_protocol and protocol != successor_protocol:
+    protocol = _read_protocol(capability)
+    protocol_is_predecessor = protocol == predecessor_protocol
+    protocol_is_successor = protocol == successor_protocol
+    if not protocol_is_predecessor and not protocol_is_successor:
         raise PendingTransactionError("pending transition protocol predecessor changed")
     live = _read_transaction(capability)
     if predecessor_tx is None:
@@ -1111,15 +1420,21 @@ def _validate_pending_transition_current(
     if current_drainer is None:
         if predecessor is not None:
             raise PendingTransactionError("pending transition drainer predecessor disappeared")
+        if protocol_is_predecessor and live is not None:
+            raise PendingTransactionError("pending transition ordering changed")
         return
     current_pair = current_drainer[:2]
     if current_pair == predecessor:
+        if protocol_is_predecessor and live != predecessor_tx:
+            raise PendingTransactionError("pending transition ordering changed")
         return
     if current_drainer[0] == successor.drainer and current_drainer[1] in {
         "reserved",
         "launching",
         "claimed",
     }:
+        if not protocol_is_successor or live != successor:
+            raise PendingTransactionError("pending transition ordering changed")
         return
     raise PendingTransactionError("pending transition drainer binding changed")
 
@@ -1142,6 +1457,25 @@ def _authority_for(tx: Transaction, drainer: DrainerTuple | None = None) -> _Aut
         tx.token_identity,
         tx.output_identity,
         drainer or tx.drainer,
+        tx.root,
+        tx.kind,
+        tx.phase,
+    )
+
+
+def _cancellation_recovery(successor: Transaction) -> CancellationRecovery:
+    return CancellationRecovery(
+        id=successor.id,
+        kind=successor.kind,
+        root=successor.root,
+        output=successor.output,
+        output_identity=successor.output_identity,
+        generation=successor.generation,
+        token_digest=successor.token_digest,
+        token_identity=successor.token_identity,
+        drainer=successor.drainer,
+        phase=successor.phase,
+        predecessor_generation=successor.generation - 1,
     )
 
 
@@ -1247,6 +1581,16 @@ def _validated_retired_marker(
     tombstone = marker.get("tombstone")
     current_name = marker.get("current_name", tombstone)
     quarantine_name = marker.get("quarantine_name")
+    if (
+        not _is_retired_tombstone(tombstone, transaction_id)
+        or not _is_single_component(current_name)
+        or (
+            quarantine_name is not None
+            and not _is_gc_quarantine(quarantine_name)
+        )
+        or not _is_single_component(candidate_name)
+    ):
+        raise PendingTransactionError("retired workspace binding is malformed")
     allowed_names = {current_name}
     if state == "gc_pending" and isinstance(quarantine_name, str):
         allowed_names.add(quarantine_name)
@@ -1257,7 +1601,6 @@ def _validated_retired_marker(
         or not isinstance(transaction_id, str)
         or len(transaction_id) != 64
         or not isinstance(tombstone, str)
-        or not tombstone.startswith(f".graphify-retired-{transaction_id}-")
         or not isinstance(current_name, str)
         or candidate_name not in allowed_names
         or _identity_from_json(marker.get("workspace_identity")) != candidate_identity
@@ -1268,7 +1611,7 @@ def _validated_retired_marker(
         raise PendingTransactionError("retired workspace binding is malformed")
     if state in {"gc_pending", "gc_quarantined"} and (
         not isinstance(quarantine_name, str)
-        or not quarantine_name.startswith(".graphify-gc-root-")
+        or not _is_gc_quarantine(quarantine_name)
     ):
         raise PendingTransactionError("retired workspace binding is malformed")
     if state == "gc_quarantined" and current_name != quarantine_name:
@@ -1276,7 +1619,137 @@ def _validated_retired_marker(
     return marker
 
 
-def _remove_retired_tree(parent_fd: int, name: str, expected: OutputIdentity) -> None:
+def _is_single_component(value: object) -> bool:
+    return type(value) is str and Path(value).name == value and value not in {"", ".", ".."}
+
+
+def _is_retired_tombstone(value: object, transaction_id: object = None) -> bool:
+    if type(value) is not str or not _is_single_component(value):
+        return False
+    match = re.fullmatch(r"\.graphify-retired-([0-9a-f]{64})-([0-9a-f]{16})", value)
+    return match is not None and (
+        transaction_id is None or match.group(1) == transaction_id
+    )
+
+
+def _is_gc_quarantine(value: object) -> bool:
+    return type(value) is str and _is_single_component(value) and re.fullmatch(
+        r"\.graphify-gc-root-[0-9a-f]{32}", value
+    ) is not None
+
+
+def _is_gc_journal(value: object) -> bool:
+    return type(value) is str and _is_single_component(value) and re.fullmatch(
+        r"\.graphify-gc-journal-[0-9a-f]{64}\.json", value
+    ) is not None
+
+
+def _gc_journal_name(
+    managed_output_identity: OutputIdentity, tombstone: str
+) -> str:
+    selector = _json_bytes(
+        {
+            "managed_output_identity": managed_output_identity.json(),
+            "tombstone": tombstone,
+        }
+    )
+    return f".graphify-gc-journal-{hashlib.sha256(selector).hexdigest()}.json"
+
+
+def _validated_gc_journal(
+    raw: dict[str, Any] | None,
+    *,
+    tombstone: str,
+    workspace_identity: OutputIdentity,
+    managed_output_identity: OutputIdentity,
+) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if raw.get("managed_output_identity") != managed_output_identity.json():
+        return None
+    quarantine_name = raw.get("quarantine_name")
+    if (
+        set(raw)
+        != {
+            "schema",
+            "protocol_epoch",
+            "state",
+            "tombstone",
+            "quarantine_name",
+            "workspace_identity",
+            "managed_output_identity",
+        }
+        or type(raw.get("schema")) is not int
+        or raw.get("schema") != 1
+        or type(raw.get("protocol_epoch")) is not int
+        or raw.get("protocol_epoch") != 1
+        or raw.get("state") not in {"planned", "quarantined", "root_removed"}
+        or raw.get("tombstone") != tombstone
+        or not _is_retired_tombstone(tombstone)
+        or not _is_gc_quarantine(quarantine_name)
+        or _identity_from_json(raw.get("workspace_identity"))
+        != workspace_identity
+    ):
+        raise PendingTransactionError("retired workspace GC journal is malformed")
+    return raw
+
+
+def _gc_journal_location(
+    parent: OutputCapability,
+    journal: Mapping[str, object],
+    workspace_identity: OutputIdentity,
+) -> str | None:
+    tombstone = journal["tombstone"]
+    quarantine = journal["quarantine_name"]
+    if not _is_retired_tombstone(tombstone) or not _is_gc_quarantine(quarantine):
+        raise PendingTransactionError("retired workspace GC journal is malformed")
+    matches: list[str] = []
+    controlled = [
+        name
+        for name in _list_entries(parent)
+        if _is_retired_tombstone(name) or _is_gc_quarantine(name)
+    ]
+    if len(controlled) > _MAX_RECEIPT_ARTIFACTS:
+        raise PendingTransactionError("retired workspace GC inventory exceeds bound")
+    for name in controlled:
+        try:
+            info = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        identity = OutputIdentity(info.st_dev, info.st_ino)
+        if name in {tombstone, quarantine} and (
+            not stat.S_ISDIR(info.st_mode) or identity != workspace_identity
+        ):
+            raise PendingTransactionError("retired workspace GC location changed")
+        if stat.S_ISDIR(info.st_mode) and identity == workspace_identity:
+            matches.append(name)
+    state = journal["state"]
+    if state == "root_removed":
+        if matches:
+            raise PendingTransactionError("retired workspace GC location is ambiguous")
+        return None
+    if state == "quarantined" and not matches:
+        # The root removal and its following parent fsync are separate durable
+        # boundaries.  The parent-scoped journal is the authority that makes
+        # this exact, identity-bound absence resumable.
+        return None
+    if len(matches) != 1:
+        raise PendingTransactionError("retired workspace GC location is ambiguous")
+    if matches[0] not in {tombstone, quarantine}:
+        raise PendingTransactionError("retired workspace GC location changed")
+    if state == "quarantined" and matches[0] != quarantine:
+        raise PendingTransactionError("retired workspace GC location is stale")
+    return matches[0]
+
+
+def _remove_retired_tree(
+    parent_fd: int,
+    name: str,
+    expected: OutputIdentity,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+    selected_root: bool = True,
+) -> None:
     """Remove one identity-proven retired workspace without following links."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(name, flags, dir_fd=parent_fd)
@@ -1289,6 +1762,8 @@ def _remove_retired_tree(parent_fd: int, name: str, expected: OutputIdentity) ->
             child_identity = OutputIdentity(info.st_dev, info.st_ino)
             quarantine = f".graphify-gc-{secrets.token_hex(16)}"
             os.rename(child, quarantine, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            if failpoint is not None:
+                failpoint("after_gc_child_quarantine")
             moved = os.stat(quarantine, dir_fd=directory_fd, follow_symlinks=False)
             if (moved.st_dev, moved.st_ino) != (
                 child_identity.device,
@@ -1304,7 +1779,11 @@ def _remove_retired_tree(parent_fd: int, name: str, expected: OutputIdentity) ->
                 raise PendingTransactionError("retired workspace child identity changed")
             if stat.S_ISDIR(info.st_mode):
                 _remove_retired_tree(
-                    directory_fd, quarantine, child_identity
+                    directory_fd,
+                    quarantine,
+                    child_identity,
+                    failpoint=failpoint,
+                    selected_root=False,
                 )
             elif stat.S_ISREG(info.st_mode):
                 terminal = os.stat(
@@ -1318,6 +1797,12 @@ def _remove_retired_tree(parent_fd: int, name: str, expected: OutputIdentity) ->
                         "retired workspace child identity changed"
                     )
                 os.unlink(quarantine, dir_fd=directory_fd)
+                if failpoint is not None:
+                    failpoint(
+                        "after_gc_marker_retirement"
+                        if child == ".graphify_retired.json"
+                        else "after_gc_child_unlink"
+                    )
             else:
                 raise PendingTransactionError(
                     "retired workspace contains an unsafe filesystem entry"
@@ -1329,6 +1814,8 @@ def _remove_retired_tree(parent_fd: int, name: str, expected: OutputIdentity) ->
     if (terminal.st_dev, terminal.st_ino) != (expected.device, expected.inode):
         raise PendingTransactionError("retired workspace identity changed")
     os.rmdir(name, dir_fd=parent_fd)
+    if failpoint is not None and selected_root:
+        failpoint("after_gc_root_removal")
     os.fsync(parent_fd)
 
 
@@ -1350,10 +1837,40 @@ def gc_retired_workspaces(
             None if prepared is None else _identity_from_json(prepared.get("identity"))
         )
         selected = Path(workspace).expanduser().absolute()
-        if selected.parent != capability.path.parent or not selected.name.startswith(".graphify-retired-"):
+        if selected.parent != capability.path.parent or not _is_retired_tombstone(selected.name):
             raise PendingTransactionError("retired workspace selector is outside output scope")
         with pin_output(capability.path.parent, mutation=not dry_run) as parent:
             selected_name = selected.name
+            journal_name = _gc_journal_name(capability.identity, selected.name)
+            journal = _validated_gc_journal(
+                _load_json(parent, journal_name),
+                tombstone=selected.name,
+                workspace_identity=expected_workspace_identity,
+                managed_output_identity=capability.identity,
+            )
+            if journal is not None:
+                _gc_journal_location(parent, journal, expected_workspace_identity)
+            if journal is not None and journal.get("state") == "root_removed":
+                if not dry_run:
+                    _unlink(parent, journal_name)
+                return (selected.name,)
+            if journal is not None and journal.get("state") == "quarantined":
+                quarantine_name = str(journal["quarantine_name"])
+                try:
+                    os.stat(
+                        quarantine_name,
+                        dir_fd=parent.fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    if not dry_run:
+                        journal = dict(journal)
+                        journal["state"] = "root_removed"
+                        _replace_bytes(parent, journal_name, _json_bytes(journal))
+                        if failpoint is not None:
+                            failpoint("after_gc_parent_fsync")
+                        _unlink(parent, journal_name)
+                    return (selected.name,)
             try:
                 info = os.stat(selected_name, dir_fd=parent.fd, follow_symlinks=False)
             except FileNotFoundError:
@@ -1369,11 +1886,17 @@ def gc_retired_workspaces(
                         continue
                     with pin_output(parent.path / name, mutation=False) as retired:
                         marker = _load_json(retired, ".graphify_retired.json")
-                    bound = _validated_retired_marker(
-                        marker,
-                        candidate_name=name,
-                        candidate_identity=candidate_identity,
-                        managed_output_identity=capability.identity,
+                    bound = (
+                        journal
+                        if journal is not None
+                        and journal.get("state") == "quarantined"
+                        and journal.get("quarantine_name") == name
+                        else _validated_retired_marker(
+                            marker,
+                            candidate_name=name,
+                            candidate_identity=candidate_identity,
+                            managed_output_identity=capability.identity,
+                        )
                     )
                     if bound is not None and bound.get("tombstone") == selected.name:
                         matches.append((name, candidate_info, bound))
@@ -1389,17 +1912,38 @@ def gc_retired_workspaces(
                 raise PendingTransactionError("retired workspace is unsafe, stale, or reachable")
             with pin_output(parent.path / selected_name, mutation=False) as retired:
                 marker = _load_json(retired, ".graphify_retired.json")
-            marker = _validated_retired_marker(
-                marker,
-                candidate_name=selected_name,
-                candidate_identity=identity,
-                managed_output_identity=capability.identity,
-            )
+            if (
+                journal is not None
+                and journal.get("state") == "quarantined"
+                and journal.get("quarantine_name") == selected_name
+            ):
+                marker = {
+                    "state": "gc_quarantined",
+                    "tombstone": selected.name,
+                    "quarantine_name": selected_name,
+                }
+            else:
+                marker = _validated_retired_marker(
+                    marker,
+                    candidate_name=selected_name,
+                    candidate_identity=identity,
+                    managed_output_identity=capability.identity,
+                )
             if marker is None or marker.get("tombstone") != selected.name:
                 raise PendingTransactionError("retired workspace binding is malformed")
             if not dry_run:
                 if marker.get("state") == "retired":
                     quarantine = f".graphify-gc-root-{secrets.token_hex(16)}"
+                    journal = {
+                        "schema": 1,
+                        "protocol_epoch": 1,
+                        "state": "planned",
+                        "tombstone": selected.name,
+                        "quarantine_name": quarantine,
+                        "workspace_identity": identity.json(),
+                        "managed_output_identity": capability.identity.json(),
+                    }
+                    _replace_bytes(parent, journal_name, _json_bytes(journal))
                     pending_marker = dict(marker)
                     pending_marker.update(
                         state="gc_pending",
@@ -1417,6 +1961,17 @@ def gc_retired_workspaces(
                     )
                 else:
                     quarantine = str(marker["quarantine_name"])
+                    if journal is None:
+                        journal = {
+                            "schema": 1,
+                            "protocol_epoch": 1,
+                            "state": "planned",
+                            "tombstone": selected.name,
+                            "quarantine_name": quarantine,
+                            "workspace_identity": identity.json(),
+                            "managed_output_identity": capability.identity.json(),
+                        }
+                        _replace_bytes(parent, journal_name, _json_bytes(journal))
                     if selected_name != quarantine:
                         os.rename(
                             selected_name,
@@ -1447,9 +2002,22 @@ def gc_retired_workspaces(
                         _json_bytes(quarantined_marker),
                     )
                 os.fsync(parent.fd)
+                journal = dict(journal)
+                journal["state"] = "quarantined"
+                _replace_bytes(parent, journal_name, _json_bytes(journal))
                 if failpoint is not None:
                     failpoint("after_gc_quarantine")
-                _remove_retired_tree(parent.fd, quarantine, identity)
+                _remove_retired_tree(
+                    parent.fd,
+                    quarantine,
+                    identity,
+                    failpoint=failpoint,
+                )
+                journal["state"] = "root_removed"
+                _replace_bytes(parent, journal_name, _json_bytes(journal))
+                if failpoint is not None:
+                    failpoint("after_gc_parent_fsync")
+                _unlink(parent, journal_name)
             return (selected.name,)
 
 
@@ -1468,7 +2036,7 @@ def begin_transaction(
         with _locked(capability):
             if _entry_stat(capability, TRANSACTION_FILE) is not None:
                 raise PendingTransactionError("graph state already has bootstrap or live ownership")
-            prior_protocol = _load_json(capability, PROTOCOL_FILE)
+            prior_protocol = _read_protocol(capability)
             receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
             current_drainer = _read_drainer(capability)
             if prior_protocol is None and not receipt_present:
@@ -1525,6 +2093,28 @@ def begin_transaction(
                         capability
                     )
                 generation = int(receipt["generation"]) + 1
+                if current_drainer is not None and current_drainer[1] == "complete":
+                    if predecessor_receipt is None:
+                        raise PendingTransactionError(
+                            "completed predecessor receipt binding is missing"
+                        )
+                    _write_predecessor_authority(
+                        capability,
+                        prior_protocol,
+                        current_drainer,
+                        predecessor_receipt,
+                    )
+                elif current_drainer is not None and current_drainer[1] == "reserved":
+                    preserved = _read_predecessor_authority(capability)
+                    if (
+                        preserved is None
+                        or preserved[0] != prior_protocol
+                        or preserved[2] != predecessor_receipt
+                        or preserved[1][0].generation + 1 != generation
+                    ):
+                        raise PendingTransactionError(
+                            "reserved successor lost preserved predecessor authority"
+                        )
             owner_secret = secrets.token_bytes(32)
             token_digest = hashlib.sha256(owner_secret).hexdigest()
             if current_drainer is not None and current_drainer[1] != "complete":
@@ -1651,6 +2241,15 @@ def resume_transaction(
     root_path = _canonical_directory(Path(root))
     with pin_output(output) as capability, _locked(capability):
         tx = _read_transaction(capability)
+        if tx is None:
+            cancellation = _read_predecessor_authority(capability)
+            if (
+                cancellation is not None
+                and cancellation[3]["state"] != "preserved-complete"
+            ):
+                tx = _transaction_from_json(
+                    capability, cancellation[3]["successor_transaction"]
+                )
         if tx is None or tx.id != transaction_id or tx.root != str(root_path):
             raise PendingTransactionError("transaction id or root does not match live state")
         return tx
@@ -1806,7 +2405,7 @@ def stage_transaction_handoff(transaction: Transaction) -> TransactionToken:
         digest = hashlib.sha256(payload).hexdigest()
         live = replace(live, token_digest=digest, token_identity=identity)
         _write_transaction(capability, live)
-        protocol = _load_json(capability, PROTOCOL_FILE)
+        protocol = _read_protocol(capability)
         assert protocol is not None
         protocol["owner_capability_digest"] = digest
         protocol["token_identity"] = {"device": identity[0], "inode": identity[1]}
@@ -1854,7 +2453,15 @@ def run_token(
 ) -> None:
     path = Path(token_path).absolute()
     if len(python_args) < 2 or python_args[0] not in {"-c", "-m"}:
+        _AUTHORITY.set(None)
         raise PendingTransactionError("runner accepts only exact -c or -m shapes")
+    mode, target, *arguments = python_args
+    if not target or (
+        mode == "-m"
+        and (target.startswith("-") or "/" in target or "\\" in target)
+    ):
+        _AUTHORITY.set(None)
+        raise PendingTransactionError("ambiguous transaction runner target")
     with pin_output(path.parent) as capability, _locked(capability):
         raw, _payload, identity = _open_token(path)
         tx = resume_transaction(
@@ -1885,9 +2492,6 @@ def run_token(
                 lease_deadline=deadline,
             )
         authority_token = _AUTHORITY.set(_authority_for(tx))
-    mode, target, *arguments = python_args
-    if not target or (mode == "-m" and (target.startswith("-") or "/" in target or "\\" in target)):
-        raise PendingTransactionError("ambiguous transaction runner target")
     old_argv = sys.argv
     old_environment = {
         key: os.environ.get(key)
@@ -1984,21 +2588,74 @@ def _validate_authority(
     if current_drainer is None:
         raise PendingTransactionError("durable claimed drainer authority is required")
     live_drainer, drainer_state, _drainer_raw = current_drainer
+    protocol = _read_protocol(capability)
+    if protocol is None:
+        raise PendingTransactionError("durable protocol authority is required")
+    allowed_protocol_states = {"INCOMPLETE", "COMPLETE"} if allow_complete else {"INCOMPLETE"}
     if (
-        authority.transaction_id != live.id
-        or transaction.id != live.id
-        or authority.generation != live.generation
+        transaction != live
+        or authority != _authority_for(live, live_drainer)
         or authority.output_identity != capability.identity
-        or authority.token_digest != live.token_digest
-        or authority.token_identity != live.token_identity
-        or authority.drainer != live_drainer
+        or live.drainer != live_drainer
+        or protocol.get("state") not in allowed_protocol_states
+        or protocol.get("generation") != live.generation
+        or protocol.get("transaction_id") != live.id
+        or protocol.get("root") != live.root
+        or protocol.get("kind") != live.kind
+        or protocol.get("owner_capability_digest") != live.token_digest
+        or _token_identity_from_json(protocol.get("token_identity"))
+        != live.token_identity
     ):
         raise PendingTransactionError("exact live drainer owner context required")
-    if drainer_state != "claimed" and not (
-        allow_complete and drainer_state == "complete"
-    ):
+    if drainer_state != "claimed" and not (allow_complete and drainer_state == "complete"):
         raise PendingTransactionError("drainer is not exactly claimed for publication")
     return live
+
+
+def _validate_durable_live_binding(
+    capability: OutputCapability,
+    live: Transaction,
+    *,
+    protocol: Mapping[str, object] | None = None,
+    drainer: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
+    allowed_protocol_states: frozenset[str] = frozenset({"INCOMPLETE"}),
+) -> tuple[dict[str, Any], tuple[DrainerTuple, str, dict[str, Any]]]:
+    """Bind durable owner records without relying on process-local authority."""
+    durable_protocol = (
+        _read_protocol(capability) if protocol is None else dict(protocol)
+    )
+    durable_drainer = _read_drainer(capability) if drainer is None else drainer
+    if durable_protocol is None or durable_drainer is None:
+        raise PendingTransactionError("durable live transaction binding is incomplete")
+    token_identity = (
+        None
+        if live.token_identity is None
+        else {"device": live.token_identity[0], "inode": live.token_identity[1]}
+    )
+    if durable_drainer[0] != live.drainer:
+        raise PendingTransactionError("exact live drainer binding changed")
+    if (
+        durable_protocol.get("state") not in allowed_protocol_states
+        or durable_protocol.get("generation") != live.generation
+        or durable_protocol.get("transaction_id") != live.id
+        or durable_protocol.get("root") != live.root
+        or durable_protocol.get("kind") != live.kind
+        or durable_protocol.get("owner_capability_digest") != live.token_digest
+        or durable_protocol.get("token_identity") != token_identity
+        or durable_protocol.get("output_identity") != capability.identity.json()
+        or live.output != capability.path
+        or live.output_identity != capability.identity
+        or durable_drainer[0].generation != live.generation
+    ):
+        raise PendingTransactionError("durable live transaction binding changed")
+    if live.token_identity is not None:
+        token_name = f".graphify_transaction_token.{live.id}"
+        token = _entry_stat(capability, token_name)
+        if token is None or (token.st_dev, token.st_ino) != live.token_identity:
+            raise PendingTransactionError("durable live transaction token changed")
+        if hashlib.sha256(_read_bytes(capability, token_name)).hexdigest() != live.token_digest:
+            raise PendingTransactionError("durable live transaction token changed")
+    return durable_protocol, durable_drainer
 
 
 @contextlib.contextmanager
@@ -2010,6 +2667,21 @@ def owned_step(transaction: Transaction, *, drainer: DrainerTuple | None = None)
         raise PendingTransactionError("caller-selected drainer authority is forbidden")
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
+    yield
+
+
+@contextlib.contextmanager
+def closing_step(
+    transaction: Transaction, *, drainer: DrainerTuple | None = None
+) -> Iterator[None]:
+    """Admit receipt acknowledgement and close coordination, never publication."""
+    authority = _AUTHORITY.get()
+    if authority is None or authority.transaction_id != transaction.id:
+        raise PendingTransactionError("exact owner context required")
+    if drainer is not None and drainer != authority.drainer:
+        raise PendingTransactionError("caller-selected drainer authority is forbidden")
+    with pin_output(transaction.output) as capability, _locked(capability):
+        _validate_authority(capability, transaction, allow_complete=True)
     yield
 
 
@@ -2326,12 +2998,13 @@ def commit_generation(
         }
         receipt_payload = _json_bytes(receipt_body)
         digest = hashlib.sha256(receipt_payload).hexdigest()
-        protocol = _load_json(capability, PROTOCOL_FILE)
+        protocol = _read_protocol(capability)
         if protocol is None:
             raise PendingTransactionError("protocol state is missing")
         protocol.update(state="COMPLETE", generation=live.generation, receipt_digest=digest)
         _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(protocol))
         _replace_bytes(capability, RECEIPT_FILE, receipt_payload)
+        _unlink(capability, PREDECESSOR_FILE)
         return GenerationReceipt(digest, live.generation)
 
 
@@ -2343,6 +3016,8 @@ def _validate_receipt_locked(
     require_closed: bool = False,
     allow_missing_completed_drainer: bool = False,
     retain_artifacts: Sequence[str] = (),
+    protocol_override: Mapping[str, object] | None = None,
+    drainer_override: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, bytes]]:
     try:
         receipt_payload = _read_bytes(capability, RECEIPT_FILE)
@@ -2352,7 +3027,11 @@ def _validate_receipt_locked(
         receipt = json.loads(receipt_payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("generation receipt is malformed") from exc
-    protocol = _load_json(capability, PROTOCOL_FILE)
+    protocol = (
+        _read_protocol(capability)
+        if protocol_override is None
+        else _protocol_from_json(capability, protocol_override)
+    )
     if not isinstance(receipt, dict) or protocol is None:
         raise PendingTransactionError("generation receipt is missing")
     digest = hashlib.sha256(receipt_payload).hexdigest()
@@ -2390,7 +3069,11 @@ def _validate_receipt_locked(
         or drainer != transaction.drainer
     ):
         raise PendingTransactionError("generation receipt does not match live owner")
-    current_drainer = _read_drainer(capability)
+    current_drainer = (
+        _read_drainer(capability)
+        if drainer_override is None
+        else drainer_override
+    )
     reserved_successor = (
         transaction is None
         and current_drainer is not None
@@ -2485,7 +3168,7 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
     graph_path = output / requested.name
     with pin_output(output, mutation=False) as capability, _locked(capability):
         if _entry_stat(capability, graph_path.name) is None:
-            protocol = _load_json(capability, PROTOCOL_FILE)
+            protocol = _read_protocol(capability)
             if protocol is not None:
                 label = (
                     "bootstrap"
@@ -2496,7 +3179,13 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
                     f"{label} state exists without a graph receipt"
                 )
             raise FileNotFoundError(graph_path)
-        payload = _read_bytes(capability, graph_path.name, 512 * 1024 * 1024)
+        from graphify.security import _max_graph_file_bytes
+
+        payload = _read_bytes(
+            capability,
+            graph_path.name,
+            _max_graph_file_bytes(),
+        )
         try:
             data = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2507,7 +3196,7 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
         watermark = graph_meta.get(GRAPH_WATERMARK_KEY) if isinstance(graph_meta, dict) else None
         if watermark is None:
             if _coordination_present(capability):
-                protocol = _load_json(capability, PROTOCOL_FILE)
+                protocol = _read_protocol(capability)
                 drainer = _read_drainer(capability)
                 publication_active = (
                     protocol is not None
@@ -2648,6 +3337,57 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
         )
 
 
+def _validate_queue_item(item: object) -> dict[str, Any]:
+    changed_paths = item.get("changed_paths") if isinstance(item, dict) else None
+    if (
+        not isinstance(item, dict)
+        or set(item)
+        != {
+            "schema",
+            "id",
+            "kind",
+            "intent",
+            "root",
+            "changed_paths",
+            "semantic",
+            "source",
+            "time",
+        }
+        or type(item.get("schema")) is not int
+        or item.get("schema") != 1
+        or type(item.get("kind")) is not str
+        or item.get("kind") not in {"full", "update", "runtime"}
+        or not _is_hex(item.get("id"))
+        or type(item.get("root")) is not str
+        or not Path(item["root"]).is_absolute()
+        or "\x00" in item["root"]
+        or not isinstance(changed_paths, (list, type(None)))
+        or (
+            isinstance(changed_paths, list)
+            and (
+                len(changed_paths) > _MAX_QUEUE_PATHS
+                or not all(
+                    type(value) is str
+                    and 0 < len(value) <= _MAX_QUEUE_PATH_LENGTH
+                    and "\x00" not in value
+                    for value in changed_paths
+                )
+            )
+        )
+        or type(item.get("intent")) is not str
+        or not 0 < len(item["intent"]) <= _MAX_QUEUE_PATH_LENGTH
+        or "\x00" in item["intent"]
+        or type(item.get("source")) is not str
+        or not 0 < len(item["source"]) <= _MAX_QUEUE_PATH_LENGTH
+        or "\x00" in item["source"]
+        or type(item.get("semantic")) is not bool
+        or type(item.get("time")) not in {int, float}
+        or not math.isfinite(float(cast(int | float, item.get("time"))))
+    ):
+        raise PendingTransactionError("malformed rebuild queue")
+    return item
+
+
 def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[dict[str, Any]]:
     if _entry_stat(capability, name) is None:
         return []
@@ -2655,19 +3395,12 @@ def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[di
         values = [json.loads(line) for line in _read_bytes(capability, name).decode().splitlines() if line]
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("malformed rebuild queue") from exc
+    if len(values) > _MAX_QUEUE_ITEMS:
+        raise PendingTransactionError("rebuild queue exceeds item bound")
     result: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     for item in values:
-        if (
-            not isinstance(item, dict)
-            or item.get("schema") != 1
-            or item.get("kind") not in {"full", "update", "runtime"}
-            or not isinstance(item.get("id"), str)
-            or len(str(item["id"])) != 64
-            or not isinstance(item.get("root"), str)
-            or not isinstance(item.get("changed_paths"), (list, type(None)))
-        ):
-            raise PendingTransactionError("malformed rebuild queue")
+        item = _validate_queue_item(item)
         item_id = str(item["id"])
         if item_id in seen_ids:
             raise PendingTransactionError("duplicate rebuild intent id")
@@ -2676,8 +3409,18 @@ def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[di
     return result
 
 
+def _queue_payload(items: list[dict[str, Any]]) -> bytes:
+    if len(items) > _MAX_QUEUE_ITEMS:
+        raise PendingTransactionError("rebuild queue exceeds item bound")
+    validated = [_validate_queue_item(item) for item in items]
+    payload = b"".join(_json_bytes(item) + b"\n" for item in validated)
+    if len(payload) > _MAX_STATE_BYTES:
+        raise PendingTransactionError("rebuild queue exceeds serialized budget")
+    return payload
+
+
 def _write_queue(capability: OutputCapability, name: str, items: list[dict[str, Any]]) -> None:
-    payload = b"".join(_json_bytes(item) + b"\n" for item in items)
+    payload = _queue_payload(items)
     _replace_bytes(capability, name, payload)
 
 
@@ -2689,34 +3432,234 @@ def _merge_intents(*groups: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
-def _read_drainer(capability: OutputCapability) -> tuple[DrainerTuple, str, dict[str, Any]] | None:
-    raw = _load_json(capability, DRAINER_FILE)
-    if raw is None:
-        return None
-    if raw.get("schema") != 1 or raw.get("protocol_epoch") != 1:
+def _drainer_state_from_json(
+    capability: OutputCapability, raw: object
+) -> tuple[DrainerTuple, str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        raise PendingTransactionError("malformed drainer state")
+    base_fields = {
+        "schema",
+        "protocol_epoch",
+        "generation",
+        "claim_epoch",
+        "launch_nonce",
+        "state",
+    }
+    if (
+        type(raw.get("schema")) is not int
+        or raw.get("schema") != 1
+        or type(raw.get("protocol_epoch")) is not int
+        or raw.get("protocol_epoch") != 1
+    ):
         raise PendingTransactionError("unsupported drainer schema or protocol epoch")
     state = raw.get("state")
     if state not in {"reserved", "launching", "claimed", "CLOSE_PENDING", "complete"}:
         raise PendingTransactionError("malformed drainer state")
+    expected_fields = set(base_fields)
     if state in {"reserved", "launching", "claimed"}:
+        expected_fields.add("lease_deadline")
+        if state == "reserved" and "predecessor_receipt" in raw:
+            expected_fields.add("predecessor_receipt")
+        if state == "claimed":
+            expected_fields.add("acked_ids")
+            if "receipt_digest" in raw:
+                expected_fields.add("receipt_digest")
         deadline = raw.get("lease_deadline")
-        if not isinstance(deadline, (int, float)):
+        if type(deadline) not in {int, float} or not math.isfinite(
+            float(cast(int | float, deadline))
+        ):
             raise PendingTransactionError("malformed drainer lease")
+    elif state in {"CLOSE_PENDING", "complete"}:
+        expected_fields.update(
+            {
+                "receipt_digest",
+                "acked_ids",
+                "queue_epoch",
+                "output_identity",
+                "successor_generation",
+                "transaction_id",
+                "token_identity",
+            }
+        )
+    if set(raw) != expected_fields:
+        raise PendingTransactionError("malformed drainer state fields")
+    drainer = _drainer_from_json(raw)
+    predecessor_receipt = raw.get("predecessor_receipt")
+    if predecessor_receipt is not None and not _is_hex(predecessor_receipt):
+        raise PendingTransactionError("malformed drainer predecessor receipt")
     if state == "claimed":
         acked_ids = raw.get("acked_ids")
-        if not isinstance(acked_ids, list) or not all(
-            isinstance(value, str) and len(value) == 64 for value in acked_ids
+        if (
+            not isinstance(acked_ids, list)
+            or len(acked_ids) > _MAX_QUEUE_ITEMS
+            or len(acked_ids) != len(set(acked_ids))
+            or not all(_is_hex(value) for value in acked_ids)
+            or (
+                "receipt_digest" in raw
+                and not _is_hex(raw.get("receipt_digest"))
+            )
         ):
             raise PendingTransactionError("malformed claimed drainer acknowledgements")
     if state in {"CLOSE_PENDING", "complete"}:
         if (
-            not isinstance(raw.get("receipt_digest"), str)
-            or len(str(raw["receipt_digest"])) != 64
+            type(raw.get("successor_generation")) is not int
+            or raw["successor_generation"] != drainer.generation + 1
+        ):
+            raise PendingTransactionError("close successor generation is malformed")
+        if (
+            not _is_hex(raw.get("receipt_digest"))
             or _identity_from_json(raw.get("output_identity")) != capability.identity
-            or not isinstance(raw.get("transaction_id"), str)
+            or not _is_hex(raw.get("transaction_id"))
         ):
             raise PendingTransactionError("malformed close drainer binding")
-    return _drainer_from_json(raw), str(state), raw
+    if state in {"CLOSE_PENDING", "complete"}:
+        acked_ids = raw.get("acked_ids")
+        if (
+            type(raw.get("queue_epoch")) is not int
+            or raw["queue_epoch"] != drainer.generation
+            or not isinstance(acked_ids, list)
+            or len(acked_ids) > _MAX_QUEUE_ITEMS
+            or len(acked_ids) != len(set(acked_ids))
+            or not all(_is_hex(value) for value in acked_ids)
+        ):
+            raise PendingTransactionError("malformed close drainer binding")
+        _token_identity_from_json(raw.get("token_identity"))
+    return drainer, str(state), raw
+
+
+def _read_drainer(capability: OutputCapability) -> tuple[DrainerTuple, str, dict[str, Any]] | None:
+    raw = _load_json(capability, DRAINER_FILE)
+    return None if raw is None else _drainer_state_from_json(capability, raw)
+
+
+def _predecessor_authority_from_json(
+    capability: OutputCapability, raw: object
+) -> tuple[
+    dict[str, Any],
+    tuple[DrainerTuple, str, dict[str, Any]],
+    str,
+    dict[str, Any],
+]:
+    states = {
+        "preserved-complete",
+        "cancelling",
+        "protocol-restored",
+        "drainer-restored",
+        "prepared-retired",
+        "token-removed",
+        "live-removed",
+    }
+    if (
+        not isinstance(raw, dict)
+        or set(raw)
+        != {
+            "schema",
+            "protocol_epoch",
+            "state",
+            "output_identity",
+            "successor_generation",
+            "receipt_digest",
+            "protocol",
+            "drainer",
+            "successor_transaction",
+            "prepared_workspace",
+        }
+        or raw.get("schema") != 1
+        or raw.get("protocol_epoch") != 1
+        or raw.get("state") not in states
+        or _identity_from_json(raw.get("output_identity")) != capability.identity
+        or not _is_hex(raw.get("receipt_digest"))
+    ):
+        raise PendingTransactionError("preserved predecessor authority is malformed")
+    protocol = _protocol_from_json(capability, raw.get("protocol"))
+    drainer = _drainer_state_from_json(capability, raw.get("drainer"))
+    receipt_digest = str(raw["receipt_digest"])
+    successor_raw = raw.get("successor_transaction")
+    if raw["state"] == "preserved-complete":
+        if successor_raw is not None:
+            raise PendingTransactionError(
+                "preserved predecessor successor binding is malformed"
+            )
+    else:
+        successor = _transaction_from_json(capability, successor_raw)
+        if successor.generation != raw.get("successor_generation"):
+            raise PendingTransactionError(
+                "preserved predecessor successor binding changed"
+            )
+        _prepared_cancellation_marker_from_json(
+            raw.get("prepared_workspace"), successor
+        )
+    if raw["state"] == "preserved-complete" and raw.get("prepared_workspace") is not None:
+        raise PendingTransactionError(
+            "preserved predecessor prepared binding is malformed"
+        )
+    if (
+        protocol.get("state") != "COMPLETE"
+        or drainer[1] != "complete"
+        or protocol.get("receipt_digest") != receipt_digest
+        or drainer[2].get("receipt_digest") != receipt_digest
+        or protocol.get("generation") != drainer[0].generation
+        or protocol.get("transaction_id") != drainer[2].get("transaction_id")
+        or protocol.get("token_identity") != drainer[2].get("token_identity")
+        or protocol.get("output_identity") != drainer[2].get("output_identity")
+        or type(raw.get("successor_generation")) is not int
+        or raw["successor_generation"] != drainer[0].generation + 1
+    ):
+        raise PendingTransactionError("preserved predecessor authority binding changed")
+    return protocol, drainer, receipt_digest, dict(raw)
+
+
+def _read_predecessor_authority(
+    capability: OutputCapability,
+) -> tuple[
+    dict[str, Any],
+    tuple[DrainerTuple, str, dict[str, Any]],
+    str,
+    dict[str, Any],
+] | None:
+    raw = _load_json(capability, PREDECESSOR_FILE)
+    return None if raw is None else _predecessor_authority_from_json(capability, raw)
+
+
+def _write_predecessor_authority(
+    capability: OutputCapability,
+    protocol: Mapping[str, object],
+    drainer: tuple[DrainerTuple, str, dict[str, Any]],
+    receipt_digest: str,
+) -> None:
+    record = {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "state": "preserved-complete",
+        "output_identity": capability.identity.json(),
+        "successor_generation": drainer[0].generation + 1,
+        "receipt_digest": receipt_digest,
+        "protocol": dict(protocol),
+        "drainer": dict(drainer[2]),
+        "successor_transaction": None,
+        "prepared_workspace": None,
+    }
+    _predecessor_authority_from_json(capability, record)
+    _replace_bytes(capability, PREDECESSOR_FILE, _json_bytes(record))
+
+
+def _advance_cancellation_authority(
+    capability: OutputCapability,
+    record: Mapping[str, object],
+    *,
+    state: str,
+    successor: Transaction,
+) -> dict[str, Any]:
+    updated = {
+        **record,
+        "state": state,
+        "successor_transaction": _transaction_json(
+            successor, phase=successor.phase
+        ),
+    }
+    parsed = _predecessor_authority_from_json(capability, updated)
+    _replace_bytes(capability, PREDECESSOR_FILE, _json_bytes(updated))
+    return parsed[3]
 
 
 def _write_drainer(capability: OutputCapability, drainer: DrainerTuple, state: str, **extra: object) -> None:
@@ -2770,9 +3713,37 @@ def queue_rebuild(
     now: float | None = None,
     legacy_pending_name: str | None = None,
 ) -> QueueReceipt:
-    root_path = _canonical_directory(Path(root))
+    if type(kind) is not str or kind not in {"full", "update", "runtime"}:
+        raise PendingTransactionError("malformed rebuild kind")
+    if type(semantic) is not bool:
+        raise PendingTransactionError("malformed rebuild semantic flag")
+    if type(source) is not str or not 0 < len(source) <= _MAX_QUEUE_PATH_LENGTH or "\x00" in source:
+        raise PendingTransactionError("malformed rebuild source")
+    if intent is not None and (
+        type(intent) is not str
+        or not 0 < len(intent) <= _MAX_QUEUE_PATH_LENGTH
+        or "\x00" in intent
+    ):
+        raise PendingTransactionError("malformed rebuild intent")
+    if now is not None and (
+        type(now) not in {int, float} or not math.isfinite(float(now))
+    ):
+        raise PendingTransactionError("malformed rebuild time")
+    durable_paths: list[str] = []
+    if changed_paths is not None:
+        if isinstance(changed_paths, (str, bytes)):
+            raise PendingTransactionError("malformed rebuild changed paths")
+        for value in changed_paths:
+            durable_value = os.fspath(value)
+            if type(durable_value) is not str:
+                raise PendingTransactionError("malformed rebuild changed path")
+            durable_paths.append(durable_value)
+    root_value = os.fspath(root)
+    if type(root_value) is not str:
+        raise PendingTransactionError("malformed rebuild root")
+    root_path = _canonical_directory(Path(root_value))
     with pin_output(output, create=True) as capability, _locked(capability):
-        protocol = _load_json(capability, PROTOCOL_FILE)
+        protocol = _read_protocol(capability)
         receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
         existing_drainer = _read_drainer(capability)
         if protocol is None and not receipt_present:
@@ -2807,8 +3778,9 @@ def queue_rebuild(
         if existing_drainer is not None and existing_drainer[1] == "CLOSE_PENDING":
             _finish_close_locked(capability, existing_drainer[2])
             existing_drainer = _read_drainer(capability)
-        if existing_drainer is None or existing_drainer[1] == "complete":
-            predecessor_receipt = None
+        reserve_drainer = existing_drainer is None or existing_drainer[1] == "complete"
+        predecessor_receipt: str | None = None
+        if reserve_drainer:
             if existing_drainer is None:
                 if _read_transaction(capability) is not None:
                     raise PendingTransactionError(
@@ -2840,16 +3812,10 @@ def queue_rebuild(
                         "close successor generation is malformed"
                     )
             drainer = DrainerTuple(generation, 0, secrets.token_hex(16))
-            _write_drainer(
-                capability,
-                drainer,
-                "reserved",
-                lease_deadline=(time.time() if now is None else now) + 30,
-                predecessor_receipt=predecessor_receipt,
-            )
         else:
+            if existing_drainer is None:
+                raise PendingTransactionError("live drainer disappeared")
             drainer = existing_drainer[0]
-        durable_paths = [] if changed_paths is None else [os.fspath(value) for value in changed_paths]
         legacy_checkpoint: dict[str, object] | None = None
         legacy_info = (
             None
@@ -2901,6 +3867,26 @@ def queue_rebuild(
             queued.append(item)
         elif not any(value.get("root") == item["root"] and value.get("kind") == "full" for value in queued):
             queued.append(item)
+        _queue_payload(queued)
+        if reserve_drainer:
+            if existing_drainer is not None and existing_drainer[1] == "complete":
+                if protocol is None or predecessor_receipt is None:
+                    raise PendingTransactionError(
+                        "completed predecessor authority is missing"
+                    )
+                _write_predecessor_authority(
+                    capability,
+                    protocol,
+                    existing_drainer,
+                    predecessor_receipt,
+                )
+            _write_drainer(
+                capability,
+                drainer,
+                "reserved",
+                lease_deadline=(time.time() if now is None else now) + 30,
+                predecessor_receipt=predecessor_receipt,
+            )
         _write_queue(capability, QUEUE_FILE, queued)
         if legacy_checkpoint is not None:
             _replace_bytes(
@@ -2968,6 +3954,12 @@ def takeover_drainer(
     transition_failpoint: Callable[[str], None] | None = None,
 ) -> DrainerTuple:
     with pin_output(output) as capability, _locked(capability):
+        pending = _read_pending_transition(capability)
+        if pending is not None:
+            _validate_pending_transition_current(capability, pending)
+            raise PendingTransactionError(
+                "pending transition requires transaction recovery"
+            )
         current = _read_drainer(capability)
         if current is None:
             raise PendingTransactionError("no drainer exists")
@@ -2978,9 +3970,57 @@ def takeover_drainer(
         deadline = float(raw.get("lease_deadline", 0.0))
         if current_time <= deadline:
             raise PendingTransactionError("drainer lease has not expired")
-        successor = DrainerTuple(drainer.generation, drainer.claim_epoch + 1, secrets.token_hex(16))
         live = _read_transaction(capability)
+        if live is None:
+            protocol = _read_protocol(capability)
+            receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
+            if state != "reserved":
+                raise PendingTransactionError(
+                    "tokenless drainer takeover requires an exact reservation"
+                )
+            if protocol is None and not receipt_present:
+                if (
+                    drainer.generation != 1
+                    or raw.get("predecessor_receipt") is not None
+                    or not _read_queue(capability)
+                    or _entry_stat(capability, "graph.json") is not None
+                ):
+                    raise PendingTransactionError(
+                        "tokenless drainer reservation is not pristine"
+                    )
+                allowed = [
+                    *_SAFE_GRAPHLESS_RUNTIME_ENTRIES,
+                    DRAINER_FILE,
+                    QUEUE_FILE,
+                ]
+                _validate_pristine_or_legacy_graph(
+                    capability,
+                    allowed_without_graph=allowed,
+                )
+            elif protocol is not None and protocol.get("state") == "COMPLETE":
+                receipt, receipt_digest, _inventory = _validate_receipt_locked(
+                    capability
+                )
+                if (
+                    drainer.generation != int(receipt["generation"]) + 1
+                    or raw.get("predecessor_receipt") != receipt_digest
+                ):
+                    raise PendingTransactionError(
+                        "tokenless successor reservation is not receipt-bound"
+                    )
+            else:
+                raise PendingTransactionError(
+                    "tokenless drainer has incomplete protocol authority"
+                )
+        successor = DrainerTuple(
+            drainer.generation, drainer.claim_epoch + 1, secrets.token_hex(16)
+        )
         if live is not None:
+            protocol, _bound_drainer = _validate_durable_live_binding(
+                capability,
+                live,
+                drainer=current,
+            )
             predecessor_live = live
             _retire_prepared_locked(capability)
             inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
@@ -3013,9 +4053,6 @@ def takeover_drainer(
                 token_identity=token_identity,
                 drainer=successor,
             )
-            protocol = _load_json(capability, PROTOCOL_FILE)
-            if protocol is None:
-                raise PendingTransactionError("protocol state is missing")
             successor_protocol = dict(protocol)
             successor_protocol.update(
                 transaction_id=live.id,
@@ -3087,7 +4124,7 @@ def complete_rebuild_claim(
     now: float | None = None,
 ) -> None:
     with pin_output(transaction.output) as capability, _locked(capability):
-        live = _validate_authority(capability, transaction)
+        live = _validate_authority(capability, transaction, allow_complete=True)
         receipt, validated_digest, _inventory = _validate_receipt_locked(capability)
         if validated_digest != receipt_digest:
             raise PendingTransactionError("generation receipt is required before claim acknowledgement")
@@ -3140,7 +4177,7 @@ def close_if_queue_empty(
     failpoint: Callable[[str], None] | None = None,
 ) -> bool:
     with pin_output(transaction.output) as capability, _locked(capability):
-        live = _validate_authority(capability, transaction)
+        live = _validate_authority(capability, transaction, allow_complete=True)
         if _read_queue(capability):
             return False
         current = _read_drainer(capability)
@@ -3173,6 +4210,16 @@ def close_if_queue_empty(
         if failpoint:
             failpoint("after_close_pending")
         _finish_close_locked(capability, pending, failpoint=failpoint)
+        complete_protocol = _read_protocol(capability)
+        complete_drainer = _read_drainer(capability)
+        if complete_protocol is None or complete_drainer is None:
+            raise PendingTransactionError("completed predecessor authority disappeared")
+        _write_predecessor_authority(
+            capability,
+            complete_protocol,
+            complete_drainer,
+            receipt_digest,
+        )
         return True
 
 
@@ -3281,6 +4328,15 @@ def recover_close(output: Path | str) -> None:
                 capability,
                 require_closed=True,
             )
+            protocol = _read_protocol(capability)
+            if protocol is None:
+                raise PendingTransactionError("completed predecessor protocol is missing")
+            _write_predecessor_authority(
+                capability,
+                protocol,
+                current,
+                predecessor_receipt,
+            )
             successor_generation = int(receipt["generation"]) + 1
             raw_generation = current[2].get("successor_generation")
             if raw_generation is not None and (
@@ -3311,6 +4367,27 @@ def recover_selected_transaction(
 ) -> Transaction:
     """Validate exact selectors before any close or recovery mutation."""
     root_path = _canonical_directory(Path(root))
+    cancellation_successor: Transaction | None = None
+    with pin_output(output) as capability, _locked(capability):
+        if capability.identity != expected_output_identity:
+            raise PendingTransactionError("stale output identity selector")
+        cancellation = _read_predecessor_authority(capability)
+        if cancellation is not None and cancellation[3]["state"] != "preserved-complete":
+            successor = _validate_cancellation_state_locked(capability, cancellation)
+            if (
+                successor.generation != expected_generation
+                or successor.root != str(root_path)
+                or (kind is not None and successor.kind != kind)
+                or (
+                    expected_transaction_id is not None
+                    and successor.id != expected_transaction_id
+                )
+            ):
+                raise PendingTransactionError("stale cancellation recovery selector")
+            cancellation_successor = successor
+    if cancellation_successor is not None:
+        cancel_unpublished_transaction(cancellation_successor)
+        return _cancellation_recovery(cancellation_successor)
     with pin_output(output) as capability, _locked(capability):
         if capability.identity != expected_output_identity:
             raise PendingTransactionError("stale output identity selector")
@@ -3319,8 +4396,15 @@ def recover_selected_transaction(
         if pending is not None:
             _validate_pending_transition_current(capability, pending)
         pending_successor = None if pending is None else pending[3]
-        protocol = _load_json(capability, PROTOCOL_FILE)
+        protocol = _read_protocol(capability)
         drainer = _read_drainer(capability)
+        if pending is None and current is not None:
+            _validate_durable_live_binding(
+                capability,
+                current,
+                protocol=protocol,
+                drainer=drainer,
+            )
         queue = _read_queue(capability)
         matching_queue = [
             item for item in queue if item.get("root") == str(root_path)
@@ -3429,6 +4513,33 @@ def recover_transaction(
     if max_attempts <= 0:
         raise RecoverableTransactionError("recovery attempt bound exhausted")
     root_path = _canonical_directory(Path(root))
+    cancellation_successor: Transaction | None = None
+    with pin_output(output) as capability, _locked(capability):
+        if (
+            expected_output_identity is not None
+            and capability.identity != expected_output_identity
+        ):
+            raise PendingTransactionError("stale output identity selector")
+        cancellation = _read_predecessor_authority(capability)
+        if cancellation is not None and cancellation[3]["state"] != "preserved-complete":
+            successor = _validate_cancellation_state_locked(capability, cancellation)
+            if (
+                successor.root != str(root_path)
+                or successor.kind != kind
+                or (
+                    expected_generation is not None
+                    and successor.generation != expected_generation
+                )
+                or (
+                    expected_transaction_id is not None
+                    and successor.id != expected_transaction_id
+                )
+            ):
+                raise PendingTransactionError("stale cancellation recovery selector")
+            cancellation_successor = successor
+    if cancellation_successor is not None:
+        cancel_unpublished_transaction(cancellation_successor)
+        return _cancellation_recovery(cancellation_successor)
     with pin_output(output) as capability, _locked(capability):
         current = _read_transaction(capability)
         pending = _read_pending_transition(capability)
@@ -3438,7 +4549,7 @@ def recover_transaction(
         selected_generation = (
             selected.generation
             if selected is not None
-            else int((_load_json(capability, PROTOCOL_FILE) or {}).get("generation", -1))
+            else int((_read_protocol(capability) or {}).get("generation", -1))
         )
         if expected_generation is not None and selected_generation != expected_generation:
             raise PendingTransactionError("stale transaction generation selector")
@@ -3451,7 +4562,7 @@ def recover_transaction(
             predecessor, predecessor_protocol, predecessor_tx, successor, successor_protocol = pending
             if successor.root != str(root_path) or successor.kind != kind:
                 raise PendingTransactionError("recovery root or kind does not match pending transition")
-            protocol = _load_json(capability, PROTOCOL_FILE)
+            protocol = _read_protocol(capability)
             if protocol == predecessor_protocol:
                 _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(successor_protocol))
                 if transition_failpoint is not None:
@@ -3513,6 +4624,7 @@ def recover_transaction(
             claimed = _read_drainer(capability)
             if claimed is None or claimed[:2] != (successor.drainer, "claimed"):
                 raise PendingTransactionError("pending transition did not reach exact claimed state")
+            successor = replace(successor, phase="building")
             _write_transaction(capability, successor, phase="building")
             if predecessor_tx is not None and predecessor_tx.token_identity is not None and predecessor_tx.id != successor.id:
                 _unlink(
@@ -3524,7 +4636,7 @@ def recover_transaction(
             _AUTHORITY.set(_authority_for(successor))
             return successor
         if current is None:
-            protocol = _load_json(capability, PROTOCOL_FILE)
+            protocol = _read_protocol(capability)
             if protocol is None or protocol.get("state") != "BOOTSTRAP_PENDING":
                 raise PendingTransactionError("no live transaction to recover")
             current_time = time.time() if now is None else now
@@ -3627,15 +4739,21 @@ def recover_transaction(
             _unlink(capability, TRANSITION_FILE)
             _AUTHORITY.set(_authority_for(tx))
             return tx
-        protocol = _load_json(capability, PROTOCOL_FILE)
+        protocol = _read_protocol(capability)
         if protocol is None:
             raise PendingTransactionError("protocol state is missing")
+        drainer_current = _read_drainer(capability)
+        protocol, drainer_current = _validate_durable_live_binding(
+            capability,
+            current,
+            protocol=protocol,
+            drainer=drainer_current,
+        )
         current_time = time.time() if now is None else now
         if current_time <= float(protocol.get("lease_deadline", 0.0)):
             raise PendingTransactionError("transaction lease has not expired")
         if current.root != str(root_path):
             raise PendingTransactionError("recovery root does not match live transaction")
-        drainer_current = _read_drainer(capability)
         phase = _transaction_phase(capability)
         if phase == "awaiting-drainer":
             raise PendingTransactionError("awaiting drainer is missing its exact transition record")
@@ -3701,6 +4819,8 @@ def recover_transaction(
             schema=1,
             protocol_epoch=1,
             generation=generation,
+            kind=kind,
+            root=str(root_path),
             state="INCOMPLETE",
             transaction_id=tx.id,
             output_identity=capability.identity.json(),
@@ -3764,9 +4884,17 @@ def recover_transaction(
 def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
     """Return validated operational state without exposing capability material."""
     with pin_output(output, mutation=False) as capability, _locked(capability):
-        protocol = _load_json(capability, PROTOCOL_FILE)
+        protocol = _read_protocol(capability)
         live = _read_transaction(capability)
         pending = _read_pending_transition(capability)
+        cancellation = _read_predecessor_authority(capability)
+        cancellation_successor: Transaction | None = None
+        cancellation_state: str | None = None
+        if cancellation is not None and cancellation[3]["state"] != "preserved-complete":
+            cancellation_successor = _validate_cancellation_state_locked(
+                capability, cancellation
+            )
+            cancellation_state = str(cancellation[3]["state"])
         if pending is not None:
             _validate_pending_transition_current(capability, pending)
         drainer = _read_drainer(capability)
@@ -3777,14 +4905,63 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
             if name.startswith(".graphify_rebuild_inflight.") and name.endswith(".jsonl"):
                 inflight[name] = [str(item["id"]) for item in _read_queue(capability, name)]
         retained: list[dict[str, object]] = []
+        journal_identities: set[OutputIdentity] = set()
         with pin_output(capability.path.parent, mutation=False) as parent:
             for name in sorted(_list_entries(parent)):
+                if name.startswith(".graphify-gc-journal-") and name.endswith(".json"):
+                    if not _is_gc_journal(name):
+                        raise PendingTransactionError(
+                            "retired workspace GC journal name is malformed"
+                        )
+                    raw_journal = _load_json(parent, name)
+                    if raw_journal is None or raw_journal.get(
+                        "managed_output_identity"
+                    ) != capability.identity.json():
+                        continue
+                    tombstone = raw_journal.get("tombstone")
+                    if not isinstance(tombstone, str):
+                        raise PendingTransactionError(
+                            "retired workspace GC journal is malformed"
+                        )
+                    workspace_identity = _identity_from_json(
+                        raw_journal.get("workspace_identity")
+                    )
+                    journal = _validated_gc_journal(
+                        raw_journal,
+                        tombstone=tombstone,
+                        workspace_identity=workspace_identity,
+                        managed_output_identity=capability.identity,
+                    )
+                    if journal is None:
+                        continue
+                    expected_journal_name = _gc_journal_name(
+                        capability.identity, tombstone
+                    )
+                    if name != expected_journal_name:
+                        raise PendingTransactionError(
+                            "retired workspace GC journal selector changed"
+                        )
+                    current_name = _gc_journal_location(
+                        parent, journal, workspace_identity
+                    )
+                    retained.append(
+                        {
+                            "name": tombstone,
+                            "current_name": current_name,
+                            "state": f"gc_{journal['state']}",
+                            "identity": workspace_identity.json(),
+                        }
+                    )
+                    journal_identities.add(workspace_identity)
+                    continue
                 if not name.startswith((".graphify-retired-", ".graphify-gc-root-")):
                     continue
                 info = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
                 if not stat.S_ISDIR(info.st_mode):
                     continue
                 identity = OutputIdentity(info.st_dev, info.st_ino)
+                if identity in journal_identities:
+                    continue
                 with pin_output(parent.path / name, mutation=False) as retired:
                     marker = _load_json(retired, ".graphify_retired.json")
                 bound = _validated_retired_marker(
@@ -3830,6 +5007,18 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
                     "transaction_id": pending[3].id,
                     "generation": pending[3].generation,
                     "output_identity": pending[3].output_identity.json(),
+                }
+            ),
+            "cancellation_transition": (
+                None
+                if cancellation_successor is None
+                else {
+                    "state": cancellation_state,
+                    "transaction_id": cancellation_successor.id,
+                    "generation": cancellation_successor.generation,
+                    "kind": cancellation_successor.kind,
+                    "root": cancellation_successor.root,
+                    "output_identity": cancellation_successor.output_identity.json(),
                 }
             ),
             "drainer": (
@@ -3971,7 +5160,7 @@ def finish_transaction(transaction: Transaction) -> None:
     """Close a direct transaction after a committed receipt."""
     lease_deadline = time.time() + 30.0
     with pin_output(transaction.output) as capability, _locked(capability):
-        _validate_authority(capability, transaction)
+        _validate_authority(capability, transaction, allow_complete=True)
         _receipt, receipt_digest, _inventory = _validate_receipt_locked(
             capability, transaction=transaction
         )
@@ -3993,7 +5182,7 @@ def finish_transaction(transaction: Transaction) -> None:
             )
     if not close_if_queue_empty(transaction, receipt_digest=receipt_digest):
         with pin_output(transaction.output) as capability, _locked(capability):
-            _validate_authority(capability, transaction)
+            _validate_authority(capability, transaction, allow_complete=True)
             if not _read_queue(capability):
                 raise PendingTransactionError("successor queue disappeared during close")
             current = _read_drainer(capability)
@@ -4021,6 +5210,18 @@ def finish_transaction(transaction: Transaction) -> None:
             }
             _replace_bytes(capability, DRAINER_FILE, _json_bytes(pending))
             _finish_close_locked(capability, pending)
+            complete_protocol = _read_protocol(capability)
+            complete_drainer = _read_drainer(capability)
+            if complete_protocol is None or complete_drainer is None:
+                raise PendingTransactionError(
+                    "completed predecessor authority disappeared"
+                )
+            _write_predecessor_authority(
+                capability,
+                complete_protocol,
+                complete_drainer,
+                receipt_digest,
+            )
             successor = DrainerTuple(
                 transaction.generation + 1, 0, secrets.token_hex(16)
             )
@@ -4088,7 +5289,245 @@ def finalize_prepared_transaction() -> None:
             raise PendingTransactionError("prepared workspace binding is missing")
 
 
-def cancel_unpublished_transaction(transaction: Transaction) -> None:
+def _validate_cancellation_predecessor(
+    capability: OutputCapability,
+    restored_protocol: Mapping[str, object],
+    restored_drainer: tuple[DrainerTuple, str, dict[str, Any]],
+    preserved_digest: str,
+) -> None:
+    receipt_preview = _load_json(capability, RECEIPT_FILE)
+    graph_name = (
+        None
+        if receipt_preview is None
+        else receipt_preview.get("graph_name", "graph.json")
+    )
+    if type(graph_name) is not str:
+        raise PendingTransactionError("no-op rollback prior graph binding is malformed")
+    receipt, receipt_digest, inventory = _validate_receipt_locked(
+        capability,
+        require_closed=True,
+        protocol_override=restored_protocol,
+        drainer_override=restored_drainer,
+        retain_artifacts=(graph_name,),
+    )
+    graph_payload = inventory.get(graph_name)
+    if graph_payload is None:
+        raise PendingTransactionError("no-op rollback prior graph binding is missing")
+    watermark = _watermark(graph_payload)
+    watermark_output = watermark.get("output_identity")
+    if (
+        receipt_digest != preserved_digest
+        or receipt.get("generation") != restored_protocol.get("generation")
+        or receipt.get("transaction_id") != restored_protocol.get("transaction_id")
+        or receipt.get("token_digest")
+        != restored_protocol.get("owner_capability_digest")
+        or receipt.get("watermark") != watermark
+        or watermark.get("state") != "active"
+        or watermark.get("generation") != receipt.get("generation")
+        or (
+            watermark.get("transaction_id") is not None
+            and watermark.get("transaction_id") != receipt.get("transaction_id")
+        )
+        or (
+            watermark_output is not None
+            and _identity_from_json(watermark_output) != capability.identity
+        )
+    ):
+        raise PendingTransactionError("no-op rollback prior generation is inconsistent")
+
+
+def _prepared_cancellation_marker_from_json(
+    raw: object, successor: Transaction
+) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise PendingTransactionError("prepared cancellation binding changed")
+    marker = raw
+    prior_inventory = marker.get("prior_inventory")
+    if (
+        set(marker)
+        != {
+            "schema",
+            "transaction_id",
+            "generation",
+            "token_digest",
+            "identity",
+            "output_identity",
+            "prior_inventory",
+        }
+        or marker.get("schema") != 1
+        or marker.get("transaction_id") != successor.id
+        or marker.get("generation") != successor.generation
+        or marker.get("token_digest") != successor.token_digest
+        or _identity_from_json(marker.get("identity")) is None
+        or _identity_from_json(marker.get("output_identity")) is None
+        or not isinstance(prior_inventory, list)
+        or len(prior_inventory) > _MAX_RECEIPT_ARTIFACTS
+    ):
+        raise PendingTransactionError("prepared cancellation binding changed")
+    for name in prior_inventory:
+        if type(name) is not str:
+            raise PendingTransactionError("prepared cancellation binding changed")
+        _validated_relative_name(name)
+    return dict(marker)
+
+
+def _validate_cancellation_prepared_marker(
+    capability: OutputCapability, successor: Transaction
+) -> dict[str, Any] | None:
+    return _prepared_cancellation_marker_from_json(
+        _load_json(capability, PREPARED_FILE), successor
+    )
+
+
+def _cancellation_retired_workspace_exists(
+    capability: OutputCapability, marker: Mapping[str, object]
+) -> bool:
+    expected = _identity_from_json(marker.get("identity"))
+    transaction_id = marker.get("transaction_id")
+    if expected is None or not isinstance(transaction_id, str):
+        raise PendingTransactionError("prepared cancellation binding changed")
+    matches = 0
+    with pin_output(capability.path.parent, mutation=False) as parent:
+        for name in _list_entries(parent):
+            if not name.startswith(f".graphify-retired-{transaction_id}-"):
+                continue
+            info = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+            if (info.st_dev, info.st_ino) != (expected.device, expected.inode):
+                continue
+            with pin_output(parent.path / name, mutation=False) as retired:
+                retired_marker = _load_json(retired, ".graphify_retired.json")
+            if (
+                _validated_retired_marker(
+                    retired_marker,
+                    candidate_name=name,
+                    candidate_identity=expected,
+                    managed_output_identity=capability.identity,
+                )
+                is None
+            ):
+                raise PendingTransactionError(
+                    "prepared cancellation retirement binding changed"
+                )
+            matches += 1
+    if matches > 1:
+        raise PendingTransactionError(
+            "prepared cancellation retirement binding is ambiguous"
+        )
+    return matches == 1
+
+
+def _validate_cancellation_state_locked(
+    capability: OutputCapability,
+    preserved: tuple[
+        dict[str, Any],
+        tuple[DrainerTuple, str, dict[str, Any]],
+        str,
+        dict[str, Any],
+    ],
+) -> Transaction:
+    """Validate one exact durable cancellation phase without mutation."""
+    restored_protocol, restored_drainer, preserved_digest, record = preserved
+    state = str(record["state"])
+    if state == "preserved-complete":
+        raise PendingTransactionError("cancellation transition is not active")
+    successor = _transaction_from_json(
+        capability, record["successor_transaction"]
+    )
+    _validate_cancellation_predecessor(
+        capability, restored_protocol, restored_drainer, preserved_digest
+    )
+    protocol = _read_protocol(capability)
+    drainer = _read_drainer(capability)
+    live = _read_transaction(capability)
+    token_name = f".graphify_transaction_token.{successor.id}"
+    token_info = _entry_stat(capability, token_name)
+    token_present = token_info is not None
+    if token_present and (
+        successor.token_identity is None
+        or (token_info.st_dev, token_info.st_ino) != successor.token_identity
+    ):
+        raise PendingTransactionError("cancellation token identity changed")
+
+    if state == "cancelling":
+        if protocol == restored_protocol:
+            protocol_restored = True
+        else:
+            if live != successor:
+                raise PendingTransactionError(
+                    "cancellation live transaction binding changed"
+                )
+            _validate_durable_live_binding(capability, successor)
+            protocol_restored = False
+        if protocol_restored and (
+            drainer is None
+            or drainer[0] != successor.drainer
+            or drainer[1] != "claimed"
+        ):
+            raise PendingTransactionError("cancellation drainer phase changed")
+    elif protocol != restored_protocol:
+        raise PendingTransactionError("cancellation protocol restore changed")
+
+    if state == "protocol-restored":
+        if drainer != restored_drainer and (
+            drainer is None
+            or drainer[0] != successor.drainer
+            or drainer[1] != "claimed"
+        ):
+            raise PendingTransactionError("cancellation drainer restore changed")
+    elif state not in {"cancelling"} and drainer != restored_drainer:
+        raise PendingTransactionError("cancellation drainer restore changed")
+
+    prepared = _prepared_cancellation_marker_from_json(
+        record.get("prepared_workspace"), successor
+    )
+    live_prepared = _load_json(capability, PREPARED_FILE)
+    if state in {"cancelling", "protocol-restored"}:
+        if live_prepared != prepared:
+            raise PendingTransactionError("prepared cancellation phase changed")
+    elif state == "drainer-restored":
+        if live_prepared != prepared:
+            if (
+                prepared is None
+                or live_prepared is not None
+                or not _cancellation_retired_workspace_exists(capability, prepared)
+            ):
+                raise PendingTransactionError("prepared cancellation phase changed")
+    else:
+        if live_prepared is not None:
+            raise PendingTransactionError("cancelled prepared owner reappeared")
+        if prepared is not None and not _cancellation_retired_workspace_exists(
+            capability, prepared
+        ):
+            raise PendingTransactionError(
+                "prepared cancellation retirement binding changed"
+            )
+
+    if state in {
+        "cancelling",
+        "protocol-restored",
+        "drainer-restored",
+    }:
+        if token_present != (successor.token_identity is not None) or live != successor:
+            raise PendingTransactionError("cancellation successor authority changed")
+    elif state == "prepared-retired":
+        if live != successor:
+            raise PendingTransactionError("cancellation live transaction binding changed")
+    elif state == "token-removed":
+        if token_present or (live is not None and live != successor):
+            raise PendingTransactionError("cancellation successor authority changed")
+    elif state == "live-removed":
+        if token_present or live is not None:
+            raise PendingTransactionError("cancelled successor authority reappeared")
+    return successor
+
+
+def cancel_unpublished_transaction(
+    transaction: Transaction,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> None:
     """Restore the prior complete generation after a proven no-op preparation.
 
     This is intentionally narrower than abort/recovery: it succeeds only when
@@ -4096,52 +5535,198 @@ def cancel_unpublished_transaction(transaction: Transaction) -> None:
     plus previous receipt prove the immediately preceding complete generation.
     """
     with pin_output(transaction.output) as capability, _locked(capability):
-        live = _validate_authority(capability, transaction)
-        protocol = _load_json(capability, PROTOCOL_FILE)
-        receipt = _load_json(capability, RECEIPT_FILE)
-        if (
-            protocol is None
-            or protocol.get("state") != "INCOMPLETE"
-            or int(protocol.get("generation", -1)) != live.generation
-            or receipt is None
-            or int(receipt.get("generation", -1)) != live.generation - 1
-        ):
-            raise PendingTransactionError("no-op rollback has no prior complete generation")
-        graph_name = str(receipt.get("graph_name", "graph.json"))
-        graph_payload = _read_bytes(capability, graph_name, 512 * 1024 * 1024)
-        watermark = _watermark(graph_payload)
-        receipt_payload = _json_bytes(receipt)
-        receipt_digest = hashlib.sha256(receipt_payload).hexdigest()
-        if (
-            watermark.get("generation") != receipt.get("generation")
-            or watermark.get("state") != "active"
-            or hashlib.sha256(graph_payload).hexdigest() != receipt.get("graph_digest")
-            or receipt.get("watermark") != watermark
-            or _identity_from_json(receipt.get("output_identity")) != capability.identity
-        ):
-            raise PendingTransactionError("no-op rollback prior generation is inconsistent")
-        restored_protocol = {
-            "schema": 1,
-            "protocol_epoch": 1,
-            "generation": int(receipt["generation"]),
-            "state": "COMPLETE",
-            "output_identity": capability.identity.json(),
-            "owner_capability_digest": str(receipt["token_digest"]),
-            "transaction_id": str(receipt["transaction_id"]),
-            "receipt_digest": receipt_digest,
-        }
-        _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(restored_protocol))
-        _unlink(capability, TRANSACTION_FILE)
-        prior_drainer = _drainer_from_json(receipt.get("drainer"))
-        _write_drainer(
-            capability,
-            prior_drainer,
-            "complete",
-            receipt_digest=receipt_digest,
-            transaction_id=str(receipt["transaction_id"]),
-            output_identity=capability.identity.json(),
-            successor_generation=prior_drainer.generation + 1,
+        preserved = _read_predecessor_authority(capability)
+        if preserved is None:
+            protocol = _read_protocol(capability)
+            drainer = _read_drainer(capability)
+            if (
+                protocol is None
+                or drainer is None
+                or protocol.get("state") != "COMPLETE"
+                or protocol.get("generation") != transaction.generation - 1
+                or drainer[1] != "complete"
+                or _read_transaction(capability) is not None
+                or _entry_stat(
+                    capability, f".graphify_transaction_token.{transaction.id}"
+                )
+                is not None
+                or _entry_stat(capability, PREPARED_FILE) is not None
+            ):
+                raise PendingTransactionError(
+                    "no-op rollback has no resumable predecessor authority"
+                )
+            receipt_digest = protocol.get("receipt_digest")
+            if not _is_hex(receipt_digest):
+                raise PendingTransactionError(
+                    "no-op rollback predecessor receipt is malformed"
+                )
+            _validate_cancellation_predecessor(
+                capability, protocol, drainer, str(receipt_digest)
+            )
+            _AUTHORITY.set(None)
+            return
+
+        restored_protocol, restored_drainer, preserved_digest, record = preserved
+        state = str(record["state"])
+        if state == "preserved-complete":
+            live = _validate_authority(capability, transaction)
+            if (
+                restored_protocol.get("generation") != live.generation - 1
+                or restored_drainer[0].generation + 1 != live.generation
+            ):
+                raise PendingTransactionError(
+                    "no-op rollback has no prior complete generation"
+                )
+            successor = live
+            _validate_cancellation_predecessor(
+                capability,
+                restored_protocol,
+                restored_drainer,
+                preserved_digest,
+            )
+            prepared_marker = _validate_cancellation_prepared_marker(
+                capability, successor
+            )
+            record = {**record, "prepared_workspace": prepared_marker}
+            record = _advance_cancellation_authority(
+                capability, record, state="cancelling", successor=successor
+            )
+            _validate_cancellation_state_locked(
+                capability,
+                _predecessor_authority_from_json(capability, record),
+            )
+            state = "cancelling"
+        else:
+            successor = _validate_cancellation_state_locked(capability, preserved)
+            if transaction != successor:
+                raise PendingTransactionError(
+                    "cancellation successor transaction binding changed"
+                )
+
+        states = (
+            "cancelling",
+            "protocol-restored",
+            "drainer-restored",
+            "prepared-retired",
+            "token-removed",
+            "live-removed",
         )
+        state_index = states.index(state)
+        protocol = _read_protocol(capability)
+        if state_index == 0:
+            if protocol != restored_protocol:
+                current_live = _read_transaction(capability)
+                if current_live is None or current_live != successor:
+                    raise PendingTransactionError(
+                        "cancellation live transaction binding changed"
+                    )
+                _validate_durable_live_binding(capability, current_live)
+                _replace_bytes(
+                    capability, PROTOCOL_FILE, _json_bytes(restored_protocol)
+                )
+            record = _advance_cancellation_authority(
+                capability,
+                record,
+                state="protocol-restored",
+                successor=successor,
+            )
+            state_index = 1
+            if failpoint is not None:
+                failpoint("after_cancel_protocol")
+        elif protocol != restored_protocol:
+            raise PendingTransactionError("cancellation protocol restore changed")
+
+        current_drainer = _read_drainer(capability)
+        if state_index == 1:
+            if current_drainer != restored_drainer:
+                if (
+                    current_drainer is None
+                    or current_drainer[0] != successor.drainer
+                    or current_drainer[1] != "claimed"
+                ):
+                    raise PendingTransactionError(
+                        "cancellation drainer restore changed"
+                    )
+                _replace_bytes(
+                    capability, DRAINER_FILE, _json_bytes(restored_drainer[2])
+                )
+            record = _advance_cancellation_authority(
+                capability,
+                record,
+                state="drainer-restored",
+                successor=successor,
+            )
+            state_index = 2
+            if failpoint is not None:
+                failpoint("after_cancel_drainer")
+        elif current_drainer != restored_drainer:
+            raise PendingTransactionError("cancellation drainer restore changed")
+
+        if state_index == 2:
+            _validate_cancellation_prepared_marker(capability, successor)
+            _retire_prepared_locked(capability)
+            record = _advance_cancellation_authority(
+                capability,
+                record,
+                state="prepared-retired",
+                successor=successor,
+            )
+            state_index = 3
+            if failpoint is not None:
+                failpoint("after_cancel_prepared")
+        elif _entry_stat(capability, PREPARED_FILE) is not None:
+            raise PendingTransactionError("cancelled prepared owner reappeared")
+
+        token_name = f".graphify_transaction_token.{successor.id}"
+        if state_index == 3:
+            token_info = _entry_stat(capability, token_name)
+            if token_info is not None:
+                if successor.token_identity is None or (
+                    token_info.st_dev,
+                    token_info.st_ino,
+                ) != successor.token_identity:
+                    raise PendingTransactionError(
+                        "cancellation token identity changed"
+                    )
+                _unlink(capability, token_name, expected=successor.token_identity)
+            record = _advance_cancellation_authority(
+                capability, record, state="token-removed", successor=successor
+            )
+            state_index = 4
+            if failpoint is not None:
+                failpoint("after_cancel_token")
+        elif _entry_stat(capability, token_name) is not None:
+            raise PendingTransactionError("cancelled successor token reappeared")
+
+        if state_index == 4:
+            current_live = _read_transaction(capability)
+            if current_live is not None:
+                if current_live != successor:
+                    raise PendingTransactionError(
+                        "cancellation live transaction binding changed"
+                    )
+                _unlink(capability, TRANSACTION_FILE)
+            record = _advance_cancellation_authority(
+                capability, record, state="live-removed", successor=successor
+            )
+            state_index = 5
+            if failpoint is not None:
+                failpoint("after_cancel_live")
+        elif _read_transaction(capability) is not None:
+            raise PendingTransactionError("cancelled successor owner reappeared")
+
+        if state_index == 5:
+            if (
+                _read_protocol(capability) != restored_protocol
+                or _read_drainer(capability) != restored_drainer
+                or _entry_stat(capability, token_name) is not None
+                or _entry_stat(capability, PREPARED_FILE) is not None
+                or _read_transaction(capability) is not None
+            ):
+                raise PendingTransactionError("cancellation terminal authority changed")
+            _unlink(capability, PREDECESSOR_FILE)
+            if failpoint is not None:
+                failpoint("after_cancel_record")
     _AUTHORITY.set(None)
 
 

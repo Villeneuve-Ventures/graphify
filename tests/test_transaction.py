@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from graphify.transaction import (
+    CancellationRecovery,
     GRAPH_WATERMARK_KEY,
     MANAGED_PUBLICATION_PATHS,
     OutputIdentity,
@@ -22,11 +23,14 @@ from graphify.transaction import (
     RecoverableTransactionError,
     active_transaction_token_path,
     begin_transaction,
+    cancel_unpublished_transaction,
     claim_rebuild_queue,
     close_if_queue_empty,
     commit_bytes,
     commit_generation,
+    commit_prepared_bytes,
     commit_relative_bytes,
+    commit_unlink,
     complete_rebuild_claim,
     finish_transaction,
     gc_retired_workspaces,
@@ -74,6 +78,7 @@ def _owner(tmp_path: Path):
     output = tmp_path / "graphify-out"
     tx = begin_transaction("runtime", root, output=output)
     token = stage_transaction_handoff(tx)
+    tx = resume_transaction(tx.id, root, output=output)
     return root, output, tx, token
 
 
@@ -247,9 +252,631 @@ def test_windows_read_adapter_admits_safe_legacy_snapshot_but_mutation_stays_blo
         "_open_windows_read_directory",
         lambda path: os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
     )
+    monkeypatch.setattr(
+        transaction_module,
+        "_open_windows_relative_fd",
+        lambda capability, name, **_kwargs: os.open(capability.path / name, os.O_RDONLY),
+    )
     assert open_graph_snapshot(graph, purpose="windows-read").data["nodes"] == []
     with pytest.raises(PendingTransactionError, match="final mutation"):
         pin_output(output)
+
+
+def test_windows_handle_relative_model_preserves_top_level_and_nested_identity(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    nested = output / "wiki"
+    nested.mkdir(parents=True)
+    top = output / "graph.json"
+    leaf = nested / "index.md"
+    top.write_bytes(b"original-top")
+    leaf.write_bytes(b"original-nested")
+    with pin_output(output, mutation=False) as capability:
+        replaced: set[str] = set()
+
+        def stable_relative_open(_capability, name, **_kwargs):
+            target = output / name
+            fd = os.open(target, os.O_RDONLY)
+            if name not in replaced:
+                replaced.add(name)
+                replacement = target.with_name(target.name + ".replacement")
+                replacement.write_bytes(b"replacement")
+                os.replace(replacement, target)
+            return fd
+
+        monkeypatch.setattr(transaction_module, "_PLATFORM", "windows")
+        monkeypatch.setattr(
+            transaction_module, "_open_windows_relative_fd", stable_relative_open
+        )
+        assert transaction_module._read_bytes(capability, "graph.json") == b"original-top"
+        digest, size, payload = transaction_module._hash_windows_relative(
+            capability,
+            "wiki/index.md",
+            retain=True,
+            aggregate_remaining=1024,
+        )
+    assert payload == b"original-nested"
+    assert size == len(payload)
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert top.read_bytes() == b"replacement"
+    assert leaf.read_bytes() == b"replacement"
+
+
+def test_queue_rejects_oversized_serialized_intent_before_sidecar_mutation(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    paths = [f"{index:04d}-" + "x" * 4088 for index in range(300)]
+    with pytest.raises(PendingTransactionError, match="serialized budget"):
+        queue_rebuild("update", root, output=output, changed_paths=paths)
+    assert _file_bytes(output) == {}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema", True),
+        ("id", "not-hex"),
+        ("changed_paths", ["ok.py", 1]),
+        ("semantic", 1),
+        ("time", True),
+    ],
+)
+def test_queue_rejects_exact_type_corruption_without_new_mutation(
+    tmp_path, field, value
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    queue_path = output / ".graphify_rebuild_queue.jsonl"
+    item = json.loads(queue_path.read_text())
+    item[field] = value
+    queue_path.write_text(json.dumps(item, separators=(",", ":")) + "\n")
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="malformed rebuild queue"):
+        transaction_status(output)
+    assert _file_bytes(output) == before
+
+
+def test_invalid_runner_target_clears_process_authority(tmp_path):
+    import graphify.transaction as transaction_module
+
+    _root, _output, _tx, token = _owner(tmp_path)
+    with pytest.raises(PendingTransactionError, match="ambiguous"):
+        run_token(token.path, ["-m", "unsafe/module"])
+    assert transaction_module._AUTHORITY.get() is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema", True),
+        ("protocol_epoch", True),
+        ("generation", 0),
+        ("kind", "unknown"),
+        ("phase", "closing"),
+        ("root", "relative-root"),
+        ("output", "relative-output"),
+    ],
+)
+def test_live_transaction_corruption_is_zero_new_mutation(tmp_path, field, value):
+    _root, output, tx, _token = _owner(tmp_path)
+    path = output / ".graphify_transaction.json"
+    raw = json.loads(path.read_text())
+    raw[field] = value
+    path.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="live transaction"):
+        commit_bytes(tx, "proof", b"forbidden")
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema", True),
+        ("protocol_epoch", True),
+        ("generation", 0),
+        ("kind", "unknown"),
+        ("state", "closing"),
+        ("root", "relative-root"),
+        ("owner_capability_digest", "not-a-digest"),
+        ("token_identity", {"device": True, "inode": 1}),
+    ],
+)
+def test_live_protocol_corruption_is_zero_new_mutation(tmp_path, field, value):
+    _root, output, tx, _token = _owner(tmp_path)
+    path = output / ".graphify_protocol.json"
+    raw = json.loads(path.read_text())
+    raw[field] = value
+    path.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="protocol"):
+        commit_bytes(tx, "proof", b"forbidden")
+    assert _file_bytes(output) == before
+
+
+def test_recovery_rejects_protocol_extra_field_before_prepared_or_queue_mutation(
+    tmp_path
+):
+    root, output, tx, _token = _owner(tmp_path)
+    protocol_path = output / ".graphify_protocol.json"
+    protocol = json.loads(protocol_path.read_text())
+    protocol["unexpected"] = "laundering"
+    protocol_path.write_text(json.dumps(protocol, separators=(",", ":")))
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="protocol"):
+        recover_transaction("runtime", root, output=output, now=time.time() + 100)
+    assert _file_bytes(output) == before
+    assert not list(output.parent.glob(f".graphify-prepare-{tx.id}"))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("unexpected", "field"),
+        ("lease_deadline", True),
+        ("lease_deadline", float("inf")),
+        ("acked_ids", ["A" * 64]),
+        ("acked_ids", ["a" * 64, "a" * 64]),
+    ],
+)
+def test_claimed_drainer_strict_shape_is_zero_new_mutation(
+    tmp_path, field, value
+):
+    _root, output, _tx, _token = _owner(tmp_path)
+    drainer_path = output / ".graphify_drainer.json"
+    raw = json.loads(drainer_path.read_text())
+    raw[field] = value
+    drainer_path.write_text(json.dumps(raw, separators=(",", ":")))
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="drainer"):
+        transaction_status(output)
+    assert _file_bytes(output) == before
+
+
+def test_snapshot_uses_effective_graph_byte_cap(monkeypatch, tmp_path):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    graph = output / "graph.json"
+    payload = b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    graph.write_bytes(payload)
+    monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", str(len(payload) - 1))
+    with pytest.raises(PendingTransactionError, match="size limit"):
+        open_graph_snapshot(graph, purpose="lowered-cap")
+    monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", str(len(payload) + 1))
+    assert open_graph_snapshot(graph, purpose="raised-cap").payload == payload
+
+
+def test_receipt_revokes_all_publication_but_finish_remains_authorized(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    with owned_step(tx):
+        commit_bytes(tx, "graph.json", _graph(tx.generation))
+        commit_bytes(tx, "manifest.json", b"{}")
+        commit_bytes(tx, "stale.html", b"old")
+        receipt = commit_generation(
+            tx,
+            graph_payload=_graph(tx.generation),
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json", "stale.html"),
+        )
+    before = _file_bytes(output)
+    for operation in (
+        lambda: commit_bytes(tx, "late.txt", b"forbidden"),
+        lambda: commit_relative_bytes(tx, "wiki/late.md", b"forbidden"),
+        lambda: commit_unlink(tx, "stale.html"),
+    ):
+        with pytest.raises(PendingTransactionError):
+            operation()
+        assert _file_bytes(output) == before
+    finish_transaction(tx)
+    assert transaction_status(output)["receipt_digest"] == receipt.digest
+
+
+def test_completed_generation_cannot_claim_queued_successor(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    _commit_owner_generation(output, tx)
+    queued = queue_rebuild(
+        "update", root, output=output, changed_paths=["late.py"]
+    )
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError):
+        claim_rebuild_queue(tx, queued.drainer)
+    assert _file_bytes(output) == before
+    assert not list(output.glob(".graphify_rebuild_inflight.*.jsonl"))
+    assert b"late.py" in (output / ".graphify_rebuild_queue.jsonl").read_bytes()
+
+
+def test_unpublished_cancellation_restores_exact_predecessor_protocol_and_close(
+    tmp_path,
+):
+    root_a = tmp_path / "root-a"
+    root_b = tmp_path / "root-b"
+    root_a.mkdir()
+    root_b.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root_a, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    protocol_before = (output / ".graphify_protocol.json").read_bytes()
+    drainer_before = (output / ".graphify_drainer.json").read_bytes()
+
+    successor = begin_transaction("update", root_b, output=output)
+    cancel_unpublished_transaction(successor)
+
+    assert (output / ".graphify_protocol.json").read_bytes() == protocol_before
+    assert (output / ".graphify_drainer.json").read_bytes() == drainer_before
+    restored = json.loads(protocol_before)
+    assert restored["root"] == str(root_a.resolve())
+    assert restored["kind"] == "full"
+    assert not (output / ".graphify_transaction.json").exists()
+    assert not (output / ".graphify_predecessor.json").exists()
+
+
+@pytest.mark.parametrize("artifact", ["manifest.json", "wiki/proof.md"])
+def test_unpublished_cancellation_validates_every_predecessor_artifact_zero_mutation(
+    tmp_path, artifact
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    graph_payload = _graph(predecessor.generation)
+    with owned_step(predecessor):
+        commit_bytes(predecessor, "graph.json", graph_payload)
+        commit_bytes(predecessor, "manifest.json", b"{}")
+        commit_relative_bytes(predecessor, "wiki/proof.md", b"proof")
+        commit_generation(
+            predecessor,
+            graph_payload=graph_payload,
+            manifest_payload=b"{}",
+            required_artifacts=(
+                "graph.json",
+                "manifest.json",
+                "wiki/proof.md",
+            ),
+        )
+    finish_transaction(predecessor)
+    successor = begin_transaction("runtime", root, output=output)
+    (output / artifact).write_bytes(b"corrupt")
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="digest"):
+        cancel_unpublished_transaction(successor)
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    ("failpoint_name", "durable_state"),
+    [
+        ("after_cancel_protocol", "protocol-restored"),
+        ("after_cancel_drainer", "drainer-restored"),
+        ("after_cancel_prepared", "prepared-retired"),
+        ("after_cancel_token", "token-removed"),
+        ("after_cancel_live", "live-removed"),
+        ("after_cancel_record", None),
+    ],
+)
+def test_unpublished_cancellation_resumes_every_durable_step(
+    tmp_path, failpoint_name, durable_state
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    protocol_before = (output / ".graphify_protocol.json").read_bytes()
+    drainer_before = (output / ".graphify_drainer.json").read_bytes()
+
+    successor = begin_transaction("update", root, output=output)
+    stage_transaction_handoff(successor)
+    successor = resume_transaction(successor.id, root, output=output)
+    commit_prepared_bytes(successor, "draft.txt", b"prepared")
+
+    def interrupt(name: str) -> None:
+        if name == failpoint_name:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint_name):
+        cancel_unpublished_transaction(successor, failpoint=interrupt)
+
+    status = transaction_status(output)
+    transition = status["cancellation_transition"]
+    if durable_state is None:
+        assert transition is None
+    else:
+        assert transition == {
+            "state": durable_state,
+            "transaction_id": successor.id,
+            "generation": successor.generation,
+            "kind": successor.kind,
+            "root": successor.root,
+            "output_identity": status["output_identity"],
+        }
+    retry_transaction = (
+        successor
+        if durable_state is None
+        else resume_transaction(successor.id, root, output=output)
+    )
+    cancel_unpublished_transaction(retry_transaction)
+
+    assert (output / ".graphify_protocol.json").read_bytes() == protocol_before
+    assert (output / ".graphify_drainer.json").read_bytes() == drainer_before
+    assert not (output / ".graphify_predecessor.json").exists()
+    assert not (output / ".graphify_prepared.json").exists()
+    assert not (output / ".graphify_transaction.json").exists()
+    assert not list(output.glob(".graphify_transaction_token.*"))
+    retained = transaction_status(output)["retained_workspaces"]
+    assert len(retained) == 1
+    assert retained[0]["state"] == "retired"
+
+
+@pytest.mark.parametrize("recovery_surface", ["selected", "direct"])
+def test_operational_recovery_completes_resumable_cancellation(
+    tmp_path, recovery_surface
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    successor = begin_transaction("update", root, output=output)
+
+    def interrupt(name: str) -> None:
+        if name == "after_cancel_protocol":
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="after_cancel_protocol"):
+        cancel_unpublished_transaction(successor, failpoint=interrupt)
+    status = transaction_status(output)
+    before = _file_bytes(output)
+    identity = OutputIdentity(**status["output_identity"])
+    with pytest.raises(PendingTransactionError, match="stale cancellation"):
+        recover_selected_transaction(
+            "update",
+            root,
+            output=output,
+            expected_generation=successor.generation + 1,
+            expected_output_identity=identity,
+            expected_transaction_id=successor.id,
+        )
+    assert _file_bytes(output) == before
+    recovered = (
+        recover_selected_transaction(
+            "update",
+            root,
+            output=output,
+            expected_generation=successor.generation,
+            expected_output_identity=identity,
+            expected_transaction_id=successor.id,
+        )
+        if recovery_surface == "selected"
+        else recover_transaction(
+            "update",
+            root,
+            output=output,
+            expected_generation=successor.generation,
+            expected_output_identity=identity,
+            expected_transaction_id=successor.id,
+        )
+    )
+    assert isinstance(recovered, CancellationRecovery)
+    assert recovered.transaction_id == successor.id
+    assert recovered.predecessor_generation == successor.generation - 1
+    assert transaction_status(output)["protocol_state"] == "COMPLETE"
+    assert not (output / ".graphify_predecessor.json").exists()
+
+
+@pytest.mark.parametrize("corruption", ["unknown-state", "extra-field"])
+def test_cancellation_transition_parser_rejects_noncanonical_state_zero_mutation(
+    tmp_path, corruption
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    successor = begin_transaction("update", root, output=output)
+
+    def interrupt(name: str) -> None:
+        if name == "after_cancel_protocol":
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="after_cancel_protocol"):
+        cancel_unpublished_transaction(successor, failpoint=interrupt)
+    record_path = output / ".graphify_predecessor.json"
+    record = json.loads(record_path.read_text())
+    if corruption == "unknown-state":
+        record["state"] = "protocol-restoring"
+    else:
+        record["unexpected"] = True
+    record_path.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")))
+    before = _file_bytes(output)
+    for operation in (
+        lambda: transaction_status(output),
+        lambda: cancel_unpublished_transaction(successor),
+    ):
+        with pytest.raises(PendingTransactionError, match="predecessor authority"):
+            operation()
+        assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "failpoint_name",
+    [
+        "after_cancel_protocol",
+        "after_cancel_drainer",
+        "after_cancel_prepared",
+        "after_cancel_token",
+        "after_cancel_live",
+    ],
+)
+def test_cli_recover_completes_every_resumable_cancellation_phase(
+    tmp_path, monkeypatch, capsys, failpoint_name
+):
+    from graphify.cli import dispatch_command
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    successor = begin_transaction("update", root, output=output)
+    stage_transaction_handoff(successor)
+    successor = resume_transaction(successor.id, root, output=output)
+    commit_prepared_bytes(successor, "draft.txt", b"prepared")
+
+    def interrupt(name: str) -> None:
+        if name == failpoint_name:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint_name):
+        cancel_unpublished_transaction(successor, failpoint=interrupt)
+    identity = transaction_status(output)["output_identity"]
+    base_arguments = [
+        "graphify",
+        "transaction",
+        "recover",
+        "--output",
+        str(output),
+        "--device",
+        str(identity["device"]),
+        "--inode",
+        str(identity["inode"]),
+        "--root",
+        str(root),
+        "--transaction-id",
+        successor.id,
+    ]
+    before = _file_bytes(output)
+    monkeypatch.setattr(
+        sys, "argv", [*base_arguments, "--generation", str(successor.generation + 1)]
+    )
+    with pytest.raises(PendingTransactionError, match="stale cancellation"):
+        dispatch_command("transaction")
+    assert _file_bytes(output) == before
+
+    monkeypatch.setattr(
+        sys, "argv", [*base_arguments, "--generation", str(successor.generation)]
+    )
+    dispatch_command("transaction")
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "state": "cancelled",
+        "transaction_id": successor.id,
+        "generation": successor.generation,
+        "predecessor_generation": successor.generation - 1,
+        "protocol_state": "COMPLETE",
+        "output_identity": identity,
+    }
+    assert transaction_status(output)["cancellation_transition"] is None
+
+
+@pytest.mark.parametrize(
+    ("failpoint_name", "component"),
+    [
+        ("after_cancel_protocol", "protocol"),
+        ("after_cancel_drainer", "drainer"),
+        ("after_cancel_prepared", "token"),
+        ("after_cancel_drainer", "prepared"),
+        ("after_cancel_prepared", "retirement"),
+        ("after_cancel_token", "live"),
+    ],
+)
+def test_cancellation_phase_validator_rejects_substituted_filesystem_state(
+    tmp_path, failpoint_name, component
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    predecessor = begin_transaction("full", root, output=output)
+    _commit_owner_generation(output, predecessor)
+    finish_transaction(predecessor)
+    successor = begin_transaction("update", root, output=output)
+    stage_transaction_handoff(successor)
+    successor = resume_transaction(successor.id, root, output=output)
+    commit_prepared_bytes(successor, "draft.txt", b"prepared")
+
+    def interrupt(name: str) -> None:
+        if name == failpoint_name:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint_name):
+        cancel_unpublished_transaction(successor, failpoint=interrupt)
+    target = {
+        "protocol": output / ".graphify_protocol.json",
+        "drainer": output / ".graphify_drainer.json",
+        "prepared": output / ".graphify_prepared.json",
+        "live": output / ".graphify_transaction.json",
+    }.get(component)
+    if component == "token":
+        token = next(output.glob(".graphify_transaction_token.*"))
+        token.unlink()
+        token.write_bytes(b"replacement")
+    elif component == "retirement":
+        target = next(output.parent.glob(".graphify-retired-*")).joinpath(
+            ".graphify_retired.json"
+        )
+        raw = json.loads(target.read_text())
+        raw["managed_output_identity"]["inode"] += 1
+        target.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+    else:
+        assert target is not None
+        raw = json.loads(target.read_text())
+        if component == "protocol":
+            raw["bootstrap_nonce"] = "0" * 64
+        elif component == "drainer":
+            raw["launch_nonce"] = "0" * 32
+        elif component == "prepared":
+            raw["transaction_id"] = "0" * 64
+        else:
+            raw["kind"] = "runtime"
+        target.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+    before = _file_bytes(output)
+    output_info = output.stat()
+    for operation in (
+        lambda: transaction_status(output),
+        lambda: recover_selected_transaction(
+            "update",
+            root,
+            output=output,
+            expected_generation=successor.generation,
+            expected_output_identity=OutputIdentity(output_info.st_dev, output_info.st_ino),
+            expected_transaction_id=successor.id,
+        ),
+    ):
+        with pytest.raises(PendingTransactionError):
+            operation()
+        assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    ("argument", "value"),
+    [
+        ("now", True),
+        ("source", 1),
+        ("intent", 1),
+        ("root", b"corpus"),
+        ("changed_paths", [b"bytes.py"]),
+    ],
+)
+def test_queue_public_arguments_reject_exact_type_errors_before_mutation(
+    tmp_path, argument, value
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    kwargs = {"root": root, "output": output, argument: value}
+    with pytest.raises((PendingTransactionError, TypeError)):
+        queue_rebuild("update", **kwargs)
+    assert not output.exists() or _file_bytes(output) == {}
 
 
 def test_retired_workspace_gc_is_identity_selected_and_dry_run_by_default(tmp_path):
@@ -400,6 +1027,213 @@ def test_retired_gc_quarantine_is_visible_and_resumable(tmp_path):
         dry_run=False,
     ) == (workspace.name,)
     assert not list(output.parent.glob(".graphify-gc-root-*"))
+
+
+def test_retired_gc_rejects_identity_moved_to_unrecorded_controlled_name(
+    tmp_path,
+):
+    _root, output, _tx, token = _owner(tmp_path)
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            "from graphify.transaction import current_transaction,commit_prepared_bytes,"
+            "finalize_prepared_transaction; tx=current_transaction(); "
+            f"commit_prepared_bytes(tx,'graph.json',{_graph(1)!r}); "
+            "commit_prepared_bytes(tx,'manifest.json',b'{}'); finalize_prepared_transaction()",
+        ],
+    )
+    workspace = next(output.parent.glob(".graphify-retired-*"))
+    workspace_info = workspace.stat(follow_symlinks=False)
+    output_identity = OutputIdentity(**transaction_status(output)["output_identity"])
+    workspace_identity = OutputIdentity(workspace_info.st_dev, workspace_info.st_ino)
+
+    def interrupt(state: str) -> None:
+        if state == "after_gc_quarantine":
+            raise RuntimeError(state)
+
+    with pytest.raises(RuntimeError, match="after_gc_quarantine"):
+        gc_retired_workspaces(
+            output,
+            expected_output_identity=output_identity,
+            workspace=workspace,
+            expected_workspace_identity=workspace_identity,
+            dry_run=False,
+            failpoint=interrupt,
+        )
+    quarantine = next(output.parent.glob(".graphify-gc-root-*"))
+    moved = output.parent / (".graphify-gc-root-" + "f" * 32)
+    quarantine.rename(moved)
+    before = _file_bytes(output.parent)
+    with pytest.raises(PendingTransactionError, match="location"):
+        transaction_status(output)
+    assert _file_bytes(output.parent) == before
+    with pytest.raises(PendingTransactionError, match="location"):
+        gc_retired_workspaces(
+            output,
+            expected_output_identity=output_identity,
+            workspace=workspace,
+            expected_workspace_identity=workspace_identity,
+            dry_run=False,
+        )
+    assert _file_bytes(output.parent) == before
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_gc_child_quarantine",
+        "after_gc_child_unlink",
+        "after_gc_marker_retirement",
+        "after_gc_root_removal",
+        "after_gc_parent_fsync",
+    ],
+)
+def test_retired_gc_parent_journal_survives_and_resumes_each_boundary(
+    tmp_path, boundary
+):
+    _root, output, tx, token = _owner(tmp_path)
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            (
+                "from graphify.transaction import current_transaction,commit_prepared_bytes,"
+                "finalize_prepared_transaction; tx=current_transaction(); "
+                f"commit_prepared_bytes(tx,'graph.json',{_graph(tx.generation)!r}); "
+                "commit_prepared_bytes(tx,'manifest.json',b'{}'); "
+                "commit_prepared_bytes(tx,'wiki/index.md',b'proof'); "
+                "finalize_prepared_transaction()"
+            ),
+        ],
+    )
+    status = transaction_status(output)
+    output_identity = OutputIdentity(**status["output_identity"])
+    workspace = next(output.parent.glob(".graphify-retired-*"))
+    info = workspace.stat(follow_symlinks=False)
+    workspace_identity = OutputIdentity(info.st_dev, info.st_ino)
+
+    def stop(name: str) -> None:
+        if name == boundary:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=boundary):
+        gc_retired_workspaces(
+            output,
+            expected_output_identity=output_identity,
+            workspace=workspace,
+            expected_workspace_identity=workspace_identity,
+            dry_run=False,
+            failpoint=stop,
+        )
+    assert list(output.parent.glob(".graphify-gc-journal-*.json"))
+    retained = transaction_status(output)["retained_workspaces"]
+    assert any(item["name"] == workspace.name for item in retained)
+    if boundary == "after_gc_root_removal":
+        assert retained == [
+            {
+                "name": workspace.name,
+                "current_name": None,
+                "state": "gc_quarantined",
+                "identity": workspace_identity.json(),
+            }
+        ]
+    assert gc_retired_workspaces(
+        output,
+        expected_output_identity=output_identity,
+        workspace=workspace,
+        expected_workspace_identity=workspace_identity,
+        dry_run=False,
+    ) == (workspace.name,)
+    assert not list(output.parent.glob(".graphify-gc-journal-*.json"))
+    assert not list(output.parent.glob(".graphify-gc-root-*"))
+
+
+def test_retired_marker_traversal_name_is_zero_new_mutation(tmp_path):
+    _root, output, tx, token = _owner(tmp_path)
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            (
+                "from graphify.transaction import current_transaction,commit_prepared_bytes,"
+                "finalize_prepared_transaction; tx=current_transaction(); "
+                f"commit_prepared_bytes(tx,'graph.json',{_graph(tx.generation)!r}); "
+                "commit_prepared_bytes(tx,'manifest.json',b'{}'); "
+                "finalize_prepared_transaction()"
+            ),
+        ],
+    )
+    workspace = next(output.parent.glob(".graphify-retired-*"))
+    marker_path = workspace / ".graphify_retired.json"
+    marker = json.loads(marker_path.read_text())
+    marker["current_name"] = "../escape"
+    marker_path.write_text(json.dumps(marker, separators=(",", ":")))
+    before = _file_bytes(output)
+    workspace_before = _file_bytes(workspace)
+    with pytest.raises(PendingTransactionError, match="retired workspace"):
+        transaction_status(output)
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == workspace_before
+
+
+def test_gc_journal_traversal_and_forged_filename_are_zero_new_mutation(tmp_path):
+    _root, output, tx, token = _owner(tmp_path)
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            (
+                "from graphify.transaction import current_transaction,commit_prepared_bytes,"
+                "finalize_prepared_transaction; tx=current_transaction(); "
+                f"commit_prepared_bytes(tx,'graph.json',{_graph(tx.generation)!r}); "
+                "commit_prepared_bytes(tx,'manifest.json',b'{}'); "
+                "finalize_prepared_transaction()"
+            ),
+        ],
+    )
+    status = transaction_status(output)
+    output_identity = OutputIdentity(**status["output_identity"])
+    workspace = next(output.parent.glob(".graphify-retired-*"))
+    info = workspace.stat(follow_symlinks=False)
+    workspace_identity = OutputIdentity(info.st_dev, info.st_ino)
+
+    def stop(name: str) -> None:
+        if name == "after_gc_quarantine":
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="after_gc_quarantine"):
+        gc_retired_workspaces(
+            output,
+            expected_output_identity=output_identity,
+            workspace=workspace,
+            expected_workspace_identity=workspace_identity,
+            dry_run=False,
+            failpoint=stop,
+        )
+    journal_path = next(output.parent.glob(".graphify-gc-journal-*.json"))
+    journal = json.loads(journal_path.read_text())
+    forged = output.parent / (".graphify-gc-journal-" + "f" * 64 + ".json")
+    forged.write_bytes(journal_path.read_bytes())
+    before = {
+        path.name: path.read_bytes()
+        for path in output.parent.iterdir()
+        if path.is_file()
+    }
+    with pytest.raises(PendingTransactionError, match="journal selector"):
+        transaction_status(output)
+    assert {
+        path.name: path.read_bytes()
+        for path in output.parent.iterdir()
+        if path.is_file()
+    } == before
+    forged.unlink()
+    journal["quarantine_name"] = "../escape"
+    journal_path.write_text(json.dumps(journal, separators=(",", ":")))
+    before = journal_path.read_bytes()
+    with pytest.raises(PendingTransactionError, match="journal"):
+        transaction_status(output)
+    assert journal_path.read_bytes() == before
 
 
 def test_retired_gc_final_identity_check_preserves_replacement(tmp_path, monkeypatch):
@@ -600,6 +1434,83 @@ def test_takeover_recovery_reuses_identity_proven_successor_token(tmp_path, boun
     after = token_path.stat(follow_symlinks=False)
     assert recovered.token_identity == (token_identity.st_dev, token_identity.st_ino)
     assert (after.st_dev, after.st_ino) == recovered.token_identity
+
+
+@pytest.mark.parametrize(
+    "boundary", ["after_successor_token", "after_owner_protocol", "after_transaction"]
+)
+def test_takeover_refuses_existing_pending_transition_zero_mutation(
+    tmp_path, boundary
+):
+    _root, output, _tx, _token = _owner(tmp_path)
+
+    def stop(state: str) -> None:
+        if state == boundary:
+            raise RuntimeError(boundary)
+
+    with pytest.raises(RuntimeError, match=boundary):
+        takeover_drainer(output, now=10**12, transition_failpoint=stop)
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="requires transaction recovery"):
+        takeover_drainer(output, now=10**12)
+    assert _file_bytes(output) == before
+
+
+def test_tokenless_takeover_rotates_only_valid_pristine_reservation(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    queued = queue_rebuild("full", root, output=output, now=0.0)
+    successor = takeover_drainer(output, now=31.0)
+    assert successor.generation == queued.drainer.generation == 1
+    assert successor.claim_epoch == queued.drainer.claim_epoch + 1
+
+
+def test_tokenless_takeover_rotates_receipt_bound_complete_successor(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    _commit_owner_generation(output, tx)
+    finish_transaction(tx)
+    queued = queue_rebuild("update", root, output=output, now=0.0)
+    successor = takeover_drainer(output, now=31.0)
+    assert successor.generation == queued.drainer.generation == tx.generation + 1
+    assert successor.claim_epoch == 1
+
+
+@pytest.mark.parametrize("protocol_state", ["BOOTSTRAP_PENDING", "INCOMPLETE"])
+def test_tokenless_takeover_rejects_orphan_protocol_zero_mutation(
+    tmp_path, protocol_state
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    if protocol_state == "BOOTSTRAP_PENDING":
+        def stop(_capability, _protocol):
+            raise RuntimeError("bootstrap")
+
+        with pytest.raises(RuntimeError, match="bootstrap"):
+            begin_transaction("runtime", root, output=output, now=0.0, failpoint=stop)
+        protocol = json.loads((output / ".graphify_protocol.json").read_text())
+    else:
+        tx = begin_transaction("runtime", root, output=output, now=0.0)
+        protocol = json.loads((output / ".graphify_protocol.json").read_text())
+        (output / ".graphify_transaction.json").unlink()
+    drainer = {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "generation": 1,
+        "claim_epoch": 0,
+        "launch_nonce": "a" * 32,
+        "state": "reserved",
+        "lease_deadline": 30.0,
+    }
+    (output / ".graphify_drainer.json").write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":"))
+    )
+    assert protocol["state"] == protocol_state
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="incomplete protocol"):
+        takeover_drainer(output, now=31.0)
+    assert _file_bytes(output) == before
 
 
 def test_pending_transition_rejects_substituted_predecessor_without_mutation(tmp_path):
@@ -845,6 +1756,84 @@ def test_selected_recovery_stale_generation_is_zero_mutation(tmp_path):
             expected_output_identity=tx.output_identity,
         )
     assert {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()} == before
+
+
+@pytest.mark.parametrize("operation", ["takeover", "selected", "direct"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "generation",
+        "transaction_id",
+        "root",
+        "kind",
+        "owner_capability_digest",
+        "token_identity",
+        "output_identity",
+        "drainer",
+    ],
+)
+def test_durable_live_owner_mismatch_is_zero_mutation(
+    tmp_path, operation, field
+):
+    root, output, tx, _token = _owner(tmp_path)
+    protocol_path = output / ".graphify_protocol.json"
+    protocol = json.loads(protocol_path.read_text())
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+    other = output / "other-identity"
+    other.write_bytes(b"identity")
+    other_info = other.stat(follow_symlinks=False)
+    if field == "generation":
+        protocol[field] = tx.generation + 1
+    elif field == "transaction_id":
+        protocol[field] = "f" * 64
+    elif field == "root":
+        protocol[field] = str(other_root)
+    elif field == "kind":
+        protocol[field] = "update"
+    elif field == "owner_capability_digest":
+        protocol[field] = "f" * 64
+    elif field == "token_identity":
+        protocol[field] = {"device": other_info.st_dev, "inode": other_info.st_ino}
+    elif field == "output_identity":
+        protocol[field] = {
+            "device": tx.output_identity.device,
+            "inode": tx.output_identity.inode + 1,
+        }
+    else:
+        drainer_path = output / ".graphify_drainer.json"
+        drainer = json.loads(drainer_path.read_text())
+        drainer["launch_nonce"] = "f" * 32
+        drainer_path.write_text(json.dumps(drainer, sort_keys=True, separators=(",", ":")))
+    if field != "drainer":
+        protocol_path.write_text(
+            json.dumps(protocol, sort_keys=True, separators=(",", ":"))
+        )
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError):
+        if operation == "takeover":
+            takeover_drainer(output, now=10**12)
+        elif operation == "selected":
+            recover_selected_transaction(
+                "runtime",
+                root,
+                output=output,
+                expected_generation=tx.generation,
+                expected_transaction_id=tx.id,
+                expected_output_identity=tx.output_identity,
+                now=10**12,
+            )
+        else:
+            recover_transaction(
+                "runtime",
+                root,
+                output=output,
+                expected_generation=tx.generation,
+                expected_transaction_id=tx.id,
+                expected_output_identity=tx.output_identity,
+                now=10**12,
+            )
+    assert _file_bytes(output) == before
 
 
 def test_recovery_substituted_drainer_tuple_is_zero_mutation(tmp_path):
@@ -1378,7 +2367,7 @@ def test_begin_rejects_coherent_negative_generation_rollback_without_mutation(tm
         json.dumps(protocol, sort_keys=True, separators=(",", ":"))
     )
     before = {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()}
-    with pytest.raises(PendingTransactionError, match="malformed drainer authority"):
+    with pytest.raises(PendingTransactionError, match="malformed protocol|drainer authority"):
         begin_transaction("full", root, output=output)
     assert {path.name: path.read_bytes() for path in output.iterdir() if path.is_file()} == before
 
@@ -2752,6 +3741,33 @@ def test_detached_merge_does_not_overwrite_replacement_winning_final_link(
     assert current.read_bytes() == b"replacement"
 
 
+def test_detached_merge_non_fileexists_competitor_cleans_exact_quarantine(
+    tmp_path, monkeypatch
+):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    for path in (base, current, other):
+        path.write_bytes(_graph(3))
+    real_link = os.link
+    injected = False
+
+    def competitor_then_io_error(src, dst, *args, **kwargs):
+        nonlocal injected
+        if dst == current.name and not injected:
+            injected = True
+            current.write_bytes(b"competitor")
+            raise OSError("injected non-FileExists publication failure")
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", competitor_then_io_error)
+    with pytest.raises(OSError, match="injected"):
+        merge_detached_snapshots(base, current, other)
+    assert current.read_bytes() == b"competitor"
+    assert not list(tmp_path.glob(".*.graphify-merge-backup.*"))
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_detached_merge_rejects_composed_node_cap_before_mutation(tmp_path):
     base = tmp_path / "base.json"
     current = tmp_path / "current.json"
@@ -2899,30 +3915,78 @@ def test_windows_adapter_is_guarantee_or_explicit_blocker(monkeypatch, tmp_path)
         pin_output(output)
 
 
-@pytest.mark.parametrize(
-    "module_name",
-    [
-        "affected.py",
-        "benchmark.py",
-        "build.py",
-        "callflow_html.py",
-        "cli.py",
-        "global_graph.py",
-        "prs.py",
-        "reflect.py",
-        "serve.py",
-        "tree_html.py",
-        "watch.py",
-    ],
-)
-def test_managed_reader_inventory_uses_canonical_snapshot_boundary(module_name):
-    source = (Path(__file__).parents[1] / "graphify" / module_name).read_text(
-        encoding="utf-8"
-    )
-    tree = ast.parse(source)
-    calls = {
-        node.func.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+def test_graph_reader_inventory_classifies_every_canonical_call_site():
+    canonical = {
+        ("affected.py", "load_graph", "affected"),
+        ("benchmark.py", "run_benchmark", "benchmark"),
+        ("build.py", "build_merge", "build-merge"),
+        ("callflow_html.py", "load_graph", "callflow-html"),
+        ("cli.py", "_stale_graph_sources", "stale-source-scan"),
+        ("cli.py", "_prune_graph_json_sources", "source-prune"),
+        ("cli.py", "_transactional_extract", "extract-baseline"),
+        ("cli.py", "_transactional_cluster_only", "publication-prepare"),
+        ("cli.py", "_transactional_export", "export-admission"),
+        ("cli.py", "_dispatch_command", "query"),
+        ("cli.py", "_dispatch_command", "path"),
+        ("cli.py", "_dispatch_command", "explain"),
+        ("cli.py", "_dispatch_command", "cluster-only"),
+        ("cli.py", "_dispatch_command", "merge-graphs"),
+        ("cli.py", "_dispatch_command", "export"),
+        ("diagnostics.py", "_read_json_file", "diagnostics"),
+        ("global_graph.py", "global_add", "global-add"),
+        ("prs.py", "_load_graph_json", "pull-request-impact"),
+        ("reflect.py", "_load_node_community", "reflect-community"),
+        ("reflect.py", "_load_known_nodes", "reflect-known-nodes"),
+        ("reflect.py", "reflect", "reflect"),
+        ("reflect.py", "_build_id_label_maps", "reflect-projection"),
+        ("serve.py", "_load_graph", "serve"),
+        ("serve.py", "_load_ctx", "mcp-context-admission"),
+        ("tree_html.py", "write_tree_html", "tree-prepare"),
+        ("watch.py", "_rebuild_code", "watch-prepare"),
     }
-    assert "open_graph_snapshot" in calls, module_name
+    discovered: set[tuple[str, str, str]] = set()
+    source_root = Path(__file__).parents[1] / "graphify"
+    for path in source_root.glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        parents: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parents[child] = parent
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "open_graph_snapshot"
+            ):
+                continue
+            owner: ast.AST | None = node
+            while owner is not None and not isinstance(
+                owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                owner = parents.get(owner)
+            assert isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef))
+            purpose = next(
+                (
+                    keyword.value.value
+                    for keyword in node.keywords
+                    if keyword.arg == "purpose"
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                ),
+                None,
+            )
+            assert purpose is not None, (path.name, node.lineno)
+            discovered.add((path.name, owner.name, purpose))
+    assert discovered == canonical
+
+    transaction_source = (source_root / "transaction.py").read_text(encoding="utf-8")
+    transaction_functions = {
+        node.name
+        for node in ast.walk(ast.parse(transaction_source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert {
+        "open_prepared_graph",  # prepared/private identity-bound workspace
+        "_load_detached_merge_snapshot_with_identity",  # unmanaged/detached input
+    } <= transaction_functions

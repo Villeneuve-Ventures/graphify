@@ -820,10 +820,13 @@ def _rebuild_code(
             PendingTransactionError,
             PublicationPlan,
             begin_transaction,
+            cancel_unpublished_transaction,
             claim_rebuild_queue,
+            closing_step,
             close_if_queue_empty,
             commit_publication_plan,
             complete_rebuild_claim,
+            finish_transaction,
             open_graph_snapshot,
             owned_step,
             publication_plan_from_directory,
@@ -872,8 +875,10 @@ def _rebuild_code(
         receipt_digest: str | None = None
         while True:
             if not claim.items:
-                assert receipt_digest is not None
-                with owned_step(transaction, drainer=claim.drainer):
+                if receipt_digest is None:
+                    cancel_unpublished_transaction(transaction)
+                    return True
+                with closing_step(transaction, drainer=claim.drainer):
                     complete_rebuild_claim(
                         transaction, claim, receipt_digest=receipt_digest
                     )
@@ -881,7 +886,12 @@ def _rebuild_code(
                         transaction, receipt_digest=receipt_digest
                     ):
                         return True
-                claim = claim_rebuild_queue(transaction, claim.drainer)
+                finish_transaction(transaction)
+                transaction = begin_transaction(
+                    "runtime", watch_path, output=actual_out
+                )
+                claim = claim_rebuild_queue(transaction, transaction.drainer)
+                receipt_digest = None
                 continue
             full = any(item["kind"] == "full" for item in claim.items)
             claimed_paths: list[list[Path]] = []
@@ -957,7 +967,7 @@ def _rebuild_code(
                 generation = commit_publication_plan(
                     transaction, PublicationPlan(payloads, plan.deletions)
                 )
-                with owned_step(transaction, drainer=claim.drainer):
+                with closing_step(transaction, drainer=claim.drainer):
                     receipt_digest = generation.digest
                     complete_rebuild_claim(
                         transaction, claim, receipt_digest=receipt_digest
@@ -966,9 +976,14 @@ def _rebuild_code(
                         transaction, receipt_digest=receipt_digest
                     ):
                         return True
+                finish_transaction(transaction)
+                transaction = begin_transaction(
+                    "runtime", watch_path, output=actual_out
+                )
                 baseline_graph = graph_data
                 baseline_artifacts = dict(payloads)
-                claim = claim_rebuild_queue(transaction, claim.drainer)
+                claim = claim_rebuild_queue(transaction, transaction.drainer)
+                receipt_digest = None
 
     watch_root = watch_path.resolve()
     project_root = Path.cwd().resolve() if not watch_path.is_absolute() else watch_root

@@ -39,9 +39,14 @@ def _graph_from_snapshot(snapshot) -> nx.Graph:
         G = json_graph.node_link_graph(data, edges="links")
     except TypeError:
         G = json_graph.node_link_graph(data)
-    # Learning state is optional and not part of the generation receipt. Do not
-    # reopen receipt-bound graph artifacts after canonical admission.
-    G.graph["_learning_overlay"] = {}
+    # Learning state is optional and not part of the generation receipt. Load
+    # it only after the managed graph has crossed canonical snapshot admission.
+    try:
+        from graphify.reflect import load_learning_overlay as _llo
+
+        G.graph["_learning_overlay"] = _llo(snapshot.graph_path)
+    except Exception:
+        G.graph["_learning_overlay"] = {}
     return G
 
 

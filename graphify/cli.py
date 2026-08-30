@@ -1077,6 +1077,7 @@ def dispatch_command(cmd: str) -> None:
 def _transaction_command() -> None:
     """Bounded operational surface for status, exact recovery, and retired GC."""
     from graphify.transaction import (
+        CancellationRecovery,
         OutputIdentity,
         active_transaction_token_path,
         gc_retired_workspaces,
@@ -1171,6 +1172,21 @@ def _transaction_command() -> None:
         expected_generation=int(values["--generation"]),
         expected_output_identity=identity,
     )
+    if isinstance(recovered, CancellationRecovery):
+        print(
+            json.dumps(
+                {
+                    "state": "cancelled",
+                    "transaction_id": recovered.transaction_id,
+                    "generation": recovered.generation,
+                    "predecessor_generation": recovered.predecessor_generation,
+                    "protocol_state": "COMPLETE",
+                    "output_identity": recovered.output_identity.json(),
+                },
+                sort_keys=True,
+            )
+        )
+        return
     token_path = (
         active_transaction_token_path(output)
         if recovered.token_identity is not None
