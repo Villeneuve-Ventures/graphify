@@ -5396,19 +5396,20 @@ def test_legacy_pending_bridge_retains_late_and_open_fd_appends(
     legacy = output / ".pending_changes"
     legacy.write_text("first.py\n", encoding="utf-8")
     open_writer = legacy.open("a", encoding="utf-8")
-    original = transaction_module._write_queue
+    original = transaction_module._transition_queue
     appended = False
 
-    def append_during_bridge(capability, name, items):
+    def append_during_bridge(capability, predecessor, items, **kwargs):
         nonlocal appended
-        original(capability, name, items)
-        if name == transaction_module.QUEUE_FILE and not appended:
+        result = original(capability, predecessor, items, **kwargs)
+        if predecessor.name == transaction_module.QUEUE_FILE and not appended:
             appended = True
             open_writer.write("late-open-fd.py\n")
             open_writer.flush()
             os.fsync(open_writer.fileno())
+        return result
 
-    monkeypatch.setattr(transaction_module, "_write_queue", append_during_bridge)
+    monkeypatch.setattr(transaction_module, "_transition_queue", append_during_bridge)
     queue_rebuild(
         "update", root, output=output, legacy_pending_name=".pending_changes"
     )
@@ -7554,12 +7555,12 @@ def test_takeover_rejects_same_name_inflight_substitution(
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
     claim = claim_rebuild_queue(tx, intent.drainer)
     inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
-    original = transaction_module._write_queue
+    original = transaction_module._transition_queue
     replaced = False
 
-    def substitute_before_queue_write(capability, name, items, **kwargs):
+    def substitute_before_queue_write(capability, predecessor, items, **kwargs):
         nonlocal replaced
-        if name == transaction_module.QUEUE_FILE and not replaced:
+        if predecessor.name == transaction_module.QUEUE_FILE and not replaced:
             replaced = True
             if substitution == "replacement":
                 body = inflight.read_bytes()
@@ -7567,9 +7568,9 @@ def test_takeover_rejects_same_name_inflight_substitution(
                 inflight.write_bytes(body)
             else:
                 _mutate_queue_same_inode(inflight)
-        return original(capability, name, items, **kwargs)
+        return original(capability, predecessor, items, **kwargs)
 
-    monkeypatch.setattr(transaction_module, "_write_queue", substitute_before_queue_write)
+    monkeypatch.setattr(transaction_module, "_transition_queue", substitute_before_queue_write)
     with pytest.raises(PendingTransactionError, match="identity changed|queue changed"):
         takeover_drainer(output, now=10**12)
     assert replaced is True
@@ -7635,12 +7636,12 @@ def test_recovery_retires_only_frozen_inflight_identity(
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
     claim = claim_rebuild_queue(tx, intent.drainer)
     inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
-    original = transaction_module._write_queue
+    original = transaction_module._transition_queue
     replaced = False
 
-    def substitute_after_freeze(capability, name, items, **kwargs):
+    def substitute_after_freeze(capability, predecessor, items, **kwargs):
         nonlocal replaced
-        if name == transaction_module.QUEUE_FILE and not replaced:
+        if predecessor.name == transaction_module.QUEUE_FILE and not replaced:
             replaced = True
             if substitution == "replacement":
                 body = inflight.read_bytes()
@@ -7648,9 +7649,9 @@ def test_recovery_retires_only_frozen_inflight_identity(
                 inflight.write_bytes(body)
             else:
                 _mutate_queue_same_inode(inflight)
-        return original(capability, name, items, **kwargs)
+        return original(capability, predecessor, items, **kwargs)
 
-    monkeypatch.setattr(transaction_module, "_write_queue", substitute_after_freeze)
+    monkeypatch.setattr(transaction_module, "_transition_queue", substitute_after_freeze)
     with pytest.raises(PendingTransactionError, match="identity changed|queue changed"):
         recover_transaction("runtime", root, output=output, now=10**12)
     assert replaced is True
@@ -7690,6 +7691,185 @@ def test_recovery_rejects_reused_inflight_id_with_changed_immutable_fields(
         recover_transaction("runtime", root, output=output, now=10**12)
 
     assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("target", ["primary", "inflight", "quarantine"])
+@pytest.mark.parametrize("substitution", ["replacement", "inplace"])
+def test_claim_queue_transitions_reject_same_inode_predecessor_drift(
+    tmp_path, monkeypatch, target, substitution
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    if target == "primary":
+        first = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    elif target == "inflight":
+        first = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+        claim_rebuild_queue(tx, first.drainer)
+        queue_rebuild("update", root, output=output, changed_paths=["b.py"])
+    else:
+        first = queue_rebuild("update", foreign, output=output, changed_paths=["a.py"])
+        claim_rebuild_queue(tx, first.drainer)
+        queue_rebuild("update", foreign, output=output, changed_paths=["b.py"])
+
+    target_name = (
+        transaction_module.QUEUE_FILE
+        if target == "primary"
+        else f".graphify_rebuild_inflight.{tx.id}.jsonl"
+        if target == "inflight"
+        else transaction_module.QUARANTINE_FILE
+    )
+    original = transaction_module._transition_queue
+    injected = False
+
+    def drift_before_transition(capability, predecessor, items, **kwargs):
+        nonlocal injected
+        if predecessor.name == target_name and predecessor.identity is not None and not injected:
+            injected = True
+            target_path = output / target_name
+            if substitution == "replacement":
+                payload = target_path.read_bytes()
+                target_path.unlink()
+                target_path.write_bytes(payload)
+            else:
+                _mutate_queue_same_inode(target_path)
+        return original(capability, predecessor, items, **kwargs)
+
+    monkeypatch.setattr(
+        transaction_module, "_transition_queue", drift_before_transition
+    )
+    with pytest.raises(PendingTransactionError, match="queue predecessor changed"):
+        claim_rebuild_queue(tx, first.drainer)
+    assert injected is True
+    assert (output / target_name).is_file()
+
+
+@pytest.mark.parametrize("substitution", ["replacement", "inplace"])
+def test_enqueue_replay_rejects_same_inode_primary_queue_drift(
+    tmp_path, monkeypatch, substitution
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    with pytest.raises(RuntimeError, match="stop"):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["b.py"],
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+            if name == "after_enqueue_journal"
+            else None,
+        )
+    original = transaction_module._transition_queue
+    injected = False
+    after_injection = None
+
+    def drift_before_transition(capability, predecessor, items, **kwargs):
+        nonlocal injected, after_injection
+        if predecessor.name == transaction_module.QUEUE_FILE and not injected:
+            injected = True
+            queue_path = output / transaction_module.QUEUE_FILE
+            if substitution == "replacement":
+                payload = queue_path.read_bytes()
+                queue_path.unlink()
+                queue_path.write_bytes(payload)
+            else:
+                _mutate_queue_same_inode(queue_path)
+            after_injection = _file_bytes(output)
+        return original(capability, predecessor, items, **kwargs)
+
+    monkeypatch.setattr(
+        transaction_module, "_transition_queue", drift_before_transition
+    )
+    with pytest.raises(PendingTransactionError, match="queue predecessor changed"):
+        recover_close(output)
+    assert injected is True
+    assert after_injection is not None and _file_bytes(output) == after_injection
+
+
+@pytest.mark.parametrize("substitution", ["replacement", "inplace"])
+def test_completed_recovery_rejects_primary_queue_drift_before_requeue(
+    tmp_path, monkeypatch, substitution
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    with owned_step(tx, drainer=claim.drainer):
+        _commit_owner_generation(output, tx)
+    queue_rebuild("update", root, output=output, changed_paths=["late.py"])
+    transaction_module._AUTHORITY.set(None)
+    original = transaction_module._transition_queue
+    injected = False
+
+    def drift_before_transition(capability, predecessor, items, **kwargs):
+        nonlocal injected
+        if predecessor.name == transaction_module.QUEUE_FILE and not injected:
+            injected = True
+            queue_path = output / transaction_module.QUEUE_FILE
+            if substitution == "replacement":
+                payload = queue_path.read_bytes()
+                queue_path.unlink()
+                queue_path.write_bytes(payload)
+            else:
+                _mutate_queue_same_inode(queue_path)
+        return original(capability, predecessor, items, **kwargs)
+
+    monkeypatch.setattr(
+        transaction_module, "_transition_queue", drift_before_transition
+    )
+    with pytest.raises(PendingTransactionError, match="queue predecessor changed"):
+        recover_selected_transaction(
+            "runtime",
+            root,
+            output=output,
+            expected_transaction_id=tx.id,
+            expected_generation=tx.generation,
+            expected_output_identity=tx.output_identity,
+        )
+    assert injected is True
+
+
+def test_empty_claim_completion_rejects_new_inflight_after_absence_admission(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    intent = queue_rebuild("update", foreign, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    assert not claim.items
+    with owned_step(tx, drainer=claim.drainer):
+        generation_digest = _commit_owner_generation(output, tx)
+        original = transaction_module._transition_queue
+        injected = False
+
+        def create_inflight_before_noop(capability, predecessor, items, **kwargs):
+            nonlocal injected
+            if predecessor.name.startswith(".graphify_rebuild_inflight.") and not injected:
+                injected = True
+                (output / predecessor.name).write_bytes(
+                    (output / transaction_module.QUARANTINE_FILE).read_bytes()
+                )
+            return original(capability, predecessor, items, **kwargs)
+
+        monkeypatch.setattr(
+            transaction_module, "_transition_queue", create_inflight_before_noop
+        )
+        with pytest.raises(PendingTransactionError, match="queue predecessor changed"):
+            complete_rebuild_claim(
+                tx,
+                claim,
+                receipt_digest=generation_digest,
+            )
+    assert injected is True
 
 
 @pytest.mark.parametrize(

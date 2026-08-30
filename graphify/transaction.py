@@ -99,7 +99,9 @@ _COORDINATION_FILES = frozenset(
 _COORDINATION_PREFIXES = (
     ".graphify_transaction_token.",
     ".graphify_rebuild_inflight.",
+    ".graphify_queue_stage.",
 )
+_QUEUE_STAGE_PREFIX = ".graphify_queue_stage."
 _UNMANAGED_JOURNAL_PREFIX = ".graphify-unmanaged-journal-"
 _UNMANAGED_DELETE_PREFIX = ".graphify-unmanaged-delete-"
 _OBSIDIAN_BATCH_PREFIX = ".graphify-unmanaged-obsidian-"
@@ -8383,27 +8385,151 @@ def _queue_payload(items: list[dict[str, Any]]) -> bytes:
     return payload
 
 
-def _write_queue(
-    capability: OutputCapability,
-    name: str,
-    items: list[dict[str, Any]],
+def _queue_record_json(record: QueueFileRecord) -> dict[str, object]:
+    return {
+        "name": record.name,
+        "identity": (
+            None
+            if record.identity is None
+            else {"device": record.identity[0], "inode": record.identity[1]}
+        ),
+        "digest": record.digest,
+    }
+
+
+def _queue_record_from_json(
+    raw: object,
     *,
-    expected_identity: tuple[int, int] | None = None,
-    expected_digest: str | None = None,
-) -> None:
-    payload = _queue_payload(items)
-    if expected_digest is not None and expected_identity is None:
-        raise PendingTransactionError("queue digest requires exact identity")
-    if expected_identity is None:
-        _replace_bytes(capability, name, payload)
+    items: Sequence[dict[str, Any]],
+    expected_name: str,
+) -> QueueFileRecord:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"name", "identity", "digest"}
+        or raw.get("name") != expected_name
+    ):
+        raise PendingTransactionError("malformed queue record binding")
+    identity_raw = raw.get("identity")
+    digest = raw.get("digest")
+    if identity_raw is None:
+        if digest is not None or items:
+            raise PendingTransactionError("malformed absent queue record binding")
+        identity = None
     else:
-        _replace_bytes(
-            capability,
-            name,
-            payload,
-            expected_identity=expected_identity,
-            expected_digest=expected_digest,
+        identity = _token_identity_from_json(identity_raw)
+        if identity is None or not _is_hex(digest):
+            raise PendingTransactionError("malformed queue record binding")
+        expected_digest = hashlib.sha256(
+            _queue_payload(list(items))
+        ).hexdigest()
+        if digest != expected_digest:
+            raise PendingTransactionError("queue record digest does not match items")
+    return QueueFileRecord(
+        expected_name,
+        tuple(items),
+        identity,
+        None if digest is None else str(digest),
+    )
+
+
+def _queue_record_matches(left: QueueFileRecord, right: QueueFileRecord) -> bool:
+    return (
+        left.name == right.name
+        and left.items == right.items
+        and left.identity == right.identity
+        and left.digest == right.digest
+    )
+
+
+def _transition_queue(
+    capability: OutputCapability,
+    predecessor: QueueFileRecord,
+    items: Sequence[dict[str, Any]],
+    *,
+    staged: QueueFileRecord | None = None,
+    staged_callback: Callable[[QueueFileRecord], None] | None = None,
+) -> QueueFileRecord:
+    """CAS one complete durable queue record into its exact successor."""
+    successor_items = list(items)
+    payload = _queue_payload(successor_items)
+    current = _read_queue_record(capability, predecessor.name)
+    if staged is not None and (
+        staged.identity is not None
+        and current.identity == staged.identity
+        and current.digest == staged.digest
+        and current.items == tuple(successor_items)
+    ):
+        displaced = _read_queue_record(capability, staged.name)
+        expected_displaced = QueueFileRecord(
+            staged.name,
+            predecessor.items,
+            predecessor.identity,
+            predecessor.digest,
         )
+        if displaced.identity is not None:
+            if not _queue_record_matches(displaced, expected_displaced):
+                raise PendingTransactionError("queue displaced predecessor changed")
+            _retire_queue_record(capability, displaced)
+        return current
+    if predecessor.items == tuple(successor_items):
+        if not _queue_record_matches(current, predecessor):
+            raise PendingTransactionError("queue predecessor changed before no-op")
+        return current
+    if not _queue_record_matches(current, predecessor):
+        raise PendingTransactionError("queue predecessor changed before transition")
+
+    if staged is not None or staged_callback is not None:
+        if staged is None:
+            stage_name = f"{_QUEUE_STAGE_PREFIX}{secrets.token_hex(32)}"
+            _create_bytes(capability, stage_name, payload)
+            staged = _read_queue_record(capability, stage_name)
+            if staged_callback is not None:
+                staged_callback(staged)
+        else:
+            staged_current = _read_queue_record(capability, staged.name)
+            if not _queue_record_matches(staged_current, staged):
+                public = _read_queue_record(capability, predecessor.name)
+                if (
+                    staged.identity is not None
+                    and public.identity == staged.identity
+                    and public.digest == staged.digest
+                    and public.items == tuple(successor_items)
+                ):
+                    return public
+                raise PendingTransactionError("queue successor stage changed")
+        if staged.items != tuple(successor_items) or staged.digest != hashlib.sha256(payload).hexdigest():
+            raise PendingTransactionError("queue successor stage payload changed")
+        if predecessor.identity is None:
+            _atomic_rename_no_replace(capability, staged.name, predecessor.name)
+        else:
+            _atomic_exchange(capability, predecessor.name, staged.name)
+            displaced = _read_queue_record(capability, staged.name)
+            if not _queue_record_matches(displaced, QueueFileRecord(
+                staged.name,
+                predecessor.items,
+                predecessor.identity,
+                predecessor.digest,
+            )):
+                _atomic_exchange(capability, predecessor.name, staged.name)
+                raise PendingTransactionError("queue predecessor changed during exchange")
+            _retire_queue_record(capability, displaced)
+    else:
+        if predecessor.identity is None:
+            _create_bytes(capability, predecessor.name, payload)
+        else:
+            _replace_bytes(
+                capability,
+                predecessor.name,
+                payload,
+                expected_identity=predecessor.identity,
+                expected_digest=predecessor.digest,
+            )
+    successor = _read_queue_record(capability, predecessor.name)
+    if successor.items != tuple(successor_items) or successor.digest != hashlib.sha256(payload).hexdigest():
+        raise PendingTransactionError("queue successor publication changed")
+    if staged is not None and successor.identity != staged.identity:
+        raise PendingTransactionError("queue successor identity changed")
+    return successor
 
 
 def _canonical_enqueue_transform(
@@ -8535,8 +8661,11 @@ def _enqueue_journal_from_json(
         "candidate",
         "predecessor_queue",
         "predecessor_queue_digest",
+        "predecessor_queue_record",
         "successor_queue",
         "successor_queue_digest",
+        "staged_queue_record",
+        "successor_queue_record",
         "predecessor_mode",
         "predecessor_protocol",
         "predecessor_receipt_digest",
@@ -8555,6 +8684,42 @@ def _enqueue_journal_from_json(
         raise PendingTransactionError("malformed enqueue journal")
     predecessor_payload = _queue_payload(cast(list[dict[str, Any]], predecessor_queue))
     successor_payload = _queue_payload(cast(list[dict[str, Any]], successor_queue))
+    predecessor_record = _queue_record_from_json(
+        raw.get("predecessor_queue_record"),
+        items=cast(list[dict[str, Any]], predecessor_queue),
+        expected_name=QUEUE_FILE,
+    )
+    staged_raw = raw.get("staged_queue_record")
+    staged_name = (
+        None
+        if not isinstance(staged_raw, dict)
+        else staged_raw.get("name")
+    )
+    if staged_name is not None and (
+        type(staged_name) is not str
+        or not staged_name.startswith(_QUEUE_STAGE_PREFIX)
+        or not _is_hex(staged_name.removeprefix(_QUEUE_STAGE_PREFIX))
+    ):
+        raise PendingTransactionError("malformed enqueue queue stage")
+    staged_record = (
+        None
+        if staged_raw is None
+        else _queue_record_from_json(
+            staged_raw,
+            items=cast(list[dict[str, Any]], successor_queue),
+            expected_name=cast(str, staged_name),
+        )
+    )
+    successor_raw = raw.get("successor_queue_record")
+    successor_record = (
+        None
+        if successor_raw is None
+        else _queue_record_from_json(
+            successor_raw,
+            items=cast(list[dict[str, Any]], successor_queue),
+            expected_name=QUEUE_FILE,
+        )
+    )
     canonical_successor, canonical_item = _canonical_enqueue_transform(
         cast(list[dict[str, Any]], predecessor_queue),
         candidate,
@@ -8593,6 +8758,19 @@ def _enqueue_journal_from_json(
         != hashlib.sha256(predecessor_payload).hexdigest()
         or raw.get("successor_queue_digest")
         != hashlib.sha256(successor_payload).hexdigest()
+        or predecessor_record.name != QUEUE_FILE
+        or (
+            staged_record is not None
+            and not staged_record.name.startswith(_QUEUE_STAGE_PREFIX)
+        )
+        or (
+            raw.get("state") == "planned"
+            and successor_record is not None
+        )
+        or (
+            raw.get("state") in {"queued", "reserved"}
+            and successor_record is None
+        )
         or raw.get("predecessor_mode")
         not in {"pristine", "missing", "complete", "reserved", "live"}
         or (
@@ -8644,9 +8822,35 @@ def _validate_enqueue_journal_current(
 ) -> None:
     """Validate one exact durable enqueue phase without changing it."""
     item = cast(dict[str, Any], journal["item"])
-    queue = _read_queue(capability)
+    queue_record = _read_queue_record(capability)
+    queue = list(queue_record.items)
     predecessor_queue = cast(list[dict[str, Any]], journal["predecessor_queue"])
     successor_queue = cast(list[dict[str, Any]], journal["successor_queue"])
+    predecessor_record = _queue_record_from_json(
+        journal["predecessor_queue_record"],
+        items=predecessor_queue,
+        expected_name=QUEUE_FILE,
+    )
+    staged_raw = journal["staged_queue_record"]
+    staged_record = (
+        None
+        if staged_raw is None
+        else _queue_record_from_json(
+            staged_raw,
+            items=successor_queue,
+            expected_name=cast(dict[str, Any], staged_raw)["name"],
+        )
+    )
+    successor_raw = journal["successor_queue_record"]
+    successor_record = (
+        None
+        if successor_raw is None
+        else _queue_record_from_json(
+            successor_raw,
+            items=successor_queue,
+            expected_name=QUEUE_FILE,
+        )
+    )
     expected_raw = journal["expected_drainer"]
     expected = (
         None
@@ -8657,11 +8861,45 @@ def _validate_enqueue_journal_current(
     current = _read_drainer(capability)
     state = journal["state"]
     if state == "planned":
-        valid = current == expected and queue in (predecessor_queue, successor_queue)
+        queue_valid = _queue_record_matches(queue_record, predecessor_record)
+        if staged_record is not None:
+            staged_current = _read_queue_record(capability, staged_record.name)
+            published_from_stage = (
+                queue_record.identity == staged_record.identity
+                and queue_record.digest == staged_record.digest
+                and queue_record.items == staged_record.items
+            )
+            staged_valid = _queue_record_matches(staged_current, staged_record)
+            displaced_valid = _queue_record_matches(
+                staged_current,
+                QueueFileRecord(
+                    staged_record.name,
+                    predecessor_record.items,
+                    predecessor_record.identity,
+                    predecessor_record.digest,
+                ),
+            )
+            queue_valid = queue_valid and staged_valid or (
+                published_from_stage
+                and (
+                    staged_current.identity is None
+                    or displaced_valid
+                )
+            )
+        valid = current == expected and queue_valid
     elif state == "queued":
-        valid = queue == successor_queue and (current == expected or current == successor)
+        valid = (
+            successor_record is not None
+            and _queue_record_matches(queue_record, successor_record)
+            and (current == expected or current == successor)
+        )
     else:
-        valid = state == "reserved" and queue == successor_queue and current == successor
+        valid = (
+            state == "reserved"
+            and successor_record is not None
+            and _queue_record_matches(queue_record, successor_record)
+            and current == successor
+        )
     if not valid:
         raise PendingTransactionError("enqueue journal durable state changed")
     protocol = _read_protocol(capability)
@@ -8683,6 +8921,8 @@ def _validate_enqueue_journal_current(
             allowed.append(QUEUE_FILE)
         if current is not None:
             allowed.append(DRAINER_FILE)
+        if staged_record is not None and _entry_stat(capability, staged_record.name) is not None:
+            allowed.append(staged_record.name)
         legacy_name = journal.get("legacy_pending_name")
         if isinstance(legacy_name, str):
             allowed.append(legacy_name)
@@ -8764,14 +9004,51 @@ def _recover_enqueue_journal(
         return None
     _validate_enqueue_journal_current(capability, journal)
     item = cast(dict[str, Any], journal["item"])
-    queue = _read_queue(capability)
     predecessor_queue = cast(list[dict[str, Any]], journal["predecessor_queue"])
     successor_queue = cast(list[dict[str, Any]], journal["successor_queue"])
-    if queue == predecessor_queue:
-        _write_queue(capability, QUEUE_FILE, successor_queue)
-    elif queue != successor_queue:
-        raise PendingTransactionError("enqueue queue predecessor changed")
+    predecessor_record = _queue_record_from_json(
+        journal["predecessor_queue_record"],
+        items=predecessor_queue,
+        expected_name=QUEUE_FILE,
+    )
+    staged_raw = journal["staged_queue_record"]
+    staged_record = (
+        None
+        if staged_raw is None
+        else _queue_record_from_json(
+            staged_raw,
+            items=successor_queue,
+            expected_name=cast(dict[str, Any], staged_raw)["name"],
+        )
+    )
+    successor_raw = journal["successor_queue_record"]
+    successor_record = (
+        None
+        if successor_raw is None
+        else _queue_record_from_json(
+            successor_raw,
+            items=successor_queue,
+            expected_name=QUEUE_FILE,
+        )
+    )
+    if successor_record is None:
+        def persist_stage(record: QueueFileRecord) -> None:
+            journal["staged_queue_record"] = _queue_record_json(record)
+            _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
+
+        successor_record = _transition_queue(
+            capability,
+            predecessor_record,
+            successor_queue,
+            staged=staged_record,
+            staged_callback=persist_stage,
+        )
+    elif not _queue_record_matches(
+        _read_queue_record(capability), successor_record
+    ):
+        raise PendingTransactionError("enqueue queue successor changed")
     journal["state"] = "queued"
+    journal["successor_queue_record"] = _queue_record_json(successor_record)
     _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
     if failpoint is not None:
         failpoint("after_enqueue_queue")
@@ -9343,7 +9620,8 @@ def queue_rebuild(
                 "identity": identity,
                 "offset": offset + complete_length,
             }
-        predecessor_queue = _read_queue(capability)
+        predecessor_queue_record = _read_queue_record(capability)
+        predecessor_queue = list(predecessor_queue_record.items)
         candidate_identity = {
             "schema": 1,
             "kind": kind,
@@ -9433,10 +9711,15 @@ def queue_rebuild(
             "predecessor_queue_digest": hashlib.sha256(
                 _queue_payload(predecessor_queue)
             ).hexdigest(),
+            "predecessor_queue_record": _queue_record_json(
+                predecessor_queue_record
+            ),
             "successor_queue": queued,
             "successor_queue_digest": hashlib.sha256(
                 _queue_payload(queued)
             ).hexdigest(),
+            "staged_queue_record": None,
+            "successor_queue_record": None,
             "predecessor_mode": predecessor_mode,
             "predecessor_protocol": protocol,
             "predecessor_receipt_digest": predecessor_receipt,
@@ -9478,7 +9761,8 @@ def claim_rebuild_queue(
         current = _read_drainer(capability)
         if current is None or current[0] != drainer:
             raise PendingTransactionError("exact drainer is not live")
-        queued = _read_queue(capability)
+        queued_record = _read_queue_record(capability)
+        queued = list(queued_record.items)
         accepted = [item for item in queued if item["root"] == live.root]
         quarantined = [item for item in queued if item["root"] != live.root]
         if failpoint:
@@ -9487,22 +9771,27 @@ def claim_rebuild_queue(
         inflight_path: Path | None = None
         inflight_record = QueueFileRecord(inflight_name, (), None, None)
         if accepted:
-            existing = _read_queue(capability, inflight_name)
-            _write_queue(capability, inflight_name, _merge_intents(existing, accepted))
+            inflight_predecessor = _read_queue_record(capability, inflight_name)
+            inflight_record = _transition_queue(
+                capability,
+                inflight_predecessor,
+                _merge_intents(inflight_predecessor.items, accepted),
+            )
             inflight_path = capability.path / inflight_name
-            inflight_record = _read_queue_record(capability, inflight_name)
         if failpoint:
             failpoint("before_quarantine_durable")
         if quarantined:
-            existing_quarantine = _read_queue(capability, QUARANTINE_FILE)
-            _write_queue(
+            quarantine_predecessor = _read_queue_record(
+                capability, QUARANTINE_FILE
+            )
+            _transition_queue(
                 capability,
-                QUARANTINE_FILE,
-                _merge_intents(existing_quarantine, quarantined),
+                quarantine_predecessor,
+                _merge_intents(quarantine_predecessor.items, quarantined),
             )
         if failpoint:
             failpoint("before_queue_durable")
-        _write_queue(capability, QUEUE_FILE, [])
+        _transition_queue(capability, queued_record, [])
         _write_drainer(
             capability,
             drainer,
@@ -9625,10 +9914,11 @@ def takeover_drainer(
             inflight_record = _read_queue_record(capability, inflight_name)
             inflight = list(inflight_record.items)
             if inflight:
-                _write_queue(
+                queue_predecessor = _read_queue_record(capability)
+                _transition_queue(
                     capability,
-                    QUEUE_FILE,
-                    _merge_intents(_read_queue(capability), inflight),
+                    queue_predecessor,
+                    _merge_intents(queue_predecessor.items, inflight),
                 )
             _retire_queue_record(capability, inflight_record)
             successor_id = secrets.token_hex(32)
@@ -9768,19 +10058,11 @@ def complete_rebuild_claim(
             failpoint("after_claim_acknowledgement")
         residual = [item for item in inflight if str(item["id"]) not in claimed_by_id]
         if residual:
-            _write_queue(
-                capability,
-                expected_name,
-                residual,
-                expected_identity=inflight_record.identity,
-                expected_digest=inflight_record.digest,
-            )
+            _transition_queue(capability, inflight_record, residual)
         elif claim.items:
-            _unlink(
-                capability,
-                expected_name,
-                expected=inflight_record.identity,
-            )
+            _retire_queue_record(capability, inflight_record)
+        else:
+            _transition_queue(capability, inflight_record, ())
         if failpoint:
             failpoint("after_inflight_retirement")
 
@@ -10013,11 +10295,12 @@ def _recover_completed_live_locked(
         inflight_ids = [str(item["id"]) for item in inflight]
         requeue_ids = [item_id for item_id in inflight_ids if item_id not in acked_ids]
         if requeue_ids:
-            _write_queue(
+            queue_predecessor = _read_queue_record(capability)
+            _transition_queue(
                 capability,
-                QUEUE_FILE,
+                queue_predecessor,
                 _merge_intents(
-                    _read_queue(capability),
+                    queue_predecessor.items,
                     [item for item in inflight if str(item["id"]) in requeue_ids],
                 ),
             )
@@ -10783,7 +11066,8 @@ def recover_transaction(
             generation = current.generation
         else:
             generation = current.generation + 1
-        queued = _read_queue(capability)
+        queue_predecessor = _read_queue_record(capability)
+        queued = list(queue_predecessor.items)
         frozen_inflight: list[QueueFileRecord] = []
         for name in _list_entries(capability):
             if name.startswith(".graphify_rebuild_inflight.") and name.endswith(".jsonl"):
@@ -10792,7 +11076,11 @@ def recover_transaction(
                 queued.extend(record.items)
         if queued:
             deduplicated = {str(item["id"]): item for item in queued}
-            _write_queue(capability, QUEUE_FILE, list(deduplicated.values()))
+            _transition_queue(
+                capability,
+                queue_predecessor,
+                list(deduplicated.values()),
+            )
         for record in frozen_inflight:
             _retire_queue_record(capability, record)
         _retire_prepared_locked(capability)
