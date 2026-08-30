@@ -61,6 +61,7 @@ LEGACY_PENDING_STATE_FILE = ".graphify_legacy_pending_state.json"
 DRAINER_FILE = ".graphify_drainer.json"
 TRANSITION_FILE = ".graphify_transition.json"
 PREDECESSOR_FILE = ".graphify_predecessor.json"
+TOKEN_TRANSITION_FILE = ".graphify_token_transition.json"  # nosec B105 - state filename
 _COORDINATION_FILES = frozenset(
     {
         PROTOCOL_FILE,
@@ -73,12 +74,14 @@ _COORDINATION_FILES = frozenset(
         LEGACY_PENDING_STATE_FILE,
         TRANSITION_FILE,
         PREDECESSOR_FILE,
+        TOKEN_TRANSITION_FILE,
     }
 )
 _COORDINATION_PREFIXES = (
     ".graphify_transaction_token.",
     ".graphify_rebuild_inflight.",
 )
+_UNMANAGED_JOURNAL_PREFIX = ".graphify-unmanaged-journal-"
 _SAFE_GRAPHLESS_RUNTIME_ENTRIES = frozenset(
     {"cache", "memory", "reflections", ".graphify_python", ".rebuild.lock"}
 )
@@ -483,9 +486,84 @@ def _open_windows_relative_fd(
         os.close(parent_fd)
 
 
+def _list_windows_directory_entries(directory_fd: int) -> list[str]:
+    """Enumerate one already-open Windows directory without resolving its name."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+
+    class FileIdBothDirectoryInfo(ctypes.Structure):
+        _fields_ = [
+            ("NextEntryOffset", wintypes.ULONG),
+            ("FileIndex", wintypes.ULONG),
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("EndOfFile", ctypes.c_longlong),
+            ("AllocationSize", ctypes.c_longlong),
+            ("FileAttributes", wintypes.ULONG),
+            ("FileNameLength", wintypes.ULONG),
+            ("EaSize", wintypes.ULONG),
+            ("ShortNameLength", ctypes.c_ubyte),
+            ("ShortName", wintypes.WCHAR * 12),
+            ("FileId", ctypes.c_longlong),
+            ("FileName", wintypes.WCHAR * 1),
+        ]
+
+    get_osfhandle: Any = getattr(msvcrt, "get_osfhandle")
+    handle = wintypes.HANDLE(get_osfhandle(directory_fd))
+    ntdll: Any = getattr(ctypes, "windll").ntdll
+    query = ntdll.NtQueryDirectoryFile
+    query.restype = ctypes.c_long
+    entries: list[str] = []
+    restart = True
+    while True:
+        buffer = ctypes.create_string_buffer(64 * 1024)
+        io_status = IoStatusBlock()
+        status_code = query(
+            handle,
+            None,
+            None,
+            None,
+            ctypes.byref(io_status),
+            buffer,
+            len(buffer),
+            37,
+            False,
+            None,
+            restart,
+        )
+        restart = False
+        if status_code == -2147483642:  # STATUS_NO_MORE_FILES
+            break
+        if status_code < 0:
+            raise OSError(f"Windows directory enumeration failed: {status_code}")
+        offset = 0
+        while offset < int(io_status.Information):
+            item = FileIdBothDirectoryInfo.from_buffer(buffer, offset)
+            name_offset = offset + FileIdBothDirectoryInfo.FileName.offset
+            name = ctypes.wstring_at(name_offset, item.FileNameLength // 2)
+            if name not in {".", ".."}:
+                entries.append(name)
+            if item.NextEntryOffset == 0:
+                break
+            offset += item.NextEntryOffset
+        if int(io_status.Information) == 0:
+            break
+    return entries
+
+
 def _list_entries(capability: OutputCapability) -> list[str]:
     capability.validate()
-    entries = os.listdir(capability.path if _PLATFORM == "windows" else capability.fd)
+    entries = (
+        _list_windows_directory_entries(capability.fd)
+        if _PLATFORM == "windows"
+        else os.listdir(capability.fd)
+    )
     capability.validate()
     return entries
 
@@ -930,21 +1008,27 @@ def _create_bytes(capability: OutputCapability, name: str, payload: bytes, mode:
 
 
 def _replace_relative_bytes(
-    capability: OutputCapability, relative_name: str, payload: bytes
+    capability: OutputCapability,
+    relative_name: str,
+    payload: bytes,
+    *,
+    failpoint: Callable[[str], None] | None = None,
 ) -> None:
-    relative = Path(relative_name)
-    if relative.is_absolute() or not relative.parts or any(
-        part in {"", ".", ".."} for part in relative.parts
-    ):
-        raise PendingTransactionError(f"unsafe managed relative path: {relative_name}")
+    relative = Path(_validated_relative_name(relative_name))
     parent_fd = os.dup(capability.fd)
     nested: OutputCapability | None = None
     try:
         for component in relative.parts[:-1]:
+            created = False
             try:
                 os.mkdir(component, 0o700, dir_fd=parent_fd)
+                created = True
             except FileExistsError:
                 pass
+            if created:
+                os.fsync(parent_fd)
+                if failpoint is not None:
+                    failpoint(f"after_mkdir:{component}")
             next_fd = os.open(
                 component,
                 os.O_RDONLY
@@ -961,6 +1045,604 @@ def _replace_relative_bytes(
         )
         parent_fd = -1
         _replace_bytes(nested, relative.parts[-1], payload)
+    finally:
+        if nested is not None:
+            nested.close()
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _unmanaged_stage_matches(
+    capability: OutputCapability,
+    name: str,
+    expected_prefix: bytes,
+    expected_digest: str,
+) -> bool:
+    """Validate an owned stage without retaining its potentially large payload."""
+    fd = os.open(
+        name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=capability.fd,
+    )
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_size < len(expected_prefix)
+            or info.st_size - len(expected_prefix) > _MAX_RECEIPT_AGGREGATE_BYTES
+        ):
+            return False
+        prefix = b""
+        while len(prefix) < len(expected_prefix):
+            chunk = os.read(fd, len(expected_prefix) - len(prefix))
+            if not chunk:
+                return False
+            prefix += chunk
+        if prefix != expected_prefix:
+            return False
+        digest = hashlib.sha256()
+        remaining = info.st_size - len(expected_prefix)
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                return False
+            digest.update(chunk)
+            remaining -= len(chunk)
+        return not os.read(fd, 1) and digest.hexdigest() == expected_digest
+    finally:
+        os.close(fd)
+
+
+def _atomic_exchange(capability: OutputCapability, left: str, right: str) -> None:
+    """Atomically exchange two directory entries or fail closed."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        exchange = getattr(libc, "renameatx_np", None)
+        flags = 0x00000002  # RENAME_SWAP
+    elif sys.platform.startswith("linux"):
+        exchange = getattr(libc, "renameat2", None)
+        flags = 0x00000002  # RENAME_EXCHANGE
+    else:
+        exchange = None
+        flags = 0
+    if exchange is None:
+        raise PendingTransactionError(
+            "atomic unmanaged replacement is unavailable on this platform"
+        )
+    exchange.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    exchange.restype = ctypes.c_int
+    if exchange(
+        capability.fd,
+        os.fsencode(left),
+        capability.fd,
+        os.fsencode(right),
+        flags,
+    ) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), right)
+
+
+def _unmanaged_aux_name(leaf: str, suffix: str) -> str:
+    return f".{leaf}.graphify-unmanaged-{secrets.token_hex(16)}.{suffix}"
+
+
+def _valid_unmanaged_aux_name(name: object, leaf: str, suffix: str) -> bool:
+    return type(name) is str and re.fullmatch(
+        rf"\.{re.escape(leaf)}\.graphify-unmanaged-[0-9a-f]{{32}}\.{suffix}",
+        name,
+    ) is not None
+
+
+def _relative_identity(
+    capability: OutputCapability, name: str
+) -> tuple[int, int] | None:
+    try:
+        info = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _replace_unmanaged_relative_bytes(
+    capability: OutputCapability,
+    relative_name: str,
+    payload: bytes,
+    *,
+    journal_capability: OutputCapability,
+    journal_name: str,
+    canonical_destination: str,
+    failpoint: Callable[[str], None] | None = None,
+    terminal_validate: Callable[[], None] | None = None,
+) -> None:
+    """Publish one unmanaged leaf with an identity-bound atomic exchange."""
+    relative = Path(_validated_relative_name(relative_name))
+    parent_fd = os.dup(capability.fd)
+    nested: OutputCapability | None = None
+    created: list[tuple[tuple[str, ...], tuple[int, int]]] = []
+    backup: str | None = None
+    predecessor_identity: tuple[int, int] | None = None
+    new_identity: tuple[int, int] | None = None
+    staged: str | None = None
+    published = False
+    exchange_attempted = False
+    retain_journal = False
+    leaf = relative.parts[-1]
+    stage_nonce = secrets.token_hex(32)
+    stage_prefix = b"GRAPHIFY-UNMANAGED-STAGE\0" + stage_nonce.encode() + b"\0"
+    try:
+        walked: list[str] = []
+        for component in relative.parts[:-1]:
+            try:
+                os.mkdir(component, 0o700, dir_fd=parent_fd)
+                info = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+                created.append((tuple((*walked, component)), (info.st_dev, info.st_ino)))
+                os.fsync(parent_fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+            walked.append(component)
+        nested = OutputCapability(
+            capability.path / Path(*relative.parts[:-1]),
+            OutputIdentity(os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino),
+            parent_fd,
+        )
+        parent_fd = -1
+        prior_journal = _load_json(journal_capability, journal_name)
+        if prior_journal is not None:
+            retain_journal = True
+            expected_fields = {
+                "schema",
+                "protocol_epoch",
+                "state",
+                "destination",
+                "journal_output_identity",
+                "predecessor_identity",
+                "backup_name",
+                "stage_name",
+                "stage_identity",
+                "restored_identity",
+                "stage_nonce",
+                "payload_digest",
+            }
+            if (
+                set(prior_journal) != expected_fields
+                or prior_journal.get("schema") != 1
+                or prior_journal.get("protocol_epoch") != 1
+                or prior_journal.get("state")
+                not in {
+                    "planned",
+                    "backup",
+                    "staged",
+                    "exchange_attempt",
+                    "exchanged",
+                    "restored_predecessor",
+                    "restored_competitor",
+                }
+                or prior_journal.get("destination") != canonical_destination
+                or _identity_from_json(
+                    prior_journal.get("journal_output_identity")
+                )
+                != journal_capability.identity
+                or not _is_hex(prior_journal.get("stage_nonce"))
+                or not _is_hex(prior_journal.get("payload_digest"))
+                or not _valid_unmanaged_aux_name(
+                    prior_journal.get("stage_name"), leaf, "stage"
+                )
+            ):
+                raise PendingTransactionError(
+                    "unmanaged publication journal is malformed"
+                )
+            predecessor_raw = prior_journal.get("predecessor_identity")
+            prior_predecessor = (
+                None
+                if predecessor_raw is None
+                else _identity_from_json(predecessor_raw)
+            )
+            prior_backup = prior_journal.get("backup_name")
+            if prior_predecessor is None:
+                if prior_backup is not None:
+                    raise PendingTransactionError(
+                        "unmanaged publication journal is malformed"
+                    )
+            elif not _valid_unmanaged_aux_name(prior_backup, leaf, "backup"):
+                raise PendingTransactionError(
+                    "unmanaged publication journal is malformed"
+                )
+            backup = cast(str | None, prior_backup)
+            staged = cast(str, prior_journal["stage_name"])
+            stage_raw = prior_journal.get("stage_identity")
+            prior_stage = (
+                None if stage_raw is None else _identity_from_json(stage_raw)
+            )
+            restored_raw = prior_journal.get("restored_identity")
+            restored_identity = (
+                None if restored_raw is None else _identity_from_json(restored_raw)
+            )
+            restored_state = str(prior_journal["state"]).startswith("restored_")
+            if restored_state != (restored_identity is not None):
+                raise PendingTransactionError(
+                    "unmanaged publication journal is malformed"
+                )
+            stage_current_raw = _relative_identity(nested, staged)
+            leaf_current = _relative_identity(nested, leaf)
+            backup_current = (
+                None if backup is None else _relative_identity(nested, backup)
+            )
+            if backup_current is not None and backup_current != (
+                None
+                if prior_predecessor is None
+                else (prior_predecessor.device, prior_predecessor.inode)
+            ):
+                raise PendingTransactionError(
+                    "unmanaged publication backup identity changed"
+                )
+            successor_identity = (
+                None
+                if prior_stage is None
+                else (prior_stage.device, prior_stage.inode)
+            )
+            predecessor_tuple = (
+                None
+                if prior_predecessor is None
+                else (prior_predecessor.device, prior_predecessor.inode)
+            )
+            recovered_competitor = prior_journal["state"] == "restored_competitor"
+            if restored_state:
+                restored_tuple = (
+                    cast(OutputIdentity, restored_identity).device,
+                    cast(OutputIdentity, restored_identity).inode,
+                )
+                if leaf_current != restored_tuple or (
+                    prior_journal["state"] == "restored_predecessor"
+                ) != (restored_tuple == predecessor_tuple):
+                    raise PendingTransactionError(
+                        "unmanaged restored publication identity changed"
+                    )
+            elif successor_identity is not None and leaf_current == successor_identity:
+                if predecessor_tuple is None:
+                    os.unlink(leaf, dir_fd=nested.fd)
+                    leaf_current = None
+                else:
+                    if stage_current_raw is None:
+                        raise PendingTransactionError(
+                            "unmanaged exchange displacement is unavailable"
+                        )
+                    recovered_competitor = stage_current_raw != predecessor_tuple
+                    _atomic_exchange(nested, staged, leaf)
+                    os.fsync(nested.fd)
+                    leaf_current = stage_current_raw
+                    stage_current_raw = successor_identity
+                    if failpoint is not None:
+                        failpoint("after_unmanaged_recovery_exchange")
+                    prior_journal["state"] = (
+                        "restored_competitor"
+                        if recovered_competitor
+                        else "restored_predecessor"
+                    )
+                    prior_journal["restored_identity"] = {
+                        "device": leaf_current[0],
+                        "inode": leaf_current[1],
+                    }
+                    _replace_bytes(
+                        journal_capability, journal_name, _json_bytes(prior_journal)
+                    )
+                    restored_state = True
+                    if failpoint is not None:
+                        failpoint("after_unmanaged_restored_phase")
+            elif (
+                prior_journal["state"] == "exchange_attempt"
+                and successor_identity is not None
+                and stage_current_raw == successor_identity
+                and leaf_current is not None
+            ):
+                recovered_competitor = leaf_current != predecessor_tuple
+                prior_journal["state"] = (
+                    "restored_competitor"
+                    if recovered_competitor
+                    else "restored_predecessor"
+                )
+                prior_journal["restored_identity"] = {
+                    "device": leaf_current[0],
+                    "inode": leaf_current[1],
+                }
+                _replace_bytes(
+                    journal_capability, journal_name, _json_bytes(prior_journal)
+                )
+                restored_state = True
+                if failpoint is not None:
+                    failpoint("after_unmanaged_restored_phase")
+            if stage_current_raw is not None:
+                stage_current = OutputIdentity(*stage_current_raw)
+                if prior_stage is not None:
+                    allowed = {prior_stage}
+                    if prior_predecessor is not None:
+                        allowed.add(prior_predecessor)
+                    if stage_current not in allowed:
+                        raise PendingTransactionError(
+                            "unmanaged publication stage identity changed"
+                        )
+                else:
+                    expected_prefix = (
+                        b"GRAPHIFY-UNMANAGED-STAGE\0"
+                        + str(prior_journal["stage_nonce"]).encode()
+                        + b"\0"
+                    )
+                    if not _unmanaged_stage_matches(
+                        nested,
+                        staged,
+                        expected_prefix,
+                        str(prior_journal["payload_digest"]),
+                    ):
+                        raise PendingTransactionError(
+                            "unmanaged publication stage ownership is unproven"
+                        )
+                    os.unlink(staged, dir_fd=nested.fd)
+                    stage_current_raw = None
+            elif prior_stage is not None and not restored_state and leaf_current != (
+                prior_stage.device,
+                prior_stage.inode,
+            ):
+                raise PendingTransactionError(
+                    "unmanaged publication stage identity is unavailable"
+                )
+            if (
+                prior_stage is not None
+                and not restored_state
+                and leaf_current == successor_identity
+            ):
+                if predecessor_tuple is None:
+                    os.unlink(leaf, dir_fd=nested.fd)
+                elif stage_current_raw == predecessor_tuple:
+                    _atomic_exchange(nested, staged, leaf)
+                elif backup_current == predecessor_tuple:
+                    _atomic_exchange(nested, cast(str, backup), leaf)
+                else:
+                    raise PendingTransactionError(
+                        "unmanaged predecessor recovery identity is unavailable"
+                    )
+            for index, (name, allowed_identity) in enumerate(
+                ((staged, successor_identity), (backup, predecessor_tuple))
+            ):
+                if name is None:
+                    continue
+                current = _relative_identity(nested, name)
+                if current is None:
+                    continue
+                if current not in {allowed_identity, predecessor_tuple}:
+                    raise PendingTransactionError(
+                        "unmanaged auxiliary identity changed"
+                    )
+                os.unlink(name, dir_fd=nested.fd)
+                os.fsync(nested.fd)
+                if failpoint is not None:
+                    failpoint(
+                        "after_unmanaged_recovery_stage_retirement"
+                        if index == 0
+                        else "after_unmanaged_recovery_backup_retirement"
+                    )
+            _unlink(journal_capability, journal_name)
+            retain_journal = False
+            if recovered_competitor:
+                raise PendingTransactionError(
+                    "unmanaged exchange competitor was restored; retry publication"
+                )
+        backup = None
+        staged = None
+        prior = (
+            os.stat(leaf, dir_fd=nested.fd, follow_symlinks=False)
+            if _entry_stat(nested, leaf) is not None
+            else None
+        )
+        if prior is not None:
+            if not stat.S_ISREG(prior.st_mode):
+                raise PendingTransactionError("unmanaged destination leaf is unsafe")
+            predecessor_identity = (prior.st_dev, prior.st_ino)
+            backup = _unmanaged_aux_name(leaf, "backup")
+        staged = _unmanaged_aux_name(leaf, "stage")
+        journal = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "state": "planned",
+            "destination": canonical_destination,
+            "journal_output_identity": journal_capability.identity.json(),
+            "predecessor_identity": (
+                None
+                if predecessor_identity is None
+                else {
+                    "device": predecessor_identity[0],
+                    "inode": predecessor_identity[1],
+                }
+            ),
+            "backup_name": backup,
+            "stage_name": staged,
+            "stage_identity": None,
+            "restored_identity": None,
+            "stage_nonce": stage_nonce,
+            "payload_digest": hashlib.sha256(payload).hexdigest(),
+        }
+        _replace_bytes(journal_capability, journal_name, _json_bytes(journal))
+        if prior is not None:
+            os.link(
+                leaf,
+                cast(str, backup),
+                src_dir_fd=nested.fd,
+                dst_dir_fd=nested.fd,
+                follow_symlinks=False,
+            )
+            os.fsync(nested.fd)
+            journal["state"] = "backup"
+            _replace_bytes(journal_capability, journal_name, _json_bytes(journal))
+            if failpoint is not None:
+                failpoint("after_unmanaged_predecessor_backup")
+        new_identity = _create_bytes(nested, staged, stage_prefix + payload)
+        if failpoint is not None:
+            failpoint("after_unmanaged_stage_create")
+        journal["state"] = "staged"
+        journal["stage_identity"] = {
+            "device": new_identity[0],
+            "inode": new_identity[1],
+        }
+        _replace_bytes(journal_capability, journal_name, _json_bytes(journal))
+        stage_fd = os.open(
+            staged,
+            os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=nested.fd,
+        )
+        try:
+            stage_info = os.fstat(stage_fd)
+            if (stage_info.st_dev, stage_info.st_ino) != new_identity:
+                raise PendingTransactionError(
+                    "unmanaged publication stage identity changed"
+                )
+            os.ftruncate(stage_fd, 0)
+            view = memoryview(payload)
+            while view:
+                count = os.write(stage_fd, view)
+                if count <= 0:
+                    raise OSError("unmanaged stage write made no progress")
+                view = view[count:]
+            os.fsync(stage_fd)
+        finally:
+            os.close(stage_fd)
+        if failpoint is not None:
+            failpoint("after_unmanaged_successor_stage")
+        if predecessor_identity is not None:
+            journal["state"] = "exchange_attempt"
+            _replace_bytes(journal_capability, journal_name, _json_bytes(journal))
+            exchange_attempted = True
+            _atomic_exchange(nested, staged, leaf)
+            published = True
+            os.fsync(nested.fd)
+            if failpoint is not None:
+                failpoint("after_unmanaged_exchange")
+            displaced = _relative_identity(nested, staged)
+            if displaced != predecessor_identity:
+                _atomic_exchange(nested, staged, leaf)
+                published = False
+                os.fsync(nested.fd)
+                raise PendingTransactionError(
+                    "unmanaged destination changed before publication"
+                )
+        else:
+            try:
+                os.link(
+                    staged,
+                    leaf,
+                    src_dir_fd=nested.fd,
+                    dst_dir_fd=nested.fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise PendingTransactionError(
+                    "unmanaged destination changed before publication"
+                ) from exc
+            published = True
+            os.fsync(nested.fd)
+        published_info = os.stat(leaf, dir_fd=nested.fd, follow_symlinks=False)
+        if (published_info.st_dev, published_info.st_ino) != new_identity:
+            raise PendingTransactionError(
+                "unmanaged destination publication identity changed"
+            )
+        journal["state"] = "exchanged"
+        _replace_bytes(journal_capability, journal_name, _json_bytes(journal))
+        if failpoint is not None:
+            failpoint("after_unmanaged_leaf_publication")
+        capability.validate()
+        nested.validate()
+        if terminal_validate is not None:
+            terminal_validate()
+        for name, expected in ((staged, predecessor_identity), (backup, predecessor_identity)):
+            if name is None:
+                continue
+            current = _relative_identity(nested, name)
+            if current is None:
+                continue
+            if predecessor_identity is None:
+                expected = new_identity
+            if current != expected:
+                raise PendingTransactionError(
+                    "unmanaged destination auxiliary identity changed"
+                )
+            os.unlink(name, dir_fd=nested.fd)
+        os.fsync(nested.fd)
+        backup = None
+        staged = None
+        _unlink(journal_capability, journal_name)
+        published = False
+        created.clear()
+        if failpoint is not None:
+            failpoint("after_unmanaged_backup_retirement")
+    except Exception:
+        if nested is not None:
+            current_identity = _relative_identity(nested, leaf)
+            if published and current_identity == new_identity:
+                if predecessor_identity is not None and staged is not None:
+                    displaced = _relative_identity(nested, staged)
+                    if displaced is None:
+                        raise PendingTransactionError(
+                            "unmanaged exchange displacement is unavailable"
+                        )
+                    if exchange_attempted:
+                        _atomic_exchange(nested, staged, leaf)
+                elif predecessor_identity is None:
+                    os.unlink(leaf, dir_fd=nested.fd)
+            for name, allowed in (
+                (staged, {new_identity, predecessor_identity}),
+                (backup, {predecessor_identity}),
+            ):
+                if name is None:
+                    continue
+                with contextlib.suppress(FileNotFoundError):
+                    current = _relative_identity(nested, name)
+                    if current not in allowed:
+                        continue
+                    os.unlink(name, dir_fd=nested.fd)
+            os.fsync(nested.fd)
+        if not retain_journal:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(journal_name, dir_fd=journal_capability.fd)
+                os.fsync(journal_capability.fd)
+        for parts, expected in reversed(created):
+            cleanup_fd = os.dup(capability.fd)
+            try:
+                for component in parts[:-1]:
+                    next_fd = os.open(
+                        component,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=cleanup_fd,
+                    )
+                    os.close(cleanup_fd)
+                    cleanup_fd = next_fd
+                info = os.stat(parts[-1], dir_fd=cleanup_fd, follow_symlinks=False)
+                if (info.st_dev, info.st_ino) != expected:
+                    raise PendingTransactionError(
+                        "unmanaged destination directory identity changed"
+                    )
+                os.rmdir(parts[-1], dir_fd=cleanup_fd)
+                os.fsync(cleanup_fd)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(cleanup_fd)
+        raise
     finally:
         if nested is not None:
             nested.close()
@@ -2034,6 +2716,12 @@ def begin_transaction(
     capability = pin_output(output, create=True)
     try:
         with _locked(capability):
+            token_transition = _read_token_transition(capability)
+            if token_transition is not None:
+                _validate_token_transition_current(capability, token_transition)
+                raise PendingTransactionError(
+                    "token publication transition requires operational recovery"
+                )
             if _entry_stat(capability, TRANSACTION_FILE) is not None:
                 raise PendingTransactionError("graph state already has bootstrap or live ownership")
             prior_protocol = _read_protocol(capability)
@@ -2270,6 +2958,12 @@ def current_transaction() -> Transaction:
 def active_transaction_token_path(output: Path | str = "graphify-out") -> Path:
     """Return the exact live token object after capability-relative validation."""
     with pin_output(output) as capability, _locked(capability):
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            _validate_token_transition_current(capability, token_transition)
+            raise PendingTransactionError(
+                "token publication transition requires operational recovery"
+            )
         live = _read_transaction(capability)
         if live is None or live.token_identity is None:
             raise PendingTransactionError("live transaction token is unavailable")
@@ -2385,38 +3079,450 @@ def prepared_workspace_path() -> Path:
             prepared_capability.close()
 
 
-def stage_transaction_handoff(transaction: Transaction) -> TransactionToken:
-    with pin_output(transaction.output) as capability, _locked(capability):
-        live = _validate_authority(capability, transaction)
-        name = f".graphify_transaction_token.{live.id}"
-        secret = secrets.token_hex(32)
-        payload = _json_bytes(
-            {
-                "schema": 1,
-                "id": live.id,
-                "root": live.root,
-                "output": str(live.output),
-                "generation": live.generation,
-                "drainer": _drainer_json(live.drainer),
-                "secret": secret,
-            }
+def _read_token_transition(capability: OutputCapability) -> dict[str, Any] | None:
+    raw = _load_json(capability, TOKEN_TRANSITION_FILE)
+    if raw is None:
+        return None
+    fields = {
+        "schema",
+        "protocol_epoch",
+        "state",
+        "output_identity",
+        "predecessor_transaction",
+        "predecessor_protocol",
+        "target_transaction",
+        "target_protocol",
+        "token_name",
+        "token_payload",
+        "token_digest",
+        "token_identity",
+        "pending_predecessor_drainer",
+        "pending_predecessor_protocol",
+        "pending_predecessor_transaction",
+        "binding_order",
+    }
+    if (
+        set(raw) != fields
+        or raw.get("schema") != 1
+        or raw.get("protocol_epoch") != 1
+        or raw.get("state")
+        not in {"planned", "token-created", "live-bound", "protocol-bound"}
+        or raw.get("binding_order") not in {"live-protocol", "protocol-live"}
+        or _identity_from_json(raw.get("output_identity")) != capability.identity
+        or not isinstance(raw.get("token_payload"), dict)
+        or not _is_hex(raw.get("token_digest"))
+    ):
+        raise PendingTransactionError("token publication transition is malformed")
+    predecessor = _transaction_from_json(capability, raw["predecessor_transaction"])
+    predecessor_protocol = _protocol_from_json(capability, raw["predecessor_protocol"])
+    target = _transaction_from_json(capability, raw["target_transaction"])
+    target_protocol = _protocol_from_json(capability, raw["target_protocol"])
+    payload = _json_bytes(raw["token_payload"])
+    expected_name = f".graphify_transaction_token.{target.id}"
+    identity = _token_identity_from_json(raw.get("token_identity"))
+    if (
+        raw.get("token_name") != expected_name
+        or hashlib.sha256(payload).hexdigest() != raw.get("token_digest")
+        or target.token_digest != raw.get("token_digest")
+        or target.token_identity is not None
+        or target_protocol.get("transaction_id") != target.id
+        or target_protocol.get("owner_capability_digest") != target.token_digest
+        or target_protocol.get("token_identity") is not None
+        or predecessor.output_identity != target.output_identity
+        or predecessor.output != target.output
+        or predecessor_protocol.get("transaction_id") != predecessor.id
+        or (raw["state"] == "planned" and identity is not None)
+        or (raw["state"] != "planned" and identity is None)
+    ):
+        raise PendingTransactionError("token publication transition binding changed")
+    pending_drainer = raw.get("pending_predecessor_drainer")
+    pending_protocol = raw.get("pending_predecessor_protocol")
+    pending_transaction = raw.get("pending_predecessor_transaction")
+    pending_values = (pending_drainer, pending_protocol, pending_transaction)
+    if any(value is not None for value in pending_values):
+        if not all(value is not None for value in pending_values):
+            raise PendingTransactionError("token takeover transition is malformed")
+        if (
+            not isinstance(pending_drainer, dict)
+            or set(pending_drainer) != {"drainer", "state"}
+            or pending_drainer.get("state")
+            not in {"reserved", "launching", "claimed"}
+            or _drainer_from_json(pending_drainer.get("drainer"))
+            != predecessor.drainer
+            or _protocol_from_json(capability, pending_protocol).get("transaction_id")
+            != predecessor.id
+            or _transaction_from_json(capability, pending_transaction) != predecessor
+        ):
+            raise PendingTransactionError("token takeover transition binding changed")
+    return raw
+
+
+def _validate_token_transition_current(
+    capability: OutputCapability, record: Mapping[str, Any]
+) -> Transaction:
+    """Validate one replay point without changing any durable state."""
+    predecessor = _transaction_from_json(capability, record["predecessor_transaction"])
+    target_base = _transaction_from_json(capability, record["target_transaction"])
+    predecessor_protocol = _protocol_from_json(
+        capability, record["predecessor_protocol"]
+    )
+    target_protocol_base = _protocol_from_json(capability, record["target_protocol"])
+    token_payload = record["token_payload"]
+    takeover = record.get("pending_predecessor_drainer") is not None
+    expected_target = replace(
+        predecessor,
+        id=target_base.id if takeover else predecessor.id,
+        token_digest=target_base.token_digest,
+        token_identity=None,
+        drainer=target_base.drainer if takeover else predecessor.drainer,
+        phase="awaiting-drainer" if takeover else predecessor.phase,
+    )
+    if (
+        set(token_payload) != {
+            "schema",
+            "id",
+            "root",
+            "output",
+            "generation",
+            "drainer",
+            "secret",
+        }
+        or token_payload.get("schema") != 1
+        or token_payload.get("id") != target_base.id
+        or token_payload.get("root") != target_base.root
+        or token_payload.get("output") != str(target_base.output)
+        or token_payload.get("generation") != target_base.generation
+        or _drainer_from_json(token_payload.get("drainer")) != target_base.drainer
+        or not _is_hex(token_payload.get("secret"))
+        or target_base != expected_target
+        or predecessor.generation != target_base.generation
+        or predecessor.root != target_base.root
+        or predecessor.kind != target_base.kind
+        or predecessor.output != target_base.output
+        or predecessor.output_identity != target_base.output_identity
+        or predecessor.drainer.generation != target_base.drainer.generation
+        or (not takeover and predecessor.drainer != target_base.drainer)
+        or (not takeover and predecessor.id != target_base.id)
+        or (takeover and predecessor.id == target_base.id)
+        or (takeover and target_base.drainer.claim_epoch != predecessor.drainer.claim_epoch + 1)
+        or record["binding_order"] != ("protocol-live" if takeover else "live-protocol")
+    ):
+        raise PendingTransactionError("token publication transaction binding changed")
+    predecessor_identity = (
+        None
+        if predecessor.token_identity is None
+        else {"device": predecessor.token_identity[0], "inode": predecessor.token_identity[1]}
+    )
+    expected_target_protocol = dict(predecessor_protocol)
+    expected_target_protocol.update(
+        transaction_id=target_base.id,
+        owner_capability_digest=target_base.token_digest,
+        token_identity=None,
+    )
+    if takeover:
+        expected_target_protocol["lease_deadline"] = target_protocol_base.get(
+            "lease_deadline"
         )
+    if (
+        predecessor_protocol.get("state") != "INCOMPLETE"
+        or predecessor_protocol.get("generation") != predecessor.generation
+        or predecessor_protocol.get("transaction_id") != predecessor.id
+        or predecessor_protocol.get("root") != predecessor.root
+        or predecessor_protocol.get("kind") != predecessor.kind
+        or predecessor_protocol.get("owner_capability_digest") != predecessor.token_digest
+        or predecessor_protocol.get("token_identity") != predecessor_identity
+        or target_protocol_base.get("state") != "INCOMPLETE"
+        or target_protocol_base.get("generation") != target_base.generation
+        or target_protocol_base.get("transaction_id") != target_base.id
+        or target_protocol_base.get("root") != target_base.root
+        or target_protocol_base.get("kind") != target_base.kind
+        or target_protocol_base.get("owner_capability_digest") != target_base.token_digest
+        or target_protocol_base.get("token_identity") is not None
+        or target_protocol_base != expected_target_protocol
+    ):
+        raise PendingTransactionError("token publication protocol binding changed")
+
+    name = str(record["token_name"])
+    token_info = _entry_stat(capability, name)
+    token_identity = None if token_info is None else (token_info.st_dev, token_info.st_ino)
+    recorded_identity = _token_identity_from_json(record.get("token_identity"))
+    if token_info is not None and hashlib.sha256(
+        _read_bytes(capability, name, _TOKEN_MAX_BYTES)
+    ).hexdigest() != record["token_digest"]:
+        raise PendingTransactionError("published transaction token changed")
+    if record["state"] == "planned":
+        if recorded_identity is not None:
+            raise PendingTransactionError("planned token transition has an identity")
+    elif token_identity is None or token_identity != recorded_identity:
+        raise PendingTransactionError("published transaction token identity changed")
+
+    target = replace(target_base, token_identity=token_identity)
+    target_protocol = dict(target_protocol_base)
+    target_protocol["token_identity"] = (
+        None
+        if token_identity is None
+        else {"device": token_identity[0], "inode": token_identity[1]}
+    )
+    live = _read_transaction(capability)
+    protocol = _read_protocol(capability)
+    state = str(record["state"])
+    if not takeover:
+        state_matrix = {
+            "planned": ({predecessor}, [predecessor_protocol]),
+            "token-created": ({predecessor, target}, [predecessor_protocol]),
+            "live-bound": ({target}, [predecessor_protocol, target_protocol]),
+            "protocol-bound": ({target}, [target_protocol]),
+        }
+    else:
+        state_matrix = {
+            "planned": ({predecessor}, [predecessor_protocol]),
+            "token-created": ({predecessor}, [predecessor_protocol, target_protocol]),
+            "protocol-bound": ({predecessor, target}, [target_protocol]),
+            "live-bound": ({target}, [target_protocol]),
+        }
+    allowed_live, allowed_protocol = state_matrix[state]
+    if live not in allowed_live or protocol not in allowed_protocol:
+        raise PendingTransactionError("token publication filesystem binding changed")
+
+    pending = _read_pending_transition(capability)
+    if not takeover:
+        if pending is not None:
+            raise PendingTransactionError("ordinary token transition gained pending state")
+    elif pending is not None:
+        if state == "planned":
+            raise PendingTransactionError(
+                "planned token takeover gained pending state"
+            )
+        _validate_pending_transition_current(capability, pending)
+        expected_pending_drainer = record["pending_predecessor_drainer"]
+        if (
+            pending[0]
+            != (
+                _drainer_from_json(expected_pending_drainer["drainer"]),
+                expected_pending_drainer["state"],
+            )
+            or pending[1] != _protocol_from_json(
+                capability, record["pending_predecessor_protocol"]
+            )
+            or pending[2] != predecessor
+            or pending[3] != target
+            or pending[4] != target_protocol
+        ):
+            raise PendingTransactionError("token takeover pending binding changed")
+    elif state in {"live-bound", "protocol-bound"} or (
+        state == "token-created" and protocol == target_protocol
+    ):
+        raise PendingTransactionError("token takeover pending transition disappeared")
+    return target
+
+
+def _resume_token_transition_locked(
+    capability: OutputCapability,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> tuple[Transaction, dict[str, Any]]:
+    loaded_record = _read_token_transition(capability)
+    if loaded_record is None:
+        raise PendingTransactionError("token publication transition is missing")
+    record: dict[str, Any] = loaded_record
+    _validate_token_transition_current(capability, record)
+    predecessor = _transaction_from_json(capability, record["predecessor_transaction"])
+    target = _transaction_from_json(capability, record["target_transaction"])
+    payload = _json_bytes(record["token_payload"])
+    name = str(record["token_name"])
+    info = _entry_stat(capability, name)
+    if info is None:
+        if record["state"] != "planned":
+            raise PendingTransactionError("published transaction token disappeared")
         identity = _create_bytes(capability, name, payload)
-        digest = hashlib.sha256(payload).hexdigest()
-        live = replace(live, token_digest=digest, token_identity=identity)
-        _write_transaction(capability, live)
+    else:
+        if hashlib.sha256(_read_bytes(capability, name)).hexdigest() != record["token_digest"]:
+            raise PendingTransactionError("published transaction token changed")
+        identity = (info.st_dev, info.st_ino)
+        recorded_identity = _token_identity_from_json(record.get("token_identity"))
+        if recorded_identity is not None and recorded_identity != identity:
+            raise PendingTransactionError("published transaction token identity changed")
+    target = replace(target, token_identity=identity)
+    target_protocol = dict(record["target_protocol"])
+    target_protocol["token_identity"] = {"device": identity[0], "inode": identity[1]}
+    record = {
+        **record,
+        "state": "token-created",
+        "token_identity": {"device": identity[0], "inode": identity[1]},
+    }
+    _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+    pending_drainer = record.get("pending_predecessor_drainer")
+    predecessor_protocol = record["predecessor_protocol"]
+    if pending_drainer is not None:
+        _write_pending_transition(
+            capability,
+            predecessor_drainer=(
+                _drainer_from_json(pending_drainer["drainer"]),
+                str(pending_drainer["state"]),
+            ),
+            predecessor_protocol=cast(Mapping[str, object], predecessor_protocol),
+            predecessor_transaction=predecessor,
+            successor=target,
+            successor_protocol=target_protocol,
+        )
+    if failpoint is not None:
+        failpoint("after_token_created")
+    live = _read_transaction(capability)
+    protocol = _read_protocol(capability)
+    def bind_live() -> None:
+        nonlocal live, record
+        if live == predecessor:
+            _write_transaction(capability, target, phase=target.phase)
+        elif live != target:
+            raise PendingTransactionError("token publication live owner changed")
+        live = target
+        record["state"] = "live-bound"
+        _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+        if failpoint is not None:
+            failpoint("after_token_live")
+
+    def bind_protocol() -> None:
+        nonlocal protocol, record
+        if protocol == predecessor_protocol or (
+            predecessor_protocol is None
+            and protocol is not None
+            and protocol.get("transaction_id") == predecessor.id
+        ):
+            _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(target_protocol))
+        elif protocol != target_protocol:
+            raise PendingTransactionError("token publication protocol changed")
+        protocol = target_protocol
+        record["state"] = "protocol-bound"
+        _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+        if failpoint is not None:
+            failpoint("after_token_protocol")
+
+    if record["binding_order"] == "protocol-live":
+        bind_protocol()
+        bind_live()
+    else:
+        bind_live()
+        bind_protocol()
+    _unlink(capability, TOKEN_TRANSITION_FILE)
+    if failpoint is not None:
+        failpoint("after_token_transition")
+    _AUTHORITY.set(_authority_for(target))
+    return target, target_protocol
+
+
+def _start_token_transition_locked(
+    capability: OutputCapability,
+    *,
+    predecessor: Transaction,
+    target: Transaction,
+    target_protocol: Mapping[str, object],
+    token_payload: Mapping[str, object],
+    predecessor_protocol: Mapping[str, object],
+    pending_predecessor_drainer: tuple[DrainerTuple, str] | None = None,
+    pending_predecessor_protocol: Mapping[str, object] | None = None,
+    binding_order: str = "live-protocol",
+    failpoint: Callable[[str], None] | None = None,
+) -> tuple[Transaction, dict[str, Any]]:
+    payload = _json_bytes(token_payload)
+    record = {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "state": "planned",
+        "output_identity": capability.identity.json(),
+        "predecessor_transaction": _transaction_json(
+            predecessor, phase=predecessor.phase
+        ),
+        "predecessor_protocol": dict(predecessor_protocol),
+        "target_transaction": _transaction_json(target, phase=target.phase),
+        "target_protocol": dict(target_protocol),
+        "token_name": f".graphify_transaction_token.{target.id}",
+        "token_payload": dict(token_payload),
+        "token_digest": hashlib.sha256(payload).hexdigest(),
+        "token_identity": None,  # nosec B105 - absent inode binding, not a password
+        "pending_predecessor_drainer": (
+            None
+            if pending_predecessor_drainer is None
+            else {
+                "drainer": _drainer_json(pending_predecessor_drainer[0]),
+                "state": pending_predecessor_drainer[1],
+            }
+        ),
+        "pending_predecessor_protocol": (
+            None
+            if pending_predecessor_protocol is None
+            else dict(pending_predecessor_protocol)
+        ),
+        "pending_predecessor_transaction": (
+            None
+            if pending_predecessor_drainer is None
+            else _transaction_json(predecessor, phase=predecessor.phase)
+        ),
+        "binding_order": binding_order,
+    }
+    _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+    _read_token_transition(capability)
+    if failpoint is not None:
+        failpoint("after_token_journal")
+    return _resume_token_transition_locked(capability, failpoint=failpoint)
+
+
+def stage_transaction_handoff(
+    transaction: Transaction,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> TransactionToken:
+    with pin_output(transaction.output) as capability, _locked(capability):
+        existing = _read_token_transition(capability)
+        if existing is not None:
+            target = _validate_token_transition_current(capability, existing)
+            if target.id != transaction.id:
+                raise PendingTransactionError("token transition owner changed")
+            raise PendingTransactionError(
+                "token publication transition requires operational recovery"
+            )
+        live = _validate_authority(capability, transaction)
+        secret = secrets.token_hex(32)
+        token_payload = {
+            "schema": 1,
+            "id": live.id,
+            "root": live.root,
+            "output": str(live.output),
+            "generation": live.generation,
+            "drainer": _drainer_json(live.drainer),
+            "secret": secret,
+        }
+        digest = hashlib.sha256(_json_bytes(token_payload)).hexdigest()
+        target = replace(live, token_digest=digest, token_identity=None)
         protocol = _read_protocol(capability)
-        assert protocol is not None
+        if protocol is None:
+            raise PendingTransactionError("protocol state is missing")
         protocol["owner_capability_digest"] = digest
-        protocol["token_identity"] = {"device": identity[0], "inode": identity[1]}
-        _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(protocol))
-        _AUTHORITY.set(_authority_for(live))
-        return TransactionToken(live.id, capability.path / name, live.generation)
+        protocol["token_identity"] = None
+        live, _protocol = _start_token_transition_locked(
+            capability,
+            predecessor=live,
+            target=target,
+            target_protocol=protocol,
+            token_payload=token_payload,
+            predecessor_protocol=_read_protocol(capability) or {},
+            failpoint=failpoint,
+        )
+        return TransactionToken(
+            live.id,
+            capability.path / f".graphify_transaction_token.{live.id}",
+            live.generation,
+        )
 
 
 def _open_token(path: Path) -> tuple[dict[str, object], bytes, tuple[int, int]]:
     output = path.parent
     with pin_output(output) as capability, _locked(capability):
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            _validate_token_transition_current(capability, token_transition)
+            raise PendingTransactionError(
+                "token publication transition requires operational recovery"
+            )
         if path.name.startswith(".graphify_transaction_token.") is False:
             raise PendingTransactionError("transaction token has an invalid name")
         before = _entry_stat(capability, path.name)
@@ -2452,6 +3558,13 @@ def run_token(
     prepared: bool = False,
 ) -> None:
     path = Path(token_path).absolute()
+    with pin_output(path.parent) as capability, _locked(capability):
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            _validate_token_transition_current(capability, token_transition)
+            raise PendingTransactionError(
+                "token publication transition requires operational recovery"
+            )
     if len(python_args) < 2 or python_args[0] not in {"-c", "-m"}:
         _AUTHORITY.set(None)
         raise PendingTransactionError("runner accepts only exact -c or -m shapes")
@@ -2554,6 +3667,7 @@ def commit_prepared_bytes(
     """Publish one immutable artifact only into the pinned prepared output."""
     if not isinstance(payload, bytes):
         raise TypeError("prepared commit payload must be immutable bytes")
+    relative_name = _validated_relative_name(relative_name)
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         prepared = _pin_prepared_workspace(transaction, capability)
@@ -2565,6 +3679,7 @@ def commit_prepared_bytes(
 
 def unlink_prepared(transaction: Transaction, name: str) -> None:
     """Remove one validated relative prepared artifact under exact live authority."""
+    name = _validated_relative_name(name)
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         prepared = _pin_prepared_workspace(transaction, capability)
@@ -2580,6 +3695,12 @@ def _validate_authority(
     *,
     allow_complete: bool = False,
 ) -> Transaction:
+    token_transition = _read_token_transition(capability)
+    if token_transition is not None:
+        _validate_token_transition_current(capability, token_transition)
+        raise PendingTransactionError(
+            "token publication transition blocks owner publication"
+        )
     authority = _AUTHORITY.get()
     live = _read_transaction(capability)
     if authority is None or live is None:
@@ -2695,6 +3816,7 @@ def commit_bytes(
 ) -> None:
     if not isinstance(payload, bytes):
         raise TypeError("commit payload must be prepared immutable bytes")
+    name = _validated_shallow_name(name)
     owned = capability is None
     cap = pin_output(transaction.output) if owned else capability
     assert cap is not None
@@ -2721,11 +3843,14 @@ def commit_relative_bytes(
     """Commit one prepared file below the pinned output without path fallback."""
     if not isinstance(payload, bytes):
         raise TypeError("commit payload must be prepared immutable bytes")
+    relative_name = _validated_relative_name(relative_name)
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         if failpoint:
             failpoint("after_validate")
-        _replace_relative_bytes(capability, relative_name, payload)
+        _replace_relative_bytes(
+            capability, relative_name, payload, failpoint=failpoint
+        )
         if failpoint:
             failpoint("after_replace")
 
@@ -2737,6 +3862,7 @@ def commit_unlink(
     capability: OutputCapability | None = None,
 ) -> None:
     """Remove one prepared managed artifact under exact live authority."""
+    name = _validated_shallow_name(name)
     owned = capability is None
     cap = pin_output(transaction.output) if owned else capability
     assert cap is not None
@@ -2750,26 +3876,50 @@ def commit_unlink(
 
 
 def _validated_relative_name(value: str) -> str:
+    if type(value) is not str or not value or "\\" in value:
+        raise PendingTransactionError(f"unsafe managed relative path: {value}")
     relative = Path(value)
     if relative.is_absolute() or not relative.parts or any(
         part in {"", ".", ".."} for part in relative.parts
     ):
         raise PendingTransactionError(f"unsafe managed relative path: {value}")
     name = relative.as_posix()
-    if relative.parts[0].startswith(
-        (
-            ".graphify_transaction",
-            ".graphify_protocol",
-            ".graphify_generation",
-            ".graphify_drainer",
-            ".graphify_rebuild_",
-            ".graphify_prepared",
-            ".graphify_legacy_pending",
-            ".graphify_transition",
+    coordination_files = {item.casefold() for item in _COORDINATION_FILES}
+    coordination_prefixes = tuple(item.casefold() for item in _COORDINATION_PREFIXES)
+    if name != value or any(
+        part.casefold() in coordination_files
+        or part.casefold().startswith(coordination_prefixes)
+        or part.casefold().startswith(
+            (
+                ".graphify-prepare-",
+                ".graphify-retired-",
+                ".graphify-gc-root-",
+                ".graphify-gc-journal-",
+                ".graphify-gc-quarantine-",
+                ".graphify-unmanaged-",
+            )
         )
+        for part in relative.parts
     ):
         raise PendingTransactionError(f"publication plan contains coordination state: {name}")
     return name
+
+
+def _validated_shallow_name(value: str) -> str:
+    name = _validated_relative_name(value)
+    if "/" in name:
+        raise PendingTransactionError(f"unsafe managed shallow path: {value}")
+    return name
+
+
+def _reject_casefold_collisions(names: Sequence[str]) -> None:
+    folded: dict[str, str] = {}
+    for name in names:
+        previous = folded.setdefault(name.casefold(), name)
+        if previous != name:
+            raise PendingTransactionError(
+                "managed publication paths collide on a case-insensitive filesystem"
+            )
 
 
 def publication_plan_from_directory(
@@ -2846,16 +3996,31 @@ def commit_publication_plan(
 ) -> GenerationReceipt:
     """Publish one validated inventory, its explicit deletions, and receipt last."""
     graph_name = _validated_relative_name(graph_name)
-    graph_payload = plan.payloads.get(graph_name)
-    manifest_payload = plan.payloads.get("manifest.json")
+    payloads: dict[str, bytes] = {}
+    for raw_name, payload in plan.payloads.items():
+        name = _validated_relative_name(raw_name)
+        if name in payloads or type(payload) is not bytes:
+            raise PendingTransactionError("publication plan payloads are malformed")
+        payloads[name] = payload
+    deletions: list[str] = []
+    for raw_name in plan.deletions:
+        name = _validated_relative_name(raw_name)
+        if name in deletions:
+            raise PendingTransactionError("publication plan deletions are duplicated")
+        deletions.append(name)
+    _reject_casefold_collisions((*payloads, *deletions, graph_name))
+    if set(payloads).intersection(deletions):
+        raise PendingTransactionError("publication plan payload and deletion overlap")
+    graph_payload = payloads.get(graph_name)
+    manifest_payload = payloads.get("manifest.json")
     if graph_payload is None or manifest_payload is None:
         raise PendingTransactionError("publication plan requires graph and manifest")
     with owned_step(transaction):
-        for name in plan.deletions:
+        for name in deletions:
             with pin_output(transaction.output) as capability, _locked(capability):
                 _validate_authority(capability, transaction)
                 _unlink_relative(capability, name)
-        for name, payload in plan.payloads.items():
+        for name, payload in payloads.items():
             if "/" in name:
                 commit_relative_bytes(transaction, name, payload)
             else:
@@ -2864,7 +4029,7 @@ def commit_publication_plan(
             transaction,
             graph_payload=graph_payload,
             manifest_payload=manifest_payload,
-            required_artifacts=tuple(plan.payloads),
+            required_artifacts=tuple(payloads),
             graph_name=graph_name,
         )
 
@@ -2963,7 +4128,15 @@ def commit_generation(
     manifest_payload: bytes,
     required_artifacts: tuple[str, ...],
     graph_name: str = "graph.json",
+    failpoint: Callable[[str], None] | None = None,
 ) -> GenerationReceipt:
+    graph_name = _validated_relative_name(graph_name)
+    required_artifacts = tuple(
+        _validated_relative_name(name) for name in required_artifacts
+    )
+    if len(required_artifacts) != len(set(required_artifacts)):
+        raise PendingTransactionError("generation inventory contains duplicate artifacts")
+    _reject_casefold_collisions((*required_artifacts, graph_name))
     watermark = _watermark(graph_payload)
     if graph_name not in required_artifacts or "manifest.json" not in required_artifacts:
         raise PendingTransactionError(
@@ -2972,7 +4145,14 @@ def commit_generation(
     if watermark.get("generation") != transaction.generation or watermark.get("state") != "active":
         raise PendingTransactionError("graph watermark does not match transaction generation")
     with pin_output(transaction.output) as capability, _locked(capability):
-        live = _validate_authority(capability, transaction)
+        live = _validate_authority(capability, transaction, allow_complete=True)
+        existing_protocol = _read_protocol(capability)
+        if existing_protocol is not None and existing_protocol.get("state") == "COMPLETE":
+            _receipt, existing_digest, _inventory = _validate_receipt_locked(
+                capability, transaction=live
+            )
+            _unlink(capability, PREDECESSOR_FILE)
+            return GenerationReceipt(existing_digest, live.generation)
         if _read_bytes(capability, graph_name, max(len(graph_payload), 1)) != graph_payload:
             raise PendingTransactionError("published graph differs from prepared graph")
         if _read_bytes(capability, "manifest.json", max(len(manifest_payload), 1)) != manifest_payload:
@@ -2998,12 +4178,16 @@ def commit_generation(
         }
         receipt_payload = _json_bytes(receipt_body)
         digest = hashlib.sha256(receipt_payload).hexdigest()
-        protocol = _read_protocol(capability)
+        protocol = existing_protocol
         if protocol is None:
             raise PendingTransactionError("protocol state is missing")
+        _replace_bytes(capability, RECEIPT_FILE, receipt_payload)
+        if failpoint is not None:
+            failpoint("after_receipt")
         protocol.update(state="COMPLETE", generation=live.generation, receipt_digest=digest)
         _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(protocol))
-        _replace_bytes(capability, RECEIPT_FILE, receipt_payload)
+        if failpoint is not None:
+            failpoint("after_protocol")
         _unlink(capability, PREDECESSOR_FILE)
         return GenerationReceipt(digest, live.generation)
 
@@ -3062,6 +4246,18 @@ def _validate_receipt_locked(
         or set(artifact_digests) != set(required)
     ):
         raise PendingTransactionError("generation receipt does not match protocol")
+    try:
+        validated_required = [
+            _validated_relative_name(cast(str, name)) for name in required
+        ]
+        graph_name = _validated_relative_name(
+            cast(str, receipt.get("graph_name", "graph.json"))
+        )
+        _reject_casefold_collisions((*validated_required, graph_name))
+    except PendingTransactionError as exc:
+        raise PendingTransactionError(
+            "generation receipt inventory is unsafe"
+        ) from exc
     if transaction is not None and (
         receipt.get("transaction_id") != transaction.id
         or receipt.get("generation") != transaction.generation
@@ -3100,7 +4296,6 @@ def _validate_receipt_locked(
         raise PendingTransactionError("generation close is incomplete")
     inventory: dict[str, bytes] = {}
     retained = set(retain_artifacts)
-    graph_name = str(receipt.get("graph_name", "graph.json"))
     if allow_missing_completed_drainer:
         retained.add(graph_name)
     retain_all = "*" in retained
@@ -3155,11 +4350,171 @@ def _validate_receipt_locked(
     return receipt, digest, inventory
 
 
-def _coordination_present(capability: OutputCapability) -> bool:
+def _coordination_present(
+    capability: OutputCapability, *, ignored_names: frozenset[str] = frozenset()
+) -> bool:
+    files = {name.casefold() for name in _COORDINATION_FILES}
+    prefixes = tuple(name.casefold() for name in _COORDINATION_PREFIXES) + (
+        ".graphify-prepare-",
+        ".graphify-retired-",
+        ".graphify-gc-root-",
+        ".graphify-gc-journal-",
+        ".graphify-gc-quarantine-",
+    )
     for name in _list_entries(capability):
-        if name in _COORDINATION_FILES or name.startswith(_COORDINATION_PREFIXES):
+        if name in ignored_names:
+            continue
+        folded = name.casefold()
+        if folded in files or folded.startswith(prefixes):
             return True
     return False
+
+
+def _managed_authority_present(
+    capability: OutputCapability, *, ignored_names: frozenset[str] = frozenset()
+) -> bool:
+    if _coordination_present(capability, ignored_names=ignored_names):
+        return True
+    graph_entries = [
+        name for name in _list_entries(capability) if name.casefold() == "graph.json"
+    ]
+    if not graph_entries:
+        return False
+    if len(graph_entries) != 1:
+        raise PendingTransactionError("destination graph authority is ambiguous")
+    from graphify.security import _max_graph_file_bytes
+
+    try:
+        graph = json.loads(
+            _read_bytes(
+                capability, graph_entries[0], _max_graph_file_bytes()
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError("destination graph authority is malformed") from exc
+    if not isinstance(graph, dict) or not isinstance(graph.get("graph", {}), dict):
+        raise PendingTransactionError("destination graph authority is malformed")
+    return GRAPH_WATERMARK_KEY in graph.get("graph", {})
+
+
+def managed_output_containing(path: Path | str) -> Path | None:
+    """Return the nearest identity-pinned managed output containing a destination."""
+    requested = Path(path).expanduser().absolute()
+    candidate = requested if requested.is_dir() else requested.parent
+    while True:
+        if candidate.exists() and candidate.is_dir():
+            with pin_output(candidate, mutation=False) as capability:
+                if _managed_authority_present(capability):
+                    return capability.path
+        if candidate.parent == candidate:
+            return None
+        candidate = candidate.parent
+
+
+def commit_unmanaged_bytes(
+    path: Path | str,
+    payload: bytes,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> Path:
+    """Publish below one pinned destination only after proving it unmanaged."""
+    if type(payload) is not bytes:
+        raise TypeError("unmanaged commit payload must be immutable bytes")
+    if _PLATFORM == "windows":
+        raise PendingTransactionError(
+            "native Windows unmanaged final mutation is not proven"
+        )
+    destination = Path(path).expanduser().resolve(strict=False)
+    existing_parent = destination.parent
+    while not existing_parent.exists():
+        if existing_parent.parent == existing_parent:
+            raise PendingTransactionError("unmanaged destination has no existing parent")
+        existing_parent = existing_parent.parent
+    existing_parent = existing_parent.resolve(strict=True)
+    try:
+        relative = destination.relative_to(existing_parent).as_posix()
+    except ValueError as exc:
+        raise PendingTransactionError("unmanaged destination identity changed") from exc
+    relative = _validated_relative_name(relative)
+    canonical_destination = os.fspath(destination)
+    recovery_journal = (
+        _UNMANAGED_JOURNAL_PREFIX
+        + hashlib.sha256(canonical_destination.encode("utf-8")).hexdigest()[:32]
+        + ".json"
+    )
+
+    ancestor_paths = [existing_parent]
+    ancestor = existing_parent.parent
+    while True:
+        ancestor_paths.append(ancestor)
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
+
+    with contextlib.ExitStack() as stack:
+        capabilities = [
+            stack.enter_context(pin_output(path, mutation=True))
+            for path in ancestor_paths
+        ]
+        destination_capability = capabilities[0]
+        for pinned in reversed(capabilities):
+            stack.enter_context(_locked(pinned))
+
+        journal_matches: list[OutputCapability] = []
+        for pinned in capabilities:
+            for name in _list_entries(pinned):
+                if not name.casefold().startswith(
+                    _UNMANAGED_JOURNAL_PREFIX.casefold()
+                ):
+                    continue
+                if name == recovery_journal:
+                    journal_matches.append(pinned)
+                else:
+                    raise PendingTransactionError(
+                        "unrelated unmanaged publication journal is present"
+                    )
+        if len(journal_matches) > 1:
+            raise PendingTransactionError(
+                "unmanaged publication journal identity is ambiguous"
+            )
+        journal_capability = (
+            journal_matches[0] if journal_matches else destination_capability
+        )
+
+        def validate_chain() -> None:
+            for pinned in capabilities:
+                pinned.validate()
+                journals = [
+                    name
+                    for name in _list_entries(pinned)
+                    if name.casefold().startswith(
+                        _UNMANAGED_JOURNAL_PREFIX.casefold()
+                    )
+                ]
+                expected = (
+                    [recovery_journal] if pinned is journal_capability else []
+                )
+                if journals not in ([], expected):
+                    raise PendingTransactionError(
+                        "unmanaged publication journal identity changed"
+                    )
+                if _managed_authority_present(pinned):
+                    raise PendingTransactionError(
+                        "external destination is inside managed graph authority"
+                    )
+
+        validate_chain()
+        _replace_unmanaged_relative_bytes(
+            destination_capability,
+            relative,
+            payload,
+            journal_capability=journal_capability,
+            journal_name=recovery_journal,
+            canonical_destination=canonical_destination,
+            failpoint=failpoint,
+            terminal_validate=validate_chain,
+        )
+    return destination
 
 
 def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
@@ -3953,12 +5308,31 @@ def takeover_drainer(
     lease_seconds: float = 30.0,
     transition_failpoint: Callable[[str], None] | None = None,
 ) -> DrainerTuple:
+    def token_failpoint(name: str) -> None:
+        if transition_failpoint is None:
+            return
+        transition_failpoint(name)
+        alias = {
+            "after_token_created": "after_successor_token",  # nosec B105 - failpoint
+            "after_token_live": "after_transaction",  # nosec B105 - failpoint
+            "after_token_protocol": "after_owner_protocol",  # nosec B105 - failpoint
+        }.get(name)
+        if alias is not None:
+            transition_failpoint(alias)
+
     with pin_output(output) as capability, _locked(capability):
         pending = _read_pending_transition(capability)
         if pending is not None:
             _validate_pending_transition_current(capability, pending)
             raise PendingTransactionError(
                 "pending transition requires transaction recovery"
+            )
+        if _read_token_transition(capability) is not None:
+            token_transition = _read_token_transition(capability)
+            if token_transition is not None:
+                _validate_token_transition_current(capability, token_transition)
+            raise PendingTransactionError(
+                "token publication transition requires transaction recovery"
             )
         current = _read_drainer(capability)
         if current is None:
@@ -4045,40 +5419,35 @@ def takeover_drainer(
                     "secret": secrets.token_hex(32),
                 }
             )
-            token_identity = _create_bytes(capability, token_name, token_payload)
-            live = replace(
+            token_digest = hashlib.sha256(token_payload).hexdigest()
+            target = replace(
                 live,
                 id=successor_id,
-                token_digest=hashlib.sha256(token_payload).hexdigest(),
-                token_identity=token_identity,
+                token_digest=token_digest,
+                token_identity=None,
                 drainer=successor,
+                phase="awaiting-drainer",
             )
             successor_protocol = dict(protocol)
             successor_protocol.update(
-                transaction_id=live.id,
-                owner_capability_digest=live.token_digest,
-                token_identity={
-                    "device": token_identity[0],
-                    "inode": token_identity[1],
-                },
+                transaction_id=target.id,
+                owner_capability_digest=target.token_digest,
+                token_identity=None,
                 lease_deadline=current_time + lease_seconds,
             )
-            _write_pending_transition(
+            target, successor_protocol = _start_token_transition_locked(
                 capability,
-                predecessor_drainer=(drainer, state),
+                predecessor=predecessor_live,
+                target=target,
+                target_protocol=successor_protocol,
+                token_payload=cast(Mapping[str, object], json.loads(token_payload)),
                 predecessor_protocol=protocol,
-                predecessor_transaction=predecessor_live,
-                successor=live,
-                successor_protocol=successor_protocol,
+                pending_predecessor_drainer=(drainer, state),
+                pending_predecessor_protocol=protocol,
+                binding_order="protocol-live",
+                failpoint=token_failpoint,
             )
-            if transition_failpoint is not None:
-                transition_failpoint("after_successor_token")
-            _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(successor_protocol))
-            if transition_failpoint is not None:
-                transition_failpoint("after_owner_protocol")
-            _write_transaction(capability, live, phase="awaiting-drainer")
-            if transition_failpoint is not None:
-                transition_failpoint("after_transaction")
+            live = target
         _transition_drainer(
             capability,
             expected=(drainer, state),
@@ -4319,6 +5688,12 @@ def _finish_close_locked(
 
 def recover_close(output: Path | str) -> None:
     with pin_output(output) as capability, _locked(capability):
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            _validate_token_transition_current(capability, token_transition)
+            raise PendingTransactionError(
+                "token publication transition requires operational recovery"
+            )
         current = _read_drainer(capability)
         if current is not None and current[1] == "CLOSE_PENDING":
             _finish_close_locked(capability, current[2])
@@ -4371,6 +5746,25 @@ def recover_selected_transaction(
     with pin_output(output) as capability, _locked(capability):
         if capability.identity != expected_output_identity:
             raise PendingTransactionError("stale output identity selector")
+        pending_before_token = _read_pending_transition(capability)
+        if pending_before_token is not None:
+            _validate_pending_transition_current(capability, pending_before_token)
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            token_target = _transaction_from_json(
+                capability, token_transition["target_transaction"]
+            )
+            if (
+                token_target.generation != expected_generation
+                or token_target.root != str(root_path)
+                or (kind is not None and token_target.kind != kind)
+                or (
+                    expected_transaction_id is not None
+                    and token_target.id != expected_transaction_id
+                )
+            ):
+                raise PendingTransactionError("stale token recovery selector")
+            _resume_token_transition_locked(capability)
         cancellation = _read_predecessor_authority(capability)
         if cancellation is not None and cancellation[3]["state"] != "preserved-complete":
             successor = _validate_cancellation_state_locked(capability, cancellation)
@@ -4515,6 +5909,35 @@ def recover_transaction(
     root_path = _canonical_directory(Path(root))
     cancellation_successor: Transaction | None = None
     with pin_output(output) as capability, _locked(capability):
+        if (
+            expected_output_identity is not None
+            and capability.identity != expected_output_identity
+        ):
+            raise PendingTransactionError("stale output identity selector")
+        pending_before_token = _read_pending_transition(capability)
+        if pending_before_token is not None:
+            _validate_pending_transition_current(capability, pending_before_token)
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            token_target = _transaction_from_json(
+                capability, token_transition["target_transaction"]
+            )
+            if (
+                token_target.root != str(root_path)
+                or token_target.kind != kind
+                or (
+                    expected_generation is not None
+                    and token_target.generation != expected_generation
+                )
+                or (
+                    expected_transaction_id is not None
+                    and token_target.id != expected_transaction_id
+                )
+            ):
+                raise PendingTransactionError("stale token recovery selector")
+            _resume_token_transition_locked(
+                capability, failpoint=transition_failpoint
+            )
         if (
             expected_output_identity is not None
             and capability.identity != expected_output_identity
@@ -4886,6 +6309,12 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
     with pin_output(output, mutation=False) as capability, _locked(capability):
         protocol = _read_protocol(capability)
         live = _read_transaction(capability)
+        token_transition = _read_token_transition(capability)
+        token_target = (
+            None
+            if token_transition is None
+            else _validate_token_transition_current(capability, token_transition)
+        )
         pending = _read_pending_transition(capability)
         cancellation = _read_predecessor_authority(capability)
         cancellation_successor: Transaction | None = None
@@ -4998,6 +6427,18 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
                 None
                 if live is None
                 else {"id": live.id, "kind": live.kind, "root": live.root}
+            ),
+            "token_transition": (
+                None
+                if token_target is None or token_transition is None
+                else {
+                    "state": token_transition["state"],
+                    "transaction_id": token_target.id,
+                    "generation": token_target.generation,
+                    "kind": token_target.kind,
+                    "root": token_target.root,
+                    "output_identity": token_target.output_identity.json(),
+                }
             ),
             "pending_transition": (
                 None
@@ -5160,6 +6601,12 @@ def finish_transaction(transaction: Transaction) -> None:
     """Close a direct transaction after a committed receipt."""
     lease_deadline = time.time() + 30.0
     with pin_output(transaction.output) as capability, _locked(capability):
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            _validate_token_transition_current(capability, token_transition)
+            raise PendingTransactionError(
+                "token publication transition requires transaction recovery"
+            )
         _validate_authority(capability, transaction, allow_complete=True)
         _receipt, receipt_digest, _inventory = _validate_receipt_locked(
             capability, transaction=transaction
@@ -5535,6 +6982,12 @@ def cancel_unpublished_transaction(
     plus previous receipt prove the immediately preceding complete generation.
     """
     with pin_output(transaction.output) as capability, _locked(capability):
+        token_transition = _read_token_transition(capability)
+        if token_transition is not None:
+            _validate_token_transition_current(capability, token_transition)
+            raise PendingTransactionError(
+                "token publication transition requires transaction recovery"
+            )
         preserved = _read_predecessor_authority(capability)
         if preserved is None:
             protocol = _read_protocol(capability)

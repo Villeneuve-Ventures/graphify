@@ -28,6 +28,7 @@ from graphify.transaction import (
     close_if_queue_empty,
     commit_bytes,
     commit_generation,
+    commit_publication_plan,
     commit_prepared_bytes,
     commit_relative_bytes,
     commit_unlink,
@@ -39,6 +40,7 @@ from graphify.transaction import (
     open_graph_snapshot,
     owned_step,
     pin_output,
+    PublicationPlan,
     queue_rebuild,
     recover_close,
     recover_transaction,
@@ -49,6 +51,7 @@ from graphify.transaction import (
     stage_transaction_handoff,
     takeover_drainer,
     transaction_status,
+    unlink_prepared,
 )
 
 
@@ -257,6 +260,11 @@ def test_windows_read_adapter_admits_safe_legacy_snapshot_but_mutation_stays_blo
         "_open_windows_relative_fd",
         lambda capability, name, **_kwargs: os.open(capability.path / name, os.O_RDONLY),
     )
+    monkeypatch.setattr(
+        transaction_module,
+        "_list_windows_directory_entries",
+        lambda directory_fd: os.listdir(directory_fd),
+    )
     assert open_graph_snapshot(graph, purpose="windows-read").data["nodes"] == []
     with pytest.raises(PendingTransactionError, match="final mutation"):
         pin_output(output)
@@ -303,6 +311,47 @@ def test_windows_handle_relative_model_preserves_top_level_and_nested_identity(
     assert digest == hashlib.sha256(payload).hexdigest()
     assert top.read_bytes() == b"replacement"
     assert leaf.read_bytes() == b"replacement"
+
+
+def test_windows_coordination_enumeration_cannot_hide_incomplete_marker(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    begin_transaction("runtime", root, output=output)
+    graph = output / "graph.json"
+    graph.write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    real_listdir = os.listdir
+    monkeypatch.setattr(transaction_module, "_PLATFORM", "windows")
+    monkeypatch.setattr(
+        transaction_module,
+        "_open_windows_read_directory",
+        lambda path: os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)),
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_open_windows_relative_fd",
+        lambda capability, name, **_kwargs: os.open(capability.path / name, os.O_RDONLY),
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_list_windows_directory_entries",
+        lambda directory_fd: real_listdir(directory_fd),
+    )
+    monkeypatch.setattr(
+        os,
+        "listdir",
+        lambda target: ["graph.json"]
+        if isinstance(target, (str, Path))
+        else real_listdir(target),
+    )
+    with pytest.raises(PendingTransactionError):
+        open_graph_snapshot(graph, purpose="windows-enumeration-race")
 
 
 def test_queue_rejects_oversized_serialized_intent_before_sidecar_mutation(tmp_path):
@@ -489,6 +538,395 @@ def test_completed_generation_cannot_claim_queued_successor(tmp_path):
     assert _file_bytes(output) == before
     assert not list(output.glob(".graphify_rebuild_inflight.*.jsonl"))
     assert b"late.py" in (output / ".graphify_rebuild_queue.jsonl").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "unsafe_name",
+    [
+        ".graphify_predecessor.json",
+        ".GRAPHIFY_PREDECESSOR.JSON",
+        "nested/.graphify_transition.json",
+        "nested/.GRAPHIFY_TRANSACTION_TOKEN.deadbeef",
+        ".graphify_token_transition.json",
+        ".graphify_transaction_token.deadbeef",
+        ".graphify_rebuild_inflight.deadbeef.jsonl",
+        ".graphify-retired-deadbeef-deadbeef",
+        ".graphify-gc-journal-deadbeef.json",
+        "wiki//duplicate.md",
+        "wiki\\escape.md",
+    ],
+)
+def test_publication_plan_rejects_unsafe_names_before_mutation(
+    tmp_path, unsafe_name
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+    before = _file_bytes(output)
+    plan = PublicationPlan(
+        {
+            "graph.json": _graph(tx.generation),
+            "manifest.json": b"{}",
+            unsafe_name: b"unsafe",
+        }
+    )
+    with pytest.raises(PendingTransactionError):
+        commit_publication_plan(tx, plan)
+    assert _file_bytes(output) == before
+
+
+def test_publication_plan_rejects_payload_deletion_overlap_before_mutation(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+    before = _file_bytes(output)
+    plan = PublicationPlan(
+        {"graph.json": _graph(tx.generation), "manifest.json": b"{}"},
+        ("manifest.json",),
+    )
+    with pytest.raises(PendingTransactionError, match="overlap"):
+        commit_publication_plan(tx, plan)
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda tx: commit_bytes(tx, ".GRAPHIFY_PROTOCOL.JSON", b"unsafe"),
+        lambda tx: commit_unlink(tx, ".GRAPHIFY_PROTOCOL.JSON"),
+        lambda tx: commit_bytes(tx, "nested/report.html", b"unsafe"),
+        lambda tx: commit_relative_bytes(
+            tx, "nested/.GRAPHIFY_TOKEN_TRANSITION.JSON", b"unsafe"
+        ),
+        lambda tx: commit_prepared_bytes(
+            tx, "nested/.GRAPHIFY_PREPARED.JSON", b"unsafe"
+        ),
+        lambda tx: unlink_prepared(tx, "nested/.GRAPHIFY_PREPARED.JSON"),
+    ],
+)
+def test_public_commit_surfaces_fence_coordination_names_before_mutation(
+    tmp_path, operation
+):
+    _root, output, tx, _token = _owner(tmp_path)
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError):
+        operation(tx)
+    assert _file_bytes(output) == before
+
+
+def test_publication_inventory_rejects_casefold_collisions_before_mutation(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="case-insensitive"):
+        commit_publication_plan(
+            tx,
+            PublicationPlan(
+                {
+                    "graph.json": _graph(tx.generation),
+                    "manifest.json": b"{}",
+                    "Wiki/Index.md": b"one",
+                    "wiki/index.md": b"two",
+                }
+            ),
+        )
+    assert _file_bytes(output) == before
+
+
+def test_commit_generation_rejects_exact_duplicate_inventory_before_mutation(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="duplicate"):
+        commit_generation(
+            tx,
+            graph_payload=_graph(tx.generation),
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json", "graph.json"),
+        )
+    assert _file_bytes(output) == before
+
+    with pytest.raises(PendingTransactionError, match="case-insensitive"):
+        commit_generation(
+            tx,
+            graph_payload=_graph(tx.generation),
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json", "Manifest.JSON"),
+        )
+    assert _file_bytes(output) == before
+
+
+def test_nested_publication_fsyncs_each_parent_before_descending(
+    tmp_path, monkeypatch
+):
+    _root, output, tx, _token = _owner(tmp_path)
+    fsynced: list[int] = []
+    real_fsync = os.fsync
+
+    def record_fsync(fd: int) -> None:
+        fsynced.append(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+
+    def interrupt(name: str) -> None:
+        if name == "after_mkdir:b":
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="after_mkdir:b"):
+        commit_relative_bytes(
+            tx, "a/b/report.html", b"report", failpoint=interrupt
+        )
+    assert fsynced[-2:] == [output.stat().st_ino, (output / "a").stat().st_ino]
+    assert not (output / "a" / "b" / "report.html").exists()
+    commit_relative_bytes(tx, "a/b/report.html", b"report")
+    assert (output / "a" / "b" / "report.html").read_bytes() == b"report"
+
+
+@pytest.mark.parametrize("failpoint_name", ["after_receipt", "after_protocol"])
+def test_generation_commit_receipt_before_complete_is_recoverable(
+    tmp_path, failpoint_name
+):
+    root, output, tx, _token = _owner(tmp_path)
+    graph_payload = _graph(tx.generation)
+    with owned_step(tx):
+        commit_bytes(tx, "graph.json", graph_payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+
+        def interrupt(name: str) -> None:
+            if name == failpoint_name:
+                raise RuntimeError(name)
+
+        with pytest.raises(RuntimeError, match=failpoint_name):
+            commit_generation(
+                tx,
+                graph_payload=graph_payload,
+                manifest_payload=b"{}",
+                required_artifacts=("graph.json", "manifest.json"),
+                failpoint=interrupt,
+            )
+        protocol = json.loads((output / ".graphify_protocol.json").read_text())
+        if failpoint_name == "after_receipt":
+            assert protocol["state"] == "INCOMPLETE"
+            with pytest.raises(PendingTransactionError):
+                open_graph_snapshot(output / "graph.json", purpose="receipt-crash")
+        else:
+            assert protocol["state"] == "COMPLETE"
+        receipt = commit_generation(
+            tx,
+            graph_payload=graph_payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+    assert receipt.digest == transaction_status(output)["receipt_digest"]
+
+
+@pytest.mark.parametrize(
+    "failpoint_name",
+    [
+        "after_token_journal",
+        "after_token_created",
+        "after_token_live",
+        "after_token_protocol",
+    ],
+)
+def test_token_publication_journal_replays_every_durable_action(
+    tmp_path, failpoint_name
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+
+    def interrupt(name: str) -> None:
+        if name == failpoint_name:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint_name):
+        stage_transaction_handoff(tx, failpoint=interrupt)
+    with pytest.raises(PendingTransactionError, match="operational recovery"):
+        stage_transaction_handoff(resume_transaction(tx.id, root, output=output))
+    recovered = recover_transaction(
+        "runtime",
+        root,
+        output=output,
+        now=time.time() + 60.0,
+        expected_generation=tx.generation,
+        expected_transaction_id=tx.id,
+    )
+    assert recovered.output == output.resolve()
+    assert not (output / ".graphify_token_transition.json").exists()
+
+
+@pytest.mark.parametrize(
+    "failpoint_name",
+    [
+        "after_token_journal",
+        "after_token_created",
+        "after_token_live",
+        "after_token_protocol",
+    ],
+)
+def test_token_transition_state_preflight_rejects_changed_target_without_mutation(
+    tmp_path, failpoint_name
+):
+    root = tmp_path / "corpus"
+    other_root = tmp_path / "other"
+    root.mkdir()
+    other_root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+
+    def interrupt(name: str) -> None:
+        if name == failpoint_name:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint_name):
+        stage_transaction_handoff(tx, failpoint=interrupt)
+    status = transaction_status(output)
+    assert status["token_transition"]["transaction_id"] == tx.id
+    assert "token_digest" not in status["token_transition"]
+    journal_path = output / ".graphify_token_transition.json"
+    journal = json.loads(journal_path.read_text())
+    journal["target_transaction"]["root"] = str(other_root.resolve())
+    journal_path.write_text(json.dumps(journal, sort_keys=True, separators=(",", ":")))
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        transaction_status(output)
+    assert _file_bytes(output) == before
+    with pytest.raises(PendingTransactionError):
+        recover_transaction(
+            "runtime",
+            root,
+            output=output,
+            now=time.time() + 60.0,
+            expected_generation=tx.generation,
+            expected_transaction_id=tx.id,
+        )
+    assert _file_bytes(output) == before
+
+
+def test_active_token_transition_fences_publication_begin_and_takeover(tmp_path):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+
+    def interrupt(name: str) -> None:
+        if name == "after_token_journal":
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="after_token_journal"):
+        stage_transaction_handoff(tx, failpoint=interrupt)
+    before = _file_bytes(output)
+    resumed = resume_transaction(tx.id, root, output=output)
+    for operation in (
+        lambda: commit_bytes(resumed, "blocked.txt", b"blocked"),
+        lambda: begin_transaction("runtime", root, output=output),
+        lambda: takeover_drainer(output, now=time.time() + 60.0),
+        lambda: cancel_unpublished_transaction(resumed),
+    ):
+        with pytest.raises(PendingTransactionError):
+            operation()
+        assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "failpoint_name",
+    [
+        "after_token_journal",
+        "after_token_created",
+        "after_token_live",
+        "after_token_protocol",
+    ],
+)
+def test_ordinary_token_transition_fences_lookup_runner_and_close(
+    tmp_path, failpoint_name
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+
+    def interrupt(name: str) -> None:
+        if name == failpoint_name:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint_name):
+        stage_transaction_handoff(tx, failpoint=interrupt)
+    journal = json.loads((output / ".graphify_token_transition.json").read_text())
+    token_path = output / journal["token_name"]
+    before = _file_bytes(output)
+    for operation in (
+        lambda: active_transaction_token_path(output),
+        lambda: run_token(token_path, ["-c", "pass"]),
+        lambda: recover_close(output),
+    ):
+        with pytest.raises(PendingTransactionError, match="operational recovery"):
+            operation()
+        assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "failpoint_name",
+    [
+        "after_token_journal",
+        "after_token_created",
+        "after_token_protocol",
+        "after_token_live",
+    ],
+)
+def test_takeover_token_transition_fences_and_rejects_target_phase_drift(
+    tmp_path, failpoint_name
+):
+    root, output, _tx, _token = _owner(tmp_path)
+
+    def interrupt(name: str) -> None:
+        if name == failpoint_name:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint_name):
+        takeover_drainer(
+            output,
+            now=time.time() + 100.0,
+            transition_failpoint=interrupt,
+        )
+    journal_path = output / ".graphify_token_transition.json"
+    journal = json.loads(journal_path.read_text())
+    token_path = output / journal["token_name"]
+    before = _file_bytes(output)
+    for operation in (
+        lambda: active_transaction_token_path(output),
+        lambda: run_token(token_path, ["-c", "pass"]),
+        lambda: recover_close(output),
+    ):
+        with pytest.raises(PendingTransactionError, match="operational recovery"):
+            operation()
+        assert _file_bytes(output) == before
+
+    journal["target_transaction"]["phase"] = "building"
+    journal_path.write_text(json.dumps(journal, sort_keys=True, separators=(",", ":")))
+    corrupted = _file_bytes(output)
+    with pytest.raises(PendingTransactionError):
+        transaction_status(output)
+    assert _file_bytes(output) == corrupted
+    with pytest.raises(PendingTransactionError):
+        recover_transaction(
+            "runtime",
+            root,
+            output=output,
+            now=time.time() + 100.0,
+            expected_generation=int(journal["target_transaction"]["generation"]),
+            expected_transaction_id=str(journal["target_transaction"]["id"]),
+        )
+    assert _file_bytes(output) == corrupted
 
 
 def test_unpublished_cancellation_restores_exact_predecessor_protocol_and_close(
@@ -1896,6 +2334,880 @@ def test_managed_tree_html_publishes_as_a_new_receipt_bound_generation(tmp_path)
     receipt = json.loads((output / ".graphify_generation.json").read_text())
     assert receipt["generation"] == snapshot.generation == tx.generation + 1
     assert "GRAPH_TREE.html" in receipt["required_artifacts"]
+
+
+@pytest.mark.parametrize("destination_kind", ["sibling", "nested", "external"])
+def test_unmarked_external_tree_source_stays_byte_identical(
+    tmp_path, destination_kind
+):
+    from graphify.tree_html import write_tree_html
+
+    source_dir = tmp_path / "external-source"
+    source_dir.mkdir()
+    graph = source_dir / "graph.json"
+    graph_payload = b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    graph.write_bytes(graph_payload)
+    destination = {
+        "sibling": source_dir / "tree.html",
+        "nested": source_dir / "reports" / "tree.html",
+        "external": tmp_path / "exports" / "tree.html",
+    }[destination_kind]
+    write_tree_html(graph, destination)
+    assert graph.read_bytes() == graph_payload
+    assert destination.read_bytes().startswith(b"<!DOCTYPE html>")
+    assert not list(source_dir.glob(".graphify*"))
+
+
+def test_external_tree_source_rejects_foreign_managed_destination(tmp_path):
+    from graphify.tree_html import write_tree_html
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph_payload = b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    graph.write_bytes(graph_payload)
+    managed_root = tmp_path / "managed-root"
+    managed_root.mkdir()
+    managed_output = tmp_path / "managed-output"
+    begin_transaction("runtime", managed_root, output=managed_output)
+    destination = managed_output / "GRAPH_TREE.html"
+    before = _file_bytes(managed_output)
+
+    with pytest.raises(PendingTransactionError, match="foreign managed authority"):
+        write_tree_html(graph, destination)
+
+    assert graph.read_bytes() == graph_payload
+    assert not destination.exists()
+    assert _file_bytes(managed_output) == before
+
+
+def test_external_tree_destination_rejects_watermarked_partial_authority(tmp_path):
+    from graphify.tree_html import write_tree_html
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    destination_dir = tmp_path / "partial"
+    destination_dir.mkdir()
+    partial = json.loads(_graph(7))
+    (destination_dir / "graph.json").write_text(json.dumps(partial))
+    before = _file_bytes(destination_dir)
+
+    with pytest.raises(PendingTransactionError, match="foreign managed authority"):
+        write_tree_html(graph, destination_dir / "tree.html")
+
+    assert _file_bytes(destination_dir) == before
+
+
+def test_external_tree_destination_detects_parent_replacement(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    destination_dir = tmp_path / "destination"
+    destination_dir.mkdir()
+    destination = destination_dir / "tree.html"
+    destination.write_bytes(b"predecessor")
+    predecessor = destination.stat()
+    detached = tmp_path / "detached-destination"
+
+    def replace_parent(name: str) -> None:
+        if name != "after_unmanaged_leaf_publication":
+            return
+        destination_dir.rename(detached)
+        destination_dir.mkdir()
+        (destination_dir / "replacement.txt").write_bytes(b"replacement")
+
+    with pytest.raises(PendingTransactionError, match="identity changed"):
+        transaction_module.commit_unmanaged_bytes(
+            destination, b"replacement-payload", failpoint=replace_parent
+        )
+    assert (destination_dir / "replacement.txt").read_bytes() == b"replacement"
+    assert not (destination_dir / "tree.html").exists()
+    assert (detached / "tree.html").read_bytes() == b"predecessor"
+    restored = (detached / "tree.html").stat()
+    assert (restored.st_dev, restored.st_ino) == (
+        predecessor.st_dev,
+        predecessor.st_ino,
+    )
+
+
+def test_managed_tree_source_can_publish_to_proven_unmanaged_destination(tmp_path):
+    from graphify.tree_html import write_tree_html
+
+    root, output, tx, _token = _owner(tmp_path)
+    tx = resume_transaction(tx.id, root, output=output)
+    _commit_owner_generation(output, tx)
+    finish_transaction(tx)
+    destination = tmp_path / "external-tree.html"
+    result = write_tree_html(output / "graph.json", destination)
+    assert result == destination
+    assert destination.read_bytes().startswith(b"<!DOCTYPE html>")
+    assert json.loads((output / ".graphify_generation.json").read_text())[
+        "generation"
+    ] == tx.generation
+
+
+def test_legacy_default_managed_tree_creates_receipt_bound_generation(tmp_path):
+    from graphify.tree_html import write_tree_html
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    graph = output / "graph.json"
+    graph.write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    destination = output / "GRAPH_TREE.html"
+    write_tree_html(graph, destination, source_managed=True)
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert destination.read_bytes().startswith(b"<!DOCTYPE html>")
+    assert receipt["generation"] == 1
+    assert "GRAPH_TREE.html" in receipt["required_artifacts"]
+
+
+def test_unmanaged_lost_stage_preserves_exact_predecessor(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    predecessor = destination.stat()
+    real_create = transaction_module._create_bytes
+
+    def lose_stage(capability, name, payload, mode=0o600):
+        if ".graphify-unmanaged-" in name and name.endswith(".stage"):
+            raise OSError("lost stage")
+        return real_create(capability, name, payload, mode)
+
+    monkeypatch.setattr(transaction_module, "_create_bytes", lose_stage)
+    with pytest.raises(OSError, match="lost stage"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    restored = destination.stat()
+    assert destination.read_bytes() == b"predecessor"
+    assert (restored.st_dev, restored.st_ino) == (
+        predecessor.st_dev,
+        predecessor.st_ino,
+    )
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_rollback_preserves_post_publication_competitor(tmp_path):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+
+    def install_winner(name: str) -> None:
+        if name != "after_unmanaged_leaf_publication":
+            return
+        winner = output / "winner.tmp"
+        winner.write_bytes(b"winner")
+        os.replace(winner, destination)
+        raise RuntimeError("competitor won")
+
+    with pytest.raises(RuntimeError, match="competitor won"):
+        transaction_module.commit_unmanaged_bytes(
+            destination, b"successor", failpoint=install_winner
+        )
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_absent_predecessor_cas_preserves_competitor(tmp_path):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+
+    def install_winner(name: str) -> None:
+        if name == "after_unmanaged_successor_stage":
+            destination.write_bytes(b"winner")
+
+    with pytest.raises(PendingTransactionError, match="changed before publication"):
+        transaction_module.commit_unmanaged_bytes(
+            destination, b"successor", failpoint=install_winner
+        )
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".graphify-unmanaged-journal-*.json"))
+
+
+def test_unmanaged_exchange_cas_preserves_late_winner(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    real_exchange = transaction_module._atomic_exchange
+    injected = False
+
+    def install_winner(capability, source, target):
+        nonlocal injected
+        if not injected and source.endswith(".stage") and target == destination.name:
+            injected = True
+            winner = output / "winner.tmp"
+            winner.write_bytes(b"winner")
+            os.replace(winner, destination)
+        return real_exchange(capability, source, target)
+
+    monkeypatch.setattr(transaction_module, "_atomic_exchange", install_winner)
+    with pytest.raises(PendingTransactionError, match="changed before publication"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_exchange_exception_restores_displaced_competitor(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    real_exchange = transaction_module._atomic_exchange
+    injected = False
+
+    def install_winner(capability, source, target):
+        nonlocal injected
+        if not injected:
+            injected = True
+            winner = output / "winner.tmp"
+            winner.write_bytes(b"winner")
+            os.replace(winner, destination)
+        return real_exchange(capability, source, target)
+
+    def interrupt(name: str) -> None:
+        if name == "after_unmanaged_exchange":
+            raise RuntimeError(name)
+
+    monkeypatch.setattr(transaction_module, "_atomic_exchange", install_winner)
+    with pytest.raises(RuntimeError, match="after_unmanaged_exchange"):
+        transaction_module.commit_unmanaged_bytes(
+            destination, b"successor", failpoint=interrupt
+        )
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_lost_stage_never_unlinks_unowned_competitor(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    real_create = transaction_module._create_bytes
+
+    def competitor_stage(capability, name, payload, mode=0o600):
+        if ".graphify-unmanaged-" in name and name.endswith(".stage"):
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=capability.fd,
+            )
+            try:
+                os.write(fd, b"competitor")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            raise OSError("lost owned stage")
+        return real_create(capability, name, payload, mode)
+
+    monkeypatch.setattr(transaction_module, "_create_bytes", competitor_stage)
+    with pytest.raises(OSError, match="lost owned stage"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    stages = list(output.glob(".*graphify-unmanaged-*.stage"))
+    assert len(stages) == 1
+    assert stages[0].read_bytes() == b"competitor"
+    assert not destination.exists()
+    monkeypatch.setattr(transaction_module, "_create_bytes", real_create)
+    transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert stages[0].read_bytes() == b"competitor"
+
+
+@pytest.mark.parametrize(
+    ("boundary", "expected"),
+    [
+        ("after_unmanaged_predecessor_backup", b"predecessor"),
+        ("after_unmanaged_successor_stage", b"predecessor"),
+        ("after_unmanaged_exchange", b"predecessor"),
+        ("after_unmanaged_leaf_publication", b"predecessor"),
+        ("after_unmanaged_backup_retirement", b"successor"),
+    ],
+)
+def test_unmanaged_replacement_failpoints_leave_exact_terminal_target(
+    tmp_path, boundary, expected
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    predecessor = destination.stat()
+
+    def interrupt(name: str) -> None:
+        if name == boundary:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=boundary):
+        transaction_module.commit_unmanaged_bytes(
+            destination, b"successor", failpoint=interrupt
+        )
+    assert destination.read_bytes() == expected
+    if expected == b"predecessor":
+        restored = destination.stat()
+        assert (restored.st_dev, restored.st_ino) == (
+            predecessor.st_dev,
+            predecessor.st_ino,
+        )
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_unmanaged_predecessor_backup",
+        "after_unmanaged_successor_stage",
+    ],
+)
+def test_unmanaged_abrupt_death_retry_reconciles_deterministic_journal(
+    tmp_path, boundary
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    code = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "boundary=sys.argv[2]; "
+        "commit_unmanaged_bytes(sys.argv[1],b'successor',"
+        "failpoint=lambda name: os._exit(91) if name==boundary else None)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", code, str(destination), boundary],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert result.returncode == 91
+    assert destination.read_bytes() == b"predecessor"
+    assert list(output.glob(".*graphify-unmanaged-*"))
+    assert list(output.glob(".graphify-unmanaged-journal-*.json"))
+
+    transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+    assert not list(output.glob(".graphify-unmanaged-journal-*.json"))
+
+
+def test_unmanaged_nested_missing_parent_retry_finds_stable_journal(tmp_path):
+    import graphify.transaction as transaction_module
+
+    anchor = tmp_path / "external"
+    anchor.mkdir()
+    destination = anchor / "nested" / "reports" / "report.html"
+    code = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "commit_unmanaged_bytes(sys.argv[1],b'first',"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_unmanaged_successor_stage' else None)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert result.returncode == 91
+    assert list(anchor.glob(".graphify-unmanaged-journal-*.json"))
+    assert destination.parent.is_dir()
+
+    transaction_module.commit_unmanaged_bytes(destination, b"second")
+    assert destination.read_bytes() == b"second"
+    assert not list(anchor.rglob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_death_after_atomic_exchange_never_removes_public_name(tmp_path):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    code = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "commit_unmanaged_bytes(sys.argv[1],b'successor',"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_unmanaged_exchange' else None)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert result.returncode == 91
+    assert destination.read_bytes() == b"successor"
+    assert list(output.glob(".graphify-unmanaged-journal-*.json"))
+
+    transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_death_after_competitor_exchange_restores_on_retry(tmp_path):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    code = "\n".join(
+        [
+            "import os,sys",
+            "from pathlib import Path",
+            "import graphify.transaction as transaction",
+            "real_exchange = transaction._atomic_exchange",
+            "injected = False",
+            "def exchange(capability, source, target):",
+            "    global injected",
+            "    if not injected:",
+            "        injected = True",
+            "        winner = Path(sys.argv[1]).with_name('winner.tmp')",
+            "        winner.write_bytes(b'winner')",
+            "        os.replace(winner, sys.argv[1])",
+            "    return real_exchange(capability, source, target)",
+            "transaction._atomic_exchange = exchange",
+            "transaction.commit_unmanaged_bytes(",
+            "    sys.argv[1], b'successor',",
+            "    failpoint=lambda name: os._exit(91)",
+            "    if name == 'after_unmanaged_exchange' else None,",
+            ")",
+        ]
+    )
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert result.returncode == 91
+    assert destination.read_bytes() == b"successor"
+
+    with pytest.raises(PendingTransactionError, match="competitor was restored"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+    transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+@pytest.mark.parametrize(
+    "recovery_boundary",
+    [
+        "after_unmanaged_recovery_exchange",
+        "after_unmanaged_restored_phase",
+        "after_unmanaged_recovery_stage_retirement",
+    ],
+)
+def test_unmanaged_competitor_recovery_phases_resume_idempotently(
+    tmp_path, recovery_boundary
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    seed_code = "\n".join(
+        [
+            "import os,sys",
+            "from pathlib import Path",
+            "import graphify.transaction as transaction",
+            "real_exchange = transaction._atomic_exchange",
+            "injected = False",
+            "def exchange(capability, source, target):",
+            "    global injected",
+            "    if not injected:",
+            "        injected = True",
+            "        winner = Path(sys.argv[1]).with_name('winner.tmp')",
+            "        winner.write_bytes(b'winner')",
+            "        os.replace(winner, sys.argv[1])",
+            "    return real_exchange(capability, source, target)",
+            "transaction._atomic_exchange = exchange",
+            "transaction.commit_unmanaged_bytes(",
+            "    sys.argv[1], b'successor',",
+            "    failpoint=lambda name: os._exit(91)",
+            "    if name == 'after_unmanaged_exchange' else None,",
+            ")",
+        ]
+    )
+    seeded = subprocess.run(
+        [sys.executable, "-P", "-c", seed_code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert seeded.returncode == 91
+    recovery_code = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "boundary=sys.argv[2]; commit_unmanaged_bytes(sys.argv[1],b'successor',"
+        "failpoint=lambda name: os._exit(92) if name==boundary else None)"
+    )
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            recovery_code,
+            str(destination),
+            recovery_boundary,
+        ],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 92
+    assert destination.read_bytes() == b"winner"
+    assert list(output.glob(".graphify-unmanaged-journal-*.json"))
+
+    with pytest.raises(PendingTransactionError, match="competitor was restored"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+    transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+
+
+def test_unmanaged_recovery_cleanup_failure_retains_journal(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    seed_code = "\n".join(
+        [
+            "import os,sys",
+            "from pathlib import Path",
+            "import graphify.transaction as transaction",
+            "real_exchange = transaction._atomic_exchange",
+            "def exchange(capability, source, target):",
+            "    winner = Path(sys.argv[1]).with_name('winner.tmp')",
+            "    winner.write_bytes(b'winner')",
+            "    os.replace(winner, sys.argv[1])",
+            "    transaction._atomic_exchange = real_exchange",
+            "    return real_exchange(capability, source, target)",
+            "transaction._atomic_exchange = exchange",
+            "transaction.commit_unmanaged_bytes(",
+            "    sys.argv[1], b'successor',",
+            "    failpoint=lambda name: os._exit(91)",
+            "    if name == 'after_unmanaged_exchange' else None,",
+            ")",
+        ]
+    )
+    seeded = subprocess.run(
+        [sys.executable, "-P", "-c", seed_code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert seeded.returncode == 91
+    journal_path = next(output.glob(".graphify-unmanaged-journal-*.json"))
+    stage_name = json.loads(journal_path.read_text())["stage_name"]
+    real_unlink = transaction_module.os.unlink
+
+    def fail_stage_cleanup(path, *args, **kwargs):
+        if path == stage_name:
+            raise OSError("stage cleanup failed")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_module.os, "unlink", fail_stage_cleanup)
+    with pytest.raises(OSError, match="stage cleanup failed"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"winner"
+    assert journal_path.exists()
+
+    monkeypatch.setattr(transaction_module.os, "unlink", real_unlink)
+    with pytest.raises(PendingTransactionError, match="competitor was restored"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_recovery_fsync_failure_retains_journal(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    seed_code = "\n".join(
+        [
+            "import os,sys",
+            "from pathlib import Path",
+            "import graphify.transaction as transaction",
+            "real_exchange = transaction._atomic_exchange",
+            "def exchange(capability, source, target):",
+            "    winner = Path(sys.argv[1]).with_name('winner.tmp')",
+            "    winner.write_bytes(b'winner')",
+            "    os.replace(winner, sys.argv[1])",
+            "    transaction._atomic_exchange = real_exchange",
+            "    return real_exchange(capability, source, target)",
+            "transaction._atomic_exchange = exchange",
+            "transaction.commit_unmanaged_bytes(",
+            "    sys.argv[1], b'successor',",
+            "    failpoint=lambda name: os._exit(91)",
+            "    if name == 'after_unmanaged_exchange' else None,",
+            ")",
+        ]
+    )
+    seeded = subprocess.run(
+        [sys.executable, "-P", "-c", seed_code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert seeded.returncode == 91
+    journal_path = next(output.glob(".graphify-unmanaged-journal-*.json"))
+    real_fsync = transaction_module.os.fsync
+    failed = False
+
+    def fail_once(fd):
+        nonlocal failed
+        if not failed and os.fstat(fd).st_ino == output.stat().st_ino:
+            failed = True
+            raise OSError("directory fsync failed")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(transaction_module.os, "fsync", fail_once)
+    with pytest.raises(OSError, match="directory fsync failed"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"winner"
+    assert journal_path.exists()
+
+    monkeypatch.setattr(transaction_module.os, "fsync", real_fsync)
+    with pytest.raises(PendingTransactionError, match="competitor was restored"):
+        transaction_module.commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"winner"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_tree_html_public_retry_recovers_its_exact_unmanaged_journal(tmp_path):
+    from graphify.tree_html import write_tree_html
+
+    source = tmp_path / "source"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    destination = tmp_path / "external" / "report.html"
+    destination.parent.mkdir()
+    code = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "commit_unmanaged_bytes(sys.argv[1],b'interrupted',"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_unmanaged_successor_stage' else None)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert result.returncode == 91
+
+    assert write_tree_html(graph, destination) == destination
+    assert destination.read_bytes().startswith(b"<!DOCTYPE html>")
+    assert not list(destination.parent.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_journal_is_not_graph_authority_but_unrelated_one_rejects(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    journal = output / (
+        transaction_module._UNMANAGED_JOURNAL_PREFIX + "f" * 32 + ".json"
+    )
+    journal.write_text("{}")
+    assert transaction_module.managed_output_containing(destination) is None
+    before = journal.read_bytes()
+
+    with pytest.raises(
+        PendingTransactionError, match="unrelated unmanaged publication journal"
+    ):
+        transaction_module.commit_unmanaged_bytes(destination, b"payload")
+    assert journal.read_bytes() == before
+    assert not destination.exists()
+
+
+def test_unmanaged_large_stage_recovery_streams_within_aggregate_budget(tmp_path):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.bin"
+    payload = b"x" * (2 * 1024 * 1024)
+    code = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "payload=b'x'*(2*1024*1024); "
+        "commit_unmanaged_bytes(sys.argv[1],payload,"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_unmanaged_stage_create' else None)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", code, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert result.returncode == 91
+
+    transaction_module.commit_unmanaged_bytes(destination, payload)
+    assert destination.read_bytes() == payload
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_oversized_unowned_stage_is_not_read_or_removed(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.bin"
+    real_create = transaction_module._create_bytes
+
+    def install_oversized_stage(capability, name, payload, mode=0o600):
+        if name.endswith(".stage"):
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                mode,
+                dir_fd=capability.fd,
+            )
+            try:
+                os.ftruncate(
+                    fd, transaction_module._MAX_RECEIPT_AGGREGATE_BYTES + 1024
+                )
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            raise OSError("competitor stage")
+        return real_create(capability, name, payload, mode)
+
+    monkeypatch.setattr(transaction_module, "_create_bytes", install_oversized_stage)
+    with pytest.raises(OSError, match="competitor stage"):
+        transaction_module.commit_unmanaged_bytes(destination, b"payload")
+    stages = list(output.glob(".*graphify-unmanaged-*.stage"))
+    assert len(stages) == 1
+    assert stages[0].stat().st_size > transaction_module._MAX_RECEIPT_AGGREGATE_BYTES
+
+
+def test_unmanaged_ancestor_lock_blocks_concurrent_transaction_until_commit(tmp_path):
+    import graphify.transaction as transaction_module
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (tmp_path / "graph.json").write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    started = threading.Event()
+    completed = threading.Event()
+    errors: list[BaseException] = []
+    thread: threading.Thread | None = None
+
+    def begin_ancestor(name: str) -> None:
+        nonlocal thread
+        if name != "after_unmanaged_leaf_publication":
+            return
+        def concurrent_begin() -> None:
+            started.set()
+            try:
+                begin_transaction("runtime", root, output=tmp_path)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        thread = threading.Thread(target=concurrent_begin, daemon=True)
+        thread.start()
+        assert started.wait(1.0)
+        assert not completed.wait(0.05)
+
+    transaction_module.commit_unmanaged_bytes(
+        destination, b"successor", failpoint=begin_ancestor
+    )
+    assert thread is not None
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert not errors
+    assert destination.read_bytes() == b"successor"
+
+
+def test_tree_html_preserves_requested_relative_output_path(
+    tmp_path, monkeypatch
+):
+    from graphify.tree_html import write_tree_html
+
+    monkeypatch.chdir(tmp_path)
+    source = Path("external")
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    requested = Path("reports/tree.html")
+    assert write_tree_html(graph, requested) == requested
+    assert requested.read_bytes().startswith(b"<!DOCTYPE html>")
+
+
+def test_tree_cli_prints_requested_relative_output_path(
+    tmp_path, monkeypatch, capsys
+):
+    from graphify.cli import dispatch_command
+
+    monkeypatch.chdir(tmp_path)
+    source = Path("external")
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "graphify",
+            "tree",
+            "--graph",
+            str(graph),
+            "--output",
+            "reports/tree.html",
+        ],
+    )
+    with pytest.raises(SystemExit) as exited:
+        dispatch_command("tree")
+    assert exited.value.code == 0
+    assert "wrote reports/tree.html" in capsys.readouterr().out
 
 
 def test_transaction_cli_status_uses_validated_read_only_surface(tmp_path, monkeypatch, capsys):

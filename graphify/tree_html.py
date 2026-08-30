@@ -568,6 +568,7 @@ def write_tree_html(
     project_label: Optional[str] = None,
     # kept for CLI compatibility with the older signature; ignored now
     top_k_edges: int = 0,
+    source_managed: Optional[bool] = None,
 ) -> Path:
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(graph_path)
@@ -578,11 +579,15 @@ def write_tree_html(
         begin_transaction,
         commit_publication_plan,
         commit_relative_bytes,
+        commit_unmanaged_bytes,
         current_transaction,
         finish_transaction,
+        managed_output_containing,
         open_graph_snapshot,
     )
     snapshot = open_graph_snapshot(graph_path, purpose="tree-prepare")
+    if source_managed is None:
+        source_managed = snapshot.generation is not None
     graph = snapshot.data
     tree = build_tree(graph, root=root, max_children=max_children,
                       project_label=project_label)
@@ -592,9 +597,19 @@ def write_tree_html(
     payload = html.encode("utf-8")
     graph_parent = graph_path.expanduser().resolve().parent
     resolved_output = output_path.expanduser().resolve()
-    managed_destination = (
+    destination_output = managed_output_containing(resolved_output)
+    contained_by_source_output = (
         resolved_output.parent == graph_parent or graph_parent in resolved_output.parents
     )
+    managed_destination = destination_output == graph_parent or (
+        source_managed
+        and destination_output is None
+        and contained_by_source_output
+    )
+    if destination_output is not None and not managed_destination:
+        raise PendingTransactionError(
+            "tree destination is controlled by foreign managed authority"
+        )
     if managed_destination:
         relative = resolved_output.relative_to(graph_parent).as_posix()
         try:
@@ -637,6 +652,5 @@ def write_tree_html(
             )
             finish_transaction(transaction)
     else:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(payload)
+        commit_unmanaged_bytes(resolved_output, payload)
     return output_path

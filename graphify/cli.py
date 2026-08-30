@@ -2308,6 +2308,7 @@ def _dispatch_command(cmd: str) -> None:
         from typing import Optional as _Opt
         from graphify.tree_html import write_tree_html, DEFAULT_MAX_CHILDREN
         graph_path = Path(_GRAPHIFY_OUT) / "graph.json"
+        graph_was_explicit = False
         output_path: "_Opt[Path]" = None
         root: "_Opt[str]" = None
         max_children = DEFAULT_MAX_CHILDREN
@@ -2318,7 +2319,7 @@ def _dispatch_command(cmd: str) -> None:
         while i_arg < len(args):
             a = args[i_arg]
             if a == "--graph" and i_arg + 1 < len(args):
-                graph_path = Path(args[i_arg + 1]); i_arg += 2
+                graph_path = Path(args[i_arg + 1]); graph_was_explicit = True; i_arg += 2
             elif a == "--output" and i_arg + 1 < len(args):
                 output_path = Path(args[i_arg + 1]); i_arg += 2
             elif a == "--root" and i_arg + 1 < len(args):
@@ -2350,6 +2351,7 @@ def _dispatch_command(cmd: str) -> None:
             graph_path=graph_path, output_path=output_path,
             root=root, max_children=max_children,
             top_k_edges=top_k_edges, project_label=project_label,
+            source_managed=True if not graph_was_explicit else None,
         )
         size_kb = out.stat().st_size / 1024
         print(f"wrote {out} ({size_kb:.1f} KB)")
