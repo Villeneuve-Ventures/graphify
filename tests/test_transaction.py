@@ -107,6 +107,34 @@ def _file_bytes(output: Path) -> dict[str, bytes]:
     }
 
 
+def test_optional_current_transaction_distinguishes_absence_from_corrupt_authority(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    transaction_module._AUTHORITY.set(None)
+    for name in transaction_module._TRANSACTION_ENV_SIGNALS:
+        monkeypatch.delenv(name, raising=False)
+    assert transaction_module.optional_current_transaction(tmp_path) is None
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", root, output=output)
+    current = transaction_module.optional_current_transaction(output)
+    assert current is not None
+    assert current.id == transaction.id
+    before = _file_bytes(output)
+    (output / transaction_module.TRANSACTION_FILE).unlink()
+    after_removal = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="exact owner context"):
+        transaction_module.optional_current_transaction(output)
+
+    assert _file_bytes(output) == after_removal
+    assert before != after_removal
+
+
 def _corrupt_generation_receipt(output: Path, corruption: str) -> None:
     receipt_path = output / ".graphify_generation.json"
     if corruption == "missing":
@@ -2639,6 +2667,61 @@ def test_managed_tree_html_publishes_as_a_new_receipt_bound_generation(tmp_path)
     receipt = json.loads((output / ".graphify_generation.json").read_text())
     assert receipt["generation"] == snapshot.generation == tx.generation + 1
     assert "GRAPH_TREE.html" in receipt["required_artifacts"]
+
+
+@pytest.mark.parametrize("publisher", ["tree", "callflow"])
+def test_managed_render_rejects_live_owner_loss_after_snapshot_admission(
+    tmp_path, monkeypatch, publisher
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token = _owner(tmp_path)
+    _commit_owner_generation(output, transaction)
+    finish_transaction(transaction)
+    admitted = open_graph_snapshot(output / "graph.json", purpose="test-admission")
+    admitted.data["nodes"] = [
+        {
+            "id": "node",
+            "label": "Node",
+            "community": 0,
+            "source_file": "node.py",
+            "file_type": "code",
+        }
+    ]
+    transaction_module.begin_transaction("runtime", root, output=output)
+    destination = output / ("GRAPH_TREE.html" if publisher == "tree" else "callflow.html")
+    removed = False
+
+    def admitted_then_owner_removed(*_args, **_kwargs):
+        nonlocal removed
+        if not removed:
+            (output / transaction_module.TRANSACTION_FILE).unlink()
+            removed = True
+        return admitted
+
+    monkeypatch.setattr(
+        transaction_module, "open_graph_snapshot", admitted_then_owner_removed
+    )
+    protocol_before = (output / transaction_module.PROTOCOL_FILE).read_bytes()
+    drainer_before = (output / transaction_module.DRAINER_FILE).read_bytes()
+    with pytest.raises(PendingTransactionError, match="exact owner context"):
+        if publisher == "tree":
+            from graphify.tree_html import write_tree_html
+
+            write_tree_html(output / "graph.json", destination)
+        else:
+            from graphify.callflow_html import write_callflow_html
+
+            write_callflow_html(
+                tmp_path,
+                graphify_out=output,
+                output=destination,
+            )
+
+    assert not destination.exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+    assert (output / transaction_module.PROTOCOL_FILE).read_bytes() == protocol_before
+    assert (output / transaction_module.DRAINER_FILE).read_bytes() == drainer_before
 
 
 @pytest.mark.parametrize("destination_kind", ["sibling", "nested", "external"])
@@ -5811,6 +5894,134 @@ def test_prepared_workspace_resumes_every_ownership_binding_boundary(
         prepared.close()
     marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
     assert marker["state"] == "ready"
+
+
+def test_prepared_workspace_rotates_unbound_root_stage_without_adoption(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    original = transaction_module._create_bytes
+
+    def interrupt_owner(capability, name, payload, **kwargs):
+        if name == transaction_module._PREPARED_OWNER_FILE:
+            raise RuntimeError("root owner interrupted")
+        return original(capability, name, payload, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_create_bytes", interrupt_owner)
+    with pytest.raises(RuntimeError, match="root owner interrupted"):
+        with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+            transaction_module._pin_prepared_workspace(tx, capability)
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    abandoned = output.parent / transaction_module._prepared_stage_name(marker)
+    (abandoned / "foreign").write_text("preserve", encoding="utf-8")
+
+    monkeypatch.setattr(transaction_module, "_create_bytes", original)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        prepared = transaction_module._pin_prepared_workspace(tx, capability)
+        prepared.close()
+
+    assert (abandoned / "foreign").read_text(encoding="utf-8") == "preserve"
+    assert not (output.parent / f".graphify-prepare-{tx.id}" / "foreign").exists()
+
+
+def test_prepared_workspace_rotates_unbound_child_stage_without_adoption(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    original = transaction_module._replace_bytes
+
+    def interrupt_child_owner(capability, name, payload, **kwargs):
+        if (
+            name == transaction_module._PREPARED_OWNER_FILE
+            and json.loads(payload)["state"] == "child-created"
+        ):
+            raise RuntimeError("child owner interrupted")
+        return original(capability, name, payload, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_replace_bytes", interrupt_child_owner)
+    with pytest.raises(RuntimeError, match="child owner interrupted"):
+        with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+            transaction_module._pin_prepared_workspace(tx, capability)
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    abandoned = output.parent / transaction_module._prepared_stage_name(marker)
+    child = abandoned / transaction_module._prepared_child_stage_name(marker)
+    (child / "foreign").write_text("preserve", encoding="utf-8")
+
+    monkeypatch.setattr(transaction_module, "_replace_bytes", original)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        prepared = transaction_module._pin_prepared_workspace(tx, capability)
+        prepared.close()
+
+    assert (child / "foreign").read_text(encoding="utf-8") == "preserve"
+    assert not (output.parent / f".graphify-prepare-{tx.id}" / "graphify-out" / "foreign").exists()
+
+
+def test_prepared_workspace_rejects_named_stage_replacement_before_publication(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    original = transaction_module._replace_bytes
+    replaced = False
+
+    def replace_named_stage(capability, name, payload, **kwargs):
+        nonlocal replaced
+        result = original(capability, name, payload, **kwargs)
+        decoded = json.loads(payload)
+        if (
+            name == transaction_module.PREPARED_FILE
+            and decoded.get("state") == "planned"
+            and decoded.get("identity") is not None
+            and not replaced
+        ):
+            replaced = True
+            stage = output.parent / transaction_module._prepared_stage_name(decoded)
+            stage.rename(stage.with_name(stage.name + ".detached"))
+            stage.mkdir()
+            (stage / "foreign").write_text("preserve", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(transaction_module, "_replace_bytes", replace_named_stage)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="workspace identity"):
+            transaction_module._pin_prepared_workspace(tx, capability)
+
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    replacement = output.parent / transaction_module._prepared_stage_name(marker)
+    assert (replacement / "foreign").read_text(encoding="utf-8") == "preserve"
+    assert not (output.parent / f".graphify-prepare-{tx.id}").exists()
+
+
+def test_prepared_retirement_preserves_unbound_nonce_stage(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    original = transaction_module._create_bytes
+
+    def interrupt_owner(capability, name, payload, **kwargs):
+        if name == transaction_module._PREPARED_OWNER_FILE:
+            raise RuntimeError("root owner interrupted")
+        return original(capability, name, payload, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_create_bytes", interrupt_owner)
+    with pytest.raises(RuntimeError, match="root owner interrupted"):
+        with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+            transaction_module._pin_prepared_workspace(tx, capability)
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    stage = output.parent / transaction_module._prepared_stage_name(marker)
+    (stage / "foreign").write_text("preserve", encoding="utf-8")
+
+    monkeypatch.setattr(transaction_module, "_create_bytes", original)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        assert transaction_module._retire_prepared_locked(capability) is None
+
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+    assert (stage / "foreign").read_text(encoding="utf-8") == "preserve"
 
 
 def test_prepared_retirement_rejects_traversal_transaction_id(tmp_path):

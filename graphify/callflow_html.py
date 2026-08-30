@@ -2079,9 +2079,9 @@ def write_callflow_html(
         commit_publication_plan,
         commit_relative_bytes,
         commit_unmanaged_bytes,
-        current_transaction,
         finish_transaction,
         managed_output_containing,
+        optional_current_transaction,
     )
     graph_output = paths["graph"].expanduser().resolve().parent
     resolved_output = output_path.expanduser().resolve()
@@ -2099,10 +2099,7 @@ def write_callflow_html(
         )
     if managed_destination:
         relative = resolved_output.relative_to(graph_output).as_posix()
-        try:
-            active = current_transaction()
-        except PendingTransactionError:
-            active = None
+        active = optional_current_transaction(graph_output)
         if active is not None:
             if active.output != graph_output:
                 raise PendingTransactionError(

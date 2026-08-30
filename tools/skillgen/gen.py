@@ -2114,13 +2114,83 @@ def _normalise_subcommand_guard(lines: list[str], *, validate_current: bool) -> 
     return lines[:start] + ["", "@@VALIDATED_PYTHON_SUBCOMMAND_GUARD@@", ""] + lines[end:], None
 
 
-def _normalise_issue88_monolith_render(text: str) -> str:
+_PREPARED_WORKSPACE_RELOCATIONS = {
+    "aider": Counter(
+        {
+            "detect = json.loads(Path('.graphify_detect.json').read_text())": 1,
+            '" > .graphify_transcripts.json': 1,
+            "chunks = sorted(glob.glob('.graphify_chunk_*.json'))": 1,
+            "Path('.graphify_semantic_new.json').write_text(json.dumps({": 1,
+            "Path('GRAPH_REPORT.md').write_text(report)": 2,
+            "cost_path = Path('cost.json')": 1,
+        }
+    ),
+    "devin": Counter(
+        {
+            '" > .graphify_detect.json': 1,
+            "detect = json.loads(Path('.graphify_detect.json').read_text())": 4,
+            '" > .graphify_transcripts.json': 1,
+            "Path('.graphify_ast.json').write_text(json.dumps(result, indent=2))": 1,
+            "Path('.graphify_ast.json').write_text(json.dumps({'nodes':[],'edges':[],'input_tokens':0,'output_tokens':0}))": 1,
+            "Path('.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges}))": 1,
+            "Path('.graphify_uncached.txt').write_text('\\n'.join(uncached))": 1,
+            "chunks = sorted(glob.glob('.graphify_chunk_*.json'))": 1,
+            "Path('.graphify_semantic_new.json').write_text(json.dumps({": 1,
+            "cached = json.loads(Path('.graphify_cached.json').read_text()) if Path('.graphify_cached.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}": 1,
+            "new = json.loads(Path('.graphify_semantic_new.json').read_text()) if Path('.graphify_semantic_new.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}": 1,
+            "Path('.graphify_semantic.json').write_text(json.dumps(merged, indent=2))": 1,
+            "ast = json.loads(Path('.graphify_ast.json').read_text())": 1,
+            "sem = json.loads(Path('.graphify_semantic.json').read_text())": 1,
+            "Path('.graphify_extract.json').write_text(json.dumps(merged, indent=2))": 1,
+            "extraction = json.loads(Path('.graphify_extract.json').read_text())": 2,
+            "detection  = json.loads(Path('.graphify_detect.json').read_text())": 2,
+            "Path('GRAPH_REPORT.md').write_text(report)": 2,
+            "Path('.graphify_analysis.json').write_text(json.dumps(analysis, indent=2))": 1,
+            "analysis   = json.loads(Path('.graphify_analysis.json').read_text())": 1,
+            "Path('.graphify_labels.json').write_text(json.dumps({str(k): v for k, v in labels.items()}))": 1,
+            "extract = json.loads(Path('.graphify_extract.json').read_text())": 1,
+            "cost_path = Path('cost.json')": 1,
+        }
+    ),
+}
+
+
+def _normalise_prepared_workspace_paths(text: str, platform_key: str) -> str:
+    """Map only the reviewed line multiset back to pristine-v8 path spelling."""
+    normalised: list[str] = []
+    remaining = _PREPARED_WORKSPACE_RELOCATIONS[platform_key].copy()
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        stripped = content.strip()
+        if remaining[stripped] > 0:
+            remaining[stripped] -= 1
+            content = re.sub(
+                r"Path\('(?!graphify-out/)", "Path('graphify-out/", content
+            )
+            content = re.sub(
+                r"glob\.glob\('(?!graphify-out/)",
+                "glob.glob('graphify-out/",
+                content,
+            )
+            content = content.replace('" > .graphify_', '" > graphify-out/.graphify_')
+        normalised.append(content + ending)
+    if any(remaining.values()):
+        return text
+    return "".join(normalised)
+
+
+def _normalise_issue88_monolith_render(
+    text: str, *, validate_current: bool, platform_key: str
+) -> str:
     """Remove issue-88's mechanical render layer for the frozen-v8 audit.
 
     The underlying monolith content and all earlier sanctioned migrations remain
     audited. This avoids broadening the line allowlist for a discovery block
     deliberately injected into every standalone command block.
     """
+    if validate_current:
+        text = _normalise_prepared_workspace_paths(text, platform_key)
     text = re.sub(
         r"(### Step 1[^\n]*\n.*?```bash\n)(.*?)(\n```)",
         lambda match: match.group(1) + "@@ISSUE88_BOOTSTRAP@@" + match.group(3),
@@ -2143,15 +2213,6 @@ def _normalise_issue88_monolith_render(text: str) -> str:
 ```'''
     text = text.replace(rendered_config, pointer_config)
     text = text.replace(_POSIX_OPERATION_GUARD + "\n", "")
-    # Collapse only the mechanical prepared-workspace path relocation.  This
-    # keeps the round-trip guard exact: an unrelated injected command merely
-    # mentioning a managed artifact name is not sanctioned.
-    for prepared, original in (
-        ("Path('graphify-out/", "Path('"),
-        ("glob.glob('graphify-out/", "glob.glob('"),
-        ("> graphify-out/.graphify_", "> .graphify_"),
-    ):
-        text = text.replace(prepared, original)
     text = text.replace(
         '"$GRAPHIFY_PYTHON" -E -P -B',
         '"$(cat graphify-out/.graphify_python)" -E -P -B',
@@ -2178,7 +2239,7 @@ def _normalise_issue88_monolith_render(text: str) -> str:
         '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
         text,
     )
-    return re.sub(
+    text = re.sub(
         r'"\$\(cat graphify-out/\.graphify_python\)" -E -P -B -c '
         r"'from graphify\.transaction import finalize_prepared_transaction; "
         r"finalize_prepared_transaction\(\)'(?:; ?)?",
@@ -2189,6 +2250,7 @@ def _normalise_issue88_monolith_render(text: str) -> str:
             text,
         ),
     )
+    return text
 
 
 def _normalise_provider_push_sequence(
@@ -2299,7 +2361,9 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     provider_error = _validate_provider_push_order(rendered_text)
     if provider_error:
         return [f"[{platform.key}] {provider_error}"]
-    rendered_text = _normalise_issue88_monolith_render(rendered_text)
+    rendered_text = _normalise_issue88_monolith_render(
+        rendered_text, validate_current=True, platform_key=platform.key
+    )
     rendered_text, provider_error = _normalise_provider_push_sequence(
         rendered_text, validate_current=True
     )
@@ -2309,7 +2373,9 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     # Strip trigger lines from the original — they are non-spec and their removal
     # (#1180) is a permitted diff.
     original_text = _normalise_issue88_monolith_render(
-        _normalise(_git_show(platform.roundtrip_ref))
+        _normalise(_git_show(platform.roundtrip_ref)),
+        validate_current=False,
+        platform_key=platform.key,
     )
     original_text, provider_error = _normalise_provider_push_sequence(
         original_text, validate_current=False

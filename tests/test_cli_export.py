@@ -198,6 +198,49 @@ def test_external_snapshot_safety_error_does_not_trigger_managed_fallback(
     assert set(source.iterdir()) == {graph}
 
 
+def test_prepared_export_rejects_live_owner_loss_after_snapshot_admission(
+    tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    import graphify.transaction as transaction_module
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    graph = output / "graph.json"
+    transaction_module.begin_transaction("runtime", root, output=output)
+    payload = b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    graph.write_bytes(payload)
+
+    def admitted_then_owner_removed(_transaction, selected_graph):
+        (output / transaction_module.TRANSACTION_FILE).unlink()
+        return transaction_module.GraphSnapshot(
+            data=json.loads(payload),
+            generation=1,
+            graph_path=selected_graph,
+            payload=payload,
+            digest="0" * 64,
+            output_identity=transaction_module.OutputIdentity(
+                output.stat().st_dev, output.stat().st_ino
+            ),
+        )
+
+    monkeypatch.setattr(
+        transaction_module, "open_prepared_graph", admitted_then_owner_removed
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "export", "html", "--graph", str(graph)],
+    )
+
+    with pytest.raises(transaction_module.PendingTransactionError, match="owner context"):
+        cli_module._transactional_export_entry()
+
+    assert not (output / "graph.html").exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+
+
 def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
     tmp_path, monkeypatch
 ):

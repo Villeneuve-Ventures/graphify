@@ -1,5 +1,6 @@
 # MCP stdio server - exposes graph query tools to Claude and other agents
 from __future__ import annotations
+import hashlib
 import json
 import math
 import re
@@ -1027,7 +1028,7 @@ def _build_server(graph_path: str):
 
     from graphify import paths as _paths
 
-    # Per-graph context cache: resolved graph.json path -> exact snapshot digest.
+    # Per-graph context cache: resolved graph.json path -> exact consumed snapshot.
     # The server's default graph is just the first entry; a tool call carrying a
     # project_path adds its own. Routing every graph through one cache means the
     # eager trigram index and the mtime+size hot-reload behave identically for
@@ -1035,6 +1036,20 @@ def _build_server(graph_path: str):
     _default_graph_path = graph_path
     _ctx_lock = threading.Lock()
     _ctx_cache: dict[str, dict] = {}
+
+    def _context_key(snapshot) -> tuple:
+        consumed = tuple(
+            (name, hashlib.sha256(payload).hexdigest())
+            for name, payload in sorted(snapshot.artifacts.items())
+        )
+        return (
+            snapshot.digest,
+            snapshot.generation,
+            snapshot.output_identity,
+            snapshot.receipt_identity,
+            snapshot.receipt_digest,
+            consumed,
+        )
 
     def _load_ctx(path: str):
         """Return (G, communities) for a graph.json path, reusing a cached
@@ -1049,7 +1064,7 @@ def _build_server(graph_path: str):
             snapshot = open_graph_snapshot(path, purpose="mcp-context-admission")
         except FileNotFoundError as exc:
             raise FileNotFoundError(f"graph.json not found: {path}") from exc
-        key = snapshot.digest
+        key = _context_key(snapshot)
         ent = _ctx_cache.get(path)
         if ent is not None and ent["key"] == key:
             return ent["G"], ent["communities"], ent["artifacts"]

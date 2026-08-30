@@ -580,10 +580,10 @@ def write_tree_html(
         commit_publication_plan,
         commit_relative_bytes,
         commit_unmanaged_bytes,
-        current_transaction,
         finish_transaction,
         managed_output_containing,
         open_graph_snapshot,
+        optional_current_transaction,
     )
     snapshot = open_graph_snapshot(graph_path, purpose="tree-prepare")
     if source_managed is None:
@@ -612,10 +612,7 @@ def write_tree_html(
         )
     if managed_destination:
         relative = resolved_output.relative_to(graph_parent).as_posix()
-        try:
-            active = current_transaction()
-        except PendingTransactionError:
-            active = None
+        active = optional_current_transaction(graph_parent)
         if active is not None:
             if active.output != graph_parent:
                 raise PendingTransactionError(

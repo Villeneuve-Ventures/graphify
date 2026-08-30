@@ -72,6 +72,7 @@ _PREPARED_MARKER_FIELDS = {
     "identity",
     "output_identity",
     "ownership_nonce",
+    "child_nonce",
     "prior_inventory",
 }
 LEGACY_PENDING_STATE_FILE = ".graphify_legacy_pending_state.json"
@@ -2627,6 +2628,7 @@ def _prepared_owner_binding(
         "generation": marker["generation"],
         "token_digest": marker["token_digest"],
         "ownership_nonce": marker["ownership_nonce"],
+        "child_nonce": marker["child_nonce"],
         "workspace_name": marker["workspace_name"],
         "identity": identity.json(),
         "output_identity": (
@@ -2643,6 +2645,13 @@ def _prepared_stage_name(marker: Mapping[str, object]) -> str:
     return f".graphify-prepare-stage-{transaction_id}-{nonce}"
 
 
+def _prepared_child_stage_name(marker: Mapping[str, object]) -> str:
+    nonce = marker.get("child_nonce")
+    if not _is_hex(nonce, 32):
+        raise PendingTransactionError("prepared workspace binding is malformed")
+    return f".graphify-output-stage-{nonce}"
+
+
 def _validate_prepared_owner_binding(
     workspace: OutputCapability,
     marker: Mapping[str, object],
@@ -2656,6 +2665,7 @@ def _validate_prepared_owner_binding(
         "generation",
         "token_digest",
         "ownership_nonce",
+        "child_nonce",
         "workspace_name",
         "identity",
         "output_identity",
@@ -2674,6 +2684,7 @@ def _validate_prepared_owner_binding(
                 "generation",
                 "token_digest",
                 "ownership_nonce",
+                "child_nonce",
                 "workspace_name",
             )
         )
@@ -2704,6 +2715,7 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
         or type(marker.get("generation")) is not int
         or not _is_hex(marker.get("token_digest"))
         or not _is_hex(marker.get("ownership_nonce"), 32)
+        or not _is_hex(marker.get("child_nonce"), 32)
         or not isinstance(marker.get("prior_inventory"), list)
         or not all(type(name) is str for name in marker["prior_inventory"])
     ):
@@ -2715,10 +2727,21 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
             marker.get("schema") != 1
             or marker.get("protocol_epoch") != 1
             or marker.get("workspace_name") != workspace.name
-            or marker.get("identity") is not None
-            or marker.get("output_identity") is not None
         ):
             raise PendingTransactionError("prepared workspace binding is malformed")
+        expected = (
+            None
+            if marker.get("identity") is None
+            else _identity_from_json(marker.get("identity"))
+        )
+        expected_output = (
+            None
+            if marker.get("output_identity") is None
+            else _identity_from_json(marker.get("output_identity"))
+        )
+        if expected is None and expected_output is not None:
+            raise PendingTransactionError("prepared workspace binding is malformed")
+        child_stage_name = _prepared_child_stage_name(marker)
         with pin_output(workspace.parent) as parent_capability:
             workspace_info = _entry_nofollow_stat(parent_capability, workspace.name)
             stage_info = _entry_nofollow_stat(parent_capability, stage_name)
@@ -2733,75 +2756,56 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
                 raise PendingTransactionError("prepared workspace ownership changed")
             if not stat.S_ISDIR(info.st_mode):
                 raise PendingTransactionError("prepared workspace ownership changed")
+            if expected is None:
+                _unlink(capability, PREPARED_FILE)
+                return None
+            if (info.st_dev, info.st_ino) != (expected.device, expected.inode):
+                raise PendingTransactionError("prepared workspace identity changed")
             selected_workspace = workspace.parent / selected_name
             with pin_output(selected_workspace) as workspace_capability:
-                if _entry_stat(workspace_capability, _PREPARED_OWNER_FILE) is None:
-                    if selected_name == workspace.name:
-                        raise PendingTransactionError(
-                            "prepared workspace reservation changed"
-                        )
-                    if _list_entries(workspace_capability):
-                        raise PendingTransactionError(
-                            "prepared workspace reservation changed"
-                    )
-                    workspace_capability.validate()
-                    os.rmdir(selected_name, dir_fd=parent_capability.fd)
-                    os.fsync(parent_capability.fd)
-                    _unlink(capability, PREPARED_FILE)
-                    return None
                 owner_state, owner_output = _validate_prepared_owner_binding(
                     workspace_capability, marker
                 )
-                if owner_state == "root-created":
+                if expected_output is None:
                     if _list_entries(workspace_capability) != [_PREPARED_OWNER_FILE]:
-                        raise PendingTransactionError(
-                            "prepared workspace ownership changed"
-                        )
+                        _unlink(capability, PREPARED_FILE)
+                        return None
                     _unlink(workspace_capability, _PREPARED_OWNER_FILE)
                     workspace_capability.validate()
                     os.rmdir(selected_name, dir_fd=parent_capability.fd)
                     os.fsync(parent_capability.fd)
                     _unlink(capability, PREPARED_FILE)
                     return None
-                if owner_state == "child-planned":
-                    try:
-                        prepared_output = pin_output(
-                            selected_workspace / "graphify-out"
-                        )
-                    except FileNotFoundError:
-                        if _list_entries(workspace_capability) != [
-                            _PREPARED_OWNER_FILE
-                        ]:
-                            raise PendingTransactionError(
-                                "prepared workspace ownership changed"
-                            ) from None
-                        _unlink(workspace_capability, _PREPARED_OWNER_FILE)
-                        workspace_capability.validate()
-                        os.rmdir(selected_name, dir_fd=parent_capability.fd)
-                        os.fsync(parent_capability.fd)
-                        _unlink(capability, PREPARED_FILE)
-                        return None
-                    with prepared_output:
-                        _replace_bytes(
-                            workspace_capability,
-                            _PREPARED_OWNER_FILE,
-                            _json_bytes(
-                                _prepared_owner_binding(
-                                    marker,
-                                    state="child-created",
-                                    identity=workspace_capability.identity,
-                                    output_identity=prepared_output.identity,
-                                )
-                            ),
-                        )
-                        owner_output = prepared_output.identity
-                with pin_output(
-                    selected_workspace / "graphify-out"
-                ) as prepared_output:
-                    if prepared_output.identity != owner_output:
+                if owner_state != "child-created" or owner_output != expected_output:
+                    raise PendingTransactionError("prepared output ownership changed")
+                graph_info = _entry_nofollow_stat(
+                    workspace_capability, "graphify-out"
+                )
+                child_info = _entry_nofollow_stat(
+                    workspace_capability, child_stage_name
+                )
+                if graph_info is not None and child_info is not None:
+                    raise PendingTransactionError("prepared output ownership changed")
+                if child_info is not None:
+                    if (child_info.st_dev, child_info.st_ino) != (
+                        expected_output.device,
+                        expected_output.inode,
+                    ):
                         raise PendingTransactionError(
-                            "prepared output ownership changed"
+                            "prepared output identity changed"
                         )
+                    _atomic_rename_no_replace(
+                        workspace_capability, child_stage_name, "graphify-out"
+                    )
+                    os.fsync(workspace_capability.fd)
+                elif graph_info is None or (graph_info.st_dev, graph_info.st_ino) != (
+                    expected_output.device,
+                    expected_output.inode,
+                ):
+                    raise PendingTransactionError("prepared output identity changed")
+                with pin_output(selected_workspace / "graphify-out") as prepared_output:
+                    if prepared_output.identity != expected_output:
+                        raise PendingTransactionError("prepared output ownership changed")
                     selected_identity = workspace_capability.identity
             if selected_name == stage_name:
                 try:
@@ -2822,7 +2826,7 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
                 **marker,
                 "state": "workspace-created",
                 "identity": selected_identity.json(),
-                "output_identity": prepared_output.identity.json(),
+                "output_identity": expected_output.json(),
             }
             _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
     expected = _identity_from_json(marker.get("identity"))
@@ -3670,16 +3674,52 @@ def resume_transaction(
         return tx
 
 
-def current_transaction() -> Transaction:
+_TRANSACTION_ENV_SIGNALS = (
+    "GRAPHIFY_TRANSACTION_ID",
+    "GRAPHIFY_TRANSACTION_ROOT",
+    "GRAPHIFY_TRANSACTION_OUTPUT",
+    "GRAPHIFY_TRANSACTION_TOKEN",
+)
+
+
+def optional_current_transaction(
+    output: Path | str | None = None,
+) -> Transaction | None:
+    """Return no owner only when both process and environment authority are absent."""
     authority = _AUTHORITY.get()
-    output = os.environ.get("GRAPHIFY_TRANSACTION_OUTPUT")
-    if authority is None or output is None:
+    signaled = any(os.environ.get(name) is not None for name in _TRANSACTION_ENV_SIGNALS)
+    if authority is None and not signaled:
+        return None
+    if authority is None:
         raise PendingTransactionError("exact owner context required")
-    with pin_output(Path(output)) as capability:
+    env_output = os.environ.get("GRAPHIFY_TRANSACTION_OUTPUT")
+    selected_output = Path(env_output) if env_output is not None else output
+    if selected_output is None:
+        raise PendingTransactionError("exact owner context required")
+    if output is not None and env_output is not None:
+        if (
+            Path(output).expanduser().resolve()
+            != Path(env_output).expanduser().resolve()
+            and os.environ.get("GRAPHIFY_PREPARED_OUTPUT") != "1"
+        ):
+            raise PendingTransactionError("exact owner output does not match")
+    with pin_output(Path(selected_output)) as capability:
+        if capability.identity != authority.output_identity:
+            if not signaled:
+                return None
+            raise PendingTransactionError("exact owner output does not match")
         tx = _read_transaction(capability)
-    if tx is None or tx.id != authority.transaction_id:
-        raise PendingTransactionError("exact owner context required")
+        if tx is None or tx.id != authority.transaction_id:
+            raise PendingTransactionError("exact owner context required")
+        _validate_authority(capability, tx)
     return tx
+
+
+def current_transaction() -> Transaction:
+    transaction = optional_current_transaction()
+    if transaction is None:
+        raise PendingTransactionError("exact owner context required")
+    return transaction
 
 
 def active_transaction_token_path(output: Path | str | None = None) -> Path:
@@ -3772,6 +3812,7 @@ def _pin_prepared_workspace(
             "identity": None,
             "output_identity": None,
             "ownership_nonce": secrets.token_hex(16),
+            "child_nonce": secrets.token_hex(16),
             "prior_inventory": list(prior_inventory),
         }
         _create_bytes(capability, PREPARED_FILE, _json_bytes(marker))
@@ -3781,6 +3822,7 @@ def _pin_prepared_workspace(
         "state",
         "workspace_name",
         "ownership_nonce",
+        "child_nonce",
     }
     legacy_marker = set(marker) == legacy_fields
     marker_state = "ready" if legacy_marker else marker.get("state")
@@ -3800,6 +3842,10 @@ def _pin_prepared_workspace(
         )
         or (
             not legacy_marker
+            and not _is_hex(marker.get("child_nonce"), 32)
+        )
+        or (
+            not legacy_marker
             and marker.get("workspace_name") != workspace.name
         )
         or not isinstance(marker.get("prior_inventory"), list)
@@ -3814,135 +3860,223 @@ def _pin_prepared_workspace(
         raise PendingTransactionError("prepared workspace inventory is malformed")
     prior_receipt = _load_json(capability, RECEIPT_FILE)
     if marker_state == "planned":
-        stage_name = _prepared_stage_name(marker)
-        selected_workspace = workspace.parent / stage_name
-        with pin_output(workspace.parent) as parent_capability:
-            workspace_info = _entry_nofollow_stat(parent_capability, workspace.name)
-            stage_info = _entry_nofollow_stat(parent_capability, stage_name)
-            if workspace_info is not None and stage_info is not None:
-                raise PendingTransactionError("prepared workspace ownership changed")
-            if workspace_info is None and stage_info is None:
-                os.mkdir(stage_name, 0o700, dir_fd=parent_capability.fd)
-                os.fsync(parent_capability.fd)
-                stage_info = _entry_nofollow_stat(parent_capability, stage_name)
-            if workspace_info is not None:
-                selected_workspace = workspace
-            elif stage_info is None or not stat.S_ISDIR(stage_info.st_mode):
-                raise PendingTransactionError("prepared workspace ownership changed")
-        workspace_capability = pin_output(selected_workspace)
-        try:
-            owner_state: str | None = None
-            owner_output: OutputIdentity | None = None
-            if _entry_stat(workspace_capability, _PREPARED_OWNER_FILE) is None:
-                if selected_workspace == workspace or _list_entries(workspace_capability):
-                    raise PendingTransactionError(
-                        "prepared workspace reservation changed"
-                    )
-                _create_bytes(
-                    workspace_capability,
-                    _PREPARED_OWNER_FILE,
-                    _json_bytes(
-                        _prepared_owner_binding(
-                            marker,
-                            state="root-created",
-                            identity=workspace_capability.identity,
-                            output_identity=None,
-                        )
-                    ),
+        for _attempt in range(4):
+            stage_name = _prepared_stage_name(marker)
+            child_stage_name = _prepared_child_stage_name(marker)
+            expected_stage = (
+                None
+                if marker.get("identity") is None
+                else _identity_from_json(marker.get("identity"))
+            )
+            expected_child = (
+                None
+                if marker.get("output_identity") is None
+                else _identity_from_json(marker.get("output_identity"))
+            )
+            selected_workspace = workspace.parent / stage_name
+            with pin_output(workspace.parent) as parent_capability:
+                workspace_info = _entry_nofollow_stat(
+                    parent_capability, workspace.name
                 )
-                owner_state = "root-created"
-            else:
+                stage_info = _entry_nofollow_stat(parent_capability, stage_name)
+                if workspace_info is not None and stage_info is not None:
+                    raise PendingTransactionError(
+                        "prepared workspace ownership changed"
+                    )
+                if expected_stage is None and stage_info is not None:
+                    marker = {
+                        **marker,
+                        "ownership_nonce": secrets.token_hex(16),
+                        "child_nonce": secrets.token_hex(16),
+                        "identity": None,
+                        "output_identity": None,
+                    }
+                    _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
+                    continue
+                if workspace_info is not None:
+                    selected_workspace = workspace
+                    selected_info = workspace_info
+                else:
+                    if stage_info is None:
+                        if expected_stage is not None:
+                            raise PendingTransactionError(
+                                "prepared workspace identity changed"
+                            )
+                        os.mkdir(stage_name, 0o700, dir_fd=parent_capability.fd)
+                        os.fsync(parent_capability.fd)
+                        stage_info = _entry_nofollow_stat(parent_capability, stage_name)
+                    selected_info = stage_info
+                if selected_info is None or not stat.S_ISDIR(selected_info.st_mode):
+                    raise PendingTransactionError(
+                        "prepared workspace ownership changed"
+                    )
+            workspace_capability = pin_output(selected_workspace)
+            try:
+                if expected_stage is None:
+                    if selected_workspace == workspace or _list_entries(
+                        workspace_capability
+                    ):
+                        raise PendingTransactionError(
+                            "prepared workspace reservation changed"
+                        )
+                    _create_bytes(
+                        workspace_capability,
+                        _PREPARED_OWNER_FILE,
+                        _json_bytes(
+                            _prepared_owner_binding(
+                                marker,
+                                state="root-created",
+                                identity=workspace_capability.identity,
+                                output_identity=None,
+                            )
+                        ),
+                    )
+                    marker = {
+                        **marker,
+                        "identity": workspace_capability.identity.json(),
+                    }
+                    _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
+                    expected_stage = workspace_capability.identity
+                    with pin_output(workspace.parent) as parent_capability:
+                        named_stage = _entry_nofollow_stat(
+                            parent_capability, stage_name
+                        )
+                        if named_stage is None or (
+                            named_stage.st_dev,
+                            named_stage.st_ino,
+                        ) != (expected_stage.device, expected_stage.inode):
+                            raise PendingTransactionError(
+                                "prepared workspace identity changed"
+                            )
+                elif workspace_capability.identity != expected_stage:
+                    raise PendingTransactionError(
+                        "prepared workspace identity changed"
+                    )
                 owner_state, owner_output = _validate_prepared_owner_binding(
                     workspace_capability, marker
                 )
-            if owner_state == "root-created":
-                try:
-                    os.stat(
-                        "graphify-out",
+                graph_info = _entry_nofollow_stat(
+                    workspace_capability, "graphify-out"
+                )
+                child_info = _entry_nofollow_stat(
+                    workspace_capability, child_stage_name
+                )
+                if expected_child is None:
+                    if graph_info is not None:
+                        raise PendingTransactionError(
+                            "unbound prepared output already exists"
+                        )
+                    if child_info is not None or owner_state != "root-created":
+                        marker = {
+                            **marker,
+                            "ownership_nonce": secrets.token_hex(16),
+                            "child_nonce": secrets.token_hex(16),
+                            "identity": None,
+                            "output_identity": None,
+                        }
+                        _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
+                        workspace_capability.close()
+                        continue
+                    os.mkdir(
+                        child_stage_name,
+                        0o700,
                         dir_fd=workspace_capability.fd,
-                        follow_symlinks=False,
                     )
-                except FileNotFoundError:
-                    pass
-                else:
-                    raise PendingTransactionError(
-                        "unbound prepared output already exists"
-                    )
-                _replace_bytes(
-                    workspace_capability,
-                    _PREPARED_OWNER_FILE,
-                    _json_bytes(
-                        _prepared_owner_binding(
-                            marker,
-                            state="child-planned",
-                            identity=workspace_capability.identity,
-                            output_identity=None,
-                        )
-                    ),
-                )
-                owner_state = "child-planned"
-            if owner_state == "child-planned":
-                try:
-                    os.mkdir("graphify-out", 0o700, dir_fd=workspace_capability.fd)
                     os.fsync(workspace_capability.fd)
-                except FileExistsError:
-                    pass
-                output_capability = pin_output(selected_workspace / "graphify-out")
-                _replace_bytes(
-                    workspace_capability,
-                    _PREPARED_OWNER_FILE,
-                    _json_bytes(
-                        _prepared_owner_binding(
-                            marker,
-                            state="child-created",
-                            identity=workspace_capability.identity,
-                            output_identity=output_capability.identity,
+                    output_capability = pin_output(
+                        selected_workspace / child_stage_name
+                    )
+                    _replace_bytes(
+                        workspace_capability,
+                        _PREPARED_OWNER_FILE,
+                        _json_bytes(
+                            _prepared_owner_binding(
+                                marker,
+                                state="child-created",
+                                identity=workspace_capability.identity,
+                                output_identity=output_capability.identity,
+                            )
+                        ),
+                    )
+                    marker = {
+                        **marker,
+                        "output_identity": output_capability.identity.json(),
+                    }
+                    _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
+                    expected_child = output_capability.identity
+                    output_capability.close()
+                else:
+                    if owner_state != "child-created" or owner_output != expected_child:
+                        raise PendingTransactionError(
+                            "prepared output ownership changed"
                         )
-                    ),
+                graph_info = _entry_nofollow_stat(
+                    workspace_capability, "graphify-out"
                 )
-            else:
-                output_capability = pin_output(selected_workspace / "graphify-out")
-                if output_capability.identity != owner_output:
+                child_info = _entry_nofollow_stat(
+                    workspace_capability, child_stage_name
+                )
+                if graph_info is not None and child_info is not None:
                     raise PendingTransactionError(
                         "prepared output ownership changed"
                     )
-            selected_identity = workspace_capability.identity
-            selected_output_identity = output_capability.identity
-            output_capability.close()
-            workspace_capability.close()
-            if selected_workspace != workspace:
-                with pin_output(workspace.parent) as parent_capability:
-                    try:
+                if child_info is not None:
+                    if (child_info.st_dev, child_info.st_ino) != (
+                        expected_child.device,
+                        expected_child.inode,
+                    ):
+                        raise PendingTransactionError(
+                            "prepared output identity changed"
+                        )
+                    _atomic_rename_no_replace(
+                        workspace_capability, child_stage_name, "graphify-out"
+                    )
+                    os.fsync(workspace_capability.fd)
+                elif graph_info is None or (graph_info.st_dev, graph_info.st_ino) != (
+                    expected_child.device,
+                    expected_child.inode,
+                ):
+                    raise PendingTransactionError(
+                        "prepared output identity changed"
+                    )
+                selected_identity = workspace_capability.identity
+                workspace_capability.close()
+                if selected_workspace != workspace:
+                    with pin_output(workspace.parent) as parent_capability:
+                        named_stage = _entry_nofollow_stat(
+                            parent_capability, stage_name
+                        )
+                        if named_stage is None or (
+                            named_stage.st_dev,
+                            named_stage.st_ino,
+                        ) != (selected_identity.device, selected_identity.inode):
+                            raise PendingTransactionError(
+                                "prepared workspace identity changed"
+                            )
                         _atomic_rename_no_replace(
                             parent_capability, stage_name, workspace.name
                         )
-                    except FileExistsError:
-                        raise PendingTransactionError(
-                            "prepared workspace destination appeared"
-                        ) from None
-                    os.fsync(parent_capability.fd)
-            workspace_capability = pin_output(workspace)
-            if workspace_capability.identity != selected_identity:
+                        os.fsync(parent_capability.fd)
+                workspace_capability = pin_output(workspace)
+                output_capability = pin_output(workspace / "graphify-out")
+                if (
+                    workspace_capability.identity != selected_identity
+                    or output_capability.identity != expected_child
+                ):
+                    raise PendingTransactionError(
+                        "prepared workspace identity changed"
+                    )
+                marker = {**marker, "state": "workspace-created"}
+                _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
+                marker_state = "workspace-created"
+                break
+            except Exception:
+                with contextlib.suppress(UnboundLocalError):
+                    output_capability.close()
                 workspace_capability.close()
-                raise PendingTransactionError("prepared workspace identity changed")
-            output_capability = pin_output(workspace / "graphify-out")
-            if output_capability.identity != selected_output_identity:
-                output_capability.close()
-                workspace_capability.close()
-                raise PendingTransactionError("prepared output identity changed")
-            marker = {
-                **marker,
-                "state": "workspace-created",
-                "identity": selected_identity.json(),
-                "output_identity": selected_output_identity.json(),
-            }
-            _replace_bytes(capability, PREPARED_FILE, _json_bytes(marker))
-            marker_state = "workspace-created"
-        except Exception:
-            with contextlib.suppress(UnboundLocalError):
-                output_capability.close()
-            workspace_capability.close()
-            raise
+                raise
+        else:
+            raise PendingTransactionError("prepared workspace reservation retry bound")
     else:
         workspace_capability = pin_output(workspace)
         try:
@@ -10894,6 +11028,9 @@ def finish_transaction(transaction: Transaction) -> None:
                 lease_deadline=time.time() + 30.0,
                 predecessor_receipt=receipt_digest,
             )
+    authority = _AUTHORITY.get()
+    if authority is not None and authority.transaction_id == transaction.id:
+        _AUTHORITY.set(None)
 
 
 def finalize_prepared_transaction() -> None:
@@ -11017,7 +11154,7 @@ def _prepared_cancellation_marker_from_json(
         "prior_inventory",
     }
     durable_fields = legacy_fields | {"protocol_epoch", "state", "workspace_name"}
-    owned_fields = durable_fields | {"ownership_nonce"}
+    owned_fields = durable_fields | {"ownership_nonce", "child_nonce"}
     durable = set(marker) in {frozenset(durable_fields), frozenset(owned_fields)}
     if (
         set(marker)
@@ -11036,7 +11173,10 @@ def _prepared_cancellation_marker_from_json(
                 != f".graphify-prepare-{successor.id}"
                 or (
                     set(marker) == owned_fields
-                    and not _is_hex(marker.get("ownership_nonce"), 32)
+                    and (
+                        not _is_hex(marker.get("ownership_nonce"), 32)
+                        or not _is_hex(marker.get("child_nonce"), 32)
+                    )
                 )
             )
         )

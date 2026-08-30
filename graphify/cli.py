@@ -1108,7 +1108,6 @@ def _transactional_export() -> None:
         commit_unmanaged_unlink,
         commit_prepared_bytes,
         commit_publication_plan,
-        current_transaction,
         finish_transaction,
         managed_output_containing,
         open_external_graph_snapshot,
@@ -1116,6 +1115,7 @@ def _transactional_export() -> None:
         open_unmanaged_obsidian_inventory,
         open_unmanaged_file,
         open_prepared_graph,
+        optional_current_transaction,
         owned_step,
         publication_plan_from_directory,
         unlink_prepared,
@@ -1135,12 +1135,17 @@ def _transactional_export() -> None:
                 retained_limits[selected.name] = (
                     50 * 1024 * 1024 if option == "--report" else 1024 * 1024
                 )
-    try:
-        active_transaction = current_transaction()
-    except PendingTransactionError:
-        active_transaction = None
+    active_transaction = optional_current_transaction(graph.parent)
     if active_transaction is not None:
         source_snapshot = open_prepared_graph(active_transaction, graph)
+        revalidated_transaction = optional_current_transaction(graph.parent)
+        if (
+            revalidated_transaction is None
+            or revalidated_transaction.id != active_transaction.id
+        ):
+            raise PendingTransactionError(
+                "prepared export transaction authority changed after admission"
+            )
         source_managed = True
     else:
         configured_output = graph.parent == (Path.cwd() / _GRAPHIFY_OUT).resolve()

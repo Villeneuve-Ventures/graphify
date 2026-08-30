@@ -275,6 +275,56 @@ def test_cached_context_is_fenced_when_protocol_becomes_pending(tmp_path):
         assert "protocol" in blocked.lower() or "pending" in blocked.lower()
 
 
+def test_cached_context_refreshes_when_receipt_artifacts_change_without_graph_change(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    graph_path = Path(_graph_file(tmp_path))
+    payload = graph_path.read_bytes()
+    base = transaction_module.GraphSnapshot(
+        data=json.loads(payload),
+        generation=1,
+        graph_path=graph_path,
+        payload=payload,
+        digest="a" * 64,
+        artifacts={"GRAPH_REPORT.md": b"old report"},
+        receipt_digest="b" * 64,
+    )
+    changed = transaction_module.GraphSnapshot(
+        data=json.loads(payload),
+        generation=2,
+        graph_path=graph_path,
+        payload=payload,
+        digest=base.digest,
+        artifacts={"GRAPH_REPORT.md": b"new report"},
+        receipt_digest="c" * 64,
+    )
+    calls = 0
+
+    def snapshots(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return base if calls == 1 else changed
+
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", snapshots)
+    app = serve_mod._build_http_app(str(graph_path), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        response = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "resources/read",
+                "params": {"uri": "graphify://report"},
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["contents"][0]["text"] == "new report"
+
+
 def test_stateless_mode_initialize(tmp_path):
     app = serve_mod._build_http_app(_graph_file(tmp_path), stateless=True, json_response=True)
     with _client(app) as client:

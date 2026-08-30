@@ -5527,6 +5527,28 @@ def test_monolith_roundtrip_rejects_prepared_runner_suffix(monkeypatch):
     assert any("unsanctioned monolith change" in problem for problem in problems)
 
 
+def test_monolith_roundtrip_rejects_prepared_workspace_path_regression(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    injected = original.content.replace(
+        "Path('.graphify_detect.json')",
+        "Path('graphify-out/.graphify_detect.json')",
+        1,
+    )
+    assert injected != original.content
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("unsanctioned monolith change" in problem for problem in problems)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
 @pytest.mark.parametrize(
     ("platform_key", "provider", "expected_tail"),
