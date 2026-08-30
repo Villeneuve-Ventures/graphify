@@ -122,6 +122,51 @@ def _corrupt_generation_receipt(output: Path, corruption: str) -> None:
         raise AssertionError(f"unsupported receipt corruption: {corruption}")
 
 
+def test_begin_transaction_rejects_stale_admitted_managed_snapshot_zero_mutation(
+    tmp_path,
+):
+    root, output, transaction, _token = _owner(tmp_path)
+    _commit_owner_generation(output, transaction)
+    finish_transaction(transaction)
+    stale = open_graph_snapshot(output / "graph.json", purpose="publication-prepare")
+
+    successor = begin_transaction("runtime", root, output=output)
+    _commit_owner_generation(output, successor)
+    finish_transaction(successor)
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="admitted snapshot"):
+        begin_transaction(
+            "runtime", root, output=output, expected_snapshot=stale
+        )
+
+    assert _file_bytes(output) == before
+
+
+def test_callflow_snapshot_rejects_managed_report_over_central_limit(tmp_path):
+    root, output, transaction, _token = _owner(tmp_path)
+    graph_payload = _graph(transaction.generation)
+    report_payload = b"x" * (50 * 1024 * 1024 + 1)
+    with owned_step(transaction):
+        commit_bytes(transaction, "graph.json", graph_payload)
+        commit_bytes(transaction, "manifest.json", b"{}")
+        commit_bytes(transaction, "GRAPH_REPORT.md", report_payload)
+        commit_generation(
+            transaction,
+            graph_payload=graph_payload,
+            manifest_payload=b"{}",
+            required_artifacts=(
+                "graph.json",
+                "manifest.json",
+                "GRAPH_REPORT.md",
+            ),
+        )
+    finish_transaction(transaction)
+
+    with pytest.raises(PendingTransactionError, match="read limit"):
+        open_graph_snapshot(output / "graph.json", purpose="callflow-html")
+
+
 def _close_pending_after_failpoint(tmp_path: Path) -> tuple[Path, Path]:
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])

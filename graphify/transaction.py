@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Mapping, Sequence, cast
+from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence, cast
 
 import networkx as nx
 
@@ -92,6 +92,12 @@ _SAFE_GRAPHLESS_RUNTIME_ENTRIES = frozenset(
 )
 _PLATFORM = "windows" if os.name == "nt" else "posix"
 _MAX_STATE_BYTES = 1024 * 1024
+_ARTIFACT_READ_LIMITS = {
+    ".graphify_analysis.json": _MAX_STATE_BYTES,
+    ".graphify_labels.json": _MAX_STATE_BYTES,
+    "GRAPH_REPORT.md": 50 * 1024 * 1024,
+    "sections.json": _MAX_STATE_BYTES,
+}
 _MAX_OBSIDIAN_BATCH_JOURNAL_BYTES = _MAX_STATE_BYTES
 _TOKEN_MAX_BYTES = 16 * 1024
 _DETACHED_MAX_BYTES = 50 * 1024 * 1024
@@ -257,6 +263,12 @@ class GraphSnapshot:
     digest: str
     manifest_payload: bytes | None = None
     artifacts: Mapping[str, bytes] = field(default_factory=dict)
+    output_identity: OutputIdentity | None = None
+    receipt_identity: OutputIdentity | None = None
+    receipt_digest: str | None = None
+    inventory_selector: tuple[tuple[str, str | None], ...] = ()
+    purpose: str = ""
+    coordination_absent: bool = False
 
 
 @dataclass(frozen=True)
@@ -2959,11 +2971,14 @@ def begin_transaction(
     now: float | None = None,
     failpoint: Callable[[OutputCapability, dict[str, object]], None] | None = None,
     transition_failpoint: Callable[[str], None] | None = None,
+    expected_snapshot: GraphSnapshot | None = None,
 ) -> Transaction:
     root_path = _canonical_directory(Path(root))
     capability = pin_output(output, create=True)
     try:
         with _locked(capability):
+            if expected_snapshot is not None:
+                _validate_expected_snapshot_locked(capability, expected_snapshot)
             _fence_pending_enqueue_locked(capability)
             token_transition = _read_token_transition(capability)
             if token_transition is not None:
@@ -4584,6 +4599,10 @@ def _validate_receipt_locked(
         if artifact_digest != artifact_digests[name]:
             raise PendingTransactionError(f"managed artifact digest changed: {name}")
         if artifact_body is not None:
+            if len(artifact_body) > _artifact_read_limit(Path(name).name):
+                raise PendingTransactionError(
+                    f"retained managed artifact exceeds its read limit: {name}"
+                )
             inventory[name] = artifact_body
     if actual_digests["manifest.json"] != receipt.get("manifest_digest"):
         raise PendingTransactionError("manifest digest changed after receipt")
@@ -6523,7 +6542,110 @@ def _legacy_owned_dynamic_inventory(
     return inventory
 
 
-def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
+def _artifact_read_limit(name: str) -> int:
+    return _ARTIFACT_READ_LIMITS.get(name, _MAX_RECEIPT_AGGREGATE_BYTES)
+
+
+def _inventory_selector(
+    names: Iterable[str], artifacts: Mapping[str, bytes]
+) -> tuple[tuple[str, str | None], ...]:
+    return tuple(
+        sorted(
+            (
+                name,
+                hashlib.sha256(artifacts[name]).hexdigest()
+                if name in artifacts
+                else None,
+            )
+            for name in set(names)
+        )
+    )
+
+
+def _validate_expected_snapshot_locked(
+    capability: OutputCapability, snapshot: GraphSnapshot
+) -> None:
+    if snapshot.output_identity != capability.identity:
+        raise PendingTransactionError("admitted snapshot output identity changed")
+    if snapshot.graph_path.parent.resolve(strict=True) != capability.path:
+        raise PendingTransactionError("admitted snapshot belongs to another output")
+    graph_name = _validated_shallow_name(snapshot.graph_path.name)
+    current_graph = _read_bytes(
+        capability, graph_name, max(len(snapshot.payload), _MAX_STATE_BYTES)
+    )
+    if hashlib.sha256(current_graph).hexdigest() != snapshot.digest:
+        raise PendingTransactionError("admitted snapshot graph changed before begin")
+    if snapshot.receipt_digest is not None:
+        receipt_stat = _entry_stat(capability, RECEIPT_FILE)
+        if (
+            receipt_stat is None
+            or snapshot.receipt_identity
+            != OutputIdentity(receipt_stat.st_dev, receipt_stat.st_ino)
+        ):
+            raise PendingTransactionError("admitted snapshot receipt identity changed")
+        receipt, digest, _inventory = _validate_receipt_locked(
+            capability,
+            graph_payload=current_graph,
+            retain_artifacts=(),
+        )
+        selector = tuple(
+            sorted(
+                (str(name), str(digest_value))
+                for name, digest_value in cast(
+                    Mapping[str, object], receipt["artifact_digests"]
+                ).items()
+            )
+        )
+        if digest != snapshot.receipt_digest or selector != snapshot.inventory_selector:
+            raise PendingTransactionError("admitted snapshot receipt changed before begin")
+        return
+    if snapshot.coordination_absent:
+        if _coordination_present(capability):
+            raise PendingTransactionError("admitted legacy snapshot gained coordination")
+    else:
+        drainer = _read_drainer(capability)
+        if (
+            snapshot.purpose != "watch-prepare"
+            or _read_protocol(capability) is not None
+            or _entry_stat(capability, RECEIPT_FILE) is not None
+            or _entry_stat(capability, TRANSACTION_FILE) is not None
+            or drainer is None
+            or drainer[1] != "reserved"
+        ):
+            raise PendingTransactionError(
+                "admitted legacy snapshot coordination changed"
+            )
+    for name, expected_digest in snapshot.inventory_selector:
+        try:
+            payload = _read_relative_bytes(
+                capability, name, _artifact_read_limit(Path(name).name)
+            )
+        except PendingTransactionError as exc:
+            if expected_digest is None and "is missing" in str(exc):
+                continue
+            raise PendingTransactionError(
+                "admitted legacy inventory changed before begin"
+            ) from exc
+        if expected_digest is None or hashlib.sha256(payload).hexdigest() != expected_digest:
+            raise PendingTransactionError(
+                "admitted legacy inventory changed before begin"
+            )
+    selected_names = {name for name, _digest in snapshot.inventory_selector}
+    dynamic = _legacy_owned_dynamic_inventory(
+        capability, budget=_LegacyInventoryBudget()
+    )
+    if any(name not in selected_names for name in dynamic):
+        raise PendingTransactionError(
+            "admitted legacy inventory changed before begin"
+        )
+
+
+def open_graph_snapshot(
+    path: Path | str,
+    *,
+    purpose: str,
+    retain_artifacts: Sequence[str] = (),
+) -> GraphSnapshot:
     requested = Path(path).expanduser()
     output = requested.parent.resolve(strict=True)
     graph_path = output / requested.name
@@ -6588,7 +6710,12 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
                     continue
                 try:
                     artifact_payload = _read_relative_bytes(
-                        capability, name, legacy_budget.remaining
+                        capability,
+                        name,
+                        min(
+                            legacy_budget.remaining,
+                            _artifact_read_limit(Path(name).name),
+                        ),
                     )
                 except PendingTransactionError as exc:
                     if "is missing" in str(exc):
@@ -6598,19 +6725,49 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
                 legacy_inventory[name] = artifact_payload
                 if name == "manifest.json":
                     manifest_payload = artifact_payload
+            for requested_name in retain_artifacts:
+                name = _validated_relative_name(requested_name)
+                if name in legacy_inventory:
+                    continue
+                try:
+                    artifact_payload = _read_relative_bytes(
+                        capability,
+                        name,
+                        min(
+                            legacy_budget.remaining,
+                            _artifact_read_limit(Path(name).name),
+                        ),
+                    )
+                except PendingTransactionError as exc:
+                    if "is missing" in str(exc):
+                        continue
+                    raise
+                legacy_budget.retain(name, artifact_payload)
+                legacy_inventory[name] = artifact_payload
             legacy_inventory.update(
                 _legacy_owned_dynamic_inventory(
                     capability, budget=legacy_budget
                 )
             )
+            selected_names = {
+                *MANAGED_PUBLICATION_PATHS,
+                *legacy_inventory,
+                *(_validated_relative_name(name) for name in retain_artifacts),
+            }
             return GraphSnapshot(
-                data,
-                None,
-                graph_path,
-                payload,
-                hashlib.sha256(payload).hexdigest(),
-                manifest_payload,
-                legacy_inventory,
+                data=data,
+                generation=None,
+                graph_path=graph_path,
+                payload=payload,
+                digest=hashlib.sha256(payload).hexdigest(),
+                manifest_payload=manifest_payload,
+                artifacts=legacy_inventory,
+                output_identity=capability.identity,
+                inventory_selector=_inventory_selector(
+                    selected_names, legacy_inventory
+                ),
+                purpose=purpose,
+                coordination_absent=not _coordination_present(capability),
             )
         if not isinstance(watermark, dict) or watermark.get("schema") != 1 or watermark.get("protocol_epoch") != 1:
             raise PendingTransactionError("unsupported graph watermark schema")
@@ -6627,7 +6784,11 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
             "cluster-only": (".graphify_labels.json", ".graphify_labels.json.sig"),
             "export": (".graphify_analysis.json", ".graphify_labels.json"),
         }
-        retain = retain_by_purpose.get(purpose, ())
+        retain = tuple(
+            dict.fromkeys(
+                (*retain_by_purpose.get(purpose, ()), *retain_artifacts)
+            )
+        )
         if purpose in {
             "extract-baseline",
             "watch-prepare",
@@ -6638,7 +6799,7 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
             "tree-prepare",
         }:
             retain = ("*",)
-        receipt, _digest, inventory = _validate_receipt_locked(
+        receipt, receipt_digest, inventory = _validate_receipt_locked(
             capability,
             graph_payload=payload,
             retain_artifacts=("manifest.json", *retain),
@@ -6649,14 +6810,25 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
             or receipt.get("watermark") != watermark
         ):
             raise PendingTransactionError("generation receipt does not match graph watermark")
+        receipt_stat = _entry_stat(capability, RECEIPT_FILE)
+        if receipt_stat is None:
+            raise PendingTransactionError("generation receipt identity is missing")
+        artifact_digests = cast(Mapping[str, object], receipt["artifact_digests"])
         return GraphSnapshot(
-            data,
-            int(generation),
-            graph_path,
-            payload,
-            hashlib.sha256(payload).hexdigest(),
-            inventory["manifest.json"],
-            inventory,
+            data=data,
+            generation=int(generation),
+            graph_path=graph_path,
+            payload=payload,
+            digest=hashlib.sha256(payload).hexdigest(),
+            manifest_payload=inventory["manifest.json"],
+            artifacts=inventory,
+            output_identity=capability.identity,
+            receipt_identity=OutputIdentity(receipt_stat.st_dev, receipt_stat.st_ino),
+            receipt_digest=receipt_digest,
+            inventory_selector=tuple(
+                sorted((str(name), str(value)) for name, value in artifact_digests.items())
+            ),
+            purpose=purpose,
         )
 
 
@@ -6665,14 +6837,17 @@ def admit_snapshot_artifact(
     path: Path | str,
     *,
     canonical_name: str,
-    limit: int = _MAX_STATE_BYTES,
+    limit: int | None = None,
 ) -> bytes | None:
     """Admit one canonical receipt artifact or an identity-pinned unmanaged override."""
     if not isinstance(snapshot, GraphSnapshot):
         raise TypeError("artifact admission requires a graph snapshot")
     name = _validated_shallow_name(canonical_name)
-    if type(limit) is not int or isinstance(limit, bool) or limit < 1:
+    if limit is not None and (type(limit) is not int or isinstance(limit, bool) or limit < 1):
         raise ValueError("artifact admission limit must be a positive integer")
+    effective_limit = _artifact_read_limit(name)
+    if limit is not None:
+        effective_limit = min(effective_limit, limit)
     requested = Path(path).expanduser().absolute()
     parent = requested.parent.resolve(strict=True)
     leaf = _validated_shallow_name(requested.name)
@@ -6691,9 +6866,16 @@ def admit_snapshot_artifact(
             raise PendingTransactionError(
                 "artifact override is inconsistent with managed authority"
             )
-        return snapshot.artifacts.get(name)
-    if resolved == canonical and name in snapshot.artifacts:
-        return snapshot.artifacts[name]
+        payload = snapshot.artifacts.get(name)
+        if payload is not None and len(payload) > effective_limit:
+            raise PendingTransactionError("retained artifact exceeds its read limit")
+        return payload
+    selected = dict(snapshot.inventory_selector)
+    if resolved == canonical and name in selected:
+        payload = snapshot.artifacts.get(name)
+        if payload is not None and len(payload) > effective_limit:
+            raise PendingTransactionError("retained artifact exceeds its read limit")
+        return payload
     if source_authority is not None and source_output in resolved.parents:
         raise PendingTransactionError(
             "artifact override is inconsistent with managed authority"
@@ -6707,7 +6889,7 @@ def admit_snapshot_artifact(
         before = _entry_stat(capability, leaf)
         if before is None:
             return None
-        payload = _read_bytes(capability, leaf, limit)
+        payload = _read_bytes(capability, leaf, effective_limit)
         after = _entry_stat(capability, leaf)
         identity = (before.st_dev, before.st_ino)
         if after is None or (after.st_dev, after.st_ino) != identity:
@@ -6716,6 +6898,78 @@ def admit_snapshot_artifact(
     if managed_output_containing(resolved) is not None:
         raise PendingTransactionError("artifact override gained managed authority")
     return payload
+
+
+def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
+    """Retain report-only work-memory inputs without adding publication ownership."""
+    if snapshot.output_identity is None:
+        raise PendingTransactionError("report auxiliaries require an output snapshot")
+    output = snapshot.graph_path.parent
+    retained: dict[str, bytes] = {}
+    with pin_output(output, mutation=False) as capability, _locked(capability):
+        _validate_expected_snapshot_locked(capability, snapshot)
+        learning = _entry_stat(capability, ".graphify_learning.json")
+        if learning is not None:
+            retained[".graphify_learning.json"] = _read_bytes(
+                capability, ".graphify_learning.json", _MAX_STATE_BYTES
+            )
+        try:
+            memory_fd = (
+                _open_windows_relative_fd(capability, "memory", directory=True)
+                if _PLATFORM == "windows"
+                else os.open(
+                    "memory",
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=capability.fd,
+                )
+            )
+        except FileNotFoundError:
+            memory_fd = None
+        if memory_fd is not None:
+            memory_stat = os.fstat(memory_fd)
+            memory = OutputCapability(
+                capability.path / "memory",
+                OutputIdentity(memory_stat.st_dev, memory_stat.st_ino),
+                memory_fd,
+            )
+            try:
+                for name in _list_entries(memory):
+                    if not name.endswith(".md"):
+                        continue
+                    if len(retained) >= _MAX_RECEIPT_ARTIFACTS:
+                        raise PendingTransactionError("report auxiliary count exceeded")
+                    retained[f"memory/{name}"] = _read_bytes(
+                        memory, _validated_shallow_name(name), _MAX_STATE_BYTES
+                    )
+                memory.validate()
+                if _PLATFORM == "windows":
+                    verify_fd = _open_windows_relative_fd(
+                        capability, "memory", directory=True
+                    )
+                    try:
+                        current_memory = os.fstat(verify_fd)
+                    finally:
+                        os.close(verify_fd)
+                else:
+                    current_memory = os.stat(
+                        "memory", dir_fd=capability.fd, follow_symlinks=False
+                    )
+                if (
+                    current_memory.st_dev,
+                    current_memory.st_ino,
+                ) != (
+                    memory.identity.device,
+                    memory.identity.inode,
+                ):
+                    raise PendingTransactionError(
+                        "report memory directory identity changed"
+                    )
+            finally:
+                memory.close()
+        _validate_expected_snapshot_locked(capability, snapshot)
+    return retained
 
 
 def open_external_graph_snapshot(
@@ -6795,13 +7049,18 @@ def open_external_graph_snapshot(
     if isinstance(graph_meta, dict) and GRAPH_WATERMARK_KEY in graph_meta:
         raise PendingTransactionError("explicit graph has managed watermark authority")
     return GraphSnapshot(
-        data,
-        None,
-        graph_path,
-        payload,
-        hashlib.sha256(payload).hexdigest(),
-        None,
-        artifacts,
+        data=data,
+        generation=None,
+        graph_path=graph_path,
+        payload=payload,
+        digest=hashlib.sha256(payload).hexdigest(),
+        artifacts=artifacts,
+        output_identity=capability.identity,
+        inventory_selector=_inventory_selector(
+            (graph_name, *retain), artifacts
+        ),
+        purpose="external",
+        coordination_absent=True,
     )
 
 
@@ -6847,13 +7106,16 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
         if not isinstance(data, dict):
             raise PendingTransactionError("malformed prepared graph payload")
         return GraphSnapshot(
-            data,
-            None,
-            expected,
-            payload,
-            hashlib.sha256(payload).hexdigest(),
-            artifacts.get("manifest.json"),
-            artifacts,
+            data=data,
+            generation=None,
+            graph_path=expected,
+            payload=payload,
+            digest=hashlib.sha256(payload).hexdigest(),
+            manifest_payload=artifacts.get("manifest.json"),
+            artifacts=artifacts,
+            output_identity=prepared_capability.output.identity,
+            inventory_selector=_inventory_selector(artifacts, artifacts),
+            purpose="prepared",
         )
 
 

@@ -1621,6 +1621,60 @@ def test_transactional_watch_accepts_legacy_baseline_before_creating_markers(
     assert graph["graph"]["_graphify_protocol"]["state"] == "active"
 
 
+def test_transactional_watch_uses_report_memory_without_receipt_ownership(tmp_path):
+    from graphify.ingest import save_query_result
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "source.py"
+    source.write_text("def source():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    learning = output / ".graphify_learning.json"
+    learning.write_text(
+        json.dumps(
+            {"nodes": {"source": {"verdict": "PREFERRED", "label": "Source"}}}
+        ),
+        encoding="utf-8",
+    )
+    save_query_result(
+        "avoid watch path",
+        "failed",
+        output / "memory",
+        outcome="dead_end",
+    )
+    learning_before = learning.read_bytes()
+    memory_before = {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    }
+
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
+
+    assert "Work-memory lessons" in (output / "GRAPH_REPORT.md").read_text(
+        encoding="utf-8"
+    )
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert ".graphify_learning.json" not in receipt["required_artifacts"]
+    assert not any(
+        name.startswith("memory/") for name in receipt["required_artifacts"]
+    )
+    assert learning.read_bytes() == learning_before
+    assert {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    } == memory_before
+
+
 def test_transactional_watch_consumes_checkpointed_legacy_paths_without_drain(
     tmp_path, monkeypatch
 ):

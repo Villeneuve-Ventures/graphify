@@ -815,6 +815,55 @@ def test_export_html_error_without_graph(tmp_path):
     assert r.returncode != 0
 
 
+def test_cluster_only_uses_report_memory_without_receipt_ownership(tmp_path):
+    out = _make_graph(tmp_path)
+    learning = out / ".graphify_learning.json"
+    learning.write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "example": {
+                        "verdict": "PREFERRED",
+                        "label": "Remembered Source",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    saved = _run(
+        [
+            "save-result",
+            "--question",
+            "avoid this path",
+            "--answer",
+            "failed",
+            "--outcome",
+            "dead_end",
+        ],
+        tmp_path,
+    )
+    assert saved.returncode == 0, saved.stderr
+    learning_before = learning.read_bytes()
+    memory_before = {
+        path.name: path.read_bytes() for path in (out / "memory").glob("*.md")
+    }
+
+    result = _run(["cluster-only", ".", "--no-viz", "--no-label"], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    report = (out / "GRAPH_REPORT.md").read_text(encoding="utf-8")
+    assert "Work-memory lessons" in report
+    receipt = json.loads((out / ".graphify_generation.json").read_text())
+    required = set(receipt["required_artifacts"])
+    assert ".graphify_learning.json" not in required
+    assert not any(name.startswith("memory/") for name in required)
+    assert learning.read_bytes() == learning_before
+    assert {
+        path.name: path.read_bytes() for path in (out / "memory").glob("*.md")
+    } == memory_before
+
+
 @pytest.mark.parametrize(
     ("subcommand", "artifact"),
     (
@@ -965,9 +1014,9 @@ def test_issue89_provider_push_is_snapshot_only_and_never_publishes_locally(
     admissions: list[str] = []
     original_snapshot = transaction_module.open_graph_snapshot
 
-    def tracked_snapshot(path, *, purpose):
+    def tracked_snapshot(path, *, purpose, **kwargs):
         admissions.append(purpose)
-        return original_snapshot(path, purpose=purpose)
+        return original_snapshot(path, purpose=purpose, **kwargs)
 
     def provider_call(_graph, **kwargs):
         calls.append(kwargs)

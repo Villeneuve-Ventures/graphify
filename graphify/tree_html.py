@@ -627,7 +627,10 @@ def write_tree_html(
                 graph_parent.parent if graph_parent.name == "graphify-out" else graph_parent
             )
             transaction = begin_transaction(
-                "runtime", transaction_root, output=graph_parent
+                "runtime",
+                transaction_root,
+                output=graph_parent,
+                expected_snapshot=snapshot,
             )
             graph_data = dict(snapshot.data)
             metadata = dict(graph_data.get("graph") or {})

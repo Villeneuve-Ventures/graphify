@@ -649,15 +649,16 @@ def _transactional_extract() -> None:
         staging_root = Path(staging_name)
         staging_output = staging_root / "graphify-out"
         staging_output.mkdir()
+        source_snapshot = None
         if destination.graph.is_file():
-            snapshot = open_graph_snapshot(
+            source_snapshot = open_graph_snapshot(
                 destination.graph, purpose="extract-baseline"
             )
-            for name, payload in snapshot.artifacts.items():
+            for name, payload in source_snapshot.artifacts.items():
                 target = staging_output / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(payload)
-            prior_inventory = snapshot.artifacts
+            prior_inventory = source_snapshot.artifacts
         else:
             prior_inventory = {}
         staged_graph = staging_output / "graph.json"
@@ -672,7 +673,10 @@ def _transactional_extract() -> None:
             baseline_graph_data = baseline
             staged_graph.write_text(json.dumps(baseline), encoding="utf-8")
         transaction = begin_transaction(
-            "full", destination.root, output=destination.output
+            "full",
+            destination.root,
+            output=destination.output,
+            expected_snapshot=source_snapshot,
         )
         sys.argv = _canonical_extract_argv(destination.root)
         globals()["_TRANSACTION_OUTPUT_OVERRIDE"] = staging_output
@@ -750,6 +754,7 @@ def _transactional_cluster_only(cmd: str) -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,
         PublicationPlan,
+        admit_report_auxiliaries,
         begin_transaction,
         commit_publication_plan,
         finish_transaction,
@@ -764,10 +769,14 @@ def _transactional_cluster_only(cmd: str) -> None:
     source_snapshot = open_graph_snapshot(
         destination.graph, purpose="publication-prepare"
     )
+    report_auxiliaries = admit_report_auxiliaries(source_snapshot)
     source_graph_data = source_snapshot.data
     destination.output.mkdir(parents=True, exist_ok=True)
     transaction = begin_transaction(
-        "runtime", destination.root, output=destination.output
+        "runtime",
+        destination.root,
+        output=destination.output,
+        expected_snapshot=source_snapshot,
     )
     captured_out = io.StringIO()
     captured_err = io.StringIO()
@@ -775,6 +784,10 @@ def _transactional_cluster_only(cmd: str) -> None:
     with tempfile.TemporaryDirectory(prefix="graphify-cli-prepare-") as staging_name:
         staging = Path(staging_name)
         for name, payload in source_snapshot.artifacts.items():
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        for name, payload in report_auxiliaries.items():
             target = staging / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
@@ -820,6 +833,8 @@ def _transactional_cluster_only(cmd: str) -> None:
         if not manifest.is_file():
             manifest.write_bytes(b"{}")
         manifest_payload = manifest.read_bytes()
+        (staging / ".graphify_learning.json").unlink(missing_ok=True)
+        shutil.rmtree(staging / "memory", ignore_errors=True)
         plan = publication_plan_from_directory(
             staging, prior_inventory=source_snapshot.artifacts
         )
@@ -991,6 +1006,12 @@ def _transactional_export() -> None:
     if not graph.is_file():
         _dispatch_command("export")
         return
+    retained_overrides: list[str] = []
+    if sys.argv[2] == "callflow-html":
+        for option in ("--labels", "--report", "--sections"):
+            selected = _export_option_path(sys.argv[3:], option)
+            if selected is not None and selected.parent == graph.parent:
+                retained_overrides.append(selected.name)
     try:
         active_transaction = current_transaction()
     except PendingTransactionError:
@@ -1022,21 +1043,29 @@ def _transactional_export() -> None:
                 if "managed" not in str(exc):
                     raise
                 source_snapshot = open_graph_snapshot(
-                    graph, purpose="export-admission"
+                    graph,
+                    purpose="export-admission",
+                    retain_artifacts=retained_overrides,
                 )
                 source_managed = True
             else:
                 source_managed = False
         else:
             source_snapshot = open_graph_snapshot(
-                graph, purpose="export-admission"
+                graph,
+                purpose="export-admission",
+                retain_artifacts=retained_overrides,
             )
             source_managed = True
     explicit_artifacts: dict[str, tuple[str, bytes | None]] = {}
-    for option, canonical_name in (
+    artifact_options = [
         ("--labels", ".graphify_labels.json"),
         ("--report", "GRAPH_REPORT.md"),
-    ):
+    ]
+    sections_override = _export_option_path(sys.argv[3:], "--sections")
+    if sys.argv[2] == "callflow-html" and sections_override is not None:
+        artifact_options.append(("--sections", sections_override.name))
+    for option, canonical_name in artifact_options:
         override = _export_option_path(sys.argv[3:], option)
         if override is None or (option == "--report" and sys.argv[2] != "callflow-html"):
             continue
@@ -1254,7 +1283,10 @@ def _transactional_export() -> None:
                 raise success_exit
             return
         transaction = active_transaction or begin_transaction(
-            "runtime", graph.parent, output=graph.parent
+            "runtime",
+            graph.parent,
+            output=graph.parent,
+            expected_snapshot=source_snapshot,
         )
         if active_transaction is not None:
             with owned_step(transaction):

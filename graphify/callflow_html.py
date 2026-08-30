@@ -331,9 +331,17 @@ def load_labels(path: str | Path | None, *, payload: bytes | None = None) -> dic
     return labels
 
 
-def load_sections(path: str | Path | None) -> list:
+def load_sections(
+    path: str | Path | None, *, payload: bytes | None = None
+) -> list:
     """Load section definitions from JSON file."""
-    data = read_json(path, default=[]) if path is not None else []
+    if payload is None:
+        data = read_json(path, default=[]) if path is not None else []
+    else:
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"ERROR: invalid JSON in {path}: {exc}") from exc
     if isinstance(data, dict) and isinstance(data.get("sections"), list):
         data = data["sections"]
     if not isinstance(data, list):
@@ -1641,7 +1649,21 @@ def write_callflow_html(
 
     # Load graph + default/explicit sidecars from one retained generation.
     from graphify.transaction import admit_snapshot_artifact, open_graph_snapshot
-    snapshot = open_graph_snapshot(paths["graph"], purpose="callflow-html")
+    retained_names: list[str] = []
+    if paths["sections"] is not None:
+        sections_parent = paths["sections"].expanduser().absolute().parent.resolve(
+            strict=True
+        )
+        graph_parent = paths["graph"].expanduser().absolute().parent.resolve(
+            strict=True
+        )
+        if sections_parent == graph_parent:
+            retained_names.append(paths["sections"].name)
+    snapshot = open_graph_snapshot(
+        paths["graph"],
+        purpose="callflow-html",
+        retain_artifacts=retained_names,
+    )
     labels_payload = admit_snapshot_artifact(
         snapshot,
         paths["labels"],
@@ -1653,6 +1675,16 @@ def write_callflow_html(
         canonical_name="GRAPH_REPORT.md",
         limit=50 * 1024 * 1024,
     )
+    sections_payload = (
+        admit_snapshot_artifact(
+            snapshot,
+            paths["sections"],
+            canonical_name=paths["sections"].name,
+            limit=1024 * 1024,
+        )
+        if paths["sections"] is not None
+        else None
+    )
     nodes, edges, hyperedges, meta = load_graph(
         paths["graph"], snapshot=snapshot
     )
@@ -1661,7 +1693,10 @@ def write_callflow_html(
     )
     lang = detect_lang(args.lang, nodes, label_map)
     if paths["sections"]:
-        section_list = load_sections(paths["sections"])
+        section_list = load_sections(
+            paths["sections"],
+            payload=sections_payload if sections_payload is not None else b"[]",
+        )
     else:
         section_list = derive_sections_from_communities(
             nodes, label_map, lang, args.max_sections

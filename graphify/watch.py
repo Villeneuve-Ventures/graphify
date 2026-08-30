@@ -819,6 +819,7 @@ def _rebuild_code(
             GRAPH_WATERMARK_KEY,
             PendingTransactionError,
             PublicationPlan,
+            admit_report_auxiliaries,
             begin_transaction,
             cancel_unpublished_transaction,
             claim_rebuild_queue,
@@ -846,6 +847,8 @@ def _rebuild_code(
         )
         baseline_graph: dict | None = None
         baseline_artifacts: dict[str, bytes] = {}
+        report_auxiliaries: dict[str, bytes] = {}
+        baseline_snapshot = None
         if (actual_out / "graph.json").is_file():
             try:
                 baseline_snapshot = open_graph_snapshot(
@@ -853,6 +856,7 @@ def _rebuild_code(
                 )
                 baseline_graph = baseline_snapshot.data
                 baseline_artifacts = dict(baseline_snapshot.artifacts)
+                report_auxiliaries = admit_report_auxiliaries(baseline_snapshot)
             except PendingTransactionError as exc:
                 print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
@@ -867,7 +871,14 @@ def _rebuild_code(
                 )
                 return False
         try:
-            transaction = begin_transaction("runtime", watch_path, output=actual_out)
+            transaction = begin_transaction(
+                "runtime",
+                watch_path,
+                output=actual_out,
+                expected_snapshot=baseline_snapshot
+                if baseline_graph is not None
+                else None,
+            )
         except PendingTransactionError as exc:
             print(f"[graphify watch] Rebuild deferred: {exc}")
             return False
@@ -887,8 +898,14 @@ def _rebuild_code(
                     ):
                         return True
                 finish_transaction(transaction)
+                baseline_snapshot = open_graph_snapshot(
+                    actual_out / "graph.json", purpose="watch-prepare"
+                )
                 transaction = begin_transaction(
-                    "runtime", watch_path, output=actual_out
+                    "runtime",
+                    watch_path,
+                    output=actual_out,
+                    expected_snapshot=baseline_snapshot,
                 )
                 claim = claim_rebuild_queue(transaction, transaction.drainer)
                 receipt_digest = None
@@ -915,6 +932,10 @@ def _rebuild_code(
                 for name, payload in baseline_artifacts.items():
                     if name == "graph.json":
                         continue
+                    target = prepared / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(payload)
+                for name, payload in report_auxiliaries.items():
                     target = prepared / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(payload)
@@ -958,6 +979,8 @@ def _rebuild_code(
                     graph_data, ensure_ascii=False, separators=(",", ":")
                 ).encode("utf-8")
                 manifest_payload = manifest_path.read_bytes()
+                (prepared / ".graphify_learning.json").unlink(missing_ok=True)
+                shutil.rmtree(prepared / "memory", ignore_errors=True)
                 plan = publication_plan_from_directory(
                     prepared, prior_inventory=baseline_artifacts
                 )
@@ -977,8 +1000,14 @@ def _rebuild_code(
                     ):
                         return True
                 finish_transaction(transaction)
+                baseline_snapshot = open_graph_snapshot(
+                    actual_out / "graph.json", purpose="watch-prepare"
+                )
                 transaction = begin_transaction(
-                    "runtime", watch_path, output=actual_out
+                    "runtime",
+                    watch_path,
+                    output=actual_out,
+                    expected_snapshot=baseline_snapshot,
                 )
                 baseline_graph = graph_data
                 baseline_artifacts = dict(payloads)
