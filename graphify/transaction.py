@@ -100,9 +100,11 @@ _COORDINATION_PREFIXES = (
     ".graphify_transaction_token.",
     ".graphify_rebuild_inflight.",
     ".graphify_queue_stage.",
+    ".graphify_queue_retire.",
     ".graphify_queue_transition.",
 )
 _QUEUE_STAGE_PREFIX = ".graphify_queue_stage."
+_QUEUE_RETIRE_PREFIX = ".graphify_queue_retire."
 _QUEUE_TRANSITION_PREFIX = ".graphify_queue_transition."
 _UNMANAGED_JOURNAL_PREFIX = ".graphify-unmanaged-journal-"
 _UNMANAGED_DELETE_PREFIX = ".graphify-unmanaged-delete-"
@@ -8542,8 +8544,8 @@ def _read_queue_transition_successor_binding(
     if _entry_stat(capability, binding_name) is None:
         return None
     try:
-        raw = json.loads(_read_bytes(capability, binding_name).decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw = _decode_queue_transition_state(capability, binding_name)
+    except PendingTransactionError as exc:
         raise PendingTransactionError("malformed queue transition binding") from exc
     if (
         not isinstance(raw, dict)
@@ -8558,6 +8560,18 @@ def _read_queue_transition_successor_binding(
     if identity is None:
         raise PendingTransactionError("malformed queue transition binding")
     return identity, str(raw["digest"])
+
+
+def _decode_queue_transition_state(
+    capability: OutputCapability, name: str, *, limit: int = _MAX_STATE_BYTES
+) -> dict[str, Any]:
+    try:
+        raw = json.loads(_read_bytes(capability, name, limit).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError("malformed queue transition state") from exc
+    if not isinstance(raw, dict):
+        raise PendingTransactionError("malformed queue transition state")
+    return cast(dict[str, Any], raw)
 
 
 def _queue_transition_binding(record: QueueFileRecord) -> dict[str, object]:
@@ -8578,12 +8592,10 @@ def _read_queue_transition(
     if _entry_stat(capability, journal_name) is None:
         return None
     try:
-        raw = json.loads(
-            _read_bytes(
-                capability, journal_name, _MAX_STATE_BYTES + 65536
-            ).decode("utf-8")
+        raw = _decode_queue_transition_state(
+            capability, journal_name, limit=_MAX_STATE_BYTES + 65536
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except PendingTransactionError as exc:
         raise PendingTransactionError("malformed queue transition journal") from exc
     expected = {
         "schema",
@@ -8593,11 +8605,13 @@ def _read_queue_transition(
         "successor_queue",
         "successor_digest",
         "stage_name",
+        "retirement_name",
     }
     if not isinstance(raw, dict) or set(raw) != expected:
         raise PendingTransactionError("malformed queue transition journal")
     public_name = raw.get("public_name")
     stage_name = raw.get("stage_name")
+    retirement_name = raw.get("retirement_name")
     predecessor = raw.get("predecessor")
     successor = raw.get("successor_queue")
     if (
@@ -8606,6 +8620,9 @@ def _read_queue_transition(
         or type(stage_name) is not str
         or not stage_name.startswith(_QUEUE_STAGE_PREFIX)
         or not _is_hex(stage_name.removeprefix(_QUEUE_STAGE_PREFIX))
+        or type(retirement_name) is not str
+        or not retirement_name.startswith(_QUEUE_RETIRE_PREFIX)
+        or not _is_hex(retirement_name.removeprefix(_QUEUE_RETIRE_PREFIX))
         or not isinstance(predecessor, dict)
         or set(predecessor) != {"name", "device", "inode", "digest"}
         or predecessor.get("name") != name
@@ -8653,8 +8670,10 @@ def _recover_queue_transition(
     successor_items = cast(list[dict[str, Any]], raw["successor_queue"])
     successor_digest = str(raw["successor_digest"])
     stage_name = str(raw["stage_name"])
+    retirement_name = str(raw["retirement_name"])
     public = _read_queue_record(capability, name)
     stage = _read_queue_record(capability, stage_name)
+    retirement = _read_queue_record(capability, retirement_name)
     successor_binding = _read_queue_transition_successor_binding(
         capability, name
     )
@@ -8671,6 +8690,10 @@ def _recover_queue_transition(
     )
     stage_is_predecessor = (
         stage.identity == predecessor_identity and stage.digest == predecessor_digest
+    )
+    retirement_is_predecessor = (
+        retirement.identity == predecessor_identity
+        and retirement.digest == predecessor_digest
     )
     stage_is_successor = stage.digest == successor_digest and (
         stage.items == tuple(successor_items)
@@ -8731,12 +8754,41 @@ def _recover_queue_transition(
         )
     if not public_is_successor:
         raise PendingTransactionError("queue transition public state changed")
+    if stage.identity is not None and retirement.identity is not None:
+        raise PendingTransactionError("queue transition retirement is ambiguous")
     if stage.identity is not None:
         if not stage_is_predecessor:
             raise PendingTransactionError("queue transition predecessor stage changed")
-        _retire_queue_record(capability, stage)
+        os.rename(
+            stage_name,
+            retirement_name,
+            src_dir_fd=capability.fd,
+            dst_dir_fd=capability.fd,
+        )
+        os.fsync(capability.fd)
+        if failpoint is not None:
+            failpoint("after_queue_retirement_rename")
+        retirement = _read_queue_record(capability, retirement_name)
+        retirement_is_predecessor = (
+            retirement.identity == predecessor_identity
+            and retirement.digest == predecessor_digest
+        )
+    if retirement.identity is not None:
+        if not retirement_is_predecessor:
+            raise PendingTransactionError("queue transition retirement identity changed")
+        confirmed = _read_queue_record(capability, retirement_name)
+        if not _queue_record_matches(confirmed, retirement):
+            raise PendingTransactionError("queue transition retirement changed")
+        os.unlink(retirement_name, dir_fd=capability.fd)
+        os.fsync(capability.fd)
+        capability.validate()
         if failpoint is not None:
             failpoint("after_queue_predecessor_retired")
+    if (
+        _entry_stat(capability, stage_name) is not None
+        or _entry_stat(capability, retirement_name) is not None
+    ):
+        raise PendingTransactionError("queue transition retirement did not finish")
     journal_name = _queue_transition_journal_name(name)
     _unlink(capability, journal_name)
     os.fsync(capability.fd)
@@ -8774,10 +8826,8 @@ def _recover_queue_transitions_locked(
     if len(names) > _MAX_QUEUE_ITEMS:
         raise PendingTransactionError("queue transition journal count exceeded")
     for journal_name in sorted(names):
-        raw = json.loads(
-            _read_bytes(
-                capability, journal_name, _MAX_STATE_BYTES + 65536
-            ).decode("utf-8")
+        raw = _decode_queue_transition_state(
+            capability, journal_name, limit=_MAX_STATE_BYTES + 65536
         )
         if not isinstance(raw, dict) or type(raw.get("public_name")) is not str:
             raise PendingTransactionError("malformed queue transition journal")
@@ -8792,7 +8842,7 @@ def _recover_queue_transitions_locked(
     if len(binding_names) > _MAX_QUEUE_ITEMS:
         raise PendingTransactionError("queue transition binding count exceeded")
     for binding_name in sorted(binding_names):
-        raw = json.loads(_read_bytes(capability, binding_name).decode("utf-8"))
+        raw = _decode_queue_transition_state(capability, binding_name)
         if not isinstance(raw, dict) or type(raw.get("public_name")) is not str:
             raise PendingTransactionError("malformed queue transition binding")
         if binding_name != _queue_transition_binding_name(str(raw["public_name"])):
@@ -8889,6 +8939,7 @@ def _transition_queue(
         else:
             journal_name = _queue_transition_journal_name(predecessor.name)
             stage_name = f"{_QUEUE_STAGE_PREFIX}{secrets.token_hex(32)}"
+            retirement_name = f"{_QUEUE_RETIRE_PREFIX}{secrets.token_hex(32)}"
             journal = {
                 "schema": 1,
                 "protocol_epoch": 1,
@@ -8897,6 +8948,7 @@ def _transition_queue(
                 "successor_queue": successor_items,
                 "successor_digest": hashlib.sha256(payload).hexdigest(),
                 "stage_name": stage_name,
+                "retirement_name": retirement_name,
             }
             _create_bytes(capability, journal_name, _json_bytes(journal))
             if failpoint is not None:

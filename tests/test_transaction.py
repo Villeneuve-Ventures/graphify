@@ -7747,8 +7747,16 @@ def test_claim_queue_transitions_reject_same_inode_predecessor_drift(
 
 
 @pytest.mark.parametrize("target", ["primary", "inflight", "quarantine"])
+@pytest.mark.parametrize(
+    "crash_phase",
+    [
+        "after_queue_exchange",
+        "after_queue_retirement_rename",
+        "after_queue_predecessor_retired",
+    ],
+)
 def test_existing_queue_exchange_crash_retains_recoverable_predecessor(
-    tmp_path, target
+    tmp_path, target, crash_phase
 ):
     import graphify.transaction as transaction_module
 
@@ -7771,7 +7779,7 @@ def test_existing_queue_exchange_crash_retains_recoverable_predecessor(
             "output, name = sys.argv[1:]",
             "with t.pin_output(output) as cap, t._locked(cap):",
             "    predecessor = t._read_queue_record(cap, name)",
-            "    t._transition_queue(cap, predecessor, (), failpoint=lambda phase: os._exit(91) if phase == 'after_queue_exchange' else None)",
+            f"    t._transition_queue(cap, predecessor, (), failpoint=lambda phase: os._exit(91) if phase == {crash_phase!r} else None)",
         ]
     )
     crashed = subprocess.run(
@@ -7781,21 +7789,147 @@ def test_existing_queue_exchange_crash_retains_recoverable_predecessor(
     assert crashed.returncode == 91
     assert target_path.read_bytes() == b""
     stages = list(output.glob(".graphify_queue_stage.*"))
+    retirements = list(output.glob(".graphify_queue_retire.*"))
     journals = [
         path
         for path in output.glob(".graphify_queue_transition.*.json")
         if not path.name.endswith(".bound.json")
     ]
     bindings = list(output.glob(".graphify_queue_transition.*.bound.json"))
-    assert len(stages) == len(journals) == len(bindings) == 1
-    assert stages[0].read_bytes() == original_payload
+    assert len(journals) == len(bindings) == 1
+    if crash_phase == "after_queue_exchange":
+        assert len(stages) == 1
+        assert not retirements
+        assert stages[0].read_bytes() == original_payload
+    elif crash_phase == "after_queue_retirement_rename":
+        assert not stages
+        assert len(retirements) == 1
+        assert retirements[0].read_bytes() == original_payload
+    else:
+        assert not stages
+        assert not retirements
 
     with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
         transaction_module._recover_queue_transitions_locked(capability)
 
     assert target_path.read_bytes() == b""
     assert not list(output.glob(".graphify_queue_stage.*"))
+    assert not list(output.glob(".graphify_queue_retire.*"))
     assert not list(output.glob(".graphify_queue_transition.*.json"))
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "after_queue_transition_journal",
+        "after_queue_successor_stage",
+        "after_queue_successor_binding",
+        "after_queue_retirement_rename",
+        "after_queue_predecessor_retired",
+        "after_queue_transition_journal_retired",
+    ],
+)
+def test_queue_transition_every_durable_phase_replays(tmp_path, phase):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        predecessor = transaction_module._read_queue_record(capability)
+        with pytest.raises(RuntimeError, match=phase):
+            transaction_module._transition_queue(
+                capability,
+                predecessor,
+                (),
+                failpoint=lambda current: (_ for _ in ()).throw(RuntimeError(current))
+                if current == phase
+                else None,
+            )
+        transaction_module._recover_queue_transitions_locked(capability)
+        assert transaction_module._read_queue_record(capability).items == ()
+
+    assert not list(output.glob(".graphify_queue_stage.*"))
+    assert not list(output.glob(".graphify_queue_retire.*"))
+    assert not list(output.glob(".graphify_queue_transition.*.json"))
+
+
+def test_queue_transition_rejects_foreign_retirement_identity(tmp_path):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        predecessor = transaction_module._read_queue_record(capability)
+        with pytest.raises(RuntimeError, match="after_queue_retirement_rename"):
+            transaction_module._transition_queue(
+                capability,
+                predecessor,
+                (),
+                failpoint=lambda current: (_ for _ in ()).throw(RuntimeError(current))
+                if current == "after_queue_retirement_rename"
+                else None,
+            )
+    retirement = next(output.glob(".graphify_queue_retire.*"))
+    payload = retirement.read_bytes()
+    retirement.unlink()
+    retirement.write_bytes(payload)
+    before = _file_bytes(output)
+
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="retirement identity"):
+            transaction_module._recover_queue_transitions_locked(capability)
+
+    assert _file_bytes(output) == before
+
+
+def test_queue_transition_binding_only_rejects_foreign_successor_identity(tmp_path):
+    import graphify.transaction as transaction_module
+
+    root, output, _tx, _token = _owner(tmp_path)
+    queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        predecessor = transaction_module._read_queue_record(capability)
+        with pytest.raises(RuntimeError, match="after_queue_transition_journal_retired"):
+            transaction_module._transition_queue(
+                capability,
+                predecessor,
+                (),
+                failpoint=lambda current: (_ for _ in ()).throw(RuntimeError(current))
+                if current == "after_queue_transition_journal_retired"
+                else None,
+            )
+    queue_path = output / transaction_module.QUEUE_FILE
+    successor_payload = queue_path.read_bytes()
+    queue_path.unlink()
+    queue_path.write_bytes(successor_payload)
+    before = _file_bytes(output)
+
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="successor binding changed"):
+            transaction_module._recover_queue_transitions_locked(capability)
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("kind", ["journal", "binding"])
+@pytest.mark.parametrize("payload", [b"\xff", b"{"])
+def test_queue_transition_discovery_maps_malformed_state(
+    tmp_path, kind, payload
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, _tx, _token = _owner(tmp_path)
+    name = transaction_module.QUEUE_FILE
+    state_name = (
+        transaction_module._queue_transition_journal_name(name)
+        if kind == "journal"
+        else transaction_module._queue_transition_binding_name(name)
+    )
+    (output / state_name).write_bytes(payload)
+
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        with pytest.raises(PendingTransactionError, match="malformed queue transition"):
+            transaction_module._recover_queue_transitions_locked(capability)
 
 
 def test_replace_bytes_fsyncs_and_revalidates_after_vanished_winner_restore(
