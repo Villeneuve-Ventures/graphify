@@ -84,11 +84,15 @@ _COORDINATION_PREFIXES = (
     ".graphify_rebuild_inflight.",
 )
 _UNMANAGED_JOURNAL_PREFIX = ".graphify-unmanaged-journal-"
+_UNMANAGED_DELETE_PREFIX = ".graphify-unmanaged-delete-"
+_OBSIDIAN_BATCH_PREFIX = ".graphify-unmanaged-obsidian-"
+_ANY_UNMANAGED_PREDECESSOR = object()
 _SAFE_GRAPHLESS_RUNTIME_ENTRIES = frozenset(
     {"cache", "memory", "reflections", ".graphify_python", ".rebuild.lock"}
 )
 _PLATFORM = "windows" if os.name == "nt" else "posix"
 _MAX_STATE_BYTES = 1024 * 1024
+_MAX_OBSIDIAN_BATCH_JOURNAL_BYTES = _MAX_STATE_BYTES
 _TOKEN_MAX_BYTES = 16 * 1024
 _DETACHED_MAX_BYTES = 50 * 1024 * 1024
 _DETACHED_MAX_NODES = 100_000
@@ -253,6 +257,23 @@ class GraphSnapshot:
     digest: str
     manifest_payload: bytes | None = None
     artifacts: Mapping[str, bytes] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class UnmanagedInventoryEntry:
+    payload: bytes
+    digest: str
+    identity: OutputIdentity
+
+
+@dataclass(frozen=True)
+class UnmanagedObsidianInventory:
+    vault_identity: OutputIdentity | None
+    manifest_payload: bytes | None
+    manifest_digest: str | None
+    manifest_identity: OutputIdentity | None
+    files: Mapping[str, UnmanagedInventoryEntry]
+    manifest_names: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -1132,6 +1153,45 @@ def _atomic_exchange(capability: OutputCapability, left: str, right: str) -> Non
         raise OSError(error, os.strerror(error), right)
 
 
+def _atomic_rename_no_replace(
+    capability: OutputCapability, source: str, target: str
+) -> None:
+    """Atomically rename one entry without replacing an existing target."""
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = getattr(libc, "renameatx_np", None)
+        flags = 0x00000004  # RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        flags = 0x00000001  # RENAME_NOREPLACE
+    else:
+        rename = None
+        flags = 0
+    if rename is None:
+        raise PendingTransactionError(
+            "atomic unmanaged deletion is unavailable on this platform"
+        )
+    rename.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename.restype = ctypes.c_int
+    if rename(
+        capability.fd,
+        os.fsencode(source),
+        capability.fd,
+        os.fsencode(target),
+        flags,
+    ) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), target)
+
+
 def _unmanaged_aux_name(leaf: str, suffix: str) -> str:
     return f".{leaf}.graphify-unmanaged-{secrets.token_hex(16)}.{suffix}"
 
@@ -1163,6 +1223,10 @@ def _replace_unmanaged_relative_bytes(
     canonical_destination: str,
     failpoint: Callable[[str], None] | None = None,
     terminal_validate: Callable[[], None] | None = None,
+    expected_predecessor_digest: str | None | object = _ANY_UNMANAGED_PREDECESSOR,
+    expected_predecessor_identity: OutputIdentity | None | object = (
+        _ANY_UNMANAGED_PREDECESSOR
+    ),
 ) -> None:
     """Publish one unmanaged leaf with an identity-bound atomic exchange."""
     relative = Path(_validated_relative_name(relative_name))
@@ -1233,6 +1297,9 @@ def _replace_unmanaged_relative_bytes(
                     "staged",
                     "exchange_attempt",
                     "exchanged",
+                    "stage-retire-attempt",
+                    "stage-retired",
+                    "aux-retired",
                     "restored_predecessor",
                     "restored_competitor",
                 }
@@ -1286,24 +1353,88 @@ def _replace_unmanaged_relative_bytes(
             backup_current = (
                 None if backup is None else _relative_identity(nested, backup)
             )
-            if backup_current is not None and backup_current != (
-                None
-                if prior_predecessor is None
-                else (prior_predecessor.device, prior_predecessor.inode)
-            ):
-                raise PendingTransactionError(
-                    "unmanaged publication backup identity changed"
-                )
-            successor_identity = (
-                None
-                if prior_stage is None
-                else (prior_stage.device, prior_stage.inode)
-            )
             predecessor_tuple = (
                 None
                 if prior_predecessor is None
                 else (prior_predecessor.device, prior_predecessor.inode)
             )
+            successor_identity = (
+                None
+                if prior_stage is None
+                else (prior_stage.device, prior_stage.inode)
+            )
+            completed_successor = (
+                (
+                    prior_journal["state"] in {"stage-retired", "aux-retired"}
+                    or (
+                        prior_journal["state"] == "stage-retire-attempt"
+                        and predecessor_tuple is None
+                    )
+                )
+                and successor_identity is not None
+                and leaf_current == successor_identity
+                and stage_current_raw is None
+                and backup_current is None
+            )
+            if prior_journal["state"] == "aux-retired" and not completed_successor:
+                raise PendingTransactionError(
+                    "unmanaged retired auxiliary state changed"
+                )
+            allowed_backup_identities = {predecessor_tuple}
+            if (
+                prior_journal["state"]
+                in {"stage-retire-attempt", "stage-retired"}
+                and leaf_current == predecessor_tuple
+            ):
+                allowed_backup_identities.add(successor_identity)
+            if (
+                backup_current is not None
+                and backup_current not in allowed_backup_identities
+            ):
+                raise PendingTransactionError(
+                    "unmanaged publication backup identity changed"
+                )
+            if (
+                prior_journal["state"]
+                in {"stage-retire-attempt", "stage-retired"}
+                and leaf_current == predecessor_tuple
+                and stage_current_raw is None
+                and backup_current == successor_identity
+            ):
+                restored_tuple = cast(tuple[int, int], leaf_current)
+                prior_journal["state"] = "restored_predecessor"
+                prior_journal["restored_identity"] = {
+                    "device": restored_tuple[0],
+                    "inode": restored_tuple[1],
+                }
+                restored_identity = OutputIdentity(*restored_tuple)
+                _replace_bytes(
+                    journal_capability, journal_name, _json_bytes(prior_journal)
+                )
+                restored_state = True
+            if (
+                prior_journal["state"]
+                in {"exchanged", "stage-retire-attempt", "stage-retired"}
+                and leaf_current is not None
+                and leaf_current not in {successor_identity, predecessor_tuple}
+                and (
+                    (predecessor_tuple is None and stage_current_raw in {successor_identity, None})
+                    or (
+                        predecessor_tuple is not None
+                        and stage_current_raw in {predecessor_tuple, None}
+                    )
+                )
+            ):
+                prior_journal["state"] = "restored_competitor"
+                prior_journal["restored_identity"] = {
+                    "device": leaf_current[0],
+                    "inode": leaf_current[1],
+                }
+                restored_identity = OutputIdentity(*leaf_current)
+                _replace_bytes(
+                    journal_capability, journal_name, _json_bytes(prior_journal)
+                )
+                restored_state = True
             recovered_competitor = prior_journal["state"] == "restored_competitor"
             if restored_state:
                 restored_tuple = (
@@ -1316,15 +1447,15 @@ def _replace_unmanaged_relative_bytes(
                     raise PendingTransactionError(
                         "unmanaged restored publication identity changed"
                     )
-            elif successor_identity is not None and leaf_current == successor_identity:
+            elif (
+                successor_identity is not None
+                and leaf_current == successor_identity
+                and not completed_successor
+            ):
                 if predecessor_tuple is None:
                     os.unlink(leaf, dir_fd=nested.fd)
                     leaf_current = None
-                else:
-                    if stage_current_raw is None:
-                        raise PendingTransactionError(
-                            "unmanaged exchange displacement is unavailable"
-                        )
+                elif stage_current_raw is not None:
                     recovered_competitor = stage_current_raw != predecessor_tuple
                     _atomic_exchange(nested, staged, leaf)
                     os.fsync(nested.fd)
@@ -1347,6 +1478,37 @@ def _replace_unmanaged_relative_bytes(
                     restored_state = True
                     if failpoint is not None:
                         failpoint("after_unmanaged_restored_phase")
+                elif (
+                    prior_journal["state"]
+                    in {"exchanged", "stage-retire-attempt", "stage-retired"}
+                    and backup is not None
+                    and backup_current == predecessor_tuple
+                ):
+                    _atomic_exchange(nested, backup, leaf)
+                    os.fsync(nested.fd)
+                    leaf_current = predecessor_tuple
+                    backup_current = successor_identity
+                    if failpoint is not None:
+                        failpoint("after_unmanaged_recovery_exchange")
+                    prior_journal["state"] = "restored_predecessor"
+                    prior_journal["restored_identity"] = {
+                        "device": leaf_current[0],
+                        "inode": leaf_current[1],
+                    }
+                    _replace_bytes(
+                        journal_capability, journal_name, _json_bytes(prior_journal)
+                    )
+                    restored_state = True
+                    if failpoint is not None:
+                        failpoint("after_unmanaged_restored_phase")
+                elif not (
+                    prior_journal["state"]
+                    in {"stage-retire-attempt", "stage-retired", "aux-retired"}
+                    and backup_current is None
+                ):
+                    raise PendingTransactionError(
+                        "unmanaged exchange displacement is unavailable"
+                    )
             elif (
                 prior_journal["state"] == "exchange_attempt"
                 and successor_identity is not None
@@ -1396,9 +1558,12 @@ def _replace_unmanaged_relative_bytes(
                         )
                     os.unlink(staged, dir_fd=nested.fd)
                     stage_current_raw = None
-            elif prior_stage is not None and not restored_state and leaf_current != (
-                prior_stage.device,
-                prior_stage.inode,
+            elif (
+                prior_stage is not None
+                and not restored_state
+                and not completed_successor
+                and leaf_current
+                != (prior_stage.device, prior_stage.inode)
             ):
                 raise PendingTransactionError(
                     "unmanaged publication stage identity is unavailable"
@@ -1406,6 +1571,7 @@ def _replace_unmanaged_relative_bytes(
             if (
                 prior_stage is not None
                 and not restored_state
+                and not completed_successor
                 and leaf_current == successor_identity
             ):
                 if predecessor_tuple is None:
@@ -1426,7 +1592,10 @@ def _replace_unmanaged_relative_bytes(
                 current = _relative_identity(nested, name)
                 if current is None:
                     continue
-                if current not in {allowed_identity, predecessor_tuple}:
+                allowed_current = {allowed_identity, predecessor_tuple}
+                if restored_state:
+                    allowed_current.add(successor_identity)
+                if current not in allowed_current:
                     raise PendingTransactionError(
                         "unmanaged auxiliary identity changed"
                     )
@@ -1444,6 +1613,8 @@ def _replace_unmanaged_relative_bytes(
                 raise PendingTransactionError(
                     "unmanaged exchange competitor was restored; retry publication"
                 )
+            if completed_successor:
+                return
         backup = None
         staged = None
         prior = (
@@ -1451,6 +1622,49 @@ def _replace_unmanaged_relative_bytes(
             if _entry_stat(nested, leaf) is not None
             else None
         )
+        if expected_predecessor_digest is not _ANY_UNMANAGED_PREDECESSOR:
+            if prior is None:
+                if expected_predecessor_digest is not None:
+                    raise PendingTransactionError(
+                        "unmanaged destination predecessor is missing"
+                    )
+            else:
+                if expected_predecessor_digest is None:
+                    raise PendingTransactionError(
+                        "unmanaged destination appeared before publication"
+                    )
+                prior_digest, _size, _body = _hash_relative_bytes(
+                    nested,
+                    leaf,
+                    aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES,
+                )
+                if prior_digest != expected_predecessor_digest:
+                    raise PendingTransactionError(
+                        "unmanaged destination predecessor changed"
+                    )
+                if _relative_identity(nested, leaf) != (
+                    prior.st_dev,
+                    prior.st_ino,
+                ):
+                    raise PendingTransactionError(
+                        "unmanaged destination predecessor changed"
+                    )
+        if expected_predecessor_identity is not _ANY_UNMANAGED_PREDECESSOR:
+            expected_tuple = (
+                None
+                if expected_predecessor_identity is None
+                else (
+                    cast(OutputIdentity, expected_predecessor_identity).device,
+                    cast(OutputIdentity, expected_predecessor_identity).inode,
+                )
+            )
+            prior_tuple = (
+                None if prior is None else (prior.st_dev, prior.st_ino)
+            )
+            if prior_tuple != expected_tuple:
+                raise PendingTransactionError(
+                    "unmanaged destination predecessor changed"
+                )
         if prior is not None:
             if not stat.S_ISREG(prior.st_mode):
                 raise PendingTransactionError("unmanaged destination leaf is unsafe")
@@ -1569,7 +1783,9 @@ def _replace_unmanaged_relative_bytes(
         nested.validate()
         if terminal_validate is not None:
             terminal_validate()
-        for name, expected in ((staged, predecessor_identity), (backup, predecessor_identity)):
+        for index, (name, expected) in enumerate(
+            ((staged, predecessor_identity), (backup, predecessor_identity))
+        ):
             if name is None:
                 continue
             current = _relative_identity(nested, name)
@@ -1581,11 +1797,36 @@ def _replace_unmanaged_relative_bytes(
                 raise PendingTransactionError(
                     "unmanaged destination auxiliary identity changed"
                 )
+            if index == 0:
+                journal["state"] = "stage-retire-attempt"
+                _replace_bytes(
+                    journal_capability, journal_name, _json_bytes(journal)
+                )
+                retain_journal = True
+                published = False
             os.unlink(name, dir_fd=nested.fd)
-        os.fsync(nested.fd)
+            os.fsync(nested.fd)
+            if index == 0:
+                if failpoint is not None:
+                    failpoint("after_unmanaged_stage_unlink_fsync")
+                journal["state"] = "stage-retired"
+                _replace_bytes(
+                    journal_capability, journal_name, _json_bytes(journal)
+                )
+                retain_journal = True
+                published = False
+                if failpoint is not None:
+                    failpoint("after_unmanaged_stage_retirement")
+        journal["state"] = "aux-retired"
+        _replace_bytes(journal_capability, journal_name, _json_bytes(journal))
+        retain_journal = True
+        published = False
+        if failpoint is not None:
+            failpoint("after_unmanaged_auxiliary_retirement")
         backup = None
         staged = None
         _unlink(journal_capability, journal_name)
+        retain_journal = False
         published = False
         created.clear()
         if failpoint is not None:
@@ -1620,7 +1861,7 @@ def _replace_unmanaged_relative_bytes(
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(journal_name, dir_fd=journal_capability.fd)
                 os.fsync(journal_capability.fd)
-        for parts, expected in reversed(created):
+        for parts, expected in reversed(created if not retain_journal else []):
             cleanup_fd = os.dup(capability.fd)
             try:
                 for component in parts[:-1]:
@@ -1763,7 +2004,12 @@ def _identity_from_json(value: object) -> OutputIdentity:
         raise PendingTransactionError("malformed output identity")
     if type(value["device"]) is not int or type(value["inode"]) is not int:
         raise PendingTransactionError("malformed output identity")
-    if value["device"] < 0 or value["inode"] <= 0:
+    if (
+        value["device"] < 0
+        or value["device"] > 18_446_744_073_709_551_615
+        or value["inode"] <= 0
+        or value["inode"] > 18_446_744_073_709_551_615
+    ):
         raise PendingTransactionError("malformed output identity")
     return OutputIdentity(value["device"], value["inode"])
 
@@ -3599,6 +3845,7 @@ def run_token(
         _AUTHORITY.set(None)
         raise PendingTransactionError("ambiguous transaction runner target")
     with pin_output(path.parent) as capability, _locked(capability):
+        _fence_pending_enqueue_locked(capability)
         raw, _payload, identity = _open_token(path)
         tx = resume_transaction(
             str(raw["id"]), str(raw["root"]), output=str(raw["output"])
@@ -4440,10 +4687,34 @@ def commit_unmanaged_bytes(
     payload: bytes,
     *,
     failpoint: Callable[[str], None] | None = None,
+    expected_predecessor_digest: str | None | object = _ANY_UNMANAGED_PREDECESSOR,
+    expected_predecessor_identity: OutputIdentity | None | object = (
+        _ANY_UNMANAGED_PREDECESSOR
+    ),
 ) -> Path:
     """Publish below one pinned destination only after proving it unmanaged."""
     if type(payload) is not bytes:
         raise TypeError("unmanaged commit payload must be immutable bytes")
+    if (expected_predecessor_digest is _ANY_UNMANAGED_PREDECESSOR) != (
+        expected_predecessor_identity is _ANY_UNMANAGED_PREDECESSOR
+    ):
+        raise TypeError("unmanaged predecessor identity and digest must be paired")
+    if expected_predecessor_identity is not _ANY_UNMANAGED_PREDECESSOR and (
+        expected_predecessor_identity is not None
+        and not isinstance(expected_predecessor_identity, OutputIdentity)
+    ):
+        raise TypeError("unmanaged predecessor identity is malformed")
+    if expected_predecessor_digest is not _ANY_UNMANAGED_PREDECESSOR and (
+        expected_predecessor_digest is not None
+        and not _is_hex(expected_predecessor_digest)
+    ):
+        raise PendingTransactionError("unmanaged predecessor digest is malformed")
+    if (expected_predecessor_digest is None) != (
+        expected_predecessor_identity is None
+    ):
+        raise PendingTransactionError(
+            "unmanaged predecessor identity and digest are inconsistent"
+        )
     if _PLATFORM == "windows":
         raise PendingTransactionError(
             "native Windows unmanaged final mutation is not proven"
@@ -4537,8 +4808,1459 @@ def commit_unmanaged_bytes(
             canonical_destination=canonical_destination,
             failpoint=failpoint,
             terminal_validate=validate_chain,
+            expected_predecessor_digest=expected_predecessor_digest,
+            expected_predecessor_identity=expected_predecessor_identity,
         )
     return destination
+
+
+def _relative_regular_identity(
+    capability: OutputCapability, relative_name: str
+) -> OutputIdentity:
+    relative = Path(_validated_relative_name(relative_name))
+    parent_fd = os.dup(capability.fd)
+    try:
+        for component in relative.parts[:-1]:
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+        fd = os.open(
+            relative.parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise PendingTransactionError(
+                    f"unsafe unmanaged artifact: {relative_name}"
+                )
+            return OutputIdentity(info.st_dev, info.st_ino)
+        finally:
+            os.close(fd)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise PendingTransactionError(
+            f"unmanaged artifact is missing: {relative_name}"
+        ) from exc
+    finally:
+        os.close(parent_fd)
+
+
+def _relative_inventory_regular_identity(
+    capability: OutputCapability, relative_name: str
+) -> OutputIdentity | None:
+    """Return one pinned regular identity, omitting proven nonregular entries."""
+    if _PLATFORM == "windows":
+        return _relative_regular_identity(capability, relative_name)
+    relative = Path(_validated_relative_name(relative_name))
+    parent_fd = os.dup(capability.fd)
+    try:
+        for component in relative.parts[:-1]:
+            try:
+                before = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            if not stat.S_ISDIR(before.st_mode):
+                return None
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            opened = os.fstat(next_fd)
+            if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                os.close(next_fd)
+                raise PendingTransactionError(
+                    f"unmanaged artifact identity changed: {relative_name}"
+                )
+            os.close(parent_fd)
+            parent_fd = next_fd
+        leaf = relative.parts[-1]
+        try:
+            before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        fd = os.open(
+            leaf,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise PendingTransactionError(
+                    f"unmanaged artifact identity changed: {relative_name}"
+                )
+            return OutputIdentity(opened.st_dev, opened.st_ino)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+def open_unmanaged_obsidian_inventory(
+    path: Path | str,
+) -> UnmanagedObsidianInventory:
+    """Read only manifest-owned vault files through one pinned vault handle."""
+    vault = Path(path).expanduser()
+    if not vault.exists():
+        return UnmanagedObsidianInventory(None, None, None, None, {}, frozenset())
+    with pin_output(vault, mutation=False) as capability, _locked(capability):
+        if _managed_authority_present(capability):
+            raise PendingTransactionError(
+                "external destination is inside managed graph authority"
+            )
+        name = ".graphify_obsidian_manifest.json"
+        if _entry_stat(capability, name) is None:
+            return UnmanagedObsidianInventory(
+                capability.identity, None, None, None, {}, frozenset()
+            )
+        manifest_identity = _relative_regular_identity(capability, name)
+        manifest_payload = _read_bytes(capability, name, 1_048_576)
+        try:
+            raw = json.loads(manifest_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PendingTransactionError(
+                "external Obsidian ownership manifest is malformed"
+            ) from exc
+        files = raw.get("files") if isinstance(raw, dict) else None
+        if (
+            not isinstance(files, list)
+            or len(files) > _MAX_RECEIPT_ARTIFACTS
+            or any(type(item) is not str for item in files)
+        ):
+            raise PendingTransactionError(
+                "external Obsidian ownership manifest is malformed"
+            )
+        inventory: dict[str, UnmanagedInventoryEntry] = {}
+        manifest_names: set[str] = set()
+        remaining = _MAX_RECEIPT_AGGREGATE_BYTES - len(manifest_payload)
+        folded: set[str] = set()
+        for item in files:
+            relative = _validated_relative_name(item)
+            if relative.casefold() in folded:
+                raise PendingTransactionError(
+                    "external Obsidian ownership manifest is ambiguous"
+                )
+            folded.add(relative.casefold())
+            manifest_names.add(relative)
+            identity = _relative_inventory_regular_identity(capability, relative)
+            if identity is None:
+                continue
+            payload = _read_relative_bytes(capability, relative, limit=remaining)
+            if _relative_regular_identity(capability, relative) != identity:
+                raise PendingTransactionError(
+                    f"unmanaged artifact identity changed: {relative}"
+                )
+            remaining -= len(payload)
+            inventory[relative] = UnmanagedInventoryEntry(
+                payload,
+                hashlib.sha256(payload).hexdigest(),
+                identity,
+            )
+        return UnmanagedObsidianInventory(
+            capability.identity,
+            manifest_payload,
+            hashlib.sha256(manifest_payload).hexdigest(),
+            manifest_identity,
+            inventory,
+            frozenset(manifest_names),
+        )
+
+
+def commit_unmanaged_unlink(
+    path: Path | str,
+    *,
+    expected_identity: OutputIdentity,
+    expected_digest: str,
+    failpoint: Callable[[str], None] | None = None,
+    foreign_callback: Callable[[], None] | None = None,
+    deleted_callback: Callable[[], None] | None = None,
+) -> Literal["deleted", "foreign"]:
+    """Remove one identity-bound unmanaged file through a durable quarantine."""
+    if not isinstance(expected_identity, OutputIdentity):
+        raise TypeError("unmanaged deletion identity is required")
+    if not _is_hex(expected_digest):
+        raise PendingTransactionError("unmanaged deletion digest is malformed")
+    if _PLATFORM == "windows":
+        raise PendingTransactionError(
+            "native Windows unmanaged final mutation is not proven"
+        )
+    requested = Path(path).expanduser().absolute()
+    parent = requested.parent.resolve(strict=True)
+    destination = parent / requested.name
+    journal_name = (
+        _UNMANAGED_DELETE_PREFIX
+        + hashlib.sha256(os.fspath(destination).encode()).hexdigest()[:32]
+        + ".json"
+    )
+    ancestor_paths = [parent]
+    ancestor = parent.parent
+    while True:
+        ancestor_paths.append(ancestor)
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
+    with contextlib.ExitStack() as stack:
+        capabilities = [
+            stack.enter_context(pin_output(candidate, mutation=True))
+            for candidate in ancestor_paths
+        ]
+        for pinned in reversed(capabilities):
+            stack.enter_context(_locked(pinned))
+        for pinned in capabilities:
+            pinned.validate()
+            journals = {
+                name
+                for name in _list_entries(pinned)
+                if name.casefold().startswith(_UNMANAGED_JOURNAL_PREFIX.casefold())
+                or name.casefold().startswith(_UNMANAGED_DELETE_PREFIX.casefold())
+            }
+            if journals - ({journal_name} if pinned is capabilities[0] else set()):
+                raise PendingTransactionError(
+                    "unmanaged publication recovery is required before deletion"
+                )
+            if _managed_authority_present(pinned):
+                raise PendingTransactionError(
+                    "external destination is inside managed graph authority"
+                )
+        capability = capabilities[0]
+        raw = _load_json(capability, journal_name)
+        expected_tuple = (expected_identity.device, expected_identity.inode)
+        if raw is None:
+            live = _relative_identity(capability, destination.name)
+            if live is None:
+                return "deleted"
+            digest, _size, _body = _hash_relative_bytes(
+                capability,
+                destination.name,
+                aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES,
+            )
+            if live != expected_tuple or digest != expected_digest:
+                raise PendingTransactionError(
+                    "unmanaged deletion predecessor changed"
+                )
+            quarantine = _unmanaged_aux_name(destination.name, "delete")
+            raw = {
+                "schema": 1,
+                "protocol_epoch": 1,
+                "operation": "unmanaged-delete",
+                "state": "planned",
+                "destination": os.fspath(destination),
+                "parent_identity": capability.identity.json(),
+                "expected_identity": expected_identity.json(),
+                "expected_digest": expected_digest,
+                "quarantine_name": quarantine,
+                "quarantine_identity": None,
+                "restored_identity": None,
+            }
+            _replace_bytes(capability, journal_name, _json_bytes(raw))
+        expected_fields = {
+            "schema", "protocol_epoch", "operation", "state", "destination",
+            "parent_identity", "expected_identity", "expected_digest",
+            "quarantine_name", "quarantine_identity",
+            "restored_identity",
+        }
+        if (
+            set(raw) != expected_fields
+            or raw.get("schema") != 1
+            or raw.get("protocol_epoch") != 1
+            or raw.get("operation") != "unmanaged-delete"
+            or raw.get("state")
+            not in {
+                "planned",
+                "delete-attempt",
+                "quarantined",
+                "retire-attempt",
+                "restored-foreign",
+                "deleted",
+            }
+            or raw.get("destination") != os.fspath(destination)
+            or _identity_from_json(raw.get("parent_identity")) != capability.identity
+            or _identity_from_json(raw.get("expected_identity")) != expected_identity
+            or raw.get("expected_digest") != expected_digest
+            or not _valid_unmanaged_aux_name(
+                raw.get("quarantine_name"), destination.name, "delete"
+            )
+        ):
+            raise PendingTransactionError("unmanaged deletion journal is malformed")
+        quarantine = cast(str, raw["quarantine_name"])
+        quarantine_identity_raw = raw.get("quarantine_identity")
+        quarantine_identity = (
+            None
+            if quarantine_identity_raw is None
+            else _identity_from_json(quarantine_identity_raw)
+        )
+        if (raw["state"] in {"quarantined", "retire-attempt"}) != (
+            quarantine_identity is not None
+        ):
+            raise PendingTransactionError("unmanaged deletion journal is malformed")
+        restored_raw = raw.get("restored_identity")
+        restored_identity = (
+            None if restored_raw is None else _identity_from_json(restored_raw)
+        )
+        if (raw["state"] == "restored-foreign") != (
+            restored_identity is not None
+        ):
+            raise PendingTransactionError("unmanaged deletion journal is malformed")
+        live = _relative_identity(capability, destination.name)
+        quarantined = _relative_identity(capability, quarantine)
+        if raw["state"] == "deleted":
+            if quarantined is not None:
+                raise PendingTransactionError(
+                    "unmanaged deletion completed geometry changed"
+                )
+            if live is not None:
+                raw["state"] = "restored-foreign"
+                raw["restored_identity"] = {
+                    "device": live[0],
+                    "inode": live[1],
+                }
+                _replace_bytes(capability, journal_name, _json_bytes(raw))
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_restored_foreign")
+                if foreign_callback is not None:
+                    foreign_callback()
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_callback")
+                _unlink(capability, journal_name)
+                for pinned in capabilities:
+                    pinned.validate()
+                return "foreign"
+            if deleted_callback is not None:
+                deleted_callback()
+            if failpoint is not None:
+                failpoint("after_unmanaged_delete_callback")
+            _unlink(capability, journal_name)
+            for pinned in capabilities:
+                pinned.validate()
+            return "deleted"
+        if raw["state"] == "restored-foreign":
+            restored_tuple = (
+                cast(OutputIdentity, restored_identity).device,
+                cast(OutputIdentity, restored_identity).inode,
+            )
+            if live != restored_tuple or quarantined is not None:
+                raise PendingTransactionError(
+                    "unmanaged deletion restored identity changed"
+                )
+            if foreign_callback is not None:
+                foreign_callback()
+            if failpoint is not None:
+                failpoint("after_unmanaged_delete_callback")
+            _unlink(capability, journal_name)
+            for pinned in capabilities:
+                pinned.validate()
+            return "foreign"
+        if raw["state"] in {"planned", "delete-attempt"} and quarantined is None:
+            if live is None:
+                raw["state"] = "deleted"
+                _replace_bytes(capability, journal_name, _json_bytes(raw))
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_completed_absent")
+                if deleted_callback is not None:
+                    deleted_callback()
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_callback")
+                _unlink(capability, journal_name)
+                for pinned in capabilities:
+                    pinned.validate()
+                return "deleted"
+            if live != expected_tuple:
+                raw["state"] = "restored-foreign"
+                raw["restored_identity"] = {
+                    "device": live[0],
+                    "inode": live[1],
+                }
+                _replace_bytes(capability, journal_name, _json_bytes(raw))
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_restored_foreign")
+                if foreign_callback is not None:
+                    foreign_callback()
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_callback")
+                _unlink(capability, journal_name)
+                for pinned in capabilities:
+                    pinned.validate()
+                return "foreign"
+            digest, _size, _body = _hash_relative_bytes(
+                capability,
+                destination.name,
+                aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES,
+            )
+            if digest != expected_digest:
+                raise PendingTransactionError("unmanaged deletion predecessor changed")
+            raw["state"] = "delete-attempt"
+            _replace_bytes(capability, journal_name, _json_bytes(raw))
+            if failpoint is not None:
+                failpoint("before_unmanaged_delete_rename")
+            live = _relative_identity(capability, destination.name)
+            if live is None:
+                raw["state"] = "deleted"
+                _replace_bytes(capability, journal_name, _json_bytes(raw))
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_completed_absent")
+                if deleted_callback is not None:
+                    deleted_callback()
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_callback")
+                _unlink(capability, journal_name)
+                for pinned in capabilities:
+                    pinned.validate()
+                return "deleted"
+            if live != expected_tuple:
+                raw["state"] = "restored-foreign"
+                raw["restored_identity"] = {
+                    "device": live[0],
+                    "inode": live[1],
+                }
+                _replace_bytes(capability, journal_name, _json_bytes(raw))
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_restored_foreign")
+                if foreign_callback is not None:
+                    foreign_callback()
+                if failpoint is not None:
+                    failpoint("after_unmanaged_delete_callback")
+                _unlink(capability, journal_name)
+                for pinned in capabilities:
+                    pinned.validate()
+                return "foreign"
+            _atomic_rename_no_replace(capability, destination.name, quarantine)
+            os.fsync(capability.fd)
+            quarantined = _relative_identity(capability, quarantine)
+            if quarantined != expected_tuple:
+                if (
+                    quarantined is not None
+                    and _relative_identity(capability, destination.name) is None
+                ):
+                    _atomic_rename_no_replace(
+                        capability, quarantine, destination.name
+                    )
+                    os.fsync(capability.fd)
+                    if _relative_identity(
+                        capability, destination.name
+                    ) != quarantined or _relative_identity(
+                        capability, quarantine
+                    ) is not None:
+                        raise PendingTransactionError(
+                            "unmanaged deletion restored identity changed"
+                        )
+                    raw["state"] = "restored-foreign"
+                    raw["restored_identity"] = {
+                        "device": quarantined[0],
+                        "inode": quarantined[1],
+                    }
+                    _replace_bytes(capability, journal_name, _json_bytes(raw))
+                    if failpoint is not None:
+                        failpoint("after_unmanaged_delete_restored_foreign")
+                    if foreign_callback is not None:
+                        foreign_callback()
+                    if failpoint is not None:
+                        failpoint("after_unmanaged_delete_callback")
+                    _unlink(capability, journal_name)
+                    for pinned in capabilities:
+                        pinned.validate()
+                    return "foreign"
+                raise PendingTransactionError("unmanaged deletion quarantine changed")
+            raw["state"] = "quarantined"
+            raw["quarantine_identity"] = expected_identity.json()
+            _replace_bytes(capability, journal_name, _json_bytes(raw))
+            if failpoint is not None:
+                failpoint("after_unmanaged_delete_quarantine")
+        elif quarantined == expected_tuple and live != expected_tuple:
+            raw["state"] = "quarantined"
+            raw["quarantine_identity"] = expected_identity.json()
+            _replace_bytes(capability, journal_name, _json_bytes(raw))
+        elif raw["state"] == "retire-attempt" and quarantined is None:
+            _unlink(capability, journal_name)
+            for pinned in capabilities:
+                pinned.validate()
+            return "deleted"
+        else:
+            raise PendingTransactionError("unmanaged deletion geometry changed")
+        digest, _size, _body = _hash_relative_bytes(
+            capability,
+            quarantine,
+            aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES,
+        )
+        if digest != expected_digest:
+            raise PendingTransactionError("unmanaged deletion quarantine changed")
+        if _relative_identity(capability, quarantine) != expected_tuple:
+            raise PendingTransactionError("unmanaged deletion quarantine changed")
+        raw["state"] = "retire-attempt"
+        _replace_bytes(capability, journal_name, _json_bytes(raw))
+        os.unlink(quarantine, dir_fd=capability.fd)
+        os.fsync(capability.fd)
+        if failpoint is not None:
+            failpoint("after_unmanaged_delete_unlink_fsync")
+        _unlink(capability, journal_name)
+        for pinned in capabilities:
+            pinned.validate()
+    return "deleted"
+
+
+def _unmanaged_obsidian_current(
+    capability: OutputCapability, name: str
+) -> tuple[OutputIdentity, str] | None:
+    try:
+        identity = _relative_regular_identity(capability, name)
+        digest, _size, _body = _hash_relative_bytes(
+            capability,
+            name,
+            aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES,
+        )
+    except PendingTransactionError as exc:
+        if "missing" in str(exc):
+            return None
+        raise
+    return identity, digest
+
+
+def _obsidian_leaf_journal_present(
+    capability: OutputCapability,
+    *,
+    vault: Path,
+    relative_name: str,
+    prefix: str = _UNMANAGED_JOURNAL_PREFIX,
+) -> bool:
+    relative = Path(_validated_relative_name(relative_name))
+    parent_fd = os.dup(capability.fd)
+    try:
+        canonical = os.fspath(vault / relative)
+        journal_name = (
+            prefix
+            + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+            + ".json"
+        )
+        for component in relative.parts[:-1]:
+            probe = OutputCapability(vault, capability.identity, parent_fd)
+            if _entry_stat(probe, journal_name) is not None:
+                return True
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = next_fd
+        parent = OutputCapability(
+            vault / Path(*relative.parts[:-1]),
+            OutputIdentity(os.fstat(parent_fd).st_dev, os.fstat(parent_fd).st_ino),
+            parent_fd,
+        )
+        parent_fd = -1
+        return _entry_stat(parent, journal_name) is not None
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+        elif "parent" in locals():
+            parent.close()
+
+
+def _unmanaged_directory_stat(
+    capability: OutputCapability, name: str
+) -> os.stat_result | None:
+    name = _validated_shallow_name(name)
+    try:
+        info = os.stat(name, dir_fd=capability.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(info.st_mode):
+        raise PendingTransactionError("external Obsidian vault path is unsafe")
+    return info
+
+
+def _open_unmanaged_directory_relative(
+    anchor: OutputCapability,
+    relative_name: str,
+    *,
+    create: bool,
+) -> tuple[OutputCapability | None, bool]:
+    relative = Path(_validated_relative_name(relative_name))
+    parent_fd = os.dup(anchor.fd)
+    created_any = False
+    try:
+        for component in relative.parts:
+            if create:
+                try:
+                    os.mkdir(component, 0o700, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                    created_any = True
+                except FileExistsError:
+                    pass
+            try:
+                next_fd = os.open(
+                    component,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=parent_fd,
+                )
+            except FileNotFoundError:
+                return None, created_any
+            os.close(parent_fd)
+            parent_fd = next_fd
+        info = os.fstat(parent_fd)
+        capability = OutputCapability(
+            anchor.path / relative,
+            OutputIdentity(info.st_dev, info.st_ino),
+            parent_fd,
+        )
+        parent_fd = -1
+        capability.validate()
+        return capability, created_any
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
+def _obsidian_identity_json(identity: OutputIdentity | None) -> dict[str, int] | None:
+    return None if identity is None else identity.json()
+
+
+def _obsidian_batch_bytes(raw: Mapping[str, Any]) -> bytes:
+    payload = _json_bytes(raw)
+    if len(payload) > _MAX_OBSIDIAN_BATCH_JOURNAL_BYTES:
+        raise PendingTransactionError(
+            "unmanaged Obsidian batch journal exceeds bounds"
+        )
+    return payload
+
+
+def _load_obsidian_batch_journal(
+    capability: OutputCapability, name: str
+) -> dict[str, Any] | None:
+    if _entry_stat(capability, name) is None:
+        return None
+    try:
+        raw = json.loads(
+            _read_bytes(
+                capability, name, limit=_MAX_OBSIDIAN_BATCH_JOURNAL_BYTES
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError(
+            "unmanaged Obsidian batch journal is malformed"
+        ) from exc
+    if not isinstance(raw, dict):
+        raise PendingTransactionError(
+            "unmanaged Obsidian batch journal is malformed"
+        )
+    return raw
+
+
+def _parse_obsidian_batch_journal(
+    raw: dict[str, Any],
+    *,
+    destination: str,
+    anchor_identity: OutputIdentity,
+    candidate_digests: Mapping[str, str],
+) -> dict[str, Any]:
+    fields = {
+        "schema",
+        "protocol_epoch",
+        "operation",
+        "state",
+        "destination",
+        "anchor_identity",
+        "vault_identity",
+        "prior_manifest",
+        "candidate_digests",
+        "items",
+        "skipped",
+        "stale",
+        "manifest",
+    }
+    if (
+        set(raw) != fields
+        or raw.get("schema") != 1
+        or raw.get("protocol_epoch") != 1
+        or raw.get("operation") != "obsidian-batch"
+        or raw.get("state") not in {"planned", "active", "manifest-committed"}
+        or raw.get("destination") != destination
+        or _identity_from_json(raw.get("anchor_identity")) != anchor_identity
+        or raw.get("candidate_digests") != dict(sorted(candidate_digests.items()))
+    ):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    vault_raw = raw.get("vault_identity")
+    if vault_raw is not None:
+        _identity_from_json(vault_raw)
+    prior_manifest = raw.get("prior_manifest")
+    if not isinstance(prior_manifest, dict) or set(prior_manifest) != {
+        "path",
+        "identity",
+        "digest",
+    } or prior_manifest.get("path") != ".graphify_obsidian_manifest.json":
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    prior_identity = prior_manifest.get("identity")
+    prior_digest = prior_manifest.get("digest")
+    if (prior_identity is None) != (prior_digest is None) or (
+        prior_identity is not None
+        and (
+            _identity_from_json(prior_identity) is None
+            or not _is_hex(prior_digest)
+        )
+    ):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    entry_names: dict[str, set[str]] = {}
+    for key, allowed_states in (
+        ("items", {"pending", "published", "foreign"}),
+        (
+            "stale",
+            {"pending", "delete-attempt", "quarantined", "deleted", "foreign"},
+        ),
+    ):
+        entries = raw.get(key)
+        if not isinstance(entries, list) or len(entries) > _MAX_RECEIPT_ARTIFACTS:
+            raise PendingTransactionError(
+                "unmanaged Obsidian batch journal is malformed"
+            )
+        seen: set[str] = set()
+        for entry in entries:
+            expected = {
+                "name",
+                "digest",
+                "predecessor_identity",
+                "predecessor_digest",
+                "state",
+                "successor_identity",
+            }
+            if not isinstance(entry, dict) or set(entry) != expected:
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            if type(entry.get("name")) is not str:
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            name = _validated_relative_name(cast(str, entry["name"]))
+            folded = name.casefold()
+            if folded in seen or not _is_hex(entry.get("digest")):
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            seen.add(folded)
+            if key == "items" and candidate_digests.get(name) != entry.get("digest"):
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            predecessor_identity = entry.get("predecessor_identity")
+            predecessor_digest = entry.get("predecessor_digest")
+            if (predecessor_identity is None) != (predecessor_digest is None) or (
+                predecessor_identity is not None
+                and (
+                    _identity_from_json(predecessor_identity) is None
+                    or not _is_hex(predecessor_digest)
+                )
+            ):
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            if key == "stale" and (
+                predecessor_identity is None
+                or entry.get("digest") != predecessor_digest
+            ):
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            if entry.get("state") not in allowed_states:
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            successor = entry.get("successor_identity")
+            if (key == "items" and (entry.get("state") == "published") != (
+                successor is not None
+            )) or (key == "stale" and successor is not None):
+                raise PendingTransactionError(
+                    "unmanaged Obsidian batch journal is malformed"
+                )
+            if successor is not None:
+                _identity_from_json(successor)
+        entry_names[key] = {cast(str, entry["name"]) for entry in entries}
+    skipped = raw.get("skipped")
+    if (
+        not isinstance(skipped, list)
+        or any(type(name) is not str for name in skipped)
+        or len({cast(str, name).casefold() for name in skipped}) != len(skipped)
+    ):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    skipped_names = {_validated_relative_name(cast(str, name)) for name in skipped}
+    complete_namespace = (
+        list(entry_names["items"])
+        + list(entry_names["stale"])
+        + list(skipped_names)
+    )
+    if len({name.casefold() for name in complete_namespace}) != len(
+        complete_namespace
+    ):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    if (
+        entry_names["items"] & skipped_names
+        or entry_names["items"] | skipped_names != set(candidate_digests)
+        or entry_names["stale"] & (entry_names["items"] | skipped_names)
+    ):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    manifest = raw.get("manifest")
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "digest",
+        "state",
+        "successor_identity",
+    }:
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    if manifest.get("digest") is not None and not _is_hex(manifest.get("digest")):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    if manifest.get("state") not in {"pending", "committed"} or (
+        manifest.get("state") == "committed"
+    ) != (manifest.get("successor_identity") is not None):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    if manifest.get("successor_identity") is not None:
+        _identity_from_json(manifest["successor_identity"])
+    if (raw["state"] == "manifest-committed") != (
+        manifest["state"] == "committed"
+    ):
+        raise PendingTransactionError("unmanaged Obsidian batch journal is malformed")
+    return raw
+
+
+def commit_unmanaged_obsidian_batch(
+    path: Path | str,
+    inventory: UnmanagedObsidianInventory,
+    payloads: Mapping[str, bytes],
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> frozenset[str]:
+    """Publish one external vault through a durable manifest-last batch journal."""
+    if not isinstance(inventory, UnmanagedObsidianInventory):
+        raise TypeError("external Obsidian inventory is required")
+    if not isinstance(payloads, Mapping) or len(payloads) > _MAX_RECEIPT_ARTIFACTS:
+        raise PendingTransactionError("external Obsidian batch exceeds bounds")
+    candidates: dict[str, bytes] = {}
+    total = 0
+    for raw_name, payload in payloads.items():
+        name = _validated_relative_name(raw_name)
+        if name == ".graphify_obsidian_manifest.json" or type(payload) is not bytes:
+            raise PendingTransactionError("external Obsidian batch is malformed")
+        total += len(payload)
+        if total > _MAX_RECEIPT_AGGREGATE_BYTES:
+            raise PendingTransactionError("external Obsidian batch exceeds bounds")
+        candidates[name] = payload
+    _reject_casefold_collisions(tuple(candidates))
+    candidate_digests = {
+        name: hashlib.sha256(payload).hexdigest()
+        for name, payload in sorted(candidates.items())
+    }
+    owned_folded = {name.casefold(): name for name in inventory.manifest_names}
+    for name in candidates:
+        owned_name = owned_folded.get(name.casefold())
+        if owned_name is not None and owned_name != name:
+            raise PendingTransactionError(
+                "external Obsidian ownership namespace is ambiguous"
+            )
+    destination = Path(path).expanduser().absolute()
+    anchor_path = destination.parent
+    while not anchor_path.exists():
+        if anchor_path.parent == anchor_path:
+            raise PendingTransactionError(
+                "external Obsidian vault has no existing ancestor"
+            )
+        anchor_path = anchor_path.parent
+    anchor_path = anchor_path.resolve(strict=True)
+    try:
+        relative_vault = _validated_relative_name(
+            destination.relative_to(anchor_path).as_posix()
+        )
+    except ValueError as exc:
+        raise PendingTransactionError(
+            "external Obsidian vault identity changed"
+        ) from exc
+    canonical_destination = os.fspath(anchor_path / relative_vault)
+    journal_name = (
+        _OBSIDIAN_BATCH_PREFIX
+        + hashlib.sha256(canonical_destination.encode("utf-8")).hexdigest()[:32]
+        + ".json"
+    )
+    ancestor_paths = [anchor_path]
+    ancestor = anchor_path.parent
+    while True:
+        ancestor_paths.append(ancestor)
+        if ancestor.parent == ancestor:
+            break
+        ancestor = ancestor.parent
+    with contextlib.ExitStack() as ancestor_stack:
+        capabilities = [
+            ancestor_stack.enter_context(pin_output(candidate, mutation=True))
+            for candidate in ancestor_paths
+        ]
+        for pinned in reversed(capabilities):
+            ancestor_stack.enter_context(_locked(pinned))
+        anchor = capabilities[0]
+
+        def validate_ancestor_chain() -> None:
+            for pinned in capabilities:
+                pinned.validate()
+                if _managed_authority_present(pinned):
+                    raise PendingTransactionError(
+                        "external destination is inside managed graph authority"
+                    )
+
+        validate_ancestor_chain()
+        raw = _load_obsidian_batch_journal(anchor, journal_name)
+        validate_ancestor_chain()
+        vault_capability: OutputCapability | None = None
+        vault_stack = contextlib.ExitStack()
+        try:
+            if raw is None:
+                current_capability, _created = _open_unmanaged_directory_relative(
+                    anchor, relative_vault, create=False
+                )
+                if inventory.vault_identity is None:
+                    if current_capability is not None:
+                        current_capability.close()
+                        raise PendingTransactionError(
+                            "external Obsidian vault appeared before batch publication"
+                        )
+                elif (
+                    current_capability is None
+                    or current_capability.identity != inventory.vault_identity
+                ):
+                    if current_capability is not None:
+                        current_capability.close()
+                    raise PendingTransactionError(
+                        "external Obsidian vault identity changed"
+                    )
+                if current_capability is not None:
+                    vault_capability = vault_stack.enter_context(current_capability)
+                    vault_stack.enter_context(_locked(vault_capability))
+                    if _managed_authority_present(vault_capability):
+                        raise PendingTransactionError(
+                            "external destination is inside managed graph authority"
+                        )
+                    manifest_current = _unmanaged_obsidian_current(
+                        vault_capability, ".graphify_obsidian_manifest.json"
+                    )
+                    expected_manifest = (
+                        None
+                        if inventory.manifest_identity is None
+                        else (inventory.manifest_identity, inventory.manifest_digest)
+                    )
+                    if manifest_current != expected_manifest:
+                        raise PendingTransactionError(
+                            "external Obsidian ownership manifest changed"
+                        )
+                    for name, entry in inventory.files.items():
+                        if _unmanaged_obsidian_current(vault_capability, name) != (
+                            entry.identity,
+                            entry.digest,
+                        ):
+                            raise PendingTransactionError(
+                                "external Obsidian owned artifact changed"
+                            )
+                items: list[dict[str, Any]] = []
+                accepted: set[str] = set()
+                skipped: list[str] = []
+                for name, digest in candidate_digests.items():
+                    prior = inventory.files.get(name)
+                    current = (
+                        None
+                        if vault_capability is None
+                        else _unmanaged_obsidian_current(vault_capability, name)
+                    )
+                    if prior is None and current is not None:
+                        skipped.append(name)
+                        continue
+                    accepted.add(name)
+                    items.append(
+                        {
+                            "name": name,
+                            "digest": digest,
+                            "predecessor_identity": _obsidian_identity_json(
+                                None if prior is None else prior.identity
+                            ),
+                            "predecessor_digest": (
+                                None if prior is None else prior.digest
+                            ),
+                            "state": "pending",
+                            "successor_identity": None,
+                        }
+                    )
+                stale: list[dict[str, Any]] = []
+                for name, prior in sorted(inventory.files.items()):
+                    if name in accepted:
+                        continue
+                    current = (
+                        None
+                        if vault_capability is None
+                        else _unmanaged_obsidian_current(vault_capability, name)
+                    )
+                    if current != (prior.identity, prior.digest):
+                        continue
+                    stale.append(
+                        {
+                            "name": name,
+                            "digest": prior.digest,
+                            "predecessor_identity": prior.identity.json(),
+                            "predecessor_digest": prior.digest,
+                            "state": "pending",
+                            "successor_identity": None,
+                        }
+                    )
+                raw = {
+                    "schema": 1,
+                    "protocol_epoch": 1,
+                    "operation": "obsidian-batch",
+                    "state": "planned",
+                    "destination": canonical_destination,
+                    "anchor_identity": anchor.identity.json(),
+                    "vault_identity": (
+                        None
+                        if vault_capability is None
+                        else vault_capability.identity.json()
+                    ),
+                    "prior_manifest": {
+                        "path": ".graphify_obsidian_manifest.json",
+                        "identity": _obsidian_identity_json(
+                            inventory.manifest_identity
+                        ),
+                        "digest": inventory.manifest_digest,
+                    },
+                    "candidate_digests": dict(sorted(candidate_digests.items())),
+                    "items": items,
+                    "skipped": sorted(skipped),
+                    "stale": stale,
+                    "manifest": {
+                        "digest": None,
+                        "state": "pending",
+                        "successor_identity": None,
+                    },
+                }
+                future = json.loads(_obsidian_batch_bytes(raw).decode("utf-8"))
+                worst_identity = {
+                    "device": 18_446_744_073_709_551_615,
+                    "inode": 18_446_744_073_709_551_615,
+                }
+                future["vault_identity"] = worst_identity
+                future["state"] = "manifest-committed"
+                for entry in future["items"]:
+                    entry["state"] = "published"
+                    entry["successor_identity"] = worst_identity
+                for entry in future["stale"]:
+                    entry["state"] = "delete-attempt"
+                future["manifest"] = {
+                    "digest": "f" * 64,
+                    "state": "committed",
+                    "successor_identity": worst_identity,
+                }
+                _obsidian_batch_bytes(future)
+                validate_ancestor_chain()
+                _replace_bytes(anchor, journal_name, _obsidian_batch_bytes(raw))
+            raw = _parse_obsidian_batch_journal(
+                raw,
+                destination=canonical_destination,
+                anchor_identity=anchor.identity,
+                candidate_digests=candidate_digests,
+            )
+            if vault_capability is None:
+                vault_identity_raw = raw["vault_identity"]
+                if vault_identity_raw is None:
+                    validate_ancestor_chain()
+                    created, created_any = _open_unmanaged_directory_relative(
+                        anchor, relative_vault, create=True
+                    )
+                    if created is None:
+                        raise PendingTransactionError(
+                            "external Obsidian vault creation failed"
+                        )
+                    vault_capability = vault_stack.enter_context(created)
+                    vault_stack.enter_context(_locked(vault_capability))
+                    if not created_any and _list_entries(vault_capability):
+                        raise PendingTransactionError(
+                            "external Obsidian vault creation is ambiguous"
+                        )
+                    raw["vault_identity"] = vault_capability.identity.json()
+                    raw["state"] = "active"
+                    _replace_bytes(anchor, journal_name, _obsidian_batch_bytes(raw))
+                else:
+                    existing, _created = _open_unmanaged_directory_relative(
+                        anchor, relative_vault, create=False
+                    )
+                    if existing is None:
+                        raise PendingTransactionError(
+                            "external Obsidian vault identity changed"
+                        )
+                    vault_capability = vault_stack.enter_context(existing)
+                    vault_stack.enter_context(_locked(vault_capability))
+            expected_vault = _identity_from_json(raw["vault_identity"])
+            if vault_capability.identity != expected_vault:
+                raise PendingTransactionError(
+                    "external Obsidian vault identity changed"
+                )
+            if _managed_authority_present(vault_capability):
+                raise PendingTransactionError(
+                    "external destination is inside managed graph authority"
+                )
+
+            def persist() -> None:
+                validate_ancestor_chain()
+                _replace_bytes(anchor, journal_name, _obsidian_batch_bytes(raw))
+
+            def reopen_committed_manifest() -> None:
+                manifest_state = raw["manifest"]
+                if manifest_state["state"] != "committed":
+                    return
+                current_manifest = _unmanaged_obsidian_current(
+                    vault_capability, ".graphify_obsidian_manifest.json"
+                )
+                expected_manifest = (
+                    _identity_from_json(manifest_state["successor_identity"]),
+                    manifest_state["digest"],
+                )
+                if current_manifest != expected_manifest:
+                    raise PendingTransactionError(
+                        "external Obsidian manifest identity changed"
+                    )
+                raw["prior_manifest"] = {
+                    "path": ".graphify_obsidian_manifest.json",
+                    "identity": expected_manifest[0].json(),
+                    "digest": expected_manifest[1],
+                }
+                raw["manifest"] = {
+                    "digest": None,
+                    "state": "pending",
+                    "successor_identity": None,
+                }
+                raw["state"] = "active"
+
+            if raw["manifest"]["state"] == "committed" and (
+                _obsidian_leaf_journal_present(
+                    vault_capability,
+                    vault=destination,
+                    relative_name=".graphify_obsidian_manifest.json",
+                )
+            ):
+                committed_payload = json.dumps(
+                    {
+                        "files": sorted(
+                            cast(str, item["name"])
+                            for item in raw["items"]
+                            if item["state"] == "published"
+                        )
+                    },
+                    indent=2,
+                ).encode()
+                if hashlib.sha256(committed_payload).hexdigest() != raw["manifest"][
+                    "digest"
+                ]:
+                    raise PendingTransactionError(
+                        "external Obsidian committed manifest changed"
+                    )
+
+                def checkpoint_committed_manifest(boundary: str) -> None:
+                    if boundary != "after_unmanaged_leaf_publication":
+                        return
+                    live = _unmanaged_obsidian_current(
+                        vault_capability, ".graphify_obsidian_manifest.json"
+                    )
+                    if live is None or live[1] != raw["manifest"]["digest"]:
+                        raise PendingTransactionError(
+                            "external Obsidian manifest identity changed"
+                        )
+                    raw["manifest"]["successor_identity"] = live[0].json()
+                    persist()
+
+                commit_unmanaged_bytes(
+                    destination / ".graphify_obsidian_manifest.json",
+                    committed_payload,
+                    failpoint=checkpoint_committed_manifest,
+                    expected_predecessor_digest=raw["prior_manifest"]["digest"],
+                    expected_predecessor_identity=(
+                        None
+                        if raw["prior_manifest"]["identity"] is None
+                        else _identity_from_json(
+                            raw["prior_manifest"]["identity"]
+                        )
+                    ),
+                )
+
+            for item in raw["items"]:
+                name = cast(str, item["name"])
+                payload = candidates[name]
+                current = _unmanaged_obsidian_current(vault_capability, name)
+                successor_raw = item["successor_identity"]
+                if item["state"] == "foreign":
+                    continue
+                predecessor_raw = item["predecessor_identity"]
+                predecessor = (
+                    None
+                    if predecessor_raw is None
+                    else _identity_from_json(predecessor_raw)
+                )
+                expected_current = (
+                    None
+                    if predecessor is None
+                    else (predecessor, item["predecessor_digest"])
+                )
+
+                def checkpoint(boundary: str, *, entry: dict[str, Any] = item) -> None:
+                    if boundary != "after_unmanaged_leaf_publication":
+                        return
+                    live = _unmanaged_obsidian_current(vault_capability, name)
+                    if live is None or live[1] != entry["digest"]:
+                        raise PendingTransactionError(
+                            "external Obsidian successor identity changed"
+                        )
+                    entry["state"] = "published"
+                    entry["successor_identity"] = live[0].json()
+                    persist()
+                    if failpoint is not None and predecessor is None:
+                        failpoint("after_obsidian_new_leaf")
+
+                if item["state"] == "published":
+                    successor = _identity_from_json(successor_raw)
+                    if current != (successor, item["digest"]):
+                        if _obsidian_leaf_journal_present(
+                            vault_capability,
+                            vault=destination,
+                            relative_name=name,
+                        ):
+                            try:
+                                commit_unmanaged_bytes(
+                                    destination / name,
+                                    payload,
+                                    failpoint=checkpoint,
+                                    expected_predecessor_digest=item[
+                                        "predecessor_digest"
+                                    ],
+                                    expected_predecessor_identity=predecessor,
+                                )
+                            except PendingTransactionError as exc:
+                                if "competitor was restored" not in str(exc):
+                                    raise
+                        item["state"] = "foreign"
+                        item["successor_identity"] = None
+                        reopen_committed_manifest()
+                        persist()
+                        continue
+                    if not _obsidian_leaf_journal_present(
+                        vault_capability,
+                        vault=destination,
+                        relative_name=name,
+                    ):
+                        continue
+                elif current != expected_current:
+                    if not (
+                        current is not None
+                        and current[1] == item["digest"]
+                        and _obsidian_leaf_journal_present(
+                            vault_capability,
+                            vault=destination,
+                            relative_name=name,
+                        )
+                    ):
+                        item["state"] = "foreign"
+                        reopen_committed_manifest()
+                        persist()
+                        continue
+
+                try:
+                    commit_unmanaged_bytes(
+                        destination / name,
+                        payload,
+                        failpoint=checkpoint,
+                        expected_predecessor_digest=item["predecessor_digest"],
+                        expected_predecessor_identity=predecessor,
+                    )
+                except PendingTransactionError as exc:
+                    if "competitor was restored" not in str(exc):
+                        raise
+                    item["state"] = "foreign"
+                    item["successor_identity"] = None
+                    persist()
+                    continue
+            for item in raw["stale"]:
+                name = cast(str, item["name"])
+                delete_journal_present = _obsidian_leaf_journal_present(
+                    vault_capability,
+                    vault=destination,
+                    relative_name=name,
+                    prefix=_UNMANAGED_DELETE_PREFIX,
+                )
+                if item["state"] == "deleted" and not delete_journal_present:
+                    continue
+                if item["state"] == "foreign" and not delete_journal_present:
+                    continue
+                predecessor = _identity_from_json(item["predecessor_identity"])
+                recovering_delete = item["state"] in {
+                    "delete-attempt",
+                    "quarantined",
+                } or (
+                    item["state"] in {"deleted", "foreign"}
+                    and delete_journal_present
+                )
+                current = (
+                    None
+                    if recovering_delete
+                    else _unmanaged_obsidian_current(vault_capability, name)
+                )
+                if current is None and not recovering_delete:
+                    item["state"] = "deleted"
+                    persist()
+                elif not recovering_delete and current != (
+                    predecessor,
+                    item["predecessor_digest"],
+                ):
+                    item["state"] = "foreign"
+                    persist()
+                else:
+                    def delete_checkpoint(
+                        boundary: str, *, entry: dict[str, Any] = item
+                    ) -> None:
+                        if boundary == "before_unmanaged_delete_rename":
+                            entry["state"] = "delete-attempt"
+                            persist()
+                            if failpoint is not None:
+                                failpoint("before_obsidian_stale_delete_rename")
+                        elif boundary == "after_unmanaged_delete_quarantine":
+                            entry["state"] = "quarantined"
+                            persist()
+                            if failpoint is not None:
+                                failpoint("after_obsidian_stale_quarantine")
+                        elif boundary == "after_unmanaged_delete_restored_foreign":
+                            if failpoint is not None:
+                                failpoint("after_obsidian_stale_restored_foreign")
+                        elif boundary == "after_unmanaged_delete_callback":
+                            if failpoint is not None:
+                                failpoint("after_obsidian_stale_delete_callback")
+
+                    def foreign_checkpoint(
+                        *, entry: dict[str, Any] = item
+                    ) -> None:
+                        entry["state"] = "foreign"
+                        persist()
+
+                    def deleted_checkpoint(
+                        *, entry: dict[str, Any] = item
+                    ) -> None:
+                        entry["state"] = "deleted"
+                        persist()
+
+                    outcome = commit_unmanaged_unlink(
+                        destination / name,
+                        expected_identity=predecessor,
+                        expected_digest=cast(str, item["predecessor_digest"]),
+                        failpoint=delete_checkpoint,
+                        foreign_callback=foreign_checkpoint,
+                        deleted_callback=deleted_checkpoint,
+                    )
+                    item["state"] = outcome
+                    persist()
+                    if failpoint is not None and outcome == "deleted":
+                        failpoint("after_obsidian_stale_deletion")
+            published = {
+                cast(str, item["name"])
+                for item in raw["items"]
+                if item["state"] == "published"
+                and _unmanaged_obsidian_current(
+                    vault_capability, cast(str, item["name"])
+                )
+                == (
+                    _identity_from_json(item["successor_identity"]),
+                    item["digest"],
+                )
+            }
+            manifest_payload = json.dumps(
+                {"files": sorted(published)}, indent=2
+            ).encode()
+            manifest_digest = hashlib.sha256(manifest_payload).hexdigest()
+            manifest = raw["manifest"]
+
+            def manifest_checkpoint(boundary: str) -> None:
+                if boundary != "after_unmanaged_leaf_publication":
+                    return
+                live = _unmanaged_obsidian_current(
+                    vault_capability, ".graphify_obsidian_manifest.json"
+                )
+                if live is None or live[1] != manifest_digest:
+                    raise PendingTransactionError(
+                        "external Obsidian manifest identity changed"
+                    )
+                manifest["digest"] = manifest_digest
+                manifest["state"] = "committed"
+                manifest["successor_identity"] = live[0].json()
+                raw["state"] = "manifest-committed"
+                persist()
+                if failpoint is not None:
+                    failpoint("after_obsidian_manifest_commit")
+
+            if manifest["state"] == "pending":
+                prior = raw["prior_manifest"]
+
+                commit_unmanaged_bytes(
+                    destination / ".graphify_obsidian_manifest.json",
+                    manifest_payload,
+                    failpoint=manifest_checkpoint,
+                    expected_predecessor_digest=prior["digest"],
+                    expected_predecessor_identity=(
+                        None
+                        if prior["identity"] is None
+                        else _identity_from_json(prior["identity"])
+                    ),
+                )
+            elif _obsidian_leaf_journal_present(
+                vault_capability,
+                vault=destination,
+                relative_name=".graphify_obsidian_manifest.json",
+            ):
+                prior = raw["prior_manifest"]
+                try:
+                    commit_unmanaged_bytes(
+                        destination / ".graphify_obsidian_manifest.json",
+                        manifest_payload,
+                        failpoint=manifest_checkpoint,
+                        expected_predecessor_digest=prior["digest"],
+                        expected_predecessor_identity=(
+                            None
+                            if prior["identity"] is None
+                            else _identity_from_json(prior["identity"])
+                        ),
+                    )
+                except PendingTransactionError as exc:
+                    if "competitor was restored" not in str(exc):
+                        raise
+            live_manifest = _unmanaged_obsidian_current(
+                vault_capability, ".graphify_obsidian_manifest.json"
+            )
+            if live_manifest != (
+                _identity_from_json(manifest["successor_identity"]),
+                manifest["digest"],
+            ):
+                raise PendingTransactionError(
+                    "external Obsidian manifest identity changed"
+                )
+            os.fsync(vault_capability.fd)
+            os.fsync(anchor.fd)
+            validate_ancestor_chain()
+            _unlink(anchor, journal_name)
+            validate_ancestor_chain()
+            return frozenset(published)
+        finally:
+            vault_stack.close()
 
 
 @dataclass
@@ -4934,6 +6656,93 @@ def open_graph_snapshot(path: Path | str, *, purpose: str) -> GraphSnapshot:
             inventory["manifest.json"],
             inventory,
         )
+
+
+def open_external_graph_snapshot(
+    path: Path | str, *, retain_artifacts: Sequence[str] = ()
+) -> GraphSnapshot:
+    """Read an explicit unmanaged graph and explicitly selected sibling leaves."""
+    requested = Path(path).expanduser()
+    output = requested.parent.resolve(strict=True)
+    graph_name = _validated_shallow_name(requested.name)
+    retain = tuple(_validated_shallow_name(name) for name in retain_artifacts)
+    _reject_casefold_collisions((graph_name, *retain))
+    graph_path = output / graph_name
+    with pin_output(output, mutation=False) as capability:
+        if _coordination_present(capability):
+            raise PendingTransactionError(
+                "explicit graph has managed coordination authority"
+            )
+        from graphify.security import _max_graph_file_bytes
+
+        fd = (
+            _open_windows_relative_fd(capability, graph_name)
+            if _PLATFORM == "windows"
+            else os.open(
+                graph_name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=capability.fd,
+            )
+        )
+        try:
+            opened_graph = os.fstat(fd)
+            payload = _read_open_regular(
+                fd, limit=_max_graph_file_bytes(), label=graph_name
+            )
+        finally:
+            os.close(fd)
+        artifacts = {graph_name: payload}
+        selected_identities: dict[str, tuple[int, int] | None] = {
+            graph_name: (opened_graph.st_dev, opened_graph.st_ino)
+        }
+        remaining = _MAX_RECEIPT_AGGREGATE_BYTES - len(payload)
+        for name in retain:
+            before = _entry_stat(capability, name)
+            if before is None:
+                selected_identities[name] = None
+                continue
+            retained = _read_bytes(capability, name, remaining)
+            after = _entry_stat(capability, name)
+            identity = (before.st_dev, before.st_ino)
+            if after is None or (after.st_dev, after.st_ino) != identity:
+                raise PendingTransactionError(
+                    f"external snapshot entry identity changed: {name}"
+                )
+            remaining -= len(retained)
+            artifacts[name] = retained
+            selected_identities[name] = identity
+        for name, expected in selected_identities.items():
+            current = _entry_stat(capability, name)
+            current_identity = (
+                None if current is None else (current.st_dev, current.st_ino)
+            )
+            if current_identity != expected:
+                raise PendingTransactionError(
+                    f"external snapshot entry identity changed: {name}"
+                )
+        if _coordination_present(capability):
+            raise PendingTransactionError(
+                "explicit graph has managed coordination authority"
+            )
+        capability.validate()
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError("malformed external graph payload") from exc
+    if not isinstance(data, dict):
+        raise PendingTransactionError("malformed external graph payload")
+    graph_meta = data.get("graph")
+    if isinstance(graph_meta, dict) and GRAPH_WATERMARK_KEY in graph_meta:
+        raise PendingTransactionError("explicit graph has managed watermark authority")
+    return GraphSnapshot(
+        data,
+        None,
+        graph_path,
+        payload,
+        hashlib.sha256(payload).hexdigest(),
+        None,
+        artifacts,
+    )
 
 
 def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnapshot:
@@ -6549,6 +8358,8 @@ def recover_selected_transaction(
     max_attempts: int = 3,
 ) -> Transaction:
     """Validate exact selectors before any close or recovery mutation."""
+    if type(max_attempts) is not int or max_attempts <= 0:
+        raise RecoverableTransactionError("recovery attempt bound exhausted")
     root_path = _canonical_directory(Path(root))
     cancellation_successor: Transaction | None = None
     with pin_output(output) as capability, _locked(capability):
@@ -6730,7 +8541,7 @@ def recover_transaction(
     expected_output_identity: OutputIdentity | None = None,
     transition_failpoint: Callable[[str], None] | None = None,
 ) -> Transaction:
-    if max_attempts <= 0:
+    if type(max_attempts) is not int or max_attempts <= 0:
         raise RecoverableTransactionError("recovery attempt bound exhausted")
     root_path = _canonical_directory(Path(root))
     cancellation_successor: Transaction | None = None

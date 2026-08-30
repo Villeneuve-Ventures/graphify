@@ -379,6 +379,333 @@ def test_issue89_external_obsidian_destination_stays_unmanaged(tmp_path):
     assert not (out / ".graphify_protocol.json").exists()
 
 
+def test_issue89_external_obsidian_preserves_foreign_and_prunes_owned_stale(
+    tmp_path,
+):
+    _make_graph(tmp_path)
+    vault = tmp_path / "external-vault"
+    first = _run(["export", "obsidian", "--dir", str(vault)], tmp_path)
+    assert first.returncode == 0, first.stderr
+    manifest_path = vault / ".graphify_obsidian_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stale = vault / "stale-owned.md"
+    stale.write_text("old", encoding="utf-8")
+    manifest["files"].append(stale.name)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    foreign = vault / "foreign-note.md"
+    foreign.write_text("user", encoding="utf-8")
+
+    second = _run(["export", "obsidian", "--dir", str(vault)], tmp_path)
+
+    assert second.returncode == 0, second.stderr
+    assert not stale.exists()
+    assert foreign.read_text(encoding="utf-8") == "user"
+    final_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stale.name not in final_manifest["files"]
+    assert foreign.name not in final_manifest["files"]
+    assert "graph.canvas" in final_manifest["files"]
+    assert not list(vault.glob(".graphify-unmanaged-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_issue89_external_obsidian_fresh_cli_recovers_nonregular_stale_replacement(
+    tmp_path, replacement,
+):
+    _make_graph(tmp_path)
+    vault = tmp_path / "external-vault"
+    first = _run(["export", "obsidian", "--dir", str(vault)], tmp_path)
+    assert first.returncode == 0, first.stderr
+    manifest_path = vault / ".graphify_obsidian_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stale = vault / "stale-owned.md"
+    stale.write_bytes(b"owned stale")
+    manifest["files"].append(stale.name)
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    script = (
+        "import os,sys\n"
+        "import graphify.transaction as t\n"
+        "from graphify.__main__ import main\n"
+        "v=sys.argv[1]\n"
+        "original=t.commit_unmanaged_obsidian_batch\n"
+        "def wrapped(path,inventory,payloads):\n"
+        " def stop(boundary):\n"
+        "  if boundary=='before_obsidian_stale_delete_rename': "
+        "os.unlink(os.path.join(v,'stale-owned.md'))\n"
+        "  if boundary=='after_obsidian_stale_delete_callback': os._exit(91)\n"
+        " return original(path,inventory,payloads,failpoint=stop)\n"
+        "t.commit_unmanaged_obsidian_batch=wrapped\n"
+        "sys.argv=['graphify','export','obsidian','--dir',v]\n"
+        "main()"
+    )
+    interrupted = subprocess.run(
+        [PYTHON, "-P", "-c", script, str(vault)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert interrupted.returncode == 91, interrupted.stderr
+    assert list(tmp_path.rglob(".graphify-unmanaged-delete-*.json"))
+    assert list(tmp_path.rglob(".graphify-unmanaged-obsidian-*.json"))
+
+    if replacement == "symlink":
+        stale.symlink_to("user-target.md")
+    else:
+        stale.mkdir()
+        (stale / "user.txt").write_bytes(b"directory content")
+    replacement_stat = stale.lstat()
+    replacement_identity = (replacement_stat.st_dev, replacement_stat.st_ino)
+
+    recovered = _run(["export", "obsidian", "--dir", str(vault)], tmp_path)
+    assert recovered.returncode == 0, recovered.stderr
+    assert (stale.lstat().st_dev, stale.lstat().st_ino) == replacement_identity
+    if replacement == "symlink":
+        assert stale.is_symlink()
+        assert os.readlink(stale) == "user-target.md"
+    else:
+        assert (stale / "user.txt").read_bytes() == b"directory content"
+    corrected = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert stale.name not in corrected["files"]
+    assert not list(tmp_path.rglob(".graphify-unmanaged-delete-*.json"))
+    assert not list(tmp_path.rglob(".graphify-unmanaged-obsidian-*.json"))
+
+    later = _run(["export", "obsidian", "--dir", str(vault)], tmp_path)
+    assert later.returncode == 0, later.stderr
+    assert (stale.lstat().st_dev, stale.lstat().st_ino) == replacement_identity
+
+
+@pytest.mark.parametrize(
+    ("arguments", "artifact"),
+    [
+        (["export", "html"], "graph.html"),
+        (["export", "svg"], "graph.svg"),
+        (["export", "graphml"], "graph.graphml"),
+        (["export", "neo4j"], "cypher.txt"),
+        (["export", "falkordb"], "cypher.txt"),
+        (["export", "wiki"], "wiki/index.md"),
+    ],
+)
+def test_issue89_explicit_external_exports_read_only_the_graph_leaf(
+    tmp_path, arguments, artifact
+):
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    seed_out = _make_graph(seed)
+    source = tmp_path / "external-source"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes((seed_out / "graph.json").read_bytes())
+    graph_before = graph.read_bytes()
+    (source / "wiki").mkdir()
+    huge = source / "wiki" / "unrelated.md"
+    huge.write_bytes(b"x" * (2 * 1024 * 1024))
+    (source / "obsidian").mkdir()
+    loop = source / "obsidian" / "loop"
+    loop.symlink_to(source / "obsidian")
+
+    result = _run([*arguments, "--graph", str(graph)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert (source / artifact).exists()
+    assert graph.read_bytes() == graph_before
+    assert huge.stat().st_size == 2 * 1024 * 1024
+    assert loop.is_symlink()
+    assert not list(source.glob(".graphify_*.json"))
+
+
+@pytest.mark.parametrize("subcommand", ["obsidian", "callflow-html"])
+@pytest.mark.parametrize("managed_source", [False, True])
+def test_issue89_export_rejects_foreign_managed_destination_zero_mutation(
+    tmp_path, subcommand, managed_source
+):
+    source_project = tmp_path / "source-project"
+    source_project.mkdir()
+    source_out = _make_graph(source_project)
+    if managed_source:
+        seeded = _run(["export", "html"], source_project)
+        assert seeded.returncode == 0, seeded.stderr
+        source_graph = source_out / "graph.json"
+    else:
+        external = tmp_path / "external-source"
+        external.mkdir()
+        source_graph = external / "graph.json"
+        source_graph.write_bytes((source_out / "graph.json").read_bytes())
+        (external / "GRAPH_REPORT.md").write_text(
+            "# Graph Report\n\n## Architecture\n\nAlpha calls Beta.\n",
+            encoding="utf-8",
+        )
+
+    foreign_project = tmp_path / "foreign-project"
+    foreign_project.mkdir()
+    foreign_out = _make_graph(foreign_project)
+    seeded = _run(["export", "html"], foreign_project)
+    assert seeded.returncode == 0, seeded.stderr
+    before = {
+        path.relative_to(foreign_out).as_posix(): path.read_bytes()
+        for path in foreign_out.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    if subcommand == "obsidian":
+        arguments = [
+            "export",
+            "obsidian",
+            "--graph",
+            str(source_graph),
+            "--dir",
+            str(foreign_out / "vault"),
+        ]
+    else:
+        arguments = [
+            "export",
+            "callflow-html",
+            "--graph",
+            str(source_graph),
+            "--output",
+            str(foreign_out / "flow.html"),
+        ]
+    result = _run(arguments, tmp_path)
+
+    assert result.returncode != 0
+    assert "foreign managed authority" in result.stderr
+    after = {
+        path.relative_to(foreign_out).as_posix(): path.read_bytes()
+        for path in foreign_out.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    assert after == before
+
+
+def test_issue89_explicit_external_callflow_destination_stays_unmanaged(tmp_path):
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    seed_out = _make_graph(seed)
+    source = tmp_path / "external-source"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes((seed_out / "graph.json").read_bytes())
+    report = source / "GRAPH_REPORT.md"
+    report.write_text(
+        "# Graph Report\n\n## Architecture\n\nAlpha calls Beta.\n",
+        encoding="utf-8",
+    )
+    graph_before = graph.read_bytes()
+    destination = tmp_path / "external-output" / "flow.html"
+
+    result = _run(
+        [
+            "export",
+            "callflow-html",
+            "--graph",
+            str(graph),
+            "--report",
+            str(report),
+            "--output",
+            str(destination),
+        ],
+        tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert destination.is_file()
+    assert result.stdout == (
+        "Loaded: 4 nodes, 4 edges, 3 sections\n"
+        f"Graph: {graph}\n"
+        f"Call-flow HTML written: {destination}\n"
+        "  Sections: 4  |  Mermaid diagrams: 3  |  Call tables: 2\n"
+        "  Diagrams use Mermaid init directives plus interactive zoom/pan controls.\n"
+        f"callflow HTML written - open in any browser: {destination}\n"
+    )
+    assert graph.read_bytes() == graph_before
+    assert not list(source.glob(".graphify_*.json"))
+
+
+def test_issue89_explicit_external_obsidian_destination_stays_unmanaged(tmp_path):
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    seed_out = _make_graph(seed)
+    source = tmp_path / "external-source"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes((seed_out / "graph.json").read_bytes())
+    graph_before = graph.read_bytes()
+    destination = tmp_path / "nested" / "new" / "external-vault"
+
+    result = _run(
+        [
+            "export",
+            "obsidian",
+            "--graph",
+            str(graph),
+            "--dir",
+            str(destination),
+        ],
+        tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (destination / "graph.canvas").is_file()
+    note_count = len(list(destination.glob("*.md")))
+    assert result.stdout == (
+        f"Obsidian vault: {note_count} notes in {destination}/\n"
+        f"Canvas: {destination}/graph.canvas\n"
+        f"Open {destination}/ as a vault in Obsidian.\n"
+    )
+    assert graph.read_bytes() == graph_before
+    assert not list(source.glob(".graphify_*.json"))
+
+
+def test_issue89_positional_callflow_source_overrides_default_graph(tmp_path):
+    default_out = _make_graph(tmp_path)
+    default_before = {
+        path.relative_to(default_out).as_posix(): path.read_bytes()
+        for path in default_out.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    external = tmp_path / "external-source"
+    external.mkdir()
+    graph = external / "graph.json"
+    graph.write_bytes((default_out / "graph.json").read_bytes())
+    graph_data = json.loads(graph.read_text())
+    graph_data["nodes"][0]["label"] = "POSITIONAL_SOURCE_SENTINEL"
+    graph.write_text(json.dumps(graph_data))
+    report = external / "GRAPH_REPORT.md"
+    report.write_text(
+        "# Graph Report\n\n## God Nodes (most connected - your core abstractions)\n"
+        "1. `POSITIONAL_REPORT_SENTINEL` - 4 edges\n"
+    )
+    destination = tmp_path / "external-output" / "positional.html"
+
+    result = _run(
+        [
+            "export",
+            "callflow-html",
+            str(graph),
+            "--output",
+            str(destination),
+        ],
+        tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "Loaded: 4 nodes, 4 edges, 3 sections\n"
+        f"Graph: {graph}\n"
+        f"Call-flow HTML written: {destination}\n"
+        "  Sections: 4  |  Mermaid diagrams: 3  |  Call tables: 2\n"
+        "  Diagrams use Mermaid init directives plus interactive zoom/pan controls.\n"
+        f"callflow HTML written - open in any browser: {destination}\n"
+    )
+    assert "POSITIONAL_SOURCE_SENTINEL" in destination.read_text()
+    assert "POSITIONAL_REPORT_SENTINEL" in destination.read_text()
+    assert {
+        path.relative_to(default_out).as_posix(): path.read_bytes()
+        for path in default_out.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    } == default_before
+    assert not list(external.glob(".graphify_*.json"))
+
+
 def test_issue89_managed_callflow_export_commits_generation(tmp_path):
     out = _make_graph(tmp_path)
     (out / "GRAPH_REPORT.md").write_text(

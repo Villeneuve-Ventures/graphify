@@ -3004,6 +3004,1043 @@ def test_unmanaged_recovery_fsync_failure_retains_journal(tmp_path, monkeypatch)
     assert not list(output.glob(".*graphify-unmanaged-*"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_unmanaged_stage_retirement_is_durable_and_recoverable(tmp_path):
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    script = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "boundary=sys.argv[2]; commit_unmanaged_bytes(sys.argv[1],b'successor',"
+        "failpoint=lambda name: os._exit(91) if name==boundary else None)"
+    )
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            script,
+            str(destination),
+            "after_unmanaged_stage_retirement",
+        ],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    journal_path = next(output.glob(".graphify-unmanaged-journal-*.json"))
+    journal = json.loads(journal_path.read_text())
+    assert journal["state"] == "stage-retired"
+    assert destination.read_bytes() == b"successor"
+    assert not (output / journal["stage_name"]).exists()
+    assert (output / journal["backup_name"]).read_bytes() == b"predecessor"
+
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            script,
+            str(destination),
+            "after_unmanaged_recovery_exchange",
+        ],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    assert destination.read_bytes() == b"predecessor"
+    assert journal_path.exists()
+
+    from graphify.transaction import commit_unmanaged_bytes
+
+    commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+    destination.write_bytes(b"next predecessor")
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            script,
+            str(destination),
+            "after_unmanaged_auxiliary_retirement",
+        ],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    journal_path = next(output.glob(".graphify-unmanaged-journal-*.json"))
+    journal = json.loads(journal_path.read_text())
+    assert journal["state"] == "aux-retired"
+    assert destination.read_bytes() == b"successor"
+    assert not (output / journal["stage_name"]).exists()
+    assert not (output / journal["backup_name"]).exists()
+
+    commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_unmanaged_first_create_recovers_stage_unlink_crash(tmp_path):
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    script = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "commit_unmanaged_bytes(sys.argv[1],b'successor',"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_unmanaged_stage_unlink_fsync' else None)"
+    )
+
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+
+    assert interrupted.returncode == 91
+    journal_path = next(output.glob(".graphify-unmanaged-journal-*.json"))
+    journal = json.loads(journal_path.read_text())
+    assert journal["state"] == "stage-retire-attempt"
+    assert destination.read_bytes() == b"successor"
+    assert not (output / journal["stage_name"]).exists()
+    assert journal["predecessor_identity"] is None
+    assert journal["backup_name"] is None
+
+    from graphify.transaction import commit_unmanaged_bytes
+
+    commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_unmanaged_predecessor_recovers_stage_unlink_and_backup_exchange(tmp_path):
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "report.html"
+    destination.write_bytes(b"predecessor")
+    script = (
+        "import os,sys; from graphify.transaction import commit_unmanaged_bytes; "
+        "boundary=sys.argv[2]; commit_unmanaged_bytes(sys.argv[1],b'successor',"
+        "failpoint=lambda name: os._exit(91) if name==boundary else None)"
+    )
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            script,
+            str(destination),
+            "after_unmanaged_stage_unlink_fsync",
+        ],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    journal_path = next(output.glob(".graphify-unmanaged-journal-*.json"))
+    journal = json.loads(journal_path.read_text())
+    assert journal["state"] == "stage-retire-attempt"
+    assert destination.read_bytes() == b"successor"
+    assert not (output / journal["stage_name"]).exists()
+    assert (output / journal["backup_name"]).read_bytes() == b"predecessor"
+
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-P",
+            "-c",
+            script,
+            str(destination),
+            "after_unmanaged_recovery_exchange",
+        ],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    assert destination.read_bytes() == b"predecessor"
+    assert (output / journal["backup_name"]).read_bytes() == b"successor"
+
+    from graphify.transaction import commit_unmanaged_bytes
+
+    commit_unmanaged_bytes(destination, b"successor")
+    assert destination.read_bytes() == b"successor"
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+def test_unmanaged_delete_rejects_same_bytes_replacement_before_rename(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "stale.md"
+    destination.write_bytes(b"stale")
+    info = destination.stat()
+    identity = OutputIdentity(info.st_dev, info.st_ino)
+    digest = hashlib.sha256(b"stale").hexdigest()
+
+    def replace(boundary):
+        if boundary == "before_unmanaged_delete_rename":
+            replacement = output / "replacement.tmp"
+            replacement.write_bytes(b"stale")
+            os.replace(replacement, destination)
+
+    outcome = transaction_module.commit_unmanaged_unlink(
+        destination,
+        expected_identity=identity,
+        expected_digest=digest,
+        failpoint=replace,
+    )
+    assert outcome == "foreign"
+    assert destination.read_bytes() == b"stale"
+    assert destination.stat().st_ino != identity.inode
+    assert not list(output.glob(".graphify-unmanaged-delete-*.json"))
+
+
+def test_unmanaged_delete_restores_competitor_moved_by_atomic_rename(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "stale.md"
+    destination.write_bytes(b"stale")
+    info = destination.stat()
+    identity = OutputIdentity(info.st_dev, info.st_ino)
+    digest = hashlib.sha256(b"stale").hexdigest()
+    real_rename = transaction_module._atomic_rename_no_replace
+
+    def race(capability, source, target):
+        if source == destination.name:
+            replacement = output / "replacement.tmp"
+            replacement.write_bytes(b"replacement")
+            os.replace(replacement, destination)
+        return real_rename(capability, source, target)
+
+    monkeypatch.setattr(transaction_module, "_atomic_rename_no_replace", race)
+    outcome = transaction_module.commit_unmanaged_unlink(
+        destination,
+        expected_identity=identity,
+        expected_digest=digest,
+    )
+    assert outcome == "foreign"
+    assert destination.read_bytes() == b"replacement"
+    assert not list(output.glob(".*.delete"))
+    assert not list(output.glob(".graphify-unmanaged-delete-*.json"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_unmanaged_delete_recovers_after_quarantine_retirement(tmp_path):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "stale.md"
+    destination.write_bytes(b"stale")
+    info = destination.stat()
+    identity = OutputIdentity(info.st_dev, info.st_ino)
+    digest = hashlib.sha256(b"stale").hexdigest()
+    script = (
+        "import hashlib,os,sys; import graphify.transaction as t; "
+        "p=sys.argv[1]; s=os.stat(p,follow_symlinks=False); "
+        "t.commit_unmanaged_unlink(p,"
+        "expected_identity=t.OutputIdentity(s.st_dev,s.st_ino),"
+        "expected_digest=hashlib.sha256(b'stale').hexdigest(),"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_unmanaged_delete_unlink_fsync' else None)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(destination)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    assert not destination.exists()
+    assert list(output.glob(".graphify-unmanaged-delete-*.json"))
+
+    transaction_module.commit_unmanaged_unlink(
+        destination,
+        expected_identity=identity,
+        expected_digest=digest,
+    )
+    assert not list(output.glob(".*graphify-unmanaged-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+@pytest.mark.parametrize("terminal", ["deleted", "foreign"])
+def test_unmanaged_delete_pre_rename_terminal_state_resumes(tmp_path, terminal):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "external"
+    output.mkdir()
+    destination = output / "stale.md"
+    destination.write_bytes(b"stale")
+    info = destination.stat()
+    identity = OutputIdentity(info.st_dev, info.st_ino)
+    digest = hashlib.sha256(b"stale").hexdigest()
+    script = (
+        "import hashlib,os,sys\nimport graphify.transaction as t\n"
+        "p=sys.argv[1]\nmode=sys.argv[2]\ns=os.stat(p,follow_symlinks=False)\n"
+        "def stop(boundary):\n"
+        " if boundary=='before_unmanaged_delete_rename':\n"
+        "  if mode=='deleted': os.unlink(p)\n"
+        "  else:\n"
+        "   q=p+'.user'; open(q,'wb').write(b'user'); os.replace(q,p)\n"
+        " if boundary in {'after_unmanaged_delete_completed_absent',"
+        "'after_unmanaged_delete_restored_foreign'}: os._exit(91)\n"
+        "t.commit_unmanaged_unlink(p,"
+        "expected_identity=t.OutputIdentity(s.st_dev,s.st_ino),"
+        "expected_digest=hashlib.sha256(b'stale').hexdigest(),failpoint=stop)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(destination), terminal],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    journal = next(output.glob(".graphify-unmanaged-delete-*.json"))
+    assert json.loads(journal.read_text())["state"] == (
+        "deleted" if terminal == "deleted" else "restored-foreign"
+    )
+
+    outcome = transaction_module.commit_unmanaged_unlink(
+        destination,
+        expected_identity=identity,
+        expected_digest=digest,
+    )
+    assert outcome == terminal
+    assert destination.exists() == (terminal == "foreign")
+    if terminal == "foreign":
+        assert destination.read_bytes() == b"user"
+    assert not journal.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+@pytest.mark.parametrize(
+    ("boundary", "replacement"),
+    [
+        ("after_obsidian_new_leaf", "new.md"),
+        ("after_obsidian_stale_quarantine", "stale.md"),
+        ("after_obsidian_stale_deletion", "stale.md"),
+        ("after_obsidian_manifest_commit", "old.md"),
+    ],
+)
+def test_unmanaged_obsidian_batch_recovers_and_preserves_replacements(
+    tmp_path, boundary, replacement
+):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "old.md").write_bytes(b"old")
+    (vault / "stale.md").write_bytes(b"stale")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["old.md", "stale.md"]}, indent=2),
+        encoding="utf-8",
+    )
+    script = (
+        "import os,sys; from graphify.transaction import "
+        "open_unmanaged_obsidian_inventory,commit_unmanaged_obsidian_batch; "
+        "v=sys.argv[1]; b=sys.argv[2]; i=open_unmanaged_obsidian_inventory(v); "
+        "commit_unmanaged_obsidian_batch(v,i,"
+        "{'old.md':b'updated','new.md':b'new'},"
+        "failpoint=lambda name: os._exit(91) if name==b else None)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(vault), boundary],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    assert list(tmp_path.glob(".graphify-unmanaged-obsidian-*.json"))
+
+    replacement_path = vault / replacement
+    replacement_temp = vault / f".{replacement}.user"
+    replacement_temp.write_bytes(b"user replacement")
+    os.replace(replacement_temp, replacement_path)
+
+    from graphify.transaction import (
+        commit_unmanaged_obsidian_batch,
+        open_unmanaged_obsidian_inventory,
+    )
+
+    inventory = open_unmanaged_obsidian_inventory(vault)
+    published = commit_unmanaged_obsidian_batch(
+        vault,
+        inventory,
+        {"old.md": b"updated", "new.md": b"new"},
+    )
+
+    assert replacement_path.read_bytes() == b"user replacement"
+    expected_owned = {"old.md", "new.md"} - {replacement}
+    assert published == expected_owned
+    manifest = json.loads(
+        (vault / ".graphify_obsidian_manifest.json").read_text(encoding="utf-8")
+    )
+    assert set(manifest["files"]) == expected_owned
+    for name in expected_owned:
+        assert (vault / name).read_bytes() == {
+            "old.md": b"updated",
+            "new.md": b"new",
+        }[name]
+    assert not list(tmp_path.glob(".graphify-unmanaged-obsidian-*.json"))
+    assert not list(vault.rglob(".graphify-unmanaged-journal-*.json"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_unmanaged_obsidian_batch_rejects_malformed_journal_zero_mutation(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    script = (
+        "import os,sys; from graphify.transaction import "
+        "open_unmanaged_obsidian_inventory,commit_unmanaged_obsidian_batch; "
+        "v=sys.argv[1]; i=open_unmanaged_obsidian_inventory(v); "
+        "commit_unmanaged_obsidian_batch(v,i,{'new.md':b'new'},"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_obsidian_new_leaf' else None)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(vault)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    journal_path = next(tmp_path.glob(".graphify-unmanaged-obsidian-*.json"))
+    journal = json.loads(journal_path.read_text())
+    journal["unexpected"] = True
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    before = _file_bytes(tmp_path)
+
+    from graphify.transaction import (
+        commit_unmanaged_obsidian_batch,
+        open_unmanaged_obsidian_inventory,
+    )
+
+    with pytest.raises(PendingTransactionError, match="batch journal is malformed"):
+        commit_unmanaged_obsidian_batch(
+            vault,
+            open_unmanaged_obsidian_inventory(vault),
+            {"new.md": b"new"},
+        )
+    assert _file_bytes(tmp_path) == before
+
+
+def test_unmanaged_obsidian_batch_budget_is_symmetric_and_preflighted(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
+    before = _file_bytes(tmp_path)
+    monkeypatch.setattr(
+        transaction_module, "_MAX_OBSIDIAN_BATCH_JOURNAL_BYTES", 512
+    )
+
+    with pytest.raises(PendingTransactionError, match="journal exceeds bounds"):
+        transaction_module.commit_unmanaged_obsidian_batch(
+            vault,
+            inventory,
+            {"nested/owned-note.md": b"payload"},
+        )
+    assert _file_bytes(tmp_path) == before
+
+
+def test_unmanaged_obsidian_near_limit_journal_recovers(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    payloads = {
+        f"notes/{index:02d}-{'x' * 80}.md": f"payload-{index}".encode()
+        for index in range(6)
+    }
+    monkeypatch.setattr(
+        transaction_module, "_MAX_OBSIDIAN_BATCH_JOURNAL_BYTES", 8192
+    )
+    payload_file = tmp_path / "payloads.json"
+    payload_file.write_text(
+        json.dumps({name: payload.decode() for name, payload in payloads.items()})
+    )
+    script = (
+        "import json,os,sys; import graphify.transaction as t; "
+        "t._MAX_OBSIDIAN_BATCH_JOURNAL_BYTES=8192; "
+        "p={k:v.encode() for k,v in json.load(open(sys.argv[2])).items()}; "
+        "i=t.open_unmanaged_obsidian_inventory(sys.argv[1]); "
+        "t.commit_unmanaged_obsidian_batch(sys.argv[1],i,p,"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_obsidian_new_leaf' else None)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(vault), str(payload_file)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    journal = next(tmp_path.glob(".graphify-unmanaged-obsidian-*.json"))
+    assert journal.stat().st_size <= 8192
+
+    published = transaction_module.commit_unmanaged_obsidian_batch(
+        vault,
+        transaction_module.open_unmanaged_obsidian_inventory(vault),
+        payloads,
+    )
+    assert published == frozenset(payloads)
+    assert not journal.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_obsidian_delete_restored_foreign_resumes_and_corrects_manifest(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "old.md").write_bytes(b"old")
+    (vault / "stale.md").write_bytes(b"stale")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["old.md", "stale.md"]}, indent=2)
+    )
+    script = (
+        "import os,sys\nimport graphify.transaction as t\n"
+        "real=t._atomic_rename_no_replace\nraced=False\n"
+        "def race(capability,source,target):\n"
+        " global raced\n"
+        " if source=='stale.md' and not raced:\n"
+        "  raced=True; p=capability.path/source; q=capability.path/'user.tmp'; "
+        "q.write_bytes(b'user replacement'); os.replace(q,p)\n"
+        " return real(capability,source,target)\n"
+        "t._atomic_rename_no_replace=race\nv=sys.argv[1]\n"
+        "i=t.open_unmanaged_obsidian_inventory(v)\n"
+        "t.commit_unmanaged_obsidian_batch(v,i,{'old.md':b'updated'},"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_obsidian_stale_restored_foreign' else None)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(vault)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    assert (vault / "stale.md").read_bytes() == b"user replacement"
+    delete_journal = next(vault.glob(".graphify-unmanaged-delete-*.json"))
+    assert json.loads(delete_journal.read_text())["state"] == "restored-foreign"
+
+    import graphify.transaction as transaction_module
+
+    published = transaction_module.commit_unmanaged_obsidian_batch(
+        vault,
+        transaction_module.open_unmanaged_obsidian_inventory(vault),
+        {"old.md": b"updated"},
+    )
+    assert published == frozenset({"old.md"})
+    assert (vault / "stale.md").read_bytes() == b"user replacement"
+    assert json.loads(
+        (vault / ".graphify_obsidian_manifest.json").read_text()
+    ) == {"files": ["old.md"]}
+    assert not list(vault.glob(".graphify-unmanaged-delete-*.json"))
+
+    assert transaction_module.commit_unmanaged_obsidian_batch(
+        vault,
+        transaction_module.open_unmanaged_obsidian_inventory(vault),
+        {"old.md": b"updated"},
+    ) == frozenset({"old.md"})
+
+
+def test_obsidian_owned_note_identity_cas_preserves_byte_identical_replacement(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "owned.md"
+    note.write_bytes(b"old")
+    original_inode = note.stat().st_ino
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["owned.md"]}, indent=2)
+    )
+    inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
+    real_exchange = transaction_module._atomic_exchange
+    raced = False
+
+    def exchange(capability, left, right):
+        nonlocal raced
+        if right == "owned.md" and not raced:
+            raced = True
+            replacement = vault / "replacement.tmp"
+            replacement.write_bytes(b"old")
+            os.replace(replacement, note)
+        return real_exchange(capability, left, right)
+
+    monkeypatch.setattr(transaction_module, "_atomic_exchange", exchange)
+    with pytest.raises(PendingTransactionError, match="changed before publication"):
+        transaction_module.commit_unmanaged_obsidian_batch(
+            vault, inventory, {"owned.md": b"updated"}
+        )
+    assert note.read_bytes() == b"old"
+    assert note.stat().st_ino != original_inode
+
+    monkeypatch.setattr(transaction_module, "_atomic_exchange", real_exchange)
+    published = transaction_module.commit_unmanaged_obsidian_batch(
+        vault,
+        transaction_module.open_unmanaged_obsidian_inventory(vault),
+        {"owned.md": b"updated"},
+    )
+    assert published == frozenset()
+    assert note.read_bytes() == b"old"
+    assert json.loads(
+        (vault / ".graphify_obsidian_manifest.json").read_text()
+    ) == {"files": []}
+
+
+def test_output_identity_json_accepts_uint64_boundary_and_rejects_overflow():
+    import graphify.transaction as transaction_module
+
+    maximum = 18_446_744_073_709_551_615
+    assert transaction_module._identity_from_json(
+        {"device": maximum, "inode": maximum}
+    ) == OutputIdentity(maximum, maximum)
+    with pytest.raises(PendingTransactionError, match="malformed output identity"):
+        transaction_module._identity_from_json(
+            {"device": maximum + 1, "inode": maximum}
+        )
+
+
+def test_obsidian_batch_rejects_casefold_owned_candidate_collision_zero_mutation(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "Foo.md").write_bytes(b"owned")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["Foo.md"]}, indent=2)
+    )
+    inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
+    before = _file_bytes(tmp_path)
+
+    with pytest.raises(PendingTransactionError, match="namespace is ambiguous"):
+        transaction_module.commit_unmanaged_obsidian_batch(
+            vault, inventory, {"foo.md": b"candidate"}
+        )
+    assert _file_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_obsidian_batch_rejects_casefold_nonregular_owned_collision_zero_mutation(
+    tmp_path, replacement,
+):
+    import graphify.transaction as transaction_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    owned = vault / "Foo.md"
+    if replacement == "symlink":
+        owned.symlink_to("user-target.md")
+    else:
+        owned.mkdir()
+        (owned / "user.txt").write_bytes(b"directory content")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["Foo.md"]}, indent=2)
+    )
+    identity = owned.lstat()
+    inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
+    assert inventory.files == {}
+    assert inventory.manifest_names == frozenset({"Foo.md"})
+    before = _file_bytes(tmp_path)
+
+    with pytest.raises(PendingTransactionError, match="namespace is ambiguous"):
+        transaction_module.commit_unmanaged_obsidian_batch(
+            vault, inventory, {"foo.md": b"candidate"}
+        )
+
+    assert _file_bytes(tmp_path) == before
+    preserved = owned.lstat()
+    assert (preserved.st_dev, preserved.st_ino) == (identity.st_dev, identity.st_ino)
+    if replacement == "symlink":
+        assert os.readlink(owned) == "user-target.md"
+    else:
+        assert (owned / "user.txt").read_bytes() == b"directory content"
+
+
+def test_obsidian_inventory_propagates_unrelated_open_error_zero_mutation(
+    tmp_path, monkeypatch,
+):
+    import graphify.transaction as transaction_module
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "owned.md").write_bytes(b"owned")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["owned.md"]}, indent=2)
+    )
+    before = _file_bytes(tmp_path)
+    original_open = transaction_module.os.open
+
+    def fail_owned_open(path, *args, **kwargs):
+        if path == "owned.md":
+            raise OSError(5, "injected I/O failure")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_module.os, "open", fail_owned_open)
+    with pytest.raises(OSError, match="injected I/O failure"):
+        transaction_module.open_unmanaged_obsidian_inventory(vault)
+    assert _file_bytes(tmp_path) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_obsidian_batch_pre_rename_foreign_recovery_corrects_manifest(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "old.md").write_bytes(b"old")
+    (vault / "stale.md").write_bytes(b"stale")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["old.md", "stale.md"]}, indent=2)
+    )
+    script = (
+        "import os,sys\nimport graphify.transaction as t\nv=sys.argv[1]\n"
+        "i=t.open_unmanaged_obsidian_inventory(v)\n"
+        "def stop(boundary):\n"
+        " if boundary=='before_obsidian_stale_delete_rename':\n"
+        "  p=os.path.join(v,'stale.md'); q=p+'.user'; "
+        "open(q,'wb').write(b'user'); os.replace(q,p)\n"
+        " if boundary=='after_obsidian_stale_restored_foreign': os._exit(91)\n"
+        "t.commit_unmanaged_obsidian_batch(v,i,{'old.md':b'updated'},failpoint=stop)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(vault)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    assert (vault / "stale.md").read_bytes() == b"user"
+
+    import graphify.transaction as transaction_module
+
+    published = transaction_module.commit_unmanaged_obsidian_batch(
+        vault,
+        transaction_module.open_unmanaged_obsidian_inventory(vault),
+        {"old.md": b"updated"},
+    )
+    assert published == frozenset({"old.md"})
+    assert (vault / "stale.md").read_bytes() == b"user"
+    assert json.loads(
+        (vault / ".graphify_obsidian_manifest.json").read_text()
+    ) == {"files": ["old.md"]}
+    assert not list(vault.glob(".graphify-unmanaged-delete-*.json"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+def test_obsidian_batch_rejects_malformed_stale_binding_before_pending_item(
+    tmp_path,
+):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "old.md").write_bytes(b"old")
+    (vault / "stale.md").write_bytes(b"stale")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["old.md", "stale.md"]}, indent=2)
+    )
+    script = (
+        "import os,sys; import graphify.transaction as t; v=sys.argv[1]; "
+        "i=t.open_unmanaged_obsidian_inventory(v); "
+        "t.commit_unmanaged_obsidian_batch(v,i,"
+        "{'new.md':b'new','old.md':b'updated'},"
+        "failpoint=lambda name: os._exit(91) "
+        "if name=='after_obsidian_new_leaf' else None)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(vault)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    journal = next(tmp_path.glob(".graphify-unmanaged-obsidian-*.json"))
+    raw = json.loads(journal.read_text())
+    raw["items"][0]["state"] = "pending"
+    raw["items"][0]["successor_identity"] = None
+    raw["stale"][0]["predecessor_digest"] = "f" * 64
+    journal.write_text(json.dumps(raw))
+    before = _file_bytes(tmp_path)
+
+    import graphify.transaction as transaction_module
+
+    with pytest.raises(PendingTransactionError, match="journal is malformed"):
+        transaction_module.commit_unmanaged_obsidian_batch(
+            vault,
+            transaction_module.open_unmanaged_obsidian_inventory(vault),
+            {"new.md": b"new", "old.md": b"updated"},
+        )
+    assert _file_bytes(tmp_path) == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
+@pytest.mark.parametrize(
+    "recreate_stale", ["absent", "file", "symlink", "directory"]
+)
+def test_obsidian_deleted_callback_crash_retires_journal_and_unblocks_publication(
+    tmp_path, recreate_stale,
+):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "old.md").write_bytes(b"old")
+    (vault / "stale.md").write_bytes(b"stale")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["old.md", "stale.md"]}, indent=2)
+    )
+    import graphify.transaction as transaction_module
+
+    inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
+    script = (
+        "import os,sys\nimport graphify.transaction as t\nv=sys.argv[1]\n"
+        "i=t.open_unmanaged_obsidian_inventory(v)\n"
+        "def stop(boundary):\n"
+        " if boundary=='before_obsidian_stale_delete_rename': "
+        "os.unlink(os.path.join(v,'stale.md'))\n"
+        " if boundary=='after_obsidian_stale_delete_callback': os._exit(91)\n"
+        "t.commit_unmanaged_obsidian_batch(v,i,{'old.md':b'updated'},failpoint=stop)"
+    )
+    interrupted = subprocess.run(
+        [sys.executable, "-P", "-c", script, str(vault)],
+        cwd=Path(__file__).parents[1],
+        check=False,
+    )
+    assert interrupted.returncode == 91
+    batch_journal = next(tmp_path.glob(".graphify-unmanaged-obsidian-*.json"))
+    batch_raw = json.loads(batch_journal.read_text())
+    assert batch_raw["stale"][0]["state"] == "deleted"
+    assert list(vault.glob(".graphify-unmanaged-delete-*.json"))
+    recreated_identity = None
+    if recreate_stale == "file":
+        (vault / "stale.md").write_bytes(b"user recreated")
+        recreated = (vault / "stale.md").lstat()
+        recreated_identity = (recreated.st_dev, recreated.st_ino)
+    elif recreate_stale == "symlink":
+        (vault / "stale.md").symlink_to("user-target.md")
+        recreated = (vault / "stale.md").lstat()
+        recreated_identity = (recreated.st_dev, recreated.st_ino)
+    elif recreate_stale == "directory":
+        (vault / "stale.md").mkdir()
+        (vault / "stale.md" / "user.txt").write_bytes(b"directory content")
+        recreated = (vault / "stale.md").lstat()
+        recreated_identity = (recreated.st_dev, recreated.st_ino)
+
+    published = transaction_module.commit_unmanaged_obsidian_batch(
+        vault,
+        inventory,
+        {"old.md": b"updated"},
+    )
+    assert published == frozenset({"old.md"})
+    assert not list(vault.glob(".graphify-unmanaged-delete-*.json"))
+    assert not batch_journal.exists()
+    assert json.loads(
+        (vault / ".graphify_obsidian_manifest.json").read_text()
+    ) == {"files": ["old.md"]}
+    if recreate_stale == "file":
+        assert (vault / "stale.md").read_bytes() == b"user recreated"
+        preserved = (vault / "stale.md").lstat()
+        assert (preserved.st_dev, preserved.st_ino) == recreated_identity
+    elif recreate_stale == "symlink":
+        assert (vault / "stale.md").is_symlink()
+        assert os.readlink(vault / "stale.md") == "user-target.md"
+        preserved = (vault / "stale.md").lstat()
+        assert (preserved.st_dev, preserved.st_ino) == recreated_identity
+    elif recreate_stale == "directory":
+        assert (vault / "stale.md" / "user.txt").read_bytes() == b"directory content"
+        preserved = (vault / "stale.md").lstat()
+        assert (preserved.st_dev, preserved.st_ino) == recreated_identity
+    else:
+        assert not (vault / "stale.md").exists()
+    transaction_module.commit_unmanaged_bytes(vault / "later.html", b"later")
+    assert (vault / "later.html").read_bytes() == b"later"
+
+
+def test_obsidian_batch_rejects_managed_ancestor_zero_mutation(tmp_path):
+    import graphify.transaction as transaction_module
+
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / ".graphify_transaction.json").write_bytes(b"managed authority")
+    vault = managed / "nested" / "vault"
+    inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
+    before = _file_bytes(tmp_path)
+
+    with pytest.raises(
+        PendingTransactionError,
+        match="external destination is inside managed graph authority",
+    ):
+        transaction_module.commit_unmanaged_obsidian_batch(
+            vault, inventory, {"note.md": b"note"}
+        )
+
+    assert _file_bytes(tmp_path) == before
+    assert not vault.exists()
+
+
+def test_obsidian_batch_revalidates_ancestor_before_first_mutation(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    external = tmp_path / "external"
+    external.mkdir()
+    vault = external / "vault"
+    inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
+    marker = external / ".graphify_transaction.json"
+
+    def inject_authority(_capability, _journal_name):
+        marker.write_bytes(b"late managed authority")
+        return None
+
+    monkeypatch.setattr(
+        transaction_module, "_load_obsidian_batch_journal", inject_authority
+    )
+
+    with pytest.raises(
+        PendingTransactionError,
+        match="external destination is inside managed graph authority",
+    ):
+        transaction_module.commit_unmanaged_obsidian_batch(
+            vault, inventory, {"note.md": b"note"}
+        )
+
+    assert marker.read_bytes() == b"late managed authority"
+    assert set(external.iterdir()) == {marker}
+    assert not list(tmp_path.glob(".graphify-unmanaged-obsidian-*.json"))
+
+
+def test_external_snapshot_reads_only_pinned_graph_leaf(tmp_path):
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    payload = b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    graph.write_bytes(payload)
+    (source / "wiki").mkdir()
+    (source / "wiki" / "huge.md").write_bytes(b"x" * (2 * 1024 * 1024))
+    (source / "obsidian").mkdir()
+    (source / "obsidian" / "loop").symlink_to(source / "obsidian")
+
+    snapshot = transaction_module.open_external_graph_snapshot(graph)
+
+    assert snapshot.payload == payload
+    assert snapshot.artifacts == {"graph.json": payload}
+    assert _file_bytes(source)["graph.json"] == payload
+
+
+def test_external_snapshot_rejects_managed_watermark_without_mutation(tmp_path):
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes(_graph(3))
+    before = _file_bytes(source)
+
+    with pytest.raises(PendingTransactionError, match="managed watermark"):
+        transaction_module.open_external_graph_snapshot(graph)
+    assert _file_bytes(source) == before
+
+
+def test_external_snapshot_rejects_prefix_coordination_authority_zero_mutation(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    (source / ".graphify_transaction_token.race").write_bytes(b"authority")
+    destination = tmp_path / "destination.html"
+    destination.write_bytes(b"preserve destination")
+
+    with pytest.raises(
+        PendingTransactionError, match="managed coordination authority"
+    ):
+        transaction_module.open_external_graph_snapshot(graph)
+    assert destination.read_bytes() == b"preserve destination"
+
+
+def test_external_snapshot_rejects_coordination_appearing_after_retained_read(
+    tmp_path, monkeypatch,
+):
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    (source / "GRAPH_REPORT.md").write_bytes(b"# detached report")
+    destination = tmp_path / "destination.html"
+    destination.write_bytes(b"preserve destination")
+    original_read = transaction_module._read_bytes
+
+    def add_coordination_after_retained_read(capability, name, limit=1024 * 1024):
+        retained = original_read(capability, name, limit)
+        if name == "GRAPH_REPORT.md":
+            (source / ".graphify-gc-journal-race.json").write_bytes(b"authority")
+        return retained
+
+    monkeypatch.setattr(
+        transaction_module, "_read_bytes", add_coordination_after_retained_read
+    )
+
+    with pytest.raises(
+        PendingTransactionError, match="managed coordination authority"
+    ):
+        transaction_module.open_external_graph_snapshot(
+            graph, retain_artifacts=("GRAPH_REPORT.md",)
+        )
+    assert destination.read_bytes() == b"preserve destination"
+
+
+def test_external_snapshot_rejects_graph_replacement_after_retained_read(
+    tmp_path, monkeypatch,
+):
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    payload = b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    graph.write_bytes(payload)
+    (source / "GRAPH_REPORT.md").write_bytes(b"# detached report")
+    destination = tmp_path / "destination.html"
+    destination.write_bytes(b"preserve destination")
+    original_read = transaction_module._read_bytes
+
+    def replace_graph_after_retained_read(capability, name, limit=1024 * 1024):
+        retained = original_read(capability, name, limit)
+        if name == "GRAPH_REPORT.md":
+            replacement = source / "replacement.json"
+            replacement.write_bytes(payload)
+            os.replace(replacement, graph)
+        return retained
+
+    monkeypatch.setattr(
+        transaction_module, "_read_bytes", replace_graph_after_retained_read
+    )
+
+    with pytest.raises(
+        PendingTransactionError,
+        match="external snapshot entry identity changed: graph.json",
+    ):
+        transaction_module.open_external_graph_snapshot(
+            graph, retain_artifacts=("GRAPH_REPORT.md",)
+        )
+    assert destination.read_bytes() == b"preserve destination"
+
+
 def test_tree_html_public_retry_recovers_its_exact_unmanaged_journal(tmp_path):
     from graphify.tree_html import write_tree_html
 
@@ -5080,6 +6117,114 @@ def test_direct_recovery_replays_pending_enqueue_exactly_once(tmp_path, boundary
     assert not (output / ".graphify_enqueue.json").exists()
     transaction = begin_transaction("update", root, output=output)
     assert transaction.generation == 1
+
+
+def test_run_token_refences_enqueue_inserted_between_locked_sections(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, token = _owner(tmp_path)
+    original = transaction_module._fence_pending_enqueue_locked
+    inserted: dict[str, bytes] | None = None
+    calls = 0
+
+    def inject(capability, *, recover=False):
+        nonlocal calls, inserted
+        result = original(capability, recover=recover)
+        calls += 1
+        if calls == 1:
+            with pytest.raises(RuntimeError, match="stop"):
+                queue_rebuild(
+                    "update",
+                    root,
+                    output=output,
+                    changed_paths=["a.py"],
+                    failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+                    if name == "after_enqueue_journal"
+                    else None,
+                )
+            inserted = _file_bytes(output)
+        return result
+
+    monkeypatch.setattr(
+        transaction_module, "_fence_pending_enqueue_locked", inject
+    )
+    with pytest.raises(PendingTransactionError, match="operational recovery"):
+        run_token(token.path, ["-c", "pass"])
+    assert inserted is not None and _file_bytes(output) == inserted
+
+    monkeypatch.setattr(
+        transaction_module, "_fence_pending_enqueue_locked", original
+    )
+    recover_close(output)
+    run_token(token.path, ["-c", "pass"])
+    assert not (output / ".graphify_enqueue.json").exists()
+
+
+@pytest.mark.parametrize("authority", ["enqueue", "token", "cancellation", "bootstrap"])
+@pytest.mark.parametrize("invalid_attempts", [0, False, 1.5, "1"])
+def test_selected_recovery_rejects_invalid_attempt_bound_before_mutation(
+    tmp_path, authority, invalid_attempts
+):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    if authority == "enqueue":
+        with pytest.raises(RuntimeError, match="stop"):
+            queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=["a.py"],
+                failpoint=lambda name: (_ for _ in ()).throw(RuntimeError("stop"))
+                if name == "after_enqueue_journal"
+                else None,
+            )
+    elif authority == "bootstrap":
+        with pytest.raises(RuntimeError, match="stop"):
+            begin_transaction(
+                "update",
+                root,
+                output=output,
+                failpoint=lambda _capability, _protocol: (_ for _ in ()).throw(
+                    RuntimeError("stop")
+                ),
+            )
+    elif authority == "token":
+        transaction = begin_transaction("update", root, output=output)
+        with pytest.raises(RuntimeError, match="after_token_journal"):
+            stage_transaction_handoff(
+                transaction,
+                failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+                if name == "after_token_journal"
+                else None,
+            )
+    else:
+        predecessor = begin_transaction("full", root, output=output)
+        _commit_owner_generation(output, predecessor)
+        finish_transaction(predecessor)
+        successor = begin_transaction("update", root, output=output)
+        with pytest.raises(RuntimeError, match="after_cancel_protocol"):
+            cancel_unpublished_transaction(
+                successor,
+                failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+                if name == "after_cancel_protocol"
+                else None,
+            )
+    before = _file_bytes(output)
+    identity = OutputIdentity(output.stat().st_dev, output.stat().st_ino)
+
+    with pytest.raises(RecoverableTransactionError, match="bound exhausted"):
+        recover_selected_transaction(
+            "update",
+            root,
+            output=output,
+            expected_generation=1,
+            expected_output_identity=identity,
+            max_attempts=invalid_attempts,  # type: ignore[arg-type]
+        )
+    assert _file_bytes(output) == before
 
 
 def test_manifest_failure_prevents_receipt_ack_and_close(tmp_path):

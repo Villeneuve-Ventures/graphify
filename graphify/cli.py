@@ -843,16 +843,73 @@ def _export_graph_path() -> Path:
             return Path(arguments[index + 1]).expanduser().resolve()
         if argument.startswith("--graph="):
             return Path(argument.split("=", 1)[1]).expanduser().resolve()
+    if len(sys.argv) > 2 and sys.argv[2] == "callflow-html":
+        positional = _callflow_positional_graph_index(arguments)
+        if positional is not None:
+            candidate = Path(arguments[positional]).expanduser()
+            if candidate.name == "graph.json" or candidate.suffix.lower() == ".json":
+                return candidate.resolve()
+            if (candidate / "graph.json").exists():
+                return (candidate / "graph.json").resolve()
+            return (candidate / _GRAPHIFY_OUT / "graph.json").resolve()
     if os.environ.get("GRAPHIFY_PREPARED_OUTPUT") == "1":
         return Path("graph.json").resolve()
     return (Path(_GRAPHIFY_OUT) / "graph.json").resolve()
 
 
 def _export_graph_was_explicit() -> bool:
+    arguments = sys.argv[3:]
     return any(
         argument == "--graph" or argument.startswith("--graph=")
-        for argument in sys.argv[3:]
+        for argument in arguments
+    ) or (
+        len(sys.argv) > 2
+        and sys.argv[2] == "callflow-html"
+        and _callflow_positional_graph_index(arguments) is not None
     )
+
+
+def _callflow_positional_graph_index(arguments: list[str]) -> int | None:
+    value_options = {
+        "--graph",
+        "--labels",
+        "--report",
+        "--sections",
+        "--output",
+        "--lang",
+        "--max-sections",
+        "--diagram-scale",
+        "--max-diagram-nodes",
+        "--max-diagram-edges",
+    }
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument in value_options:
+            index += 2
+            continue
+        if argument.startswith("--"):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _replace_export_graph_argument(
+    arguments: list[str], graph: Path, *, subcmd: str
+) -> list[str]:
+    if any(
+        argument == "--graph" or argument.startswith("--graph=")
+        for argument in arguments
+    ):
+        return _replace_graph_argument(arguments, graph)
+    rewritten = list(arguments)
+    if subcmd == "callflow-html":
+        positional = _callflow_positional_graph_index(rewritten)
+        if positional is not None:
+            rewritten[positional] = str(graph)
+            return rewritten
+    return [*rewritten, "--graph", str(graph)]
 
 
 def _export_destination_is_managed(graph: Path, *, source_managed: bool) -> bool:
@@ -873,6 +930,15 @@ def _export_destination_is_managed(graph: Path, *, source_managed: bool) -> bool
             target = Path(argument.split("=", 1)[1]).expanduser().resolve()
             return target == graph.parent or graph.parent in target.parents
     return True
+
+
+def _export_destination_path(graph: Path) -> Path:
+    subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+    if subcmd == "obsidian":
+        return _export_option_path(sys.argv[3:], "--dir") or graph.parent / "obsidian"
+    if subcmd == "callflow-html":
+        return _export_option_path(sys.argv[3:], "--output") or graph.parent
+    return graph.parent
 
 
 def _replace_export_path_argument(
@@ -904,11 +970,16 @@ def _transactional_export() -> None:
         PendingTransactionError,
         PublicationPlan,
         begin_transaction,
+        commit_unmanaged_obsidian_batch,
+        commit_unmanaged_bytes,
         commit_prepared_bytes,
         commit_publication_plan,
         current_transaction,
         finish_transaction,
+        managed_output_containing,
+        open_external_graph_snapshot,
         open_graph_snapshot,
+        open_unmanaged_obsidian_inventory,
         open_prepared_graph,
         owned_step,
         publication_plan_from_directory,
@@ -927,15 +998,66 @@ def _transactional_export() -> None:
         source_snapshot = open_prepared_graph(active_transaction, graph)
         source_managed = True
     else:
-        source_snapshot = open_graph_snapshot(graph, purpose="export-admission")
-        source_managed = (
-            source_snapshot.generation is not None
-            or graph.parent == (Path.cwd() / _GRAPHIFY_OUT).resolve()
-            or not _export_graph_was_explicit()
+        configured_output = graph.parent == (Path.cwd() / _GRAPHIFY_OUT).resolve()
+        if _export_graph_was_explicit() and not configured_output:
+            retain_external: list[str] = []
+            if sys.argv[2] == "callflow-html":
+                arguments = sys.argv[3:]
+                if not any(
+                    argument == "--report" or argument.startswith("--report=")
+                    for argument in arguments
+                ):
+                    retain_external.append("GRAPH_REPORT.md")
+                if not any(
+                    argument == "--labels" or argument.startswith("--labels=")
+                    for argument in arguments
+                ):
+                    retain_external.append(".graphify_labels.json")
+            try:
+                source_snapshot = open_external_graph_snapshot(
+                    graph, retain_artifacts=retain_external
+                )
+            except PendingTransactionError as exc:
+                if "managed" not in str(exc):
+                    raise
+                source_snapshot = open_graph_snapshot(
+                    graph, purpose="export-admission"
+                )
+                source_managed = True
+            else:
+                source_managed = False
+        else:
+            source_snapshot = open_graph_snapshot(
+                graph, purpose="export-admission"
+            )
+            source_managed = True
+    requested_destination = _export_destination_path(graph).resolve()
+    destination_authority = managed_output_containing(requested_destination)
+    prepared_destination = active_transaction is not None and (
+        requested_destination == graph.parent
+        or graph.parent in requested_destination.parents
+    )
+    source_output = (
+        active_transaction.output if active_transaction is not None else graph.parent
+    )
+    if not prepared_destination and destination_authority is not None and (
+        not source_managed or destination_authority != source_output
+    ):
+        raise PendingTransactionError("export destination has foreign managed authority")
+    destination_within_source = (
+        requested_destination == graph.parent
+        or graph.parent in requested_destination.parents
+    )
+    managed_delivery = prepared_destination or source_managed and (
+        destination_authority == source_output
+        or (destination_authority is None and destination_within_source)
+    )
+    export_subcmd = sys.argv[2]
+    external_obsidian_inventory = None
+    if not managed_delivery and export_subcmd == "obsidian":
+        external_obsidian_inventory = open_unmanaged_obsidian_inventory(
+            requested_destination
         )
-    if not _export_destination_is_managed(graph, source_managed=source_managed):
-        _dispatch_command("export")
-        return
     snapshot = source_snapshot
     captured_out = io.StringIO()
     captured_err = io.StringIO()
@@ -953,10 +1075,30 @@ def _transactional_export() -> None:
         manifest_payload = b"{}"
     with tempfile.TemporaryDirectory(prefix="graphify-export-prepare-") as staging_name:
         staging = Path(staging_name)
+        external_target: Path | None = None
         for name, payload in snapshot.artifacts.items():
             target = staging / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
+        if not managed_delivery and export_subcmd == "obsidian":
+            if external_obsidian_inventory is None:
+                raise PendingTransactionError(
+                    "external Obsidian inventory is unavailable"
+                )
+            external_vault = staging / "__external_obsidian"
+            external_vault.mkdir()
+            for name, entry in external_obsidian_inventory.files.items():
+                target = external_vault / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(entry.payload)
+            if external_obsidian_inventory.manifest_payload is not None:
+                (external_vault / ".graphify_obsidian_manifest.json").write_text(
+                    json.dumps(
+                        {"files": sorted(external_obsidian_inventory.files)},
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
         staged_graph = staging / graph.name
         graph_data = snapshot.data
         metadata = graph_data.get("graph")
@@ -965,25 +1107,36 @@ def _transactional_export() -> None:
             metadata.pop(GRAPH_WATERMARK_KEY, None)
             graph_data["graph"] = metadata
         staged_graph.write_text(json.dumps(graph_data), encoding="utf-8")
-        rewritten = _replace_graph_argument(original_argv[3:], staged_graph)
+        rewritten = _replace_export_graph_argument(
+            original_argv[3:], staged_graph, subcmd=original_argv[2]
+        )
         subcmd = original_argv[2]
         if subcmd == "obsidian":
             requested = _export_option_path(original_argv[3:], "--dir")
-            relative = (
-                Path("obsidian")
-                if requested is None
-                else requested.relative_to(graph.parent)
+            relative = Path("obsidian") if requested is None else (
+                requested.relative_to(graph.parent)
+                if managed_delivery
+                else Path("__external_obsidian")
             )
+            if not managed_delivery:
+                external_target = requested or graph.parent / "obsidian"
             rewritten = _replace_export_path_argument(
                 rewritten, "--dir", staging / relative
             )
         elif subcmd == "callflow-html":
             requested = _export_option_path(original_argv[3:], "--output")
             if requested is not None:
+                relative_output = (
+                    requested.relative_to(graph.parent)
+                    if managed_delivery
+                    else Path("__external_callflow.html")
+                )
+                if not managed_delivery:
+                    external_target = requested
                 rewritten = _replace_export_path_argument(
                     rewritten,
                     "--output",
-                    staging / requested.relative_to(graph.parent),
+                    staging / relative_output,
                 )
         sys.argv = [*original_argv[:3], *rewritten]
         try:
@@ -998,11 +1151,76 @@ def _transactional_export() -> None:
             success_exit = exc
         finally:
             sys.argv = original_argv
-        transaction = active_transaction or begin_transaction(
-            "runtime", graph.parent, output=graph.parent
-        )
         plan = publication_plan_from_directory(
             staging, prior_inventory=snapshot.artifacts
+        )
+        if not managed_delivery:
+            external_payloads: dict[Path, bytes] = {}
+            exact_output_mapping: tuple[Path, Path] | None = None
+            if subcmd == "obsidian":
+                if external_obsidian_inventory is None:
+                    raise PendingTransactionError(
+                        "external Obsidian inventory is unavailable"
+                    )
+                staged_destination = staging / (
+                    "__external_obsidian" if external_target is not None else "obsidian"
+                )
+                destination = external_target or graph.parent / "obsidian"
+                manifest_path = (
+                    staged_destination / ".graphify_obsidian_manifest.json"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                generated = {
+                    str(name) for name in manifest.get("files", [])
+                }
+                canvas = staged_destination / "graph.canvas"
+                if canvas.is_file():
+                    generated.add("graph.canvas")
+                generated_payloads: dict[str, bytes] = {}
+                for name in sorted(generated):
+                    path = staged_destination / name
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    generated_payloads[name] = path.read_bytes()
+                commit_unmanaged_obsidian_batch(
+                    destination,
+                    external_obsidian_inventory,
+                    generated_payloads,
+                )
+                exact_output_mapping = (staged_destination, destination)
+            elif subcmd == "callflow-html" and external_target is not None:
+                staged_callflow = staging / "__external_callflow.html"
+                external_payloads[external_target] = staged_callflow.read_bytes()
+                exact_output_mapping = (staged_callflow, external_target)
+            else:
+                for name, payload in plan.payloads.items():
+                    if name == graph.name or snapshot.artifacts.get(name) == payload:
+                        continue
+                    external_payloads[graph.parent / name] = payload
+            if subcmd != "obsidian":
+                for destination, payload in sorted(
+                    external_payloads.items(), key=lambda item: str(item[0])
+                ):
+                    commit_unmanaged_bytes(destination, payload)
+            rendered_out = captured_out.getvalue()
+            rendered_err = captured_err.getvalue()
+            if exact_output_mapping is not None:
+                staged_exact, requested_exact = exact_output_mapping
+                rendered_out = rendered_out.replace(
+                    str(staged_exact), str(requested_exact)
+                )
+                rendered_err = rendered_err.replace(
+                    str(staged_exact), str(requested_exact)
+                )
+            rendered_out = rendered_out.replace(str(staging), str(graph.parent))
+            rendered_err = rendered_err.replace(str(staging), str(graph.parent))
+            sys.stdout.write(rendered_out)
+            sys.stderr.write(rendered_err)
+            if success_exit is not None:
+                raise success_exit
+            return
+        transaction = active_transaction or begin_transaction(
+            "runtime", graph.parent, output=graph.parent
         )
         if active_transaction is not None:
             with owned_step(transaction):
