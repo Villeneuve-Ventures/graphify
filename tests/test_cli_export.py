@@ -47,6 +47,132 @@ def test_issue89_cli_destination_rejects_ambiguous_options(argv, monkeypatch):
         _resolve_transaction_destination("cluster-only")
 
 
+def test_export_routing_normalizes_inline_paths_and_rejects_duplicates():
+    from graphify.cli import _CliArgumentError, _normalize_export_routing
+
+    assert _normalize_export_routing(
+        ["callflow-html", "--graph=source.json", "--output=result.html"]
+    ) == [
+        "callflow-html",
+        "--graph",
+        "source.json",
+        "--output",
+        "result.html",
+    ]
+    with pytest.raises(_CliArgumentError, match="--graph may be specified only once"):
+        _normalize_export_routing(
+            ["html", "--graph", "one.json", "--graph=two.json"]
+        )
+    with pytest.raises(_CliArgumentError, match="ambiguous"):
+        _normalize_export_routing(
+            ["callflow-html", "source.json", "--graph=other.json"]
+        )
+
+
+def test_external_callflow_admits_explicit_same_parent_sidecars_once(
+    tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_text(
+        '{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}',
+        encoding="utf-8",
+    )
+    for name in ("custom-labels.json", "custom-report.md", "custom-sections.json"):
+        (source / name).write_text("[]" if name.endswith(".json") else "report")
+    calls: list[tuple[tuple[str, ...], dict[str, int]]] = []
+
+    def stop_after_admission(path, *, retain_artifacts=(), retain_limits=None):
+        calls.append((tuple(retain_artifacts), dict(retain_limits or {})))
+        raise RuntimeError("stop after exact admission")
+
+    monkeypatch.setattr(
+        transaction_module, "open_external_graph_snapshot", stop_after_admission
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "graphify",
+            "export",
+            "callflow-html",
+            "--graph",
+            str(graph),
+            "--labels",
+            str(source / "custom-labels.json"),
+            "--report",
+            str(source / "custom-report.md"),
+            "--sections",
+            str(source / "custom-sections.json"),
+            "--output",
+            str(tmp_path / "out.html"),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="stop after exact admission"):
+        cli_module._transactional_export_entry()
+
+    assert calls == [
+        (
+            (
+                "custom-labels.json",
+                "custom-report.md",
+                "custom-sections.json",
+            ),
+            {
+                "custom-labels.json": 1024 * 1024,
+                "custom-report.md": 50 * 1024 * 1024,
+                "custom-sections.json": 1024 * 1024,
+            },
+        )
+    ]
+
+
+def test_external_snapshot_safety_error_does_not_trigger_managed_fallback(
+    tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "graph.json"
+    graph.write_text("{}", encoding="utf-8")
+    managed_fallback = False
+
+    def safety_failure(*_args, **_kwargs):
+        raise transaction_module.PendingTransactionError(
+            "managed entry replaced while reading external sidecar"
+        )
+
+    def unexpected_fallback(*_args, **_kwargs):
+        nonlocal managed_fallback
+        managed_fallback = True
+        raise AssertionError("managed fallback must be typed")
+
+    monkeypatch.setattr(
+        transaction_module, "open_external_graph_snapshot", safety_failure
+    )
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", unexpected_fallback)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "export", "html", "--graph", str(graph)],
+    )
+
+    with pytest.raises(
+        transaction_module.PendingTransactionError, match="replaced while reading"
+    ):
+        cli_module._transactional_export_entry()
+
+    assert not managed_fallback
+    assert set(source.iterdir()) == {graph}
+
+
 def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
     tmp_path, monkeypatch
 ):
@@ -862,6 +988,32 @@ def test_cluster_only_uses_report_memory_without_receipt_ownership(tmp_path):
     assert {
         path.name: path.read_bytes() for path in (out / "memory").glob("*.md")
     } == memory_before
+
+
+def test_cluster_only_flushes_original_diagnostics_before_nonzero_exit(
+    tmp_path, monkeypatch, capsys
+):
+    import graphify.cli as cli_module
+
+    _make_graph(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["graphify", "cluster-only", ".", "--no-viz"]
+    )
+
+    def failing_dispatch(_cmd):
+        print("cluster stdout detail")
+        print("cluster stderr detail", file=sys.stderr)
+        raise SystemExit(7)
+
+    monkeypatch.setattr(cli_module, "_dispatch_command", failing_dispatch)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_module._transactional_cluster_only("cluster-only")
+
+    assert excinfo.value.code == 7
+    captured = capsys.readouterr()
+    assert "cluster stdout detail" in captured.out
+    assert "cluster stderr detail" in captured.err
 
 
 @pytest.mark.parametrize(

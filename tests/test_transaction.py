@@ -167,6 +167,116 @@ def test_callflow_snapshot_rejects_managed_report_over_central_limit(tmp_path):
         open_graph_snapshot(output / "graph.json", purpose="callflow-html")
 
 
+def test_retained_receipt_limit_is_passed_into_streaming_hash(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token = _owner(tmp_path)
+    graph_payload = _graph(transaction.generation)
+    sections = b"[]"
+    with owned_step(transaction):
+        commit_bytes(transaction, "graph.json", graph_payload)
+        commit_bytes(transaction, "manifest.json", b"{}")
+        commit_bytes(transaction, "custom-sections.json", sections)
+        commit_generation(
+            transaction,
+            graph_payload=graph_payload,
+            manifest_payload=b"{}",
+            required_artifacts=(
+                "graph.json",
+                "manifest.json",
+                "custom-sections.json",
+            ),
+        )
+    finish_transaction(transaction)
+    observed: list[tuple[str, int | None]] = []
+    original = transaction_module._hash_relative_bytes
+
+    def recording_hash(capability, name, **kwargs):
+        observed.append((name, kwargs.get("retain_limit")))
+        return original(capability, name, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_hash_relative_bytes", recording_hash)
+    open_graph_snapshot(
+        output / "graph.json",
+        purpose="callflow-html",
+        retain_artifacts=("custom-sections.json",),
+        retain_limits={"custom-sections.json": 1024 * 1024},
+    )
+
+    assert ("custom-sections.json", 1024 * 1024) in observed
+
+
+def test_absent_graph_snapshot_rejects_late_graph_before_begin_zero_mutation(tmp_path):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    snapshot = open_graph_snapshot(
+        output / "graph.json", purpose="extract-baseline", allow_absent=True
+    )
+    (output / "graph.json").write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="absent graph appeared"):
+        begin_transaction(
+            "full", tmp_path, output=output, expected_snapshot=snapshot
+        )
+
+    assert _file_bytes(output) == before
+
+
+def test_absent_watch_output_rejects_late_directory_before_enqueue_zero_mutation(
+    tmp_path,
+):
+    output = tmp_path / "graphify-out"
+    snapshot = open_graph_snapshot(
+        output / "graph.json", purpose="watch-prepare", allow_absent=True
+    )
+    output.mkdir()
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="absent output appeared"):
+        queue_rebuild(
+            "full",
+            tmp_path,
+            output=output,
+            source="watch",
+            expected_snapshot=snapshot,
+        )
+
+    assert _file_bytes(output) == before
+
+
+def test_external_managed_authority_uses_typed_signal(tmp_path):
+    import graphify.transaction as transaction_module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "graph.json").write_bytes(_graph(1))
+
+    with pytest.raises(transaction_module.ManagedAuthorityError):
+        transaction_module.open_external_graph_snapshot(source / "graph.json")
+
+
+def test_report_auxiliaries_share_one_aggregate_budget(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    (output / ".graphify_learning.json").write_bytes(b"123")
+    memory = output / "memory"
+    memory.mkdir()
+    (memory / "lesson.md").write_bytes(b"456")
+    snapshot = open_graph_snapshot(output / "graph.json", purpose="publication-prepare")
+    monkeypatch.setattr(transaction_module, "_MAX_REPORT_AUXILIARY_BYTES", 5)
+
+    with pytest.raises(PendingTransactionError, match="size limit"):
+        transaction_module.admit_report_auxiliaries(snapshot)
+
+
 def _close_pending_after_failpoint(tmp_path: Path) -> tuple[Path, Path]:
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])

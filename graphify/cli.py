@@ -649,11 +649,12 @@ def _transactional_extract() -> None:
         staging_root = Path(staging_name)
         staging_output = staging_root / "graphify-out"
         staging_output.mkdir()
-        source_snapshot = None
-        if destination.graph.is_file():
-            source_snapshot = open_graph_snapshot(
-                destination.graph, purpose="extract-baseline"
-            )
+        source_snapshot = open_graph_snapshot(
+            destination.graph,
+            purpose="extract-baseline",
+            allow_absent=True,
+        )
+        if source_snapshot.graph_present:
             for name, payload in source_snapshot.artifacts.items():
                 target = staging_output / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -763,9 +764,6 @@ def _transactional_cluster_only(cmd: str) -> None:
     )
 
     destination = _resolve_transaction_destination(cmd)
-    if not destination.graph.is_file():
-        _dispatch_command(cmd)
-        return
     source_snapshot = open_graph_snapshot(
         destination.graph, purpose="publication-prepare"
     )
@@ -810,6 +808,8 @@ def _transactional_cluster_only(cmd: str) -> None:
                 _dispatch_command(cmd)
         except SystemExit as exc:
             if exc.code not in (None, 0):
+                sys.stdout.write(captured_out.getvalue())
+                sys.stderr.write(captured_err.getvalue())
                 raise
         finally:
             sys.argv = original_argv
@@ -927,6 +927,75 @@ def _replace_export_graph_argument(
     return [*rewritten, "--graph", str(graph)]
 
 
+_EXPORT_PATH_OPTIONS = frozenset(
+    {"--graph", "--labels", "--report", "--sections", "--output", "--dir"}
+)
+
+
+def _normalize_export_routing(arguments: list[str]) -> list[str]:
+    """Canonicalize path options once and reject ambiguous export routing."""
+    if not arguments:
+        raise _CliArgumentError("export requires a subcommand")
+    subcmd = arguments[0]
+    normalized = [subcmd]
+    seen: set[str] = set()
+    positionals: list[str] = []
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        option, separator, inline = argument.partition("=")
+        if option in _EXPORT_PATH_OPTIONS:
+            if option in seen:
+                raise _CliArgumentError(f"{option} may be specified only once")
+            if separator:
+                if not inline:
+                    raise _CliArgumentError(f"{option} requires a value")
+                value = inline
+                index += 1
+            else:
+                if index + 1 >= len(arguments) or not arguments[index + 1]:
+                    raise _CliArgumentError(f"{option} requires a value")
+                value = arguments[index + 1]
+                index += 2
+            seen.add(option)
+            normalized.extend((option, value))
+            continue
+        normalized.append(argument)
+        if subcmd == "callflow-html" and not argument.startswith("-"):
+            positionals.append(argument)
+        index += 1
+    if subcmd == "callflow-html":
+        # Value arguments are not positional source candidates.
+        parsed_positionals: list[str] = []
+        skip = False
+        for index, argument in enumerate(normalized[1:]):
+            if skip:
+                skip = False
+                continue
+            if argument in _EXPORT_PATH_OPTIONS or argument in {
+                "--lang",
+                "--max-sections",
+                "--diagram-scale",
+                "--max-diagram-nodes",
+                "--max-diagram-edges",
+            }:
+                skip = True
+                continue
+            if not argument.startswith("-"):
+                parsed_positionals.append(argument)
+        if len(parsed_positionals) > 1:
+            raise _CliArgumentError("callflow-html accepts at most one graph or directory")
+        if parsed_positionals and "--graph" in seen:
+            raise _CliArgumentError(
+                "callflow-html graph source is ambiguous between positional and --graph"
+            )
+    if "--output" in seen and subcmd != "callflow-html":
+        raise _CliArgumentError("--output is only valid for callflow-html")
+    if "--dir" in seen and subcmd != "obsidian":
+        raise _CliArgumentError("--dir is only valid for obsidian")
+    return normalized
+
+
 def _export_destination_is_managed(graph: Path, *, source_managed: bool) -> bool:
     if not source_managed:
         return False
@@ -979,9 +1048,19 @@ def _export_option_path(arguments: list[str], option: str) -> Path | None:
     return None
 
 
+def _transactional_export_entry() -> None:
+    original_argv = sys.argv
+    sys.argv = [*original_argv[:2], *_normalize_export_routing(original_argv[2:])]
+    try:
+        _transactional_export()
+    finally:
+        sys.argv = original_argv
+
+
 def _transactional_export() -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,
+        ManagedAuthorityError,
         PendingTransactionError,
         PublicationPlan,
         admit_snapshot_artifact,
@@ -1002,16 +1081,20 @@ def _transactional_export() -> None:
         unlink_prepared,
     )
 
+    original_argv = sys.argv
     graph = _export_graph_path()
     if not graph.is_file():
-        _dispatch_command("export")
-        return
+        raise FileNotFoundError(graph)
     retained_overrides: list[str] = []
+    retained_limits: dict[str, int] = {}
     if sys.argv[2] == "callflow-html":
         for option in ("--labels", "--report", "--sections"):
             selected = _export_option_path(sys.argv[3:], option)
             if selected is not None and selected.parent == graph.parent:
                 retained_overrides.append(selected.name)
+                retained_limits[selected.name] = (
+                    50 * 1024 * 1024 if option == "--report" else 1024 * 1024
+                )
     try:
         active_transaction = current_transaction()
     except PendingTransactionError:
@@ -1022,7 +1105,7 @@ def _transactional_export() -> None:
     else:
         configured_output = graph.parent == (Path.cwd() / _GRAPHIFY_OUT).resolve()
         if _export_graph_was_explicit() and not configured_output:
-            retain_external: list[str] = []
+            retain_external: list[str] = list(retained_overrides)
             if sys.argv[2] == "callflow-html":
                 arguments = sys.argv[3:]
                 if not any(
@@ -1037,15 +1120,16 @@ def _transactional_export() -> None:
                     retain_external.append(".graphify_labels.json")
             try:
                 source_snapshot = open_external_graph_snapshot(
-                    graph, retain_artifacts=retain_external
+                    graph,
+                    retain_artifacts=retain_external,
+                    retain_limits=retained_limits,
                 )
-            except PendingTransactionError as exc:
-                if "managed" not in str(exc):
-                    raise
+            except ManagedAuthorityError:
                 source_snapshot = open_graph_snapshot(
                     graph,
                     purpose="export-admission",
                     retain_artifacts=retained_overrides,
+                    retain_limits=retained_limits,
                 )
                 source_managed = True
             else:
@@ -1055,6 +1139,7 @@ def _transactional_export() -> None:
                 graph,
                 purpose="export-admission",
                 retain_artifacts=retained_overrides,
+                retain_limits=retained_limits,
             )
             source_managed = True
     explicit_artifacts: dict[str, tuple[str, bytes | None]] = {}
@@ -1113,7 +1198,7 @@ def _transactional_export() -> None:
     snapshot = source_snapshot
     captured_out = io.StringIO()
     captured_err = io.StringIO()
-    original_argv = sys.argv
+    normalized_argv = sys.argv
     success_exit: SystemExit | None = None
     manifest_payload = snapshot.manifest_payload
     if manifest_payload is None:
@@ -1201,7 +1286,7 @@ def _transactional_export() -> None:
                     "--output",
                     staging / relative_output,
                 )
-        sys.argv = [*original_argv[:3], *rewritten]
+        sys.argv = [*normalized_argv[:3], *rewritten]
         try:
             with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
                 captured_err
@@ -1213,7 +1298,7 @@ def _transactional_export() -> None:
                 raise
             success_exit = exc
         finally:
-            sys.argv = original_argv
+            sys.argv = normalized_argv
         plan = publication_plan_from_directory(
             staging, prior_inventory=snapshot.artifacts
         )
@@ -1353,7 +1438,7 @@ def dispatch_command(cmd: str) -> None:
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(2) from exc
     if cmd == "export":
-        _transactional_export()
+        _transactional_export_entry()
         return
     _dispatch_command(cmd)
 

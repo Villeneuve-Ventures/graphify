@@ -1650,19 +1650,25 @@ def write_callflow_html(
     # Load graph + default/explicit sidecars from one retained generation.
     from graphify.transaction import admit_snapshot_artifact, open_graph_snapshot
     retained_names: list[str] = []
-    if paths["sections"] is not None:
-        sections_parent = paths["sections"].expanduser().absolute().parent.resolve(
-            strict=True
-        )
-        graph_parent = paths["graph"].expanduser().absolute().parent.resolve(
-            strict=True
-        )
-        if sections_parent == graph_parent:
-            retained_names.append(paths["sections"].name)
+    retained_limits: dict[str, int] = {}
+    graph_parent = paths["graph"].expanduser().absolute().parent.resolve(strict=True)
+    for key, limit in (
+        ("labels", 1024 * 1024),
+        ("report", 50 * 1024 * 1024),
+        ("sections", 1024 * 1024),
+    ):
+        selected = paths[key]
+        if selected is None:
+            continue
+        selected_parent = selected.expanduser().absolute().parent.resolve(strict=True)
+        if selected_parent == graph_parent:
+            retained_names.append(selected.name)
+            retained_limits[selected.name] = limit
     snapshot = open_graph_snapshot(
         paths["graph"],
         purpose="callflow-html",
-        retain_artifacts=retained_names,
+        retain_artifacts=tuple(dict.fromkeys(retained_names)),
+        retain_limits=retained_limits,
     )
     labels_payload = admit_snapshot_artifact(
         snapshot,

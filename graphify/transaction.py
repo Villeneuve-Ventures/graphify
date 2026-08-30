@@ -104,6 +104,7 @@ _DETACHED_MAX_BYTES = 50 * 1024 * 1024
 _DETACHED_MAX_NODES = 100_000
 _MAX_RECEIPT_ARTIFACTS = 4096
 _MAX_RECEIPT_AGGREGATE_BYTES = 1024 * 1024 * 1024
+_MAX_REPORT_AUXILIARY_BYTES = 50 * 1024 * 1024
 _MAX_QUEUE_ITEMS = 4096
 _MAX_QUEUE_PATHS = 4096
 _MAX_QUEUE_PATH_LENGTH = 4096
@@ -111,6 +112,10 @@ _MAX_QUEUE_PATH_LENGTH = 4096
 
 class PendingTransactionError(RuntimeError):
     """Managed graph state is incomplete, malformed, or owned elsewhere."""
+
+
+class ManagedAuthorityError(PendingTransactionError):
+    """An explicitly selected graph is governed by managed authority."""
 
 
 class RecoverableTransactionError(PendingTransactionError):
@@ -269,6 +274,9 @@ class GraphSnapshot:
     inventory_selector: tuple[tuple[str, str | None], ...] = ()
     purpose: str = ""
     coordination_absent: bool = False
+    graph_present: bool = True
+    output_parent_identity: OutputIdentity | None = None
+    output_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -784,6 +792,7 @@ def _hash_relative_bytes(
     *,
     retain: bool = False,
     aggregate_remaining: int,
+    retain_limit: int | None = None,
 ) -> tuple[str, int, bytes | None]:
     """Hash one identity-pinned artifact without aggregating its body in memory."""
     if _PLATFORM == "windows":
@@ -792,6 +801,7 @@ def _hash_relative_bytes(
             relative_name,
             retain=retain,
             aggregate_remaining=aggregate_remaining,
+            retain_limit=retain_limit,
         )
     relative = Path(relative_name)
     if relative.is_absolute() or not relative.parts or any(
@@ -812,8 +822,15 @@ def _hash_relative_bytes(
             parent_fd = next_fd
         leaf = relative.parts[-1]
         before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > aggregate_remaining:
-            raise PendingTransactionError("generation receipt aggregate budget exceeded")
+        effective_limit = aggregate_remaining
+        if retain and retain_limit is not None:
+            effective_limit = min(effective_limit, retain_limit)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > effective_limit:
+            raise PendingTransactionError(
+                "retained managed artifact exceeds its read limit"
+                if retain_limit is not None and effective_limit == retain_limit
+                else "generation receipt aggregate budget exceeded"
+            )
         fd = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
         try:
             opened = os.fstat(fd)
@@ -829,9 +846,11 @@ def _hash_relative_bytes(
                 if not chunk:
                     break
                 size += len(chunk)
-                if size > aggregate_remaining:
+                if size > effective_limit:
                     raise PendingTransactionError(
-                        "generation receipt aggregate budget exceeded"
+                        "retained managed artifact exceeds its read limit"
+                        if retain_limit is not None and effective_limit == retain_limit
+                        else "generation receipt aggregate budget exceeded"
                     )
                 digest.update(chunk)
                 if body is not None:
@@ -858,6 +877,7 @@ def _hash_windows_relative(
     *,
     retain: bool,
     aggregate_remaining: int,
+    retain_limit: int | None = None,
 ) -> tuple[str, int, bytes | None]:
     try:
         fd = _open_windows_relative_fd(capability, relative_name)
@@ -867,8 +887,15 @@ def _hash_windows_relative(
         ) from exc
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_size > aggregate_remaining:
-            raise PendingTransactionError(f"unsafe managed artifact: {relative_name}")
+        effective_limit = aggregate_remaining
+        if retain and retain_limit is not None:
+            effective_limit = min(effective_limit, retain_limit)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > effective_limit:
+            raise PendingTransactionError(
+                "retained managed artifact exceeds its read limit"
+                if retain_limit is not None and effective_limit == retain_limit
+                else f"unsafe managed artifact: {relative_name}"
+            )
         digest = hashlib.sha256()
         body = bytearray() if retain else None
         size = 0
@@ -877,9 +904,11 @@ def _hash_windows_relative(
             if not chunk:
                 break
             size += len(chunk)
-            if size > aggregate_remaining:
+            if size > effective_limit:
                 raise PendingTransactionError(
-                    "generation receipt aggregate budget exceeded"
+                    "retained managed artifact exceeds its read limit"
+                    if retain_limit is not None and effective_limit == retain_limit
+                    else "generation receipt aggregate budget exceeded"
                 )
             digest.update(chunk)
             if body is not None:
@@ -2963,6 +2992,46 @@ def gc_retired_workspaces(
             return (selected.name,)
 
 
+def _materialize_absent_snapshot_output(
+    output_path: Path,
+    snapshot: GraphSnapshot | None,
+    *,
+    allow_watch_reservation: bool = False,
+) -> None:
+    if (
+        snapshot is None
+        or snapshot.graph_present
+        or snapshot.output_identity is not None
+    ):
+        return
+    relative_output = Path(cast(str, snapshot.output_name))
+    parent_path = output_path
+    for _part in relative_output.parts:
+        parent_path = parent_path.parent
+    parent_path = parent_path.resolve(strict=True)
+    if (
+        snapshot.output_parent_identity is None
+        or snapshot.graph_path.parent.absolute() != output_path
+    ):
+        raise PendingTransactionError("admitted absent output binding is invalid")
+    if output_path.exists():
+        if not (allow_watch_reservation and snapshot.purpose == "watch-prepare"):
+            raise PendingTransactionError("admitted absent output appeared before begin")
+        return
+    with pin_output(parent_path) as parent, _locked(parent):
+        if parent.identity != snapshot.output_parent_identity:
+            raise PendingTransactionError("admitted output parent identity changed")
+        first = relative_output.parts[0]
+        try:
+            os.stat(first, dir_fd=parent.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise PendingTransactionError("admitted absent output appeared before begin")
+        output_path.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.fsync(parent.fd)
+
+
 def begin_transaction(
     kind: TransactionKind,
     root: Path | str,
@@ -2974,7 +3043,11 @@ def begin_transaction(
     expected_snapshot: GraphSnapshot | None = None,
 ) -> Transaction:
     root_path = _canonical_directory(Path(root))
-    capability = pin_output(output, create=True)
+    output_path = Path(output).expanduser().absolute()
+    _materialize_absent_snapshot_output(
+        output_path, expected_snapshot, allow_watch_reservation=True
+    )
+    capability = pin_output(output_path, create=True)
     try:
         with _locked(capability):
             if expected_snapshot is not None:
@@ -4486,6 +4559,7 @@ def _validate_receipt_locked(
     require_closed: bool = False,
     allow_missing_completed_drainer: bool = False,
     retain_artifacts: Sequence[str] = (),
+    retain_limits: Mapping[str, int] | None = None,
     protocol_override: Mapping[str, object] | None = None,
     drainer_override: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, bytes]]:
@@ -4582,27 +4656,38 @@ def _validate_receipt_locked(
         raise PendingTransactionError("generation close is incomplete")
     inventory: dict[str, bytes] = {}
     retained = set(retain_artifacts)
+    validated_retain_limits: dict[str, int] = {}
+    for raw_name, raw_limit in (retain_limits or {}).items():
+        name = _validated_relative_name(raw_name)
+        if type(raw_limit) is not int or isinstance(raw_limit, bool) or raw_limit < 1:
+            raise PendingTransactionError("retained artifact limit is invalid")
+        validated_retain_limits[name] = raw_limit
     if allow_missing_completed_drainer:
         retained.add(graph_name)
     retain_all = "*" in retained
     aggregate_size = 0
     actual_digests: dict[str, str] = {}
     for name in required:
+        should_retain = retain_all or name in retained
         artifact_digest, artifact_size, artifact_body = _hash_relative_bytes(
             capability,
             name,
-            retain=retain_all or name in retained,
+            retain=should_retain,
             aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES - aggregate_size,
+            retain_limit=(
+                min(
+                    _artifact_read_limit(Path(name).name),
+                    validated_retain_limits.get(name, _MAX_RECEIPT_AGGREGATE_BYTES),
+                )
+                if should_retain
+                else None
+            ),
         )
         aggregate_size += artifact_size
         actual_digests[name] = artifact_digest
         if artifact_digest != artifact_digests[name]:
             raise PendingTransactionError(f"managed artifact digest changed: {name}")
         if artifact_body is not None:
-            if len(artifact_body) > _artifact_read_limit(Path(name).name):
-                raise PendingTransactionError(
-                    f"retained managed artifact exceeds its read limit: {name}"
-                )
             inventory[name] = artifact_body
     if actual_digests["manifest.json"] != receipt.get("manifest_digest"):
         raise PendingTransactionError("manifest digest changed after receipt")
@@ -6565,11 +6650,29 @@ def _inventory_selector(
 def _validate_expected_snapshot_locked(
     capability: OutputCapability, snapshot: GraphSnapshot
 ) -> None:
-    if snapshot.output_identity != capability.identity:
+    if snapshot.output_identity is not None and snapshot.output_identity != capability.identity:
         raise PendingTransactionError("admitted snapshot output identity changed")
+    if snapshot.output_identity is None and snapshot.graph_present:
+        raise PendingTransactionError("admitted snapshot output identity is missing")
     if snapshot.graph_path.parent.resolve(strict=True) != capability.path:
         raise PendingTransactionError("admitted snapshot belongs to another output")
     graph_name = _validated_shallow_name(snapshot.graph_path.name)
+    if not snapshot.graph_present:
+        if _entry_stat(capability, graph_name) is not None:
+            raise PendingTransactionError("admitted absent graph appeared before begin")
+        drainer = _read_drainer(capability)
+        watch_reservation = (
+            snapshot.purpose == "watch-prepare"
+            and _read_protocol(capability) is None
+            and _entry_stat(capability, RECEIPT_FILE) is None
+            and _entry_stat(capability, TRANSACTION_FILE) is None
+            and drainer is not None
+            and drainer[1] == "reserved"
+            and bool(_read_queue(capability))
+        )
+        if _coordination_present(capability) and not watch_reservation:
+            raise PendingTransactionError("admitted absent graph gained coordination")
+        return
     current_graph = _read_bytes(
         capability, graph_name, max(len(snapshot.payload), _MAX_STATE_BYTES)
     )
@@ -6645,9 +6748,45 @@ def open_graph_snapshot(
     *,
     purpose: str,
     retain_artifacts: Sequence[str] = (),
+    retain_limits: Mapping[str, int] | None = None,
+    allow_absent: bool = False,
 ) -> GraphSnapshot:
     requested = Path(path).expanduser()
-    output = requested.parent.resolve(strict=True)
+    requested_output = requested.parent.absolute()
+    if allow_absent and not requested_output.exists():
+        existing_parent = requested_output
+        missing_parts: list[str] = []
+        while not existing_parent.exists():
+            missing_parts.append(_validated_shallow_name(existing_parent.name))
+            existing_parent = existing_parent.parent
+        output_parent = existing_parent.resolve(strict=True)
+        output_name = _validated_relative_name(
+            Path(*reversed(missing_parts)).as_posix()
+        )
+        with pin_output(output_parent, mutation=False) as parent, _locked(parent):
+            try:
+                os.stat(
+                    Path(output_name).parts[0],
+                    dir_fd=parent.fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                raise PendingTransactionError("admitted output identity is ambiguous")
+            return GraphSnapshot(
+                data={},
+                generation=None,
+                graph_path=requested_output / requested.name,
+                payload=b"",
+                digest=hashlib.sha256(b"").hexdigest(),
+                output_parent_identity=parent.identity,
+                output_name=output_name,
+                purpose=purpose,
+                coordination_absent=True,
+                graph_present=False,
+            )
+    output = requested_output.resolve(strict=True)
     graph_path = output / requested.name
     with pin_output(output, mutation=False) as capability, _locked(capability):
         if _entry_stat(capability, graph_path.name) is None:
@@ -6661,7 +6800,23 @@ def open_graph_snapshot(
                 raise PendingTransactionError(
                     f"{label} state exists without a graph receipt"
                 )
-            raise FileNotFoundError(graph_path)
+            if not allow_absent:
+                raise FileNotFoundError(graph_path)
+            if _coordination_present(capability):
+                raise PendingTransactionError(
+                    "coordination state exists without an admitted graph"
+                )
+            return GraphSnapshot(
+                data={},
+                generation=None,
+                graph_path=graph_path,
+                payload=b"",
+                digest=hashlib.sha256(b"").hexdigest(),
+                output_identity=capability.identity,
+                purpose=purpose,
+                coordination_absent=True,
+                graph_present=False,
+            )
         from graphify.security import _max_graph_file_bytes
 
         payload = _read_bytes(
@@ -6725,6 +6880,10 @@ def open_graph_snapshot(
                 legacy_inventory[name] = artifact_payload
                 if name == "manifest.json":
                     manifest_payload = artifact_payload
+            validated_retain_limits = {
+                _validated_relative_name(name): limit
+                for name, limit in (retain_limits or {}).items()
+            }
             for requested_name in retain_artifacts:
                 name = _validated_relative_name(requested_name)
                 if name in legacy_inventory:
@@ -6736,6 +6895,9 @@ def open_graph_snapshot(
                         min(
                             legacy_budget.remaining,
                             _artifact_read_limit(Path(name).name),
+                            validated_retain_limits.get(
+                                name, _MAX_RECEIPT_AGGREGATE_BYTES
+                            ),
                         ),
                     )
                 except PendingTransactionError as exc:
@@ -6803,6 +6965,7 @@ def open_graph_snapshot(
             capability,
             graph_payload=payload,
             retain_artifacts=("manifest.json", *retain),
+            retain_limits=retain_limits,
         )
         if (
             receipt.get("generation") != generation
@@ -6876,6 +7039,15 @@ def admit_snapshot_artifact(
         if payload is not None and len(payload) > effective_limit:
             raise PendingTransactionError("retained artifact exceeds its read limit")
         return payload
+    if (
+        requested_authority is None
+        and resolved.parent == source_output
+        and leaf in selected
+    ):
+        payload = snapshot.artifacts.get(leaf)
+        if payload is not None and len(payload) > effective_limit:
+            raise PendingTransactionError("retained artifact exceeds its read limit")
+        return payload
     if source_authority is not None and source_output in resolved.parents:
         raise PendingTransactionError(
             "artifact override is inconsistent with managed authority"
@@ -6906,13 +7078,22 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
         raise PendingTransactionError("report auxiliaries require an output snapshot")
     output = snapshot.graph_path.parent
     retained: dict[str, bytes] = {}
+    identities: dict[str, OutputIdentity] = {}
+    remaining = _MAX_REPORT_AUXILIARY_BYTES
     with pin_output(output, mutation=False) as capability, _locked(capability):
         _validate_expected_snapshot_locked(capability, snapshot)
         learning = _entry_stat(capability, ".graphify_learning.json")
         if learning is not None:
-            retained[".graphify_learning.json"] = _read_bytes(
-                capability, ".graphify_learning.json", _MAX_STATE_BYTES
+            payload = _read_bytes(
+                capability,
+                ".graphify_learning.json",
+                min(_MAX_STATE_BYTES, remaining),
             )
+            retained[".graphify_learning.json"] = payload
+            identities[".graphify_learning.json"] = OutputIdentity(
+                learning.st_dev, learning.st_ino
+            )
+            remaining -= len(payload)
         try:
             memory_fd = (
                 _open_windows_relative_fd(capability, "memory", directory=True)
@@ -6935,14 +7116,39 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
                 memory_fd,
             )
             try:
-                for name in _list_entries(memory):
+                enumerated = tuple(sorted(_list_entries(memory)))
+                for name in enumerated:
                     if not name.endswith(".md"):
                         continue
                     if len(retained) >= _MAX_RECEIPT_ARTIFACTS:
                         raise PendingTransactionError("report auxiliary count exceeded")
-                    retained[f"memory/{name}"] = _read_bytes(
-                        memory, _validated_shallow_name(name), _MAX_STATE_BYTES
+                    before = _entry_stat(memory, _validated_shallow_name(name))
+                    if before is None:
+                        raise PendingTransactionError(
+                            "report memory inventory changed"
+                        )
+                    payload = _read_bytes(
+                        memory,
+                        _validated_shallow_name(name),
+                        min(_MAX_STATE_BYTES, remaining),
                     )
+                    retained[f"memory/{name}"] = payload
+                    identities[f"memory/{name}"] = OutputIdentity(
+                        before.st_dev, before.st_ino
+                    )
+                    remaining -= len(payload)
+                if tuple(sorted(_list_entries(memory))) != enumerated:
+                    raise PendingTransactionError("report memory inventory changed")
+                for relative, expected in identities.items():
+                    if not relative.startswith("memory/"):
+                        continue
+                    current = _entry_stat(memory, relative.removeprefix("memory/"))
+                    if current is None or OutputIdentity(
+                        current.st_dev, current.st_ino
+                    ) != expected:
+                        raise PendingTransactionError(
+                            "report memory inventory changed"
+                        )
                 memory.validate()
                 if _PLATFORM == "windows":
                     verify_fd = _open_windows_relative_fd(
@@ -6968,23 +7174,41 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
                     )
             finally:
                 memory.close()
+        if learning is not None:
+            current_learning = _entry_stat(capability, ".graphify_learning.json")
+            if current_learning is None or OutputIdentity(
+                current_learning.st_dev, current_learning.st_ino
+            ) != identities[".graphify_learning.json"]:
+                raise PendingTransactionError("report learning identity changed")
         _validate_expected_snapshot_locked(capability, snapshot)
     return retained
 
 
 def open_external_graph_snapshot(
-    path: Path | str, *, retain_artifacts: Sequence[str] = ()
+    path: Path | str,
+    *,
+    retain_artifacts: Sequence[str] = (),
+    retain_limits: Mapping[str, int] | None = None,
 ) -> GraphSnapshot:
     """Read an explicit unmanaged graph and explicitly selected sibling leaves."""
     requested = Path(path).expanduser()
     output = requested.parent.resolve(strict=True)
     graph_name = _validated_shallow_name(requested.name)
     retain = tuple(_validated_shallow_name(name) for name in retain_artifacts)
+    validated_retain_limits = {
+        _validated_shallow_name(name): limit
+        for name, limit in (retain_limits or {}).items()
+    }
+    if any(
+        type(limit) is not int or isinstance(limit, bool) or limit < 1
+        for limit in validated_retain_limits.values()
+    ):
+        raise PendingTransactionError("retained artifact limit is invalid")
     _reject_casefold_collisions((graph_name, *retain))
     graph_path = output / graph_name
     with pin_output(output, mutation=False) as capability:
         if _coordination_present(capability):
-            raise PendingTransactionError(
+            raise ManagedAuthorityError(
                 "explicit graph has managed coordination authority"
             )
         from graphify.security import _max_graph_file_bytes
@@ -7015,7 +7239,17 @@ def open_external_graph_snapshot(
             if before is None:
                 selected_identities[name] = None
                 continue
-            retained = _read_bytes(capability, name, remaining)
+            retained = _read_bytes(
+                capability,
+                name,
+                min(
+                    remaining,
+                    _artifact_read_limit(Path(name).name),
+                    validated_retain_limits.get(
+                        name, _MAX_RECEIPT_AGGREGATE_BYTES
+                    ),
+                ),
+            )
             after = _entry_stat(capability, name)
             identity = (before.st_dev, before.st_ino)
             if after is None or (after.st_dev, after.st_ino) != identity:
@@ -7035,7 +7269,7 @@ def open_external_graph_snapshot(
                     f"external snapshot entry identity changed: {name}"
                 )
         if _coordination_present(capability):
-            raise PendingTransactionError(
+            raise ManagedAuthorityError(
                 "explicit graph has managed coordination authority"
             )
         capability.validate()
@@ -7047,7 +7281,7 @@ def open_external_graph_snapshot(
         raise PendingTransactionError("malformed external graph payload")
     graph_meta = data.get("graph")
     if isinstance(graph_meta, dict) and GRAPH_WATERMARK_KEY in graph_meta:
-        raise PendingTransactionError("explicit graph has managed watermark authority")
+        raise ManagedAuthorityError("explicit graph has managed watermark authority")
     return GraphSnapshot(
         data=data,
         generation=None,
@@ -7922,6 +8156,7 @@ def queue_rebuild(
     now: float | None = None,
     legacy_pending_name: str | None = None,
     failpoint: Callable[[str], None] | None = None,
+    expected_snapshot: GraphSnapshot | None = None,
 ) -> QueueReceipt:
     if type(kind) is not str or kind not in {"full", "update", "runtime"}:
         raise PendingTransactionError("malformed rebuild kind")
@@ -7952,7 +8187,11 @@ def queue_rebuild(
     if type(root_value) is not str:
         raise PendingTransactionError("malformed rebuild root")
     root_path = _canonical_directory(Path(root_value))
-    with pin_output(output, create=True) as capability, _locked(capability):
+    output_path = Path(output).expanduser().absolute()
+    _materialize_absent_snapshot_output(output_path, expected_snapshot)
+    with pin_output(output_path, create=True) as capability, _locked(capability):
+        if expected_snapshot is not None:
+            _validate_expected_snapshot_locked(capability, expected_snapshot)
         _recover_enqueue_journal(capability, failpoint=failpoint)
         protocol = _read_protocol(capability)
         receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
