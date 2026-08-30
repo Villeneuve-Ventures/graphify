@@ -187,7 +187,7 @@ if ! _graphify_selected_usable "$PYTHON"; then
 fi
 _graphify_selected_usable "$PYTHON" || { echo "Graphify requires CPython 3.14.2 through the final 3.14.x release." >&2; exit 1; }
 "$PYTHON" -E -P -B -c 'from pathlib import Path; Path("graphify-out").mkdir(parents=True, exist_ok=True)' || exit 1
-if ! "$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python; then echo "Graphify cannot safely publish the advisory interpreter pointer; continuing with the freshly discovered interpreter." >&2; fi; if [ -n "${GRAPHIFY_INPUT_PATH-}" ]; then GRAPHIFY_TRANSACTION_TOKEN=$("$PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.transaction import begin_transaction, stage_transaction_handoff; root=Path(sys.argv[1]).resolve(strict=True); output=(Path.cwd() / "graphify-out").resolve(); print(stage_transaction_handoff(begin_transaction("full", root, output=output)).path, end="")' "$GRAPHIFY_INPUT_PATH") || exit $?; export GRAPHIFY_TRANSACTION_TOKEN; fi
+if ! "$PYTHON" -E -P -B -m graphify.interpreter_pointer write graphify-out/.graphify_python; then echo "Graphify cannot safely publish the advisory interpreter pointer; continuing with the freshly discovered interpreter." >&2; fi
 export PYTHONUTF8=1
 ```
 

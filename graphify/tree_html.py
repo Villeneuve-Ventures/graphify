@@ -571,13 +571,72 @@ def write_tree_html(
 ) -> Path:
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(graph_path)
-    from graphify.transaction import open_graph_snapshot
-    graph = open_graph_snapshot(graph_path, purpose="tree-html").data
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PendingTransactionError,
+        PublicationPlan,
+        begin_transaction,
+        commit_publication_plan,
+        commit_relative_bytes,
+        current_transaction,
+        finish_transaction,
+        open_graph_snapshot,
+    )
+    snapshot = open_graph_snapshot(graph_path, purpose="tree-prepare")
+    graph = snapshot.data
     tree = build_tree(graph, root=root, max_children=max_children,
                       project_label=project_label)
     title = f"{tree['name']} — graphify tree viewer"
     header = f"{tree['name']} — Knowledge Graph"
     html = emit_html(tree, title=title, header=header)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
+    payload = html.encode("utf-8")
+    graph_parent = graph_path.expanduser().resolve().parent
+    resolved_output = output_path.expanduser().resolve()
+    managed_destination = (
+        resolved_output.parent == graph_parent or graph_parent in resolved_output.parents
+    )
+    if managed_destination:
+        relative = resolved_output.relative_to(graph_parent).as_posix()
+        try:
+            active = current_transaction()
+        except PendingTransactionError:
+            active = None
+        if active is not None:
+            if active.output != graph_parent:
+                raise PendingTransactionError(
+                    "tree destination does not match exact transaction output"
+                )
+            commit_relative_bytes(active, relative, payload)
+        else:
+            transaction_root = (
+                graph_parent.parent if graph_parent.name == "graphify-out" else graph_parent
+            )
+            transaction = begin_transaction(
+                "runtime", transaction_root, output=graph_parent
+            )
+            graph_data = dict(snapshot.data)
+            metadata = dict(graph_data.get("graph") or {})
+            metadata[GRAPH_WATERMARK_KEY] = {
+                "schema": 1,
+                "protocol_epoch": 1,
+                "generation": transaction.generation,
+                "state": "active",
+            }
+            graph_data["graph"] = metadata
+            graph_payload = json.dumps(
+                graph_data, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            payloads = dict(snapshot.artifacts)
+            payloads[graph_path.name] = graph_payload
+            payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
+            payloads[relative] = payload
+            commit_publication_plan(
+                transaction,
+                PublicationPlan(payloads),
+                graph_name=graph_path.name,
+            )
+            finish_transaction(transaction)
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(payload)
     return output_path

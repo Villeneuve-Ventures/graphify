@@ -83,10 +83,17 @@ if (-not $GRAPHIFY_PYTHON) {
 # Save interpreter path — all subsequent steps read this
 & $GRAPHIFY_PYTHON -E -P -B -m graphify.interpreter_pointer write graphify-out\.graphify_python
 if ($LASTEXITCODE -ne 0) { throw "Failed to publish the Graphify interpreter pointer." }
+```
+
+For a full build only (never for `query`, `path`, `explain`, or another
+read-only fast path), begin the immutable transaction handoff separately:
+
+```powershell
 
 # Full-build transaction handoff. The exact token binds the canonical input
 # root and actual output directory; environment ids/roots alone are not owner authority.
-$GRAPHIFY_TRANSACTION_TOKEN = & $GRAPHIFY_PYTHON -E -P -B -c @'
+@@GRAPHIFY_GUARD@@
+$GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c @'
 import sys
 from pathlib import Path
 from graphify.transaction import begin_transaction, stage_transaction_handoff
@@ -101,7 +108,7 @@ function Invoke-GraphifyTransactionPython {
     if (-not $Env:GRAPHIFY_TRANSACTION_TOKEN) {
         throw "Missing immutable Graphify transaction token."
     }
-    & $GRAPHIFY_PYTHON -E -P -B -m graphify.transaction run-token `
+    & $GraphifyPython -E -P -B -m graphify.transaction run-token `
         $Env:GRAPHIFY_TRANSACTION_TOKEN -- @PythonArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }

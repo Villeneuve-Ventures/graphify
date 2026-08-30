@@ -817,20 +817,30 @@ def _rebuild_code(
     if acquire_lock:
         from graphify.transaction import (
             GRAPH_WATERMARK_KEY,
-            MANAGED_PUBLICATION_PATHS,
             PendingTransactionError,
+            PublicationPlan,
             begin_transaction,
             claim_rebuild_queue,
             close_if_queue_empty,
-            commit_bytes,
-            commit_generation,
+            commit_publication_plan,
             complete_rebuild_claim,
             open_graph_snapshot,
             owned_step,
+            publication_plan_from_directory,
             queue_rebuild,
         )
 
         actual_out = watch_path / _GRAPHIFY_OUT
+        if changed_paths is not None:
+            _queue_pending(actual_out, list(changed_paths))
+        queued = queue_rebuild(
+            "update" if changed_paths is not None else "full",
+            watch_path,
+            output=actual_out,
+            changed_paths=changed_paths,
+            source="watch",
+            legacy_pending_name=_PENDING_FILENAME,
+        )
         baseline_graph: dict | None = None
         baseline_artifacts: dict[str, bytes] = {}
         if (actual_out / "graph.json").is_file():
@@ -843,16 +853,6 @@ def _rebuild_code(
             except PendingTransactionError as exc:
                 print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
-        if changed_paths is not None:
-            _queue_pending(actual_out, list(changed_paths))
-        queued = queue_rebuild(
-            "update" if changed_paths is not None else "full",
-            watch_path,
-            output=actual_out,
-            changed_paths=changed_paths,
-            source="watch",
-            legacy_pending_name=_PENDING_FILENAME,
-        )
         # Compatibility signal for an already-running pre-transaction watcher:
         # probe the legacy lock, release it immediately, and rely exclusively
         # on durable transaction state for all subsequent ownership.
@@ -902,12 +902,12 @@ def _rebuild_code(
                 prefix="graphify-prepare-"
             ) as prepared_name:
                 prepared = Path(prepared_name)
-                for name in MANAGED_PUBLICATION_PATHS:
-                    if "/" in name or name == "graph.json":
+                for name, payload in baseline_artifacts.items():
+                    if name == "graph.json":
                         continue
-                    payload = baseline_artifacts.get(name)
-                    if payload is not None:
-                        (prepared / name).write_bytes(payload)
+                    target = prepared / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(payload)
                 if baseline_graph is not None:
                     graph_metadata = baseline_graph.get("graph")
                     if isinstance(graph_metadata, dict):
@@ -948,26 +948,16 @@ def _rebuild_code(
                     graph_data, ensure_ascii=False, separators=(",", ":")
                 ).encode("utf-8")
                 manifest_payload = manifest_path.read_bytes()
-                artifacts: list[str] = []
+                plan = publication_plan_from_directory(
+                    prepared, prior_inventory=baseline_artifacts
+                )
+                payloads = dict(plan.payloads)
+                payloads["graph.json"] = graph_payload
+                payloads["manifest.json"] = manifest_payload
+                generation = commit_publication_plan(
+                    transaction, PublicationPlan(payloads, plan.deletions)
+                )
                 with owned_step(transaction, drainer=claim.drainer):
-                    commit_bytes(transaction, "graph.json", graph_payload)
-                    artifacts.append("graph.json")
-                    for name in MANAGED_PUBLICATION_PATHS:
-                        if "/" in name or name in {"graph.json", "manifest.json"}:
-                            continue
-                        entry = prepared / name
-                        if not entry.is_file():
-                            continue
-                        commit_bytes(transaction, name, entry.read_bytes())
-                        artifacts.append(name)
-                    commit_bytes(transaction, "manifest.json", manifest_payload)
-                    artifacts.append("manifest.json")
-                    generation = commit_generation(
-                        transaction,
-                        graph_payload=graph_payload,
-                        manifest_payload=manifest_payload,
-                        required_artifacts=tuple(artifacts),
-                    )
                     receipt_digest = generation.digest
                     complete_rebuild_claim(
                         transaction, claim, receipt_digest=receipt_digest
@@ -977,6 +967,7 @@ def _rebuild_code(
                     ):
                         return True
                 baseline_graph = graph_data
+                baseline_artifacts = dict(payloads)
                 claim = claim_rebuild_queue(transaction, claim.drainer)
 
     watch_root = watch_path.resolve()

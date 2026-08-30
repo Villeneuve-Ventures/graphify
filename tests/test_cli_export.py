@@ -176,6 +176,63 @@ def test_full_build_token_runner_exports_before_final_commit(tmp_path):
     _assert_transactional_export(out)
 
 
+def test_prepared_export_uses_dynamic_receipt_inventory_and_nested_deletion(tmp_path):
+    from graphify.transaction import (
+        PublicationPlan,
+        begin_transaction,
+        commit_publication_plan,
+        finish_transaction,
+        open_graph_snapshot,
+        run_prepared_token,
+        run_token,
+        stage_transaction_handoff,
+    )
+
+    out = _make_graph(tmp_path)
+    assert _run(["export", "wiki"], tmp_path).returncode == 0
+    assert _run(["export", "obsidian"], tmp_path).returncode == 0
+    snapshot = open_graph_snapshot(out / "graph.json", purpose="publication-prepare")
+    custom_tx = begin_transaction("runtime", tmp_path, output=out)
+    payloads = dict(snapshot.artifacts)
+    graph_data = json.loads(payloads["graph.json"])
+    graph_data["graph"]["_graphify_protocol"]["generation"] = custom_tx.generation
+    payloads["graph.json"] = json.dumps(
+        graph_data, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    payloads["flows/custom.html"] = b"custom"
+    commit_publication_plan(custom_tx, PublicationPlan(payloads, ()))
+    finish_transaction(custom_tx)
+    unrelated = out / "private" / "user.txt"
+    unrelated.parent.mkdir()
+    unrelated.write_text("user", encoding="utf-8")
+
+    token = stage_transaction_handoff(begin_transaction("full", tmp_path, output=out))
+    run_prepared_token(
+        token.path,
+        ["-c", "from pathlib import Path; Path('wiki/index.md').unlink()"],
+    )
+    run_prepared_token(
+        token.path,
+        [
+            "-c",
+            "import sys; from graphify.cli import dispatch_command; "
+            "sys.argv=['graphify','export','html']; dispatch_command('export')",
+        ],
+    )
+    run_token(
+        token.path,
+        [
+            "-c",
+            "from graphify.transaction import finalize_prepared_transaction; "
+            "finalize_prepared_transaction()",
+        ],
+    )
+    assert not (out / "wiki" / "index.md").exists()
+    assert (out / "obsidian" / "graph.canvas").is_file()
+    assert (out / "flows" / "custom.html").read_bytes() == b"custom"
+    assert unrelated.read_text(encoding="utf-8") == "user"
+
+
 def test_rendered_style_prepare_detect_export_finalize_cleanup(tmp_path):
     from graphify.transaction import begin_transaction, stage_transaction_handoff
 
@@ -331,6 +388,51 @@ def test_issue89_managed_callflow_export_commits_generation(tmp_path):
     assert result.returncode == 0, result.stderr
     assert list(out.glob("*callflow.html"))
     _assert_transactional_export(out)
+
+
+def test_issue89_cluster_plan_preserves_receipt_nested_inventory_and_unrelated_files(
+    tmp_path,
+):
+    out = _make_graph(tmp_path)
+    assert _run(["export", "wiki"], tmp_path).returncode == 0
+    assert _run(["export", "obsidian"], tmp_path).returncode == 0
+    assert _run(["export", "html"], tmp_path).returncode == 0
+    custom = out / "flows" / "custom-callflow.html"
+    custom.parent.mkdir(parents=True)
+    custom.write_text("managed", encoding="utf-8")
+    # Publish the custom dynamic path into the canonical receipt inventory.
+    from graphify.transaction import (
+        PublicationPlan,
+        begin_transaction,
+        commit_publication_plan,
+        finish_transaction,
+        open_graph_snapshot,
+    )
+
+    snapshot = open_graph_snapshot(out / "graph.json", purpose="publication-prepare")
+    tx = begin_transaction("runtime", tmp_path, output=out)
+    payloads = dict(snapshot.artifacts)
+    graph_data = json.loads(payloads["graph.json"])
+    graph_data["graph"]["_graphify_protocol"]["generation"] = tx.generation
+    payloads["graph.json"] = json.dumps(
+        graph_data, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    payloads["flows/custom-callflow.html"] = b"managed"
+    receipt = commit_publication_plan(tx, PublicationPlan(payloads, ()))
+    assert receipt.digest
+    finish_transaction(tx)
+    unrelated = out / "private" / "user.txt"
+    unrelated.parent.mkdir()
+    unrelated.write_text("user", encoding="utf-8")
+
+    result = _run(["cluster-only", ".", "--no-viz", "--no-label"], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert (out / "wiki" / "index.md").is_file()
+    assert (out / "obsidian" / "graph.canvas").is_file()
+    assert custom.read_text(encoding="utf-8") == "managed"
+    assert not (out / "graph.html").exists()
+    assert unrelated.read_text(encoding="utf-8") == "user"
 
 
 def test_issue89_extract_manifest_failure_leaves_recoverable_owner(

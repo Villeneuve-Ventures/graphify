@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 from pathlib import Path
@@ -629,14 +630,13 @@ def _replace_out_argument(arguments: list[str], output_root: Path) -> list[str]:
 def _transactional_extract() -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,
-        MANAGED_PUBLICATION_PATHS,
         begin_transaction,
         cancel_unpublished_transaction,
-        commit_bytes,
-        commit_generation,
+        commit_publication_plan,
         finish_transaction,
         open_graph_snapshot,
-        owned_step,
+        publication_plan_from_directory,
+        PublicationPlan,
     )
 
     destination = _resolve_extract_destination()
@@ -653,12 +653,13 @@ def _transactional_extract() -> None:
             snapshot = open_graph_snapshot(
                 destination.graph, purpose="extract-baseline"
             )
-            for name in MANAGED_PUBLICATION_PATHS:
-                if "/" in name:
-                    continue
-                payload = snapshot.artifacts.get(name)
-                if payload is not None:
-                    (staging_output / name).write_bytes(payload)
+            for name, payload in snapshot.artifacts.items():
+                target = staging_output / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+            prior_inventory = snapshot.artifacts
+        else:
+            prior_inventory = {}
         staged_graph = staging_output / "graph.json"
         baseline_graph_data: dict | None = None
         if staged_graph.is_file():
@@ -691,6 +692,8 @@ def _transactional_extract() -> None:
         finally:
             sys.argv = original_argv
             globals()["_TRANSACTION_OUTPUT_OVERRIDE"] = original_output_override
+        if "--no-viz" in original_argv:
+            (staging_output / "graph.html").unlink(missing_ok=True)
         prepared_graph_data = (
             json.loads(staged_graph.read_text(encoding="utf-8"))
             if staged_graph.is_file()
@@ -727,26 +730,15 @@ def _transactional_extract() -> None:
         if not manifest.is_file():
             raise RuntimeError("extract completed without a prepared manifest.json")
         manifest_payload = manifest.read_bytes()
-        artifacts: list[str] = []
-        with owned_step(transaction):
-            commit_bytes(transaction, "graph.json", graph_payload)
-            artifacts.append("graph.json")
-            for name in MANAGED_PUBLICATION_PATHS:
-                if name in {"graph.json", "manifest.json"}:
-                    continue
-                entry = staging_output / name
-                if not entry.is_file():
-                    continue
-                commit_bytes(transaction, name, entry.read_bytes())
-                artifacts.append(name)
-            commit_bytes(transaction, "manifest.json", manifest_payload)
-            artifacts.append("manifest.json")
-            commit_generation(
-                transaction,
-                graph_payload=graph_payload,
-                manifest_payload=manifest_payload,
-                required_artifacts=tuple(artifacts),
-            )
+        plan = publication_plan_from_directory(
+            staging_output, prior_inventory=prior_inventory
+        )
+        payloads = dict(plan.payloads)
+        payloads["graph.json"] = graph_payload
+        payloads["manifest.json"] = manifest_payload
+        commit_publication_plan(
+            transaction, PublicationPlan(payloads, plan.deletions)
+        )
         finish_transaction(transaction)
     sys.stdout.write(captured_out.getvalue())
     sys.stderr.write(captured_err.getvalue())
@@ -757,22 +749,22 @@ def _transactional_extract() -> None:
 def _transactional_cluster_only(cmd: str) -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,
+        PublicationPlan,
         begin_transaction,
-        commit_bytes,
-        commit_generation,
-        commit_unlink,
+        commit_publication_plan,
         finish_transaction,
         open_graph_snapshot,
-        owned_step,
+        publication_plan_from_directory,
     )
 
     destination = _resolve_transaction_destination(cmd)
     if not destination.graph.is_file():
         _dispatch_command(cmd)
         return
-    source_graph_data = open_graph_snapshot(
-        destination.graph, purpose=f"{cmd}-prepare"
-    ).data
+    source_snapshot = open_graph_snapshot(
+        destination.graph, purpose="publication-prepare"
+    )
+    source_graph_data = source_snapshot.data
     destination.output.mkdir(parents=True, exist_ok=True)
     transaction = begin_transaction(
         "runtime", destination.root, output=destination.output
@@ -780,22 +772,12 @@ def _transactional_cluster_only(cmd: str) -> None:
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     original_argv = sys.argv
-    managed_names = {
-        destination.graph.name,
-        "GRAPH_REPORT.md",
-        ".graphify_analysis.json",
-        ".graphify_labels.json",
-        ".graphify_labels.json.sig",
-        ".graphify_root",
-        "graph.html",
-        "manifest.json",
-    }
     with tempfile.TemporaryDirectory(prefix="graphify-cli-prepare-") as staging_name:
         staging = Path(staging_name)
-        for name in managed_names:
-            source = destination.output / name
-            if source.is_file() and not source.is_symlink():
-                shutil.copy2(source, staging / name)
+        for name, payload in source_snapshot.artifacts.items():
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
         staged_graph = staging / destination.graph.name
         graph_data = source_graph_data
         graph_metadata = graph_data.get("graph")
@@ -818,6 +800,8 @@ def _transactional_cluster_only(cmd: str) -> None:
                 raise
         finally:
             sys.argv = original_argv
+        if "--no-viz" in original_argv:
+            (staging / "graph.html").unlink(missing_ok=True)
         published_graph = json.loads(staged_graph.read_text(encoding="utf-8"))
         published_metadata = published_graph.get("graph")
         if not isinstance(published_metadata, dict):
@@ -836,26 +820,17 @@ def _transactional_cluster_only(cmd: str) -> None:
         if not manifest.is_file():
             manifest.write_bytes(b"{}")
         manifest_payload = manifest.read_bytes()
-        artifacts: list[str] = []
-        with owned_step(transaction):
-            commit_bytes(transaction, destination.graph.name, graph_payload)
-            artifacts.append(destination.graph.name)
-            for name in sorted(managed_names - {destination.graph.name, "manifest.json"}):
-                prepared = staging / name
-                if prepared.is_file():
-                    commit_bytes(transaction, name, prepared.read_bytes())
-                    artifacts.append(name)
-                elif (destination.output / name).is_file():
-                    commit_unlink(transaction, name)
-            commit_bytes(transaction, "manifest.json", manifest_payload)
-            artifacts.append("manifest.json")
-            commit_generation(
-                transaction,
-                graph_payload=graph_payload,
-                manifest_payload=manifest_payload,
-                required_artifacts=tuple(artifacts),
-                graph_name=destination.graph.name,
-            )
+        plan = publication_plan_from_directory(
+            staging, prior_inventory=source_snapshot.artifacts
+        )
+        payloads = dict(plan.payloads)
+        payloads[destination.graph.name] = graph_payload
+        payloads["manifest.json"] = manifest_payload
+        commit_publication_plan(
+            transaction,
+            PublicationPlan(payloads, plan.deletions),
+            graph_name=destination.graph.name,
+        )
         finish_transaction(transaction)
     sys.stdout.write(captured_out.getvalue())
     sys.stderr.write(captured_err.getvalue())
@@ -873,7 +848,16 @@ def _export_graph_path() -> Path:
     return (Path(_GRAPHIFY_OUT) / "graph.json").resolve()
 
 
-def _export_destination_is_managed(graph: Path) -> bool:
+def _export_graph_was_explicit() -> bool:
+    return any(
+        argument == "--graph" or argument.startswith("--graph=")
+        for argument in sys.argv[3:]
+    )
+
+
+def _export_destination_is_managed(graph: Path, *, source_managed: bool) -> bool:
+    if not source_managed:
+        return False
     arguments = sys.argv[3:]
     if "--push" in arguments or any(value.startswith("--push=") for value in arguments):
         return False
@@ -918,33 +902,41 @@ def _transactional_export() -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,
         PendingTransactionError,
+        PublicationPlan,
         begin_transaction,
-        commit_bytes,
-        commit_generation,
         commit_prepared_bytes,
-        commit_relative_bytes,
-        commit_unlink,
+        commit_publication_plan,
         current_transaction,
         finish_transaction,
         open_graph_snapshot,
         open_prepared_graph,
         owned_step,
+        publication_plan_from_directory,
         unlink_prepared,
     )
 
     graph = _export_graph_path()
-    if not graph.is_file() or not _export_destination_is_managed(graph):
+    if not graph.is_file():
         _dispatch_command("export")
         return
     try:
         active_transaction = current_transaction()
     except PendingTransactionError:
         active_transaction = None
-    snapshot = (
-        open_prepared_graph(active_transaction, graph)
-        if active_transaction is not None
-        else open_graph_snapshot(graph, purpose="export-prepare")
-    )
+    if active_transaction is not None:
+        source_snapshot = open_prepared_graph(active_transaction, graph)
+        source_managed = True
+    else:
+        source_snapshot = open_graph_snapshot(graph, purpose="export-admission")
+        source_managed = (
+            source_snapshot.generation is not None
+            or graph.parent == (Path.cwd() / _GRAPHIFY_OUT).resolve()
+            or not _export_graph_was_explicit()
+        )
+    if not _export_destination_is_managed(graph, source_managed=source_managed):
+        _dispatch_command("export")
+        return
+    snapshot = source_snapshot
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     original_argv = sys.argv
@@ -961,6 +953,10 @@ def _transactional_export() -> None:
         manifest_payload = b"{}"
     with tempfile.TemporaryDirectory(prefix="graphify-export-prepare-") as staging_name:
         staging = Path(staging_name)
+        for name, payload in snapshot.artifacts.items():
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
         staged_graph = staging / graph.name
         graph_data = snapshot.data
         metadata = graph_data.get("graph")
@@ -1005,15 +1001,17 @@ def _transactional_export() -> None:
         transaction = active_transaction or begin_transaction(
             "runtime", graph.parent, output=graph.parent
         )
+        plan = publication_plan_from_directory(
+            staging, prior_inventory=snapshot.artifacts
+        )
         if active_transaction is not None:
             with owned_step(transaction):
-                for prepared in sorted(staging.rglob("*")):
-                    if not prepared.is_file() or prepared == staged_graph:
+                for relative, payload in sorted(plan.payloads.items()):
+                    if relative == graph.name:
                         continue
-                    relative = prepared.relative_to(staging).as_posix()
-                    commit_prepared_bytes(transaction, relative, prepared.read_bytes())
-                if subcmd == "html" and "--no-viz" in original_argv:
-                    unlink_prepared(transaction, "graph.html")
+                    commit_prepared_bytes(transaction, relative, payload)
+                for relative in plan.deletions:
+                    unlink_prepared(transaction, relative)
             rendered_out = captured_out.getvalue().replace(str(staging), str(graph.parent))
             rendered_err = captured_err.getvalue().replace(str(staging), str(graph.parent))
             sys.stdout.write(rendered_out)
@@ -1035,30 +1033,14 @@ def _transactional_export() -> None:
         graph_payload = json.dumps(
             published_graph, ensure_ascii=False, separators=(",", ":")
         ).encode()
-        artifacts = [graph.name]
-        with owned_step(transaction):
-            commit_bytes(transaction, graph.name, graph_payload)
-            for prepared in sorted(staging.rglob("*")):
-                if (
-                    not prepared.is_file()
-                    or prepared == staged_graph
-                    or prepared.name == ".graphify_state.lock"
-                ):
-                    continue
-                relative = prepared.relative_to(staging).as_posix()
-                commit_relative_bytes(transaction, relative, prepared.read_bytes())
-                artifacts.append(relative)
-            if subcmd == "html" and "--no-viz" in original_argv:
-                commit_unlink(transaction, "graph.html")
-            commit_bytes(transaction, "manifest.json", manifest_payload)
-            artifacts.append("manifest.json")
-            commit_generation(
-                transaction,
-                graph_payload=graph_payload,
-                manifest_payload=manifest_payload,
-                required_artifacts=tuple(artifacts),
-                graph_name=graph.name,
-            )
+        payloads = dict(plan.payloads)
+        payloads[graph.name] = graph_payload
+        payloads["manifest.json"] = manifest_payload
+        commit_publication_plan(
+            transaction,
+            PublicationPlan(payloads, plan.deletions),
+            graph_name=graph.name,
+        )
         finish_transaction(transaction)
         rendered_out = captured_out.getvalue().replace(str(staging), str(graph.parent))
         rendered_err = captured_err.getvalue().replace(str(staging), str(graph.parent))
@@ -1069,6 +1051,9 @@ def _transactional_export() -> None:
 
 
 def dispatch_command(cmd: str) -> None:
+    if cmd == "transaction":
+        _transaction_command()
+        return
     if cmd == "extract":
         try:
             _transactional_extract()
@@ -1087,6 +1072,120 @@ def dispatch_command(cmd: str) -> None:
         _transactional_export()
         return
     _dispatch_command(cmd)
+
+
+def _transaction_command() -> None:
+    """Bounded operational surface for status, exact recovery, and retired GC."""
+    from graphify.transaction import (
+        OutputIdentity,
+        active_transaction_token_path,
+        gc_retired_workspaces,
+        recover_selected_transaction,
+        stage_transaction_handoff,
+        transaction_status,
+    )
+
+    arguments = sys.argv[2:]
+    if not arguments or arguments[0] not in {"status", "recover", "gc"}:
+        raise SystemExit(
+            "usage: graphify transaction (status|recover|gc) --output PATH [selectors]"
+        )
+    action = arguments[0]
+    values: dict[str, str] = {}
+    apply = False
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--apply":
+            apply = True
+            index += 1
+            continue
+        if argument.startswith("--") and index + 1 < len(arguments):
+            values[argument] = arguments[index + 1]
+            index += 2
+            continue
+        raise SystemExit(f"invalid transaction argument: {argument}")
+    allowed = {
+        "status": {"--output"},
+        "recover": {
+            "--output",
+            "--generation",
+            "--device",
+            "--inode",
+            "--root",
+            "--transaction-id",
+        },
+        "gc": {
+            "--output",
+            "--device",
+            "--inode",
+            "--workspace",
+            "--workspace-device",
+            "--workspace-inode",
+        },
+    }[action]
+    unknown = set(values) - allowed
+    if unknown:
+        raise SystemExit(
+            f"transaction {action} received unsupported selector: {sorted(unknown)[0]}"
+        )
+    output = Path(values.get("--output", _GRAPHIFY_OUT)).expanduser().resolve()
+    if action == "status":
+        if apply or set(values) - {"--output"}:
+            raise SystemExit("transaction status accepts only --output")
+        print(json.dumps(transaction_status(output), sort_keys=True))
+        return
+    identity_required = {"--device", "--inode"}
+    if not identity_required <= values.keys():
+        raise SystemExit("transaction recover/gc requires output device and inode selectors")
+    identity = OutputIdentity(int(values["--device"]), int(values["--inode"]))
+    if action == "gc":
+        gc_required = {"--workspace", "--workspace-device", "--workspace-inode"}
+        if not gc_required <= values.keys():
+            raise SystemExit("transaction gc requires exact workspace path, device, and inode")
+        removed = gc_retired_workspaces(
+            output,
+            expected_output_identity=identity,
+            workspace=values["--workspace"],
+            expected_workspace_identity=OutputIdentity(
+                int(values["--workspace-device"]),
+                int(values["--workspace-inode"]),
+            ),
+            dry_run=not apply,
+        )
+        print(json.dumps({"dry_run": not apply, "retained_workspaces": removed}))
+        return
+    if apply:
+        raise SystemExit("transaction recover does not accept --apply")
+    if "--generation" not in values:
+        raise SystemExit("transaction recover requires --generation")
+    root = values.get("--root")
+    if root is None:
+        raise SystemExit("transaction recover requires --root")
+    recovered = recover_selected_transaction(
+        None,
+        Path(root),
+        output=output,
+        now=time.time(),
+        expected_transaction_id=values.get("--transaction-id"),
+        expected_generation=int(values["--generation"]),
+        expected_output_identity=identity,
+    )
+    token_path = (
+        active_transaction_token_path(output)
+        if recovered.token_identity is not None
+        else stage_transaction_handoff(recovered).path
+    )
+    print(
+        json.dumps(
+            {
+                "transaction_id": recovered.id,
+                "generation": recovered.generation,
+                "token_path": str(token_path),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _dispatch_command(cmd: str) -> None:
