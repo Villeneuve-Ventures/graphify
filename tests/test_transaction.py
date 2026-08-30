@@ -107,6 +107,36 @@ def _file_bytes(output: Path) -> dict[str, bytes]:
     }
 
 
+def _mutate_queue_same_inode(path: Path) -> tuple[int, int]:
+    identity = (path.stat().st_dev, path.stat().st_ino)
+    items = [json.loads(line) for line in path.read_text().splitlines()]
+    items[0]["time"] = float(items[0]["time"]) + 1.0
+    payload = b"".join(
+        json.dumps(item, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        for item in items
+    )
+    with path.open("r+b") as handle:
+        handle.seek(0)
+        handle.write(payload)
+        handle.truncate()
+        handle.flush()
+        os.fsync(handle.fileno())
+    assert (path.stat().st_dev, path.stat().st_ino) == identity
+    return identity
+
+
+def _forge_queue_item_with_reused_id(path: Path) -> None:
+    items = [json.loads(line) for line in path.read_text().splitlines()]
+    items[0]["source"] = f"{items[0]['source']}-forged"
+    path.write_bytes(
+        b"".join(
+            json.dumps(item, sort_keys=True, separators=(",", ":")).encode()
+            + b"\n"
+            for item in items
+        )
+    )
+
+
 def test_optional_current_transaction_distinguishes_absence_from_corrupt_authority(
     tmp_path, monkeypatch
 ):
@@ -6570,15 +6600,20 @@ def test_claim_source_survives_until_replacement_is_durable(tmp_path, boundary):
 
 def test_duplicate_queue_intent_ids_fail_closed(tmp_path):
     root, output, _tx, _token = _owner(tmp_path)
-    intent = {
+    identity = {
         "schema": 1,
-        "id": "a" * 64,
         "kind": "update",
         "intent": "update",
         "root": str(root.resolve()),
         "changed_paths": ["a.py"],
         "semantic": False,
         "source": "test",
+    }
+    intent = {
+        **identity,
+        "id": hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
         "time": 0.0,
     }
     queue = output / ".graphify_rebuild_queue.jsonl"
@@ -7475,7 +7510,10 @@ def test_claim_acknowledgement_is_durable_before_inflight_retirement(tmp_path):
     recover_close(output)
 
 
-def test_complete_claim_rejects_same_name_inflight_substitution(tmp_path):
+@pytest.mark.parametrize("substitution", ["replacement", "inplace"])
+def test_complete_claim_rejects_same_name_inflight_substitution(
+    tmp_path, substitution
+):
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
     claim = claim_rebuild_queue(tx, intent.drainer)
@@ -7490,9 +7528,12 @@ def test_complete_claim_rejects_same_name_inflight_substitution(tmp_path):
             manifest_payload=b"{}",
             required_artifacts=("graph.json", "manifest.json"),
         )
-        replacement = inflight.read_bytes()
-        inflight.unlink()
-        inflight.write_bytes(replacement)
+        if substitution == "replacement":
+            replacement = inflight.read_bytes()
+            inflight.unlink()
+            inflight.write_bytes(replacement)
+        else:
+            _mutate_queue_same_inode(inflight)
         replacement_identity = (inflight.stat().st_dev, inflight.stat().st_ino)
         before = _file_bytes(output)
 
@@ -7503,7 +7544,10 @@ def test_complete_claim_rejects_same_name_inflight_substitution(tmp_path):
     assert (inflight.stat().st_dev, inflight.stat().st_ino) == replacement_identity
 
 
-def test_takeover_rejects_same_name_inflight_substitution(tmp_path, monkeypatch):
+@pytest.mark.parametrize("substitution", ["replacement", "inplace"])
+def test_takeover_rejects_same_name_inflight_substitution(
+    tmp_path, monkeypatch, substitution
+):
     import graphify.transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
@@ -7517,19 +7561,25 @@ def test_takeover_rejects_same_name_inflight_substitution(tmp_path, monkeypatch)
         nonlocal replaced
         if name == transaction_module.QUEUE_FILE and not replaced:
             replaced = True
-            body = inflight.read_bytes()
-            inflight.unlink()
-            inflight.write_bytes(body)
+            if substitution == "replacement":
+                body = inflight.read_bytes()
+                inflight.unlink()
+                inflight.write_bytes(body)
+            else:
+                _mutate_queue_same_inode(inflight)
         return original(capability, name, items, **kwargs)
 
     monkeypatch.setattr(transaction_module, "_write_queue", substitute_before_queue_write)
-    with pytest.raises(PendingTransactionError, match="identity changed"):
+    with pytest.raises(PendingTransactionError, match="identity changed|queue changed"):
         takeover_drainer(output, now=10**12)
     assert replaced is True
     assert inflight.is_file()
 
 
-def test_close_replay_rejects_same_name_inflight_substitution(tmp_path):
+@pytest.mark.parametrize("substitution", ["replacement", "inplace"])
+def test_close_replay_rejects_same_name_inflight_substitution(
+    tmp_path, substitution
+):
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
     claim = claim_rebuild_queue(tx, intent.drainer)
@@ -7561,9 +7611,12 @@ def test_close_replay_rejects_same_name_inflight_substitution(tmp_path):
                 else None,
             )
     inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
-    body = inflight.read_bytes()
-    inflight.unlink()
-    inflight.write_bytes(body)
+    if substitution == "replacement":
+        body = inflight.read_bytes()
+        inflight.unlink()
+        inflight.write_bytes(body)
+    else:
+        _mutate_queue_same_inode(inflight)
     before = _file_bytes(output)
 
     with pytest.raises(PendingTransactionError, match="inflight identity"):
@@ -7572,7 +7625,10 @@ def test_close_replay_rejects_same_name_inflight_substitution(tmp_path):
     assert _file_bytes(output) == before
 
 
-def test_recovery_retires_only_frozen_inflight_identity(tmp_path, monkeypatch):
+@pytest.mark.parametrize("substitution", ["replacement", "inplace"])
+def test_recovery_retires_only_frozen_inflight_identity(
+    tmp_path, monkeypatch, substitution
+):
     import graphify.transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
@@ -7586,16 +7642,54 @@ def test_recovery_retires_only_frozen_inflight_identity(tmp_path, monkeypatch):
         nonlocal replaced
         if name == transaction_module.QUEUE_FILE and not replaced:
             replaced = True
-            body = inflight.read_bytes()
-            inflight.unlink()
-            inflight.write_bytes(body)
+            if substitution == "replacement":
+                body = inflight.read_bytes()
+                inflight.unlink()
+                inflight.write_bytes(body)
+            else:
+                _mutate_queue_same_inode(inflight)
         return original(capability, name, items, **kwargs)
 
     monkeypatch.setattr(transaction_module, "_write_queue", substitute_after_freeze)
-    with pytest.raises(PendingTransactionError, match="identity changed"):
+    with pytest.raises(PendingTransactionError, match="identity changed|queue changed"):
         recover_transaction("runtime", root, output=output, now=10**12)
     assert replaced is True
     assert inflight.is_file()
+
+
+@pytest.mark.parametrize("entrypoint", ["queue", "claim"])
+def test_queue_parser_rejects_reused_id_with_changed_immutable_fields(
+    tmp_path, entrypoint
+):
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    queue_path = output / ".graphify_rebuild_queue.jsonl"
+    _forge_queue_item_with_reused_id(queue_path)
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="intent identity"):
+        if entrypoint == "queue":
+            queue_rebuild("update", root, output=output, changed_paths=["b.py"])
+        else:
+            claim_rebuild_queue(tx, intent.drainer)
+
+    assert _file_bytes(output) == before
+
+
+def test_recovery_rejects_reused_inflight_id_with_changed_immutable_fields(
+    tmp_path,
+):
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim_rebuild_queue(tx, intent.drainer)
+    inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
+    _forge_queue_item_with_reused_id(inflight)
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="intent identity"):
+        recover_transaction("runtime", root, output=output, now=10**12)
+
+    assert _file_bytes(output) == before
 
 
 @pytest.mark.parametrize(

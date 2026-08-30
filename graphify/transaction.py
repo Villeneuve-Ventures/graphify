@@ -1089,7 +1089,10 @@ def _replace_bytes(
     payload: bytes,
     *,
     expected_identity: tuple[int, int] | None = None,
+    expected_digest: str | None = None,
 ) -> None:
+    if expected_digest is not None and expected_identity is None:
+        raise PendingTransactionError("managed entry digest requires exact identity")
     capability.validate()
     prior = _entry_stat(capability, name)
     temporary = f".{name}.{secrets.token_hex(16)}.tmp"
@@ -1117,6 +1120,15 @@ def _replace_bytes(
             current = _entry_stat(capability, name)
             if current is None or (current.st_dev, current.st_ino) != expected_identity:
                 raise PendingTransactionError(f"managed entry identity changed: {name}")
+            if expected_digest is not None:
+                current_record = _read_queue_record(capability, name)
+                if (
+                    current_record.identity != expected_identity
+                    or current_record.digest != expected_digest
+                ):
+                    raise PendingTransactionError(
+                        f"managed entry content changed: {name}"
+                    )
             quarantine = f".{name}.graphify-merge-backup.{secrets.token_hex(16)}"
             os.rename(
                 name,
@@ -1138,6 +1150,23 @@ def _replace_bytes(
                         dst_dir_fd=capability.fd,
                     )
                 raise PendingTransactionError(f"managed entry changed during quarantine: {name}")
+            if expected_digest is not None:
+                quarantined_record = _read_queue_record(capability, quarantine)
+                if (
+                    quarantined_record.identity != expected_identity
+                    or quarantined_record.digest != expected_digest
+                ):
+                    if _entry_stat(capability, name) is None:
+                        os.rename(
+                            quarantine,
+                            name,
+                            src_dir_fd=capability.fd,
+                            dst_dir_fd=capability.fd,
+                        )
+                        os.fsync(capability.fd)
+                    raise PendingTransactionError(
+                        f"managed entry content changed during quarantine: {name}"
+                    )
             try:
                 os.link(
                     temporary,
@@ -8253,6 +8282,20 @@ def _validate_queue_item(item: object) -> dict[str, Any]:
         or not math.isfinite(float(cast(int | float, item.get("time"))))
     ):
         raise PendingTransactionError("malformed rebuild queue")
+    identity = {
+        key: item[key]
+        for key in (
+            "schema",
+            "kind",
+            "intent",
+            "root",
+            "changed_paths",
+            "semantic",
+            "source",
+        )
+    }
+    if item["id"] != hashlib.sha256(_json_bytes(identity)).hexdigest():
+        raise PendingTransactionError("rebuild intent identity changed")
     return item
 
 
@@ -8346,8 +8389,11 @@ def _write_queue(
     items: list[dict[str, Any]],
     *,
     expected_identity: tuple[int, int] | None = None,
+    expected_digest: str | None = None,
 ) -> None:
     payload = _queue_payload(items)
+    if expected_digest is not None and expected_identity is None:
+        raise PendingTransactionError("queue digest requires exact identity")
     if expected_identity is None:
         _replace_bytes(capability, name, payload)
     else:
@@ -8356,6 +8402,7 @@ def _write_queue(
             name,
             payload,
             expected_identity=expected_identity,
+            expected_digest=expected_digest,
         )
 
 
@@ -8829,7 +8876,36 @@ def _retire_queue_record(
         if _entry_stat(capability, record.name) is not None:
             raise PendingTransactionError("rebuild queue appeared after absence admission")
         return
-    _unlink(capability, record.name, expected=record.identity)
+    if record.digest is None:
+        raise PendingTransactionError("rebuild queue retirement digest is missing")
+    current = _read_queue_record(capability, record.name)
+    if current.identity != record.identity or current.digest != record.digest:
+        raise PendingTransactionError("rebuild queue changed before retirement")
+    quarantine = f"{record.name}.graphify-retire.{secrets.token_hex(16)}"
+    os.rename(
+        record.name,
+        quarantine,
+        src_dir_fd=capability.fd,
+        dst_dir_fd=capability.fd,
+    )
+    os.fsync(capability.fd)
+    quarantined = _read_queue_record(capability, quarantine)
+    if (
+        quarantined.identity != record.identity
+        or quarantined.digest != record.digest
+    ):
+        if _entry_stat(capability, record.name) is None:
+            os.rename(
+                quarantine,
+                record.name,
+                src_dir_fd=capability.fd,
+                dst_dir_fd=capability.fd,
+            )
+            os.fsync(capability.fd)
+        raise PendingTransactionError("rebuild queue changed during retirement")
+    os.unlink(quarantine, dir_fd=capability.fd)
+    os.fsync(capability.fd)
+    capability.validate()
 
 
 def _drainer_state_from_json(
@@ -9697,6 +9773,7 @@ def complete_rebuild_claim(
                 expected_name,
                 residual,
                 expected_identity=inflight_record.identity,
+                expected_digest=inflight_record.digest,
             )
         elif claim.items:
             _unlink(
