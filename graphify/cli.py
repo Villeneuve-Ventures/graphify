@@ -1048,9 +1048,15 @@ def _transactional_export() -> None:
         requested_destination == graph.parent
         or graph.parent in requested_destination.parents
     )
-    managed_delivery = prepared_destination or source_managed and (
-        destination_authority == source_output
-        or (destination_authority is None and destination_within_source)
+    managed_delivery = _export_destination_is_managed(
+        graph, source_managed=source_managed
+    ) and (
+        prepared_destination
+        or source_managed
+        and (
+            destination_authority == source_output
+            or (destination_authority is None and destination_within_source)
+        )
     )
     export_subcmd = sys.argv[2]
     external_obsidian_inventory = None

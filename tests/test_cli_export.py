@@ -875,6 +875,81 @@ def test_export_graphml_creates_file(tmp_path):
 
 # ── graphify export neo4j (cypher) ───────────────────────────────────────────
 
+
+@pytest.mark.parametrize("provider", ["neo4j", "falkordb"])
+@pytest.mark.parametrize("provider_fails", [False, True])
+def test_issue89_provider_push_is_snapshot_only_and_never_publishes_locally(
+    tmp_path, monkeypatch, provider, provider_fails,
+):
+    import graphify.export as export_module
+    import graphify.transaction as transaction_module
+    from graphify.cli import dispatch_command
+
+    out = _make_graph(tmp_path)
+    seeded = _run(["export", "html"], tmp_path)
+    assert seeded.returncode == 0, seeded.stderr
+    before = {
+        path.relative_to(out).as_posix(): path.read_bytes()
+        for path in out.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    calls: list[dict[str, object]] = []
+    admissions: list[str] = []
+    original_snapshot = transaction_module.open_graph_snapshot
+
+    def tracked_snapshot(path, *, purpose):
+        admissions.append(purpose)
+        return original_snapshot(path, purpose=purpose)
+
+    def provider_call(_graph, **kwargs):
+        calls.append(kwargs)
+        if provider_fails:
+            raise RuntimeError(f"{provider} provider failed")
+        return {"nodes": 4, "edges": 4}
+
+    def forbid_local_publication(*_args, **_kwargs):
+        raise AssertionError("provider push entered local publication")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", tracked_snapshot)
+    monkeypatch.setattr(
+        export_module, f"push_to_{provider}", provider_call
+    )
+    monkeypatch.setattr(
+        transaction_module, "begin_transaction", forbid_local_publication
+    )
+    monkeypatch.setattr(
+        transaction_module, "commit_publication_plan", forbid_local_publication
+    )
+    monkeypatch.setattr(
+        transaction_module, "commit_unmanaged_bytes", forbid_local_publication
+    )
+    argv = [
+        "graphify",
+        "export",
+        provider,
+        "--push",
+        f"{provider}://provider.invalid",
+    ]
+    if provider == "neo4j":
+        argv.extend(["--password", "test-password"])
+    monkeypatch.setattr(sys, "argv", argv)
+
+    if provider_fails:
+        with pytest.raises(RuntimeError, match=f"{provider} provider failed"):
+            dispatch_command("export")
+    else:
+        dispatch_command("export")
+
+    assert admissions == ["export-admission", "export"]
+    assert len(calls) == 1
+    assert {
+        path.relative_to(out).as_posix(): path.read_bytes()
+        for path in out.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    } == before
+
+
 def test_export_neo4j_creates_cypher(tmp_path):
     _make_graph(tmp_path)
     r = _run(["export", "neo4j"], tmp_path)
