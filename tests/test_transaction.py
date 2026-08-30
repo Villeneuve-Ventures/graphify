@@ -6892,9 +6892,7 @@ queue_rebuild(
 def test_enqueue_recovery_never_adopts_unselected_foreign_stage(tmp_path):
     import graphify.transaction as transaction_module
 
-    root = tmp_path / "corpus"
-    root.mkdir()
-    output = tmp_path / "graphify-out"
+    root, output, _tx, _token = _owner(tmp_path)
     with pytest.raises(RuntimeError, match="stop"):
         queue_rebuild(
             "update",
@@ -6913,19 +6911,33 @@ def test_enqueue_recovery_never_adopts_unselected_foreign_stage(tmp_path):
     (output / foreign_name).write_bytes(
         transaction_module._queue_payload(journal["successor_queue"])
     )
-    before = _file_bytes(output)
+    foreign = output / foreign_name
+    foreign_before = foreign.read_bytes()
+    foreign_stat = foreign.stat(follow_symlinks=False)
+    foreign_identity = (foreign_stat.st_dev, foreign_stat.st_ino)
 
-    with pytest.raises(PendingTransactionError):
-        queue_rebuild(
-            "update",
-            root,
-            output=output,
-            changed_paths=["a.py"],
-            now=1.0,
-        )
+    receipt = queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["a.py"],
+        now=1.0,
+    )
 
-    assert _file_bytes(output) == before
+    queued = [
+        json.loads(line)
+        for line in (output / transaction_module.QUEUE_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [item["id"] for item in queued] == [receipt.id]
+    assert queued[0]["changed_paths"] == ["a.py"]
+    assert foreign.read_bytes() == foreign_before
+    foreign_after = foreign.stat(follow_symlinks=False)
+    assert (foreign_after.st_dev, foreign_after.st_ino) == foreign_identity
     assert not (output / selected).exists()
+    assert not (output / transaction_module.ENQUEUE_FILE).exists()
+    assert not list(output.glob(transaction_module._QUEUE_TRANSITION_PREFIX + "*"))
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
