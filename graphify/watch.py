@@ -5,7 +5,6 @@ import json
 import os
 import posixpath
 import re
-import shutil
 import sys
 import tempfile
 import time
@@ -783,6 +782,7 @@ def _rebuild_code(
             GRAPH_WATERMARK_KEY,
             PendingTransactionError,
             PublicationPlan,
+            _discard_report_only_directory,
             admit_report_auxiliaries,
             begin_transaction,
             cancel_unpublished_transaction,
@@ -946,7 +946,7 @@ def _rebuild_code(
                 ).encode("utf-8")
                 manifest_payload = manifest_path.read_bytes()
                 (prepared / ".graphify_learning.json").unlink(missing_ok=True)
-                shutil.rmtree(prepared / "memory", ignore_errors=True)
+                _discard_report_only_directory(prepared / "memory")
                 plan = publication_plan_from_directory(
                     prepared, prior_inventory=baseline_artifacts
                 )

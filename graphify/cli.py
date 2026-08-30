@@ -10,7 +10,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -741,6 +740,7 @@ def _transactional_cluster_only(cmd: str) -> None:
     from graphify.transaction import (
         GRAPH_WATERMARK_KEY,
         PublicationPlan,
+        _discard_report_only_directory,
         admit_report_auxiliaries,
         begin_transaction,
         commit_publication_plan,
@@ -820,7 +820,7 @@ def _transactional_cluster_only(cmd: str) -> None:
             manifest.write_bytes(b"{}")
         manifest_payload = manifest.read_bytes()
         (staging / ".graphify_learning.json").unlink(missing_ok=True)
-        shutil.rmtree(staging / "memory", ignore_errors=True)
+        _discard_report_only_directory(staging / "memory")
         plan = publication_plan_from_directory(
             staging, prior_inventory=source_snapshot.artifacts
         )

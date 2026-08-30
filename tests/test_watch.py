@@ -1822,6 +1822,60 @@ def test_transactional_watch_uses_report_memory_without_receipt_ownership(tmp_pa
     } == memory_before
 
 
+def test_transactional_watch_report_memory_cleanup_failure_blocks_publication(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+    from graphify.ingest import save_query_result
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "source.py"
+    source.write_text("def source():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_query_result(
+        "preserve watch cleanup failure",
+        "failed",
+        output / "memory",
+        outcome="dead_end",
+    )
+    graph_before = (output / "graph.json").read_bytes()
+    memory_before = {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    }
+    original_rmtree = transaction_module.shutil.rmtree
+
+    def denied_rmtree(path, *args, **kwargs):
+        if Path(path).name == "memory":
+            raise PermissionError("memory cleanup denied")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_module.shutil, "rmtree", denied_rmtree)
+
+    with pytest.raises(PermissionError, match="memory cleanup denied"):
+        _rebuild_code(tmp_path, changed_paths=[source])
+
+    assert (output / "graph.json").read_bytes() == graph_before
+    assert not (output / transaction_module.RECEIPT_FILE).exists()
+    protocol = json.loads((output / transaction_module.PROTOCOL_FILE).read_text())
+    assert protocol["state"] == "INCOMPLETE"
+    assert {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    } == memory_before
+
+
 def test_transactional_watch_preserves_checkpointed_legacy_paths(tmp_path):
     import graphify.watch as watch_module
 

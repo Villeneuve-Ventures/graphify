@@ -15,6 +15,7 @@ import os
 import re
 import runpy
 import secrets
+import shutil
 import stat
 import sys
 import threading
@@ -8134,6 +8135,15 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
                 raise PendingTransactionError("report learning content changed")
         _validate_expected_snapshot_locked(capability, snapshot)
     return retained
+
+
+def _discard_report_only_directory(path: Path) -> None:
+    """Remove prepared report auxiliaries, ignoring only initial absence."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    shutil.rmtree(path)
 
 
 def open_external_graph_snapshot(

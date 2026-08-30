@@ -1151,6 +1151,50 @@ def test_cluster_only_uses_report_memory_without_receipt_ownership(tmp_path):
     } == memory_before
 
 
+def test_cluster_only_report_memory_cleanup_failure_blocks_publication(
+    tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    import graphify.transaction as transaction_module
+    from graphify.ingest import save_query_result
+
+    out = _make_graph(tmp_path)
+    save_query_result(
+        "preserve cleanup failure",
+        "failed",
+        out / "memory",
+        outcome="dead_end",
+    )
+    graph_before = (out / "graph.json").read_bytes()
+    memory_before = {
+        path.name: path.read_bytes() for path in (out / "memory").glob("*.md")
+    }
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["graphify", "cluster-only", ".", "--no-viz", "--no-label"]
+    )
+    monkeypatch.setattr(cli_module, "_dispatch_command", lambda _cmd: None)
+    original_rmtree = transaction_module.shutil.rmtree
+
+    def denied_rmtree(path, *args, **kwargs):
+        if Path(path).name == "memory":
+            raise PermissionError("memory cleanup denied")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_module.shutil, "rmtree", denied_rmtree)
+
+    with pytest.raises(PermissionError, match="memory cleanup denied"):
+        cli_module._transactional_cluster_only("cluster-only")
+
+    assert (out / "graph.json").read_bytes() == graph_before
+    assert not (out / transaction_module.RECEIPT_FILE).exists()
+    protocol = json.loads((out / transaction_module.PROTOCOL_FILE).read_text())
+    assert protocol["state"] == "INCOMPLETE"
+    assert {
+        path.name: path.read_bytes() for path in (out / "memory").glob("*.md")
+    } == memory_before
+
+
 def test_cluster_only_flushes_original_diagnostics_before_nonzero_exit(
     tmp_path, monkeypatch, capsys
 ):
