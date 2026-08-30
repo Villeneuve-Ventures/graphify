@@ -277,6 +277,53 @@ def test_report_auxiliaries_share_one_aggregate_budget(tmp_path, monkeypatch):
         transaction_module.admit_report_auxiliaries(snapshot)
 
 
+def test_report_auxiliaries_reject_in_place_content_rewrite(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_bytes(
+        b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
+    )
+    learning = output / ".graphify_learning.json"
+    learning.write_bytes(b"before")
+    snapshot = open_graph_snapshot(output / "graph.json", purpose="publication-prepare")
+    original = transaction_module._read_bytes
+    reads = 0
+
+    def rewrite_after_first_read(capability, name, limit=512 * 1024 * 1024):
+        nonlocal reads
+        payload = original(capability, name, limit)
+        if name == ".graphify_learning.json" and reads == 0:
+            reads += 1
+            learning.write_bytes(b"after!")
+        return payload
+
+    monkeypatch.setattr(transaction_module, "_read_bytes", rewrite_after_first_read)
+    with pytest.raises(PendingTransactionError, match="learning content changed"):
+        transaction_module.admit_report_auxiliaries(snapshot)
+
+
+def test_nested_absent_output_rejects_intermediate_symlink_before_mutation(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    output = tmp_path / "nested" / "graphify-out"
+    snapshot = open_graph_snapshot(
+        output / "graph.json", purpose="watch-prepare", allow_absent=True
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+    (tmp_path / "nested").symlink_to(target, target_is_directory=True)
+    before = _file_bytes(target)
+
+    with pytest.raises(PendingTransactionError, match="appeared|unsafe|chain"):
+        begin_transaction(
+            "runtime", root, output=output, expected_snapshot=snapshot
+        )
+
+    assert _file_bytes(target) == before
+
+
 def _close_pending_after_failpoint(tmp_path: Path) -> tuple[Path, Path]:
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -6608,6 +6655,43 @@ def test_close_pending_recovery_and_racing_enqueue_create_successor(tmp_path):
     drainer = json.loads((output / ".graphify_drainer.json").read_text())
     assert drainer["state"] == "reserved"
     assert drainer["generation"] == late.drainer.generation
+
+
+def test_claim_acknowledgement_is_durable_before_inflight_retirement(tmp_path):
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    with owned_step(tx, drainer=claim.drainer):
+        payload = _graph(tx.generation)
+        commit_bytes(tx, "graph.json", payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+        generation = commit_generation(
+            tx,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+
+        def failpoint(name: str) -> None:
+            if name == "after_claim_acknowledgement":
+                raise RuntimeError(name)
+
+        with pytest.raises(RuntimeError, match="after_claim_acknowledgement"):
+            complete_rebuild_claim(
+                tx,
+                claim,
+                receipt_digest=generation.digest,
+                failpoint=failpoint,
+            )
+        inflight = output / f".graphify_rebuild_inflight.{tx.id}.jsonl"
+        assert inflight.is_file()
+        drainer = json.loads((output / ".graphify_drainer.json").read_text())
+        assert drainer["acked_ids"] == [claim.items[0]["id"]]
+        assert drainer["receipt_digest"] == generation.digest
+        assert close_if_queue_empty(tx, receipt_digest=generation.digest)
+
+    assert not inflight.exists()
+    recover_close(output)
 
 
 @pytest.mark.parametrize("entrypoint", ["queue", "recover"])

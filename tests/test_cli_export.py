@@ -67,6 +67,13 @@ def test_export_routing_normalizes_inline_paths_and_rejects_duplicates():
         _normalize_export_routing(
             ["callflow-html", "source.json", "--graph=other.json"]
         )
+    assert _normalize_export_routing(
+        ["callflow-html", "--", "--graph-looking.json"]
+    ) == ["callflow-html", "--", "--graph-looking.json"]
+    with pytest.raises(_CliArgumentError, match="ambiguous"):
+        _normalize_export_routing(
+            ["callflow-html", "--graph", "source.json", "--", "--other.json"]
+        )
 
 
 def test_external_callflow_admits_explicit_same_parent_sidecars_once(

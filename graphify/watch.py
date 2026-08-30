@@ -846,12 +846,6 @@ def _rebuild_code(
             except PendingTransactionError as exc:
                 print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
-        defer_legacy_pending = (
-            baseline_snapshot is not None
-            and baseline_snapshot.output_identity is None
-        )
-        if changed_paths is not None and not defer_legacy_pending:
-            _queue_pending(actual_out, list(changed_paths))
         queued = queue_rebuild(
             "update" if changed_paths is not None else "full",
             watch_path,
@@ -886,6 +880,11 @@ def _rebuild_code(
         # on durable transaction state for all subsequent ownership.
         with _rebuild_lock(actual_out, blocking=block_on_lock) as got:
             if not got:
+                # Preserve the compatibility signal only after the canonical
+                # queue CAS has captured the intent, and only for an older
+                # lock-holder that may not read the durable queue itself.
+                if changed_paths is not None:
+                    _queue_pending(actual_out, list(changed_paths))
                 print(
                     "[graphify watch] Rebuild already in progress for "
                     f"{watch_path.resolve()} - changes queued."

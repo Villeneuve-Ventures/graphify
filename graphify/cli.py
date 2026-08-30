@@ -854,6 +854,8 @@ def _transactional_cluster_only(cmd: str) -> None:
 def _export_graph_path() -> Path:
     arguments = sys.argv[3:]
     for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
         if argument == "--graph" and index + 1 < len(arguments):
             return Path(arguments[index + 1]).expanduser().resolve()
         if argument.startswith("--graph="):
@@ -876,7 +878,7 @@ def _export_graph_was_explicit() -> bool:
     arguments = sys.argv[3:]
     return any(
         argument == "--graph" or argument.startswith("--graph=")
-        for argument in arguments
+        for argument in arguments[: arguments.index("--") if "--" in arguments else None]
     ) or (
         len(sys.argv) > 2
         and sys.argv[2] == "callflow-html"
@@ -900,6 +902,8 @@ def _callflow_positional_graph_index(arguments: list[str]) -> int | None:
     index = 0
     while index < len(arguments):
         argument = arguments[index]
+        if argument == "--":
+            return index + 1 if index + 1 < len(arguments) else None
         if argument in value_options:
             index += 2
             continue
@@ -913,9 +917,10 @@ def _callflow_positional_graph_index(arguments: list[str]) -> int | None:
 def _replace_export_graph_argument(
     arguments: list[str], graph: Path, *, subcmd: str
 ) -> list[str]:
+    option_arguments = arguments[: arguments.index("--") if "--" in arguments else None]
     if any(
         argument == "--graph" or argument.startswith("--graph=")
-        for argument in arguments
+        for argument in option_arguments
     ):
         return _replace_graph_argument(arguments, graph)
     rewritten = list(arguments)
@@ -943,6 +948,13 @@ def _normalize_export_routing(arguments: list[str]) -> list[str]:
     index = 1
     while index < len(arguments):
         argument = arguments[index]
+        if argument == "--":
+            normalized.append(argument)
+            boundary_values = arguments[index + 1 :]
+            normalized.extend(boundary_values)
+            if subcmd == "callflow-html":
+                positionals.extend(boundary_values)
+            break
         option, separator, inline = argument.partition("=")
         if option in _EXPORT_PATH_OPTIONS:
             if option in seen:
@@ -968,7 +980,14 @@ def _normalize_export_routing(arguments: list[str]) -> list[str]:
         # Value arguments are not positional source candidates.
         parsed_positionals: list[str] = []
         skip = False
-        for index, argument in enumerate(normalized[1:]):
+        after_boundary = False
+        for argument in normalized[1:]:
+            if argument == "--":
+                after_boundary = True
+                continue
+            if after_boundary:
+                parsed_positionals.append(argument)
+                continue
             if skip:
                 skip = False
                 continue
@@ -1030,6 +1049,8 @@ def _replace_export_path_argument(
 ) -> list[str]:
     rewritten = list(arguments)
     for index, argument in enumerate(rewritten):
+        if argument == "--":
+            break
         if argument == option and index + 1 < len(rewritten):
             rewritten[index + 1] = str(target)
             return rewritten
@@ -1041,6 +1062,8 @@ def _replace_export_path_argument(
 
 def _export_option_path(arguments: list[str], option: str) -> Path | None:
     for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
         if argument == option and index + 1 < len(arguments):
             return Path(arguments[index + 1]).expanduser().resolve()
         if argument.startswith(f"{option}="):
@@ -1050,8 +1073,15 @@ def _export_option_path(arguments: list[str], option: str) -> Path | None:
 
 def _transactional_export_entry() -> None:
     original_argv = sys.argv
-    sys.argv = [*original_argv[:2], *_normalize_export_routing(original_argv[2:])]
+    normalized = _normalize_export_routing(original_argv[2:])
+    sys.argv = [*original_argv[:2], *normalized]
     try:
+        option_prefix = normalized[: normalized.index("--") if "--" in normalized else None]
+        if normalized[0] not in {
+            "html", "callflow-html", "obsidian", "wiki", "svg", "graphml", "neo4j", "falkordb"
+        } or any(value in {"-h", "--help"} for value in option_prefix[1:]):
+            _dispatch_command("export")
+            return
         _transactional_export()
     finally:
         sys.argv = original_argv
@@ -1438,7 +1468,14 @@ def dispatch_command(cmd: str) -> None:
             print(f"error: {exc}", file=sys.stderr)
             raise SystemExit(2) from exc
     if cmd == "export":
-        _transactional_export_entry()
+        try:
+            _transactional_export_entry()
+        except _CliArgumentError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        except FileNotFoundError as exc:
+            print(f"error: graph.json not found at {exc.filename or exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
         return
     _dispatch_command(cmd)
 
@@ -2865,6 +2902,22 @@ def _dispatch_command(cmd: str) -> None:
             print("            (or set FALKORDB_PASSWORD instead of --password to keep it off argv)", file=sys.stderr)
             sys.exit(1)
 
+        help_arguments = sys.argv[3:]
+        if "--" in help_arguments:
+            help_arguments = help_arguments[: help_arguments.index("--")]
+        if any(value in {"-h", "--help"} for value in help_arguments):
+            print(f"Usage: graphify export {subcmd} [options]")
+            if subcmd == "callflow-html":
+                print("  [GRAPH|DIR] [--graph PATH] [--labels PATH] [--report PATH]")
+                print("  [--sections PATH] [--output HTML] [--lang LANG]")
+            elif subcmd == "obsidian":
+                print("  [--graph PATH] [--labels PATH] [--dir PATH]")
+            elif subcmd in {"neo4j", "falkordb"}:
+                print("  [--graph PATH] [--push URI] [--user USER] [--password PASSWORD]")
+            else:
+                print("  [--graph PATH] [--labels PATH]")
+            return
+
         # Parse shared args
         args = sys.argv[3:]
         graph_path = Path(_GRAPHIFY_OUT) / "graph.json"
@@ -2899,6 +2952,18 @@ def _dispatch_command(cmd: str) -> None:
         i = 0
         while i < len(args):
             a = args[i]
+            if a == "--":
+                i += 1
+                if subcmd == "callflow-html" and i < len(args) and not graph_path_explicit:
+                    candidate = Path(args[i])
+                    if candidate.name == "graph.json" or candidate.suffix.lower() == ".json":
+                        graph_path = candidate
+                    elif (candidate / "graph.json").exists():
+                        graph_path = candidate / "graph.json"
+                    else:
+                        graph_path = candidate / _GRAPHIFY_OUT / "graph.json"
+                    graph_path_explicit = True
+                break
             if a == "--graph" and i + 1 < len(args):
                 graph_path = Path(args[i + 1])
                 graph_path_explicit = True

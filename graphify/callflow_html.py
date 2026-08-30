@@ -2067,10 +2067,82 @@ def write_callflow_html(
 </body>
 </html>""")
 
-    # Write output
+    # Publish only after rendering. Managed destinations are receipt-owned;
+    # proven external destinations use the crash-recoverable unmanaged writer.
     output = "\n".join(html)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(output, encoding="utf-8")
+    payload = output.encode("utf-8")
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PendingTransactionError,
+        PublicationPlan,
+        begin_transaction,
+        commit_publication_plan,
+        commit_relative_bytes,
+        commit_unmanaged_bytes,
+        current_transaction,
+        finish_transaction,
+        managed_output_containing,
+    )
+    graph_output = paths["graph"].expanduser().resolve().parent
+    resolved_output = output_path.expanduser().resolve()
+    resolved_graph = paths["graph"].expanduser().resolve()
+    source_authority = managed_output_containing(resolved_graph)
+    destination_authority = managed_output_containing(resolved_output)
+    within_source = (
+        resolved_output.parent == graph_output or graph_output in resolved_output.parents
+    )
+    source_is_managed = source_authority == graph_output or graph is None
+    managed_destination = source_is_managed and within_source
+    if destination_authority is not None and not managed_destination:
+        raise PendingTransactionError(
+            "callflow destination is controlled by foreign managed authority"
+        )
+    if managed_destination:
+        relative = resolved_output.relative_to(graph_output).as_posix()
+        try:
+            active = current_transaction()
+        except PendingTransactionError:
+            active = None
+        if active is not None:
+            if active.output != graph_output:
+                raise PendingTransactionError(
+                    "callflow destination does not match exact transaction output"
+                )
+            commit_relative_bytes(active, relative, payload)
+        else:
+            transaction_root = (
+                graph_output.parent if graph_output.name == "graphify-out" else graph_output
+            )
+            transaction = begin_transaction(
+                "runtime",
+                transaction_root,
+                output=graph_output,
+                expected_snapshot=snapshot,
+            )
+            graph_data = dict(snapshot.data)
+            metadata = dict(graph_data.get("graph") or {})
+            metadata[GRAPH_WATERMARK_KEY] = {
+                "schema": 1,
+                "protocol_epoch": 1,
+                "generation": transaction.generation,
+                "state": "active",
+            }
+            graph_data["graph"] = metadata
+            graph_payload = json.dumps(
+                graph_data, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            payloads = dict(snapshot.artifacts)
+            payloads[paths["graph"].name] = graph_payload
+            payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
+            payloads[relative] = payload
+            commit_publication_plan(
+                transaction,
+                PublicationPlan(payloads),
+                graph_name=paths["graph"].name,
+            )
+            finish_transaction(transaction)
+    else:
+        commit_unmanaged_bytes(resolved_output, payload)
 
     # Summary
     mermaid_count = output.count('<div class="mermaid">')

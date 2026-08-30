@@ -321,13 +321,72 @@ def _canonical_directory(path: Path) -> Path:
     return path.expanduser().resolve(strict=True)
 
 
+def _create_output_chain(
+    path: Path,
+    *,
+    expected_parent_identity: OutputIdentity | None = None,
+    expected_relative: str | None = None,
+) -> None:
+    """Create a missing output chain from one pinned existing ancestor."""
+    absolute = path.expanduser().absolute()
+    ancestor = absolute
+    missing: list[str] = []
+    while True:
+        try:
+            info = ancestor.lstat()
+        except FileNotFoundError:
+            missing.append(_validated_shallow_name(ancestor.name))
+            ancestor = ancestor.parent
+            continue
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise PendingTransactionError(f"unsafe graphify output directory: {ancestor}")
+        break
+    relative = Path(*reversed(missing)).as_posix() if missing else ""
+    if expected_relative is not None and relative != expected_relative:
+        raise PendingTransactionError("admitted absent output appeared or chain changed")
+    if not missing:
+        if expected_relative is not None:
+            raise PendingTransactionError("admitted absent output appeared before begin")
+        return
+    opened: list[OutputCapability] = []
+    with pin_output(ancestor) as parent, _locked(parent):
+        if expected_parent_identity is not None and parent.identity != expected_parent_identity:
+            raise PendingTransactionError("admitted output parent identity changed")
+        current = parent
+        try:
+            for part in reversed(missing):
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=current.fd)
+                except FileExistsError as exc:
+                    raise PendingTransactionError(
+                        "admitted absent output appeared before begin"
+                    ) from exc
+                os.fsync(current.fd)
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                child_fd = os.open(part, flags, dir_fd=current.fd)
+                child_info = os.fstat(child_fd)
+                child = OutputCapability(
+                    current.path / part,
+                    OutputIdentity(child_info.st_dev, child_info.st_ino),
+                    child_fd,
+                )
+                opened.append(child)
+                current = child
+            for capability in opened:
+                capability.validate()
+        finally:
+            for capability in reversed(opened):
+                capability.close()
+
+
 def _ensure_output(path: Path) -> None:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        path.mkdir(parents=True, exist_ok=True)
-        info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or path.is_symlink():
+    _create_output_chain(path)
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise PendingTransactionError(f"unsafe graphify output directory: {path}")
 
 
@@ -341,12 +400,12 @@ def pin_output(
     is not represented as equivalent protection.
     """
     path = Path(output)
-    if create:
-        _ensure_output(path)
     if _PLATFORM == "windows" and mutation:
         raise PendingTransactionError(
             "Windows non-retargetable final mutation is not proven on this runtime"
         )
+    if create:
+        _ensure_output(path)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = _open_windows_read_directory(path) if _PLATFORM == "windows" else os.open(path, flags)
@@ -3004,32 +3063,19 @@ def _materialize_absent_snapshot_output(
         or snapshot.output_identity is not None
     ):
         return
-    relative_output = Path(cast(str, snapshot.output_name))
-    parent_path = output_path
-    for _part in relative_output.parts:
-        parent_path = parent_path.parent
-    parent_path = parent_path.resolve(strict=True)
+    relative_output = cast(str, snapshot.output_name)
     if (
         snapshot.output_parent_identity is None
         or snapshot.graph_path.parent.absolute() != output_path
     ):
         raise PendingTransactionError("admitted absent output binding is invalid")
-    if output_path.exists():
-        if not (allow_watch_reservation and snapshot.purpose == "watch-prepare"):
-            raise PendingTransactionError("admitted absent output appeared before begin")
+    if output_path.exists() and allow_watch_reservation and snapshot.purpose == "watch-prepare":
         return
-    with pin_output(parent_path) as parent, _locked(parent):
-        if parent.identity != snapshot.output_parent_identity:
-            raise PendingTransactionError("admitted output parent identity changed")
-        first = relative_output.parts[0]
-        try:
-            os.stat(first, dir_fd=parent.fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
-            raise PendingTransactionError("admitted absent output appeared before begin")
-        output_path.mkdir(mode=0o700, parents=True, exist_ok=False)
-        os.fsync(parent.fd)
+    _create_output_chain(
+        output_path,
+        expected_parent_identity=snapshot.output_parent_identity,
+        expected_relative=relative_output,
+    )
 
 
 def begin_transaction(
@@ -7079,6 +7125,7 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
     output = snapshot.graph_path.parent
     retained: dict[str, bytes] = {}
     identities: dict[str, OutputIdentity] = {}
+    digests: dict[str, str] = {}
     remaining = _MAX_REPORT_AUXILIARY_BYTES
     with pin_output(output, mutation=False) as capability, _locked(capability):
         _validate_expected_snapshot_locked(capability, snapshot)
@@ -7090,6 +7137,7 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
                 min(_MAX_STATE_BYTES, remaining),
             )
             retained[".graphify_learning.json"] = payload
+            digests[".graphify_learning.json"] = hashlib.sha256(payload).hexdigest()
             identities[".graphify_learning.json"] = OutputIdentity(
                 learning.st_dev, learning.st_ino
             )
@@ -7133,6 +7181,7 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
                         min(_MAX_STATE_BYTES, remaining),
                     )
                     retained[f"memory/{name}"] = payload
+                    digests[f"memory/{name}"] = hashlib.sha256(payload).hexdigest()
                     identities[f"memory/{name}"] = OutputIdentity(
                         before.st_dev, before.st_ino
                     )
@@ -7148,6 +7197,15 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
                     ) != expected:
                         raise PendingTransactionError(
                             "report memory inventory changed"
+                        )
+                    final_payload = _read_bytes(
+                        memory,
+                        relative.removeprefix("memory/"),
+                        len(retained[relative]) + 1,
+                    )
+                    if hashlib.sha256(final_payload).hexdigest() != digests[relative]:
+                        raise PendingTransactionError(
+                            "report memory content changed"
                         )
                 memory.validate()
                 if _PLATFORM == "windows":
@@ -7180,6 +7238,15 @@ def admit_report_auxiliaries(snapshot: GraphSnapshot) -> dict[str, bytes]:
                 current_learning.st_dev, current_learning.st_ino
             ) != identities[".graphify_learning.json"]:
                 raise PendingTransactionError("report learning identity changed")
+            final_learning = _read_bytes(
+                capability,
+                ".graphify_learning.json",
+                len(retained[".graphify_learning.json"]) + 1,
+            )
+            if hashlib.sha256(final_learning).hexdigest() != digests[
+                ".graphify_learning.json"
+            ]:
+                raise PendingTransactionError("report learning content changed")
         _validate_expected_snapshot_locked(capability, snapshot)
     return retained
 
@@ -8668,6 +8735,7 @@ def complete_rebuild_claim(
     *,
     receipt_digest: str,
     now: float | None = None,
+    failpoint: Callable[[str], None] | None = None,
 ) -> None:
     with pin_output(transaction.output) as capability, _locked(capability):
         live = _validate_authority(capability, transaction, allow_complete=True)
@@ -8700,12 +8768,10 @@ def complete_rebuild_claim(
         ):
             raise PendingTransactionError("claim does not match durable inflight work")
         ids = list(claimed_by_id)
-        residual = [item for item in inflight if str(item["id"]) not in claimed_by_id]
-        if residual:
-            _write_queue(capability, expected_name, residual)
-        elif claim.items:
-            _unlink(capability, expected_name)
         current_time = time.time() if now is None else now
+        # The acknowledgement is the durable authority for retiring inflight
+        # work.  Persist it before touching the inflight record so recovery can
+        # always distinguish acknowledged work from unprocessed intent.
         _write_drainer(
             capability,
             claim.drainer,
@@ -8714,6 +8780,15 @@ def complete_rebuild_claim(
             receipt_digest=receipt_digest,
             lease_deadline=current_time + 30.0,
         )
+        if failpoint:
+            failpoint("after_claim_acknowledgement")
+        residual = [item for item in inflight if str(item["id"]) not in claimed_by_id]
+        if residual:
+            _write_queue(capability, expected_name, residual)
+        elif claim.items:
+            _unlink(capability, expected_name)
+        if failpoint:
+            failpoint("after_inflight_retirement")
 
 
 def close_if_queue_empty(
@@ -8817,8 +8892,18 @@ def _validate_close_pending_locked(
     ):
         raise PendingTransactionError("unexpected token remains after owner retirement")
     inflight_name = f".graphify_rebuild_inflight.{pending['transaction_id']}.jsonl"
-    if _entry_stat(capability, inflight_name) is not None:
-        raise PendingTransactionError("close-pending inflight work was recreated")
+    try:
+        inflight = _read_queue(capability, inflight_name)
+    except PendingTransactionError as exc:
+        raise PendingTransactionError("close-pending inflight work is malformed") from exc
+    acked_ids = pending.get("acked_ids")
+    if not isinstance(acked_ids, list):
+        raise PendingTransactionError("close-pending acknowledgements are malformed")
+    acked = {str(item_id) for item_id in acked_ids}
+    if len(acked) != len(acked_ids) or any(
+        str(item["id"]) not in acked for item in inflight
+    ):
+        raise PendingTransactionError("close-pending inflight work is not acknowledged")
     receipt, receipt_digest, _inventory = _validate_receipt_locked(
         capability,
         transaction=live,
@@ -8842,6 +8927,9 @@ def _finish_close_locked(
         return
     live = _validate_close_pending_locked(capability, pending)
     transaction_id = str(pending["transaction_id"])
+    inflight_name = f".graphify_rebuild_inflight.{transaction_id}.jsonl"
+    if _entry_stat(capability, inflight_name) is not None:
+        _unlink(capability, inflight_name)
     if failpoint:
         failpoint("after_inflight_remove")
     if live is not None and live.id == transaction_id:

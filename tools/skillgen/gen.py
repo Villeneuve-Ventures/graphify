@@ -1768,6 +1768,7 @@ def _is_zero_node_guard_fix_line(line: str) -> bool:
         or "to_json(G, communities," in line
         or s == "if not wrote:"
         or "refused to shrink graphify-out/graph.json" in line
+        or "refused to shrink graph.json" in line
         or "Guard BEFORE any write" in line
         or "GRAPH_REPORT.md / analysis sidecar" in line
         or "Persist the graph first" in line
@@ -2076,7 +2077,6 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_saved_interpreter_subcommand_fix_line,
     _is_semantic_cache_scope_fix_line,
     _is_prepared_transaction_runner_line,
-    _is_prepared_workspace_path_line,
 )
 
 
@@ -2140,6 +2140,15 @@ def _normalise_issue88_monolith_render(text: str) -> str:
 ```'''
     text = text.replace(rendered_config, pointer_config)
     text = text.replace(_POSIX_OPERATION_GUARD + "\n", "")
+    # Collapse only the mechanical prepared-workspace path relocation.  This
+    # keeps the round-trip guard exact: an unrelated injected command merely
+    # mentioning a managed artifact name is not sanctioned.
+    for prepared, original in (
+        ("Path('graphify-out/", "Path('"),
+        ("glob.glob('graphify-out/", "glob.glob('"),
+        ("> graphify-out/.graphify_", "> .graphify_"),
+    ):
+        text = text.replace(prepared, original)
     text = text.replace(
         '"$GRAPHIFY_PYTHON" -E -P -B',
         '"$(cat graphify-out/.graphify_python)" -E -P -B',

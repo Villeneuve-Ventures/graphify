@@ -5458,6 +5458,29 @@ def test_monolith_roundtrip_rejects_injected_provider_content(monkeypatch):
     assert any("post-Step-9 provider block drifted" in problem for problem in problems)
 
 
+def test_monolith_roundtrip_rejects_unrelated_artifact_name_command(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    injected = original.content.replace(
+        "### Step 2",
+        "run-unrelated graph.json GRAPH_REPORT.md .graphify_detect.json "
+        ".graphify_transcripts.json .graphify_semantic_new.json cost.json\n\n"
+        "### Step 2",
+        1,
+    )
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("unsanctioned monolith change" in problem for problem in problems)
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
 @pytest.mark.parametrize(
     ("platform_key", "provider", "expected_tail"),
