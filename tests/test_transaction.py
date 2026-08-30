@@ -5588,6 +5588,127 @@ def test_recovery_identity_retires_expired_prepared_workspace(tmp_path):
     )
 
 
+def test_repeated_build_recovery_keeps_receipt_successor_generation(tmp_path):
+    from graphify.transaction import finalize_prepared_transaction
+
+    root, output, first, _token = _owner(tmp_path)
+    _commit_owner_generation(output, first)
+    finish_transaction(resume_transaction(first.id, root, output=output))
+
+    second = begin_transaction("full", root, output=output)
+    second_token = stage_transaction_handoff(second)
+    run_prepared_token(
+        second_token.path,
+        ["-c", "from pathlib import Path; Path('interrupted').write_text('old')"],
+    )
+    old_workspace = output.parent / f".graphify-prepare-{second.id}"
+
+    recovered = recover_transaction(
+        "full", root, output=output, now=time.time() + 100.0
+    )
+
+    assert recovered.generation == second.generation == first.generation + 1
+    assert not old_workspace.exists()
+    assert list(output.parent.glob(f".graphify-retired-{second.id}-*"))
+    recovered_token = stage_transaction_handoff(recovered)
+    run_prepared_token(
+        recovered_token.path,
+        [
+            "-c",
+            "from pathlib import Path; "
+            f"Path('graph.json').write_bytes({_graph(recovered.generation)!r}); "
+            "Path('manifest.json').write_text('{}')",
+        ],
+    )
+    run_token(
+        recovered_token.path,
+        [
+            "-c",
+            "from graphify.transaction import finalize_prepared_transaction; "
+            "finalize_prepared_transaction()",
+        ],
+    )
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert receipt["generation"] == second.generation
+
+
+def test_prepared_workspace_creation_resumes_after_binding_interruption(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, tx, _token = _owner(tmp_path)
+    original = transaction_module._replace_bytes
+    crashed = False
+
+    def interrupt_binding(capability, name, payload, **kwargs):
+        nonlocal crashed
+        if (
+            name == transaction_module.PREPARED_FILE
+            and not crashed
+            and json.loads(payload)["state"] == "workspace-created"
+        ):
+            crashed = True
+            raise RuntimeError("prepared binding interrupted")
+        return original(capability, name, payload, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_replace_bytes", interrupt_binding)
+    with pytest.raises(RuntimeError, match="prepared binding interrupted"):
+        with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+            transaction_module._pin_prepared_workspace(tx, capability)
+
+    status = transaction_status(output)
+    assert status["prepared_creation"] == {
+        "state": "planned",
+        "transaction_id": tx.id,
+        "generation": tx.generation,
+        "workspace_name": f".graphify-prepare-{tx.id}",
+    }
+    monkeypatch.setattr(transaction_module, "_replace_bytes", original)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        prepared = transaction_module._pin_prepared_workspace(tx, capability)
+        workspace = prepared.path
+        prepared.close()
+    assert workspace == output.parent / f".graphify-prepare-{tx.id}"
+    marker = json.loads((output / transaction_module.PREPARED_FILE).read_text())
+    assert marker["state"] == "ready"
+
+
+def test_recovery_retires_planned_prepared_workspace(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    original = transaction_module._replace_bytes
+
+    def interrupt_binding(capability, name, payload, **kwargs):
+        if (
+            name == transaction_module.PREPARED_FILE
+            and json.loads(payload)["state"] == "workspace-created"
+        ):
+            raise RuntimeError("prepared binding interrupted")
+        return original(capability, name, payload, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_replace_bytes", interrupt_binding)
+    with pytest.raises(RuntimeError, match="prepared binding interrupted"):
+        with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+            transaction_module._pin_prepared_workspace(tx, capability)
+    monkeypatch.setattr(transaction_module, "_replace_bytes", original)
+
+    recovered = recover_transaction(
+        "runtime", root, output=output, now=time.time() + 100.0
+    )
+
+    assert not (output.parent / f".graphify-prepare-{tx.id}").exists()
+    retained = transaction_status(output)["retained_workspaces"]
+    assert any(item["name"].startswith(f".graphify-retired-{tx.id}-") for item in retained)
+    stage_transaction_handoff(recovered)
+    recovered = resume_transaction(recovered.id, root, output=output)
+    with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
+        prepared = transaction_module._pin_prepared_workspace(recovered, capability)
+        assert prepared.path.is_dir()
+        prepared.close()
+
+
 def test_next_generation_retires_prepared_workspace_left_after_close(tmp_path):
     root, output, tx, token = _owner(tmp_path)
     run_prepared_token(token.path, ["-c", "from pathlib import Path; Path('proof').write_text('old')"])
@@ -6851,12 +6972,82 @@ def test_selected_recovery_closes_process_lost_completed_live_generation(
     protocol = json.loads((output / ".graphify_protocol.json").read_text())
     assert protocol["state"] == "COMPLETE"
     drainer = json.loads((output / ".graphify_drainer.json").read_text())
-    assert drainer["state"] == ("reserved" if late_enqueue else "complete")
-    if late_enqueue:
-        queued = json.loads(
-            (output / ".graphify_rebuild_queue.jsonl").read_text().splitlines()[0]
+    requeued_unacknowledged = boundary == "after_protocol_complete"
+    assert drainer["state"] == (
+        "reserved" if late_enqueue or requeued_unacknowledged else "complete"
+    )
+    if late_enqueue or requeued_unacknowledged:
+        queued = [
+            json.loads(line)
+            for line in (output / ".graphify_rebuild_queue.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        expected_paths: set[str] = set()
+        if requeued_unacknowledged:
+            expected_paths.add("a.py")
+        if late_enqueue:
+            expected_paths.add("late.py")
+        actual_paths = {
+            path
+            for item in queued
+            for path in item.get("changed_paths", [])
+        }
+        assert expected_paths <= actual_paths
+
+
+def test_completed_live_recovery_replays_after_close_pending_without_losing_intent(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root, output, tx, _token = _owner(tmp_path)
+    intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
+    claim = claim_rebuild_queue(tx, intent.drainer)
+    with owned_step(tx, drainer=claim.drainer):
+        payload = _graph(tx.generation)
+        commit_bytes(tx, "graph.json", payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+        commit_generation(
+            tx,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
         )
-        assert "late.py" in queued["changed_paths"]
+    transaction_module._AUTHORITY.set(None)
+    original = transaction_module._finish_close_locked
+    crashed = False
+
+    def crash_once(capability, pending, *, failpoint=None):
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("after completed recovery close-pending")
+        return original(capability, pending, failpoint=failpoint)
+
+    monkeypatch.setattr(transaction_module, "_finish_close_locked", crash_once)
+    with pytest.raises(RuntimeError, match="close-pending"):
+        recover_selected_transaction(
+            "runtime",
+            root,
+            output=output,
+            expected_transaction_id=tx.id,
+            expected_generation=tx.generation,
+            expected_output_identity=tx.output_identity,
+        )
+    monkeypatch.setattr(transaction_module, "_finish_close_locked", original)
+
+    recovered = recover_selected_transaction(
+        "runtime",
+        root,
+        output=output,
+        expected_transaction_id=tx.id,
+        expected_generation=tx.generation,
+        expected_output_identity=tx.output_identity,
+    )
+    assert isinstance(recovered, transaction_module.CompletedRecovery)
+    queued = (output / ".graphify_rebuild_queue.jsonl").read_text()
+    assert queued.count(str(claim.items[0]["id"])) == 1
 
 
 def test_cli_recovery_closes_process_lost_completed_live_generation(
@@ -7403,6 +7594,7 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
         ("serve.py", "_load_ctx", "mcp-context-admission"),
         ("tree_html.py", "write_tree_html", "tree-prepare"),
         ("watch.py", "_rebuild_code", "watch-prepare"),
+        ("watch.py", "_notify_only", "watch-prepare"),
     }
     discovered: set[tuple[str, str, str]] = set()
     source_root = Path(__file__).parents[1] / "graphify"

@@ -14,6 +14,7 @@ import json
 import os
 import py_compile
 import re
+import shlex
 import subprocess
 import shutil
 import sys
@@ -616,6 +617,22 @@ def _posix_transaction_handoff_script() -> str:
     return re.sub(r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", ".", handoff)
 
 
+def _posix_root_persistence_script(input_path: str = ".") -> str:
+    platform = gen.load_platforms()["claude"]
+    body = gen.render(platform)[0].content
+    step1 = body[body.index("### Step 1"):body.index("### Step 2")]
+    scripts = re.findall(r"```bash\n(.*?)\n```", step1, flags=re.DOTALL)
+    persistence = next(
+        script
+        for script in scripts
+        if "active_transaction_token_path" in script
+        and ".graphify_root" in script
+    )
+    return re.sub(
+        r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", shlex.quote(input_path), persistence
+    )
+
+
 def test_posix_bootstrap_helper_replaces_only_standalone_input_placeholder():
     script = _posix_bootstrap_script()
 
@@ -641,8 +658,9 @@ def _powershell_bootstrap_script() -> str:
     return _powershell_step1_scripts()[0]
 
 
-def _powershell_root_persistence_script() -> str:
-    return _powershell_step1_scripts()[1].replace("INPUT_PATH", ".")
+def _powershell_root_persistence_script(input_path: str = ".") -> str:
+    quoted = "'" + input_path.replace("'", "''") + "'"
+    return _powershell_step1_scripts()[1].replace("INPUT_PATH", quoted)
 
 
 def _powershell_transaction_handoff_script() -> str:
@@ -5647,6 +5665,24 @@ def test_rendered_posix_handoff_honors_graphify_out_override(tmp_path, absolute)
     assert list(expected.glob(".graphify_transaction_token.*"))
     assert not list((root / "graphify-out").glob(".graphify_transaction_token.*"))
 
+    followup = subprocess.run(
+        ["/bin/bash", "-c", _posix_root_persistence_script(str(root))],
+        cwd=root,
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert followup.returncode == 0, followup.stderr
+    workspace = next(expected.parent.glob(".graphify-prepare-*"))
+    assert (workspace / "graphify-out" / ".graphify_root").read_text() == str(
+        root.resolve()
+    )
+
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell runtime unavailable")
 @pytest.mark.parametrize("absolute", [False, True])
@@ -5675,3 +5711,28 @@ def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path, absolut
     assert result.returncode == 0, result.stderr
     assert list(expected.glob(".graphify_transaction_token.*"))
     assert not list((tmp_path / "graphify-out").glob(".graphify_transaction_token.*"))
+
+    followup = subprocess.run(
+        [
+            str(shutil.which("pwsh")),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _powershell_root_persistence_script(str(tmp_path)),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert followup.returncode == 0, followup.stderr
+    workspace = next(expected.parent.glob(".graphify-prepare-*"))
+    assert (workspace / "graphify-out" / ".graphify_root").read_text() == str(
+        tmp_path.resolve()
+    )

@@ -1460,15 +1460,81 @@ def check_update(watch_path: Path) -> bool:
     return True
 
 
-def _notify_only(watch_path: Path) -> None:
-    """Write a flag file and print a notification (fallback for non-code-only corpora)."""
-    flag = watch_path / _GRAPHIFY_OUT / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1", encoding="utf-8")
+def _notify_only(
+    watch_path: Path, changed_paths: list[Path] | None = None
+) -> None:
+    """Durably queue semantic work and publish its marker through one owner."""
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PendingTransactionError,
+        PublicationPlan,
+        begin_transaction,
+        claim_rebuild_queue,
+        commit_publication_plan,
+        open_graph_snapshot,
+        queue_rebuild,
+        recover_selected_transaction,
+    )
+
+    output = watch_path / _GRAPHIFY_OUT
+    queued = queue_rebuild(
+        "update",
+        watch_path,
+        output=output,
+        changed_paths=changed_paths or [],
+        semantic=True,
+        source="watch-notify",
+    )
+    try:
+        snapshot = open_graph_snapshot(
+            output / "graph.json", purpose="watch-prepare", allow_absent=True
+        )
+        if not snapshot.graph_present:
+            raise PendingTransactionError(
+                "semantic intent is queued until the first graph generation"
+            )
+        transaction = begin_transaction(
+            "runtime", watch_path, output=output, expected_snapshot=snapshot
+        )
+        claim = claim_rebuild_queue(transaction, queued.drainer)
+        if not claim.items:
+            raise PendingTransactionError(
+                "semantic intent is queued for another rebuild owner"
+            )
+        payloads = dict(snapshot.artifacts)
+        graph = json.loads(json.dumps(snapshot.data))
+        metadata = graph.get("graph")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            graph["graph"] = metadata
+        metadata[GRAPH_WATERMARK_KEY] = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "state": "active",
+        }
+        payloads["graph.json"] = json.dumps(
+            graph, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        payloads["needs_update"] = b"1"
+        commit_publication_plan(
+            transaction, PublicationPlan(payloads=payloads, deletions=())
+        )
+        recover_selected_transaction(
+            transaction.kind,
+            watch_path,
+            output=output,
+            expected_transaction_id=transaction.id,
+            expected_generation=transaction.generation,
+            expected_output_identity=transaction.output_identity,
+        )
+    except PendingTransactionError as exc:
+        print(f"[graphify watch] Semantic rebuild queued: {exc}")
     print(f"\n[graphify watch] New or changed files detected in {watch_path}")
     print("[graphify watch] Non-code files changed - semantic re-extraction requires LLM.")
     print("[graphify watch] Run `/graphify --update` in Claude Code to update the graph.")
-    print(f"[graphify watch] Flag written to {flag}")
+    if (output / "needs_update").is_file():
+        print(f"[graphify watch] Flag published to {output / 'needs_update'}")
 
 
 def _has_non_code(changed_paths: list[Path]) -> bool:
@@ -1557,7 +1623,7 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
                 if has_code:
                     _rebuild_code(watch_path)
                 if has_non_code:
-                    _notify_only(watch_path)
+                    _notify_only(watch_path, batch)
     except KeyboardInterrupt:
         print("\n[graphify watch] Stopped.")
     finally:

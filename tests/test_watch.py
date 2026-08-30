@@ -31,23 +31,101 @@ from graphify.watch import _notify_only, _WATCHED_EXTENSIONS, _rebuild_lock, _ch
 
 # --- _notify_only ---
 
-def test_notify_only_creates_flag(tmp_path):
-    _notify_only(tmp_path)
-    flag = tmp_path / "graphify-out" / "needs_update"
-    assert flag.exists()
+def _managed_watch_graph(tmp_path: Path):
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        begin_transaction,
+        commit_bytes,
+        commit_generation,
+        finish_transaction,
+        owned_step,
+        resume_transaction,
+        stage_transaction_handoff,
+    )
+
+    output = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", tmp_path, output=output)
+    stage_transaction_handoff(transaction)
+    transaction = resume_transaction(transaction.id, tmp_path, output=output)
+    payload = json.dumps(
+        {
+            "directed": False,
+            "multigraph": False,
+            "graph": {
+                GRAPH_WATERMARK_KEY: {
+                    "schema": 1,
+                    "protocol_epoch": 1,
+                    "generation": transaction.generation,
+                    "state": "active",
+                }
+            },
+            "nodes": [],
+            "links": [],
+        },
+        sort_keys=True,
+    ).encode()
+    with owned_step(transaction):
+        commit_bytes(transaction, "graph.json", payload)
+        commit_bytes(transaction, "manifest.json", b"{}")
+        commit_generation(
+            transaction,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+    finish_transaction(transaction)
+    return output
+
+
+def test_notify_only_publishes_receipt_bound_flag_and_retains_intent(tmp_path):
+    output = _managed_watch_graph(tmp_path)
+    changed = tmp_path / "notes.md"
+    _notify_only(tmp_path, [changed])
+    flag = output / "needs_update"
     assert flag.read_text() == "1"
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert receipt["artifact_digests"]["needs_update"]
+    queued = (output / ".graphify_rebuild_queue.jsonl").read_text()
+    assert "notes.md" in queued
 
 def test_notify_only_creates_flag_dir(tmp_path):
-    # graphify-out dir does not exist yet
+    # First-generation intent is durable before graph admission, without an
+    # unreceipted publication.
     assert not (tmp_path / "graphify-out").exists()
-    _notify_only(tmp_path)
+    _notify_only(tmp_path, [tmp_path / "notes.md"])
     assert (tmp_path / "graphify-out").is_dir()
+    assert not (tmp_path / "graphify-out" / "needs_update").exists()
+    assert (tmp_path / "graphify-out" / ".graphify_rebuild_queue.jsonl").is_file()
 
 def test_notify_only_idempotent(tmp_path):
-    _notify_only(tmp_path)
-    _notify_only(tmp_path)
-    flag = tmp_path / "graphify-out" / "needs_update"
+    output = _managed_watch_graph(tmp_path)
+    changed = tmp_path / "notes.md"
+    _notify_only(tmp_path, [changed])
+    _notify_only(tmp_path, [changed])
+    flag = output / "needs_update"
     assert flag.read_text() == "1"
+
+
+def test_notify_only_queues_before_live_transaction_conflict(tmp_path):
+    from graphify.transaction import begin_transaction
+
+    output = _managed_watch_graph(tmp_path)
+    live = begin_transaction("runtime", tmp_path, output=output)
+    stable = {
+        name: (output / name).read_bytes()
+        for name in (
+            ".graphify_transaction.json",
+            ".graphify_protocol.json",
+        )
+    }
+
+    _notify_only(tmp_path, [tmp_path / "contended.md"])
+
+    assert "contended.md" in (output / ".graphify_rebuild_queue.jsonl").read_text()
+    assert not (output / "needs_update").exists()
+    assert live.id in (output / ".graphify_transaction.json").read_text()
+    for name, payload in stable.items():
+        assert (output / name).read_bytes() == payload
 
 
 # --- _WATCHED_EXTENSIONS ---
