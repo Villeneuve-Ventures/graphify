@@ -241,6 +241,72 @@ def test_prepared_export_rejects_live_owner_loss_after_snapshot_admission(
     assert not (output / transaction_module.TRANSACTION_FILE).exists()
 
 
+def test_managed_export_rejects_process_owner_for_different_output(
+    tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    import graphify.transaction as transaction_module
+
+    managed_root = tmp_path / "managed-root"
+    managed_root.mkdir()
+    managed_output = tmp_path / "managed-output"
+    managed = transaction_module.begin_transaction(
+        "runtime", managed_root, output=managed_output
+    )
+    graph_payload = json.dumps(
+        {
+            "directed": False,
+            "multigraph": False,
+            "graph": {
+                transaction_module.GRAPH_WATERMARK_KEY: {
+                    "schema": 1,
+                    "protocol_epoch": 1,
+                    "generation": managed.generation,
+                    "state": "active",
+                }
+            },
+            "nodes": [],
+            "links": [],
+        }
+    ).encode()
+    with transaction_module.owned_step(managed):
+        transaction_module.commit_bytes(managed, "graph.json", graph_payload)
+        transaction_module.commit_bytes(managed, "manifest.json", b"{}")
+        transaction_module.commit_generation(
+            managed,
+            graph_payload=graph_payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+    transaction_module.finish_transaction(managed)
+    before = {
+        path.name: path.read_bytes()
+        for path in managed_output.iterdir()
+        if path.is_file()
+    }
+
+    foreign_root = tmp_path / "foreign-root"
+    foreign_root.mkdir()
+    transaction_module.begin_transaction(
+        "runtime", foreign_root, output=tmp_path / "foreign-output"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "export", "html", "--graph", str(managed_output / "graph.json")],
+    )
+
+    with pytest.raises(transaction_module.PendingTransactionError, match="owner output"):
+        cli_module._transactional_export_entry()
+
+    assert {
+        path.name: path.read_bytes()
+        for path in managed_output.iterdir()
+        if path.is_file()
+    } == before
+    assert not (managed_output / "graph.html").exists()
+
+
 def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
     tmp_path, monkeypatch
 ):

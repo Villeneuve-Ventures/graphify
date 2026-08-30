@@ -1651,6 +1651,30 @@ def test_rebuild_code_real_transaction_drains_arrival_before_close(
     assert followup.generation >= 2
 
 
+def test_watch_queues_changed_path_before_absent_graph_live_owner_admission(
+    tmp_path, capsys
+):
+    from graphify import transaction as transaction_mod
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "changed.py"
+    source.write_text("def changed():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    transaction_mod.begin_transaction("runtime", tmp_path, output=output)
+    transaction_mod._AUTHORITY.set(None)
+
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is False
+    queued = [
+        json.loads(line)
+        for line in (output / transaction_mod.QUEUE_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(queued) == 1
+    assert queued[0]["changed_paths"] == [str(source)]
+    assert "deferred" in capsys.readouterr().out.lower()
+
+
 def test_watch_rolls_back_unpublished_successor_for_foreign_root(
     tmp_path, monkeypatch
 ):

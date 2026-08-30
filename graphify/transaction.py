@@ -3705,8 +3705,6 @@ def optional_current_transaction(
             raise PendingTransactionError("exact owner output does not match")
     with pin_output(Path(selected_output)) as capability:
         if capability.identity != authority.output_identity:
-            if not signaled:
-                return None
             raise PendingTransactionError("exact owner output does not match")
         tx = _read_transaction(capability)
         if tx is None or tx.id != authority.transaction_id:
@@ -4947,6 +4945,10 @@ def _validated_relative_name(value: str) -> str:
         part in {"", ".", ".."} for part in relative.parts
     ):
         raise PendingTransactionError(f"unsafe managed relative path: {value}")
+    if len(value) > _MAX_QUEUE_PATH_LENGTH:
+        raise PendingTransactionError("managed relative path length exceeds bound")
+    if len(relative.parts) > 32:
+        raise PendingTransactionError("managed relative path depth exceeds bound")
     name = relative.as_posix()
     coordination_files = {item.casefold() for item in _COORDINATION_FILES}
     coordination_prefixes = tuple(item.casefold() for item in _COORDINATION_PREFIXES)
@@ -5131,6 +5133,17 @@ def commit_publication_plan(
         if name in deletions:
             raise PendingTransactionError("publication plan deletions are duplicated")
         deletions.append(name)
+    if (
+        len(payloads) > _MAX_RECEIPT_ARTIFACTS
+        or len(deletions) > _MAX_RECEIPT_ARTIFACTS
+        or len(payloads) + len(deletions) > _MAX_RECEIPT_ARTIFACTS
+    ):
+        raise PendingTransactionError("publication plan exceeds bounded inventory")
+    aggregate = 0
+    for payload in payloads.values():
+        aggregate += len(payload)
+        if aggregate > _MAX_RECEIPT_AGGREGATE_BYTES:
+            raise PendingTransactionError("publication plan exceeds aggregate budget")
     _reject_casefold_collisions((*payloads, *deletions, graph_name))
     if set(payloads).intersection(deletions):
         raise PendingTransactionError("publication plan payload and deletion overlap")
@@ -5257,7 +5270,10 @@ def commit_generation(
     required_artifacts = tuple(
         _validated_relative_name(name) for name in required_artifacts
     )
-    if len(required_artifacts) != len(set(required_artifacts)):
+    if (
+        len(required_artifacts) > _MAX_RECEIPT_ARTIFACTS
+        or len(required_artifacts) != len(set(required_artifacts))
+    ):
         raise PendingTransactionError("generation inventory contains duplicate artifacts")
     _reject_casefold_collisions((*required_artifacts, graph_name))
     watermark = _watermark(graph_payload)
@@ -5280,10 +5296,18 @@ def commit_generation(
             raise PendingTransactionError("published graph differs from prepared graph")
         if _read_bytes(capability, "manifest.json", max(len(manifest_payload), 1)) != manifest_payload:
             raise PendingTransactionError("published manifest differs from prepared manifest")
-        artifact_digests = {
-            name: hashlib.sha256(_read_relative_bytes(capability, name)).hexdigest()
-            for name in dict.fromkeys(required_artifacts)
-        }
+        artifact_digests: dict[str, str] = {}
+        aggregate_size = 0
+        for name in required_artifacts:
+            artifact_digest, artifact_size, _artifact_body = _hash_relative_bytes(
+                capability,
+                name,
+                aggregate_remaining=(
+                    _MAX_RECEIPT_AGGREGATE_BYTES - aggregate_size
+                ),
+            )
+            aggregate_size += artifact_size
+            artifact_digests[name] = artifact_digest
         receipt_body = {
             "schema": 1,
             "protocol_epoch": 1,

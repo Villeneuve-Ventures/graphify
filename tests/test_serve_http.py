@@ -325,6 +325,34 @@ def test_cached_context_refreshes_when_receipt_artifacts_change_without_graph_ch
     assert response.json()["result"]["contents"][0]["text"] == "new report"
 
 
+def test_cached_context_refreshes_uncached_learning_overlay(tmp_path, monkeypatch):
+    import graphify.reflect as reflect_module
+
+    overlays = iter(
+        (
+            {"a": {"status": "contested", "stale": False}},
+            {"a": {"status": "preferred", "stale": False}},
+        )
+    )
+    monkeypatch.setattr(
+        reflect_module,
+        "load_learning_overlay",
+        lambda _path: next(overlays),
+    )
+    app = serve_mod._build_http_app(_graph_file(tmp_path), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        result = _call_tool(
+            client,
+            headers,
+            "query_graph",
+            {"question": "Alpha"},
+            rid=2,
+        )
+    assert "learning=preferred" in result
+    assert "learning=contested" not in result
+
+
 def test_stateless_mode_initialize(tmp_path):
     app = serve_mod._build_http_app(_graph_file(tmp_path), stateless=True, json_response=True)
     with _client(app) as client:

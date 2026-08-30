@@ -124,6 +124,10 @@ def test_optional_current_transaction_distinguishes_absence_from_corrupt_authori
     current = transaction_module.optional_current_transaction(output)
     assert current is not None
     assert current.id == transaction.id
+    foreign_output = tmp_path / "foreign-output"
+    foreign_output.mkdir()
+    with pytest.raises(PendingTransactionError, match="owner output"):
+        transaction_module.optional_current_transaction(foreign_output)
     before = _file_bytes(output)
     (output / transaction_module.TRANSACTION_FILE).unlink()
     after_removal = _file_bytes(output)
@@ -921,6 +925,73 @@ def test_publication_plan_rejects_payload_deletion_overlap_before_mutation(tmp_p
     )
     with pytest.raises(PendingTransactionError, match="overlap"):
         commit_publication_plan(tx, plan)
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("bound", ["count", "aggregate", "depth"])
+def test_publication_plan_rejects_bounded_work_before_mutation(
+    tmp_path, monkeypatch, bound
+):
+    import graphify.transaction as transaction_module
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+    graph_payload = _graph(tx.generation)
+    payloads = {
+        "graph.json": graph_payload,
+        "manifest.json": b"{}",
+        "extra.bin": b"x",
+    }
+    if bound == "count":
+        monkeypatch.setattr(transaction_module, "_MAX_RECEIPT_ARTIFACTS", 2)
+    elif bound == "aggregate":
+        monkeypatch.setattr(
+            transaction_module,
+            "_MAX_RECEIPT_AGGREGATE_BYTES",
+            len(graph_payload) + 2,
+        )
+    else:
+        payloads = {
+            "graph.json": graph_payload,
+            "manifest.json": b"{}",
+            "/".join(["nested"] * 33 + ["extra.bin"]): b"x",
+        }
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        commit_publication_plan(tx, PublicationPlan(payloads))
+
+    assert _file_bytes(output) == before
+
+
+def test_commit_generation_hashing_enforces_aggregate_budget_before_receipt(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    tx = begin_transaction("runtime", root, output=output)
+    graph_payload = _graph(tx.generation)
+    with owned_step(tx):
+        commit_bytes(tx, "graph.json", graph_payload)
+        commit_bytes(tx, "manifest.json", b"{}")
+        before = _file_bytes(output)
+        monkeypatch.setattr(
+            transaction_module,
+            "_MAX_RECEIPT_AGGREGATE_BYTES",
+            len(graph_payload) + 1,
+        )
+        with pytest.raises(PendingTransactionError, match="aggregate budget"):
+            commit_generation(
+                tx,
+                graph_payload=graph_payload,
+                manifest_payload=b"{}",
+                required_artifacts=("graph.json", "manifest.json"),
+            )
     assert _file_bytes(output) == before
 
 
@@ -2722,6 +2793,66 @@ def test_managed_render_rejects_live_owner_loss_after_snapshot_admission(
     assert not (output / transaction_module.TRANSACTION_FILE).exists()
     assert (output / transaction_module.PROTOCOL_FILE).read_bytes() == protocol_before
     assert (output / transaction_module.DRAINER_FILE).read_bytes() == drainer_before
+
+
+@pytest.mark.parametrize("publisher", ["tree", "callflow"])
+def test_managed_render_rejects_process_owner_for_different_output(
+    tmp_path, publisher
+):
+    from graphify import transaction as transaction_module
+
+    managed_root = tmp_path / "managed-root"
+    managed_root.mkdir()
+    managed_output = tmp_path / "managed-output"
+    managed = begin_transaction("runtime", managed_root, output=managed_output)
+    graph_data = json.loads(_graph(managed.generation))
+    graph_data["nodes"] = [
+        {
+            "id": "node",
+            "label": "Node",
+            "community": 0,
+            "source_file": "node.py",
+            "file_type": "code",
+        }
+    ]
+    graph_payload = json.dumps(graph_data, sort_keys=True).encode()
+    with owned_step(managed):
+        commit_bytes(managed, "graph.json", graph_payload)
+        commit_bytes(managed, "manifest.json", b"{}")
+        commit_generation(
+            managed,
+            graph_payload=graph_payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+    finish_transaction(managed)
+    before = _file_bytes(managed_output)
+
+    foreign_root = tmp_path / "foreign-root"
+    foreign_root.mkdir()
+    transaction_module.begin_transaction(
+        "runtime", foreign_root, output=tmp_path / "foreign-output"
+    )
+    destination = managed_output / (
+        "GRAPH_TREE.html" if publisher == "tree" else "callflow.html"
+    )
+
+    with pytest.raises(PendingTransactionError, match="owner output"):
+        if publisher == "tree":
+            from graphify.tree_html import write_tree_html
+
+            write_tree_html(managed_output / "graph.json", destination)
+        else:
+            from graphify.callflow_html import write_callflow_html
+
+            write_callflow_html(
+                managed_root,
+                graphify_out=managed_output,
+                output=destination,
+            )
+
+    assert _file_bytes(managed_output) == before
+    assert not destination.exists()
 
 
 @pytest.mark.parametrize("destination_kind", ["sibling", "nested", "external"])

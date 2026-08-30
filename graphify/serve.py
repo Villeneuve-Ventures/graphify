@@ -20,6 +20,16 @@ except ImportError:
     _jieba = None
 
 
+def _refresh_learning_overlay(graph: nx.Graph, snapshot) -> None:
+    """Refresh the optional non-receipt overlay on every context admission."""
+    try:
+        from graphify.reflect import load_learning_overlay as _llo
+
+        graph.graph["_learning_overlay"] = _llo(snapshot.graph_path)
+    except Exception:
+        graph.graph["_learning_overlay"] = {}
+
+
 def _graph_from_snapshot(snapshot) -> nx.Graph:
     """Build the in-memory graph from one admitted immutable snapshot."""
     data = snapshot.data
@@ -42,12 +52,7 @@ def _graph_from_snapshot(snapshot) -> nx.Graph:
         G = json_graph.node_link_graph(data)
     # Learning state is optional and not part of the generation receipt. Load
     # it only after the managed graph has crossed canonical snapshot admission.
-    try:
-        from graphify.reflect import load_learning_overlay as _llo
-
-        G.graph["_learning_overlay"] = _llo(snapshot.graph_path)
-    except Exception:
-        G.graph["_learning_overlay"] = {}
+    _refresh_learning_overlay(G, snapshot)
     return G
 
 
@@ -1067,10 +1072,12 @@ def _build_server(graph_path: str):
         key = _context_key(snapshot)
         ent = _ctx_cache.get(path)
         if ent is not None and ent["key"] == key:
+            _refresh_learning_overlay(ent["G"], snapshot)
             return ent["G"], ent["communities"], ent["artifacts"]
         with _ctx_lock:
             ent = _ctx_cache.get(path)
             if ent is not None and ent["key"] == key:
+                _refresh_learning_overlay(ent["G"], snapshot)
                 return ent["G"], ent["communities"], ent["artifacts"]
             new_G = _graph_from_snapshot(snapshot)
             # Warm the trigram index before exposing the graph so the first query
