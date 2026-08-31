@@ -660,7 +660,11 @@ def _powershell_bootstrap_script() -> str:
 
 def _powershell_root_persistence_script(input_path: str = ".") -> str:
     quoted = "'" + input_path.replace("'", "''") + "'"
-    return _powershell_step1_scripts()[1].replace("INPUT_PATH", quoted)
+    return re.sub(
+        r"(?<![A-Z_])INPUT_PATH(?![A-Z_])",
+        lambda _match: quoted,
+        _powershell_step1_scripts()[1],
+    )
 
 
 def _powershell_transaction_handoff_script() -> str:
@@ -670,6 +674,21 @@ def _powershell_transaction_handoff_script() -> str:
     scripts = re.findall(r"```powershell\n(.*?)\n```", step1, flags=re.DOTALL)
     handoff = next(script for script in scripts if "begin_transaction" in script)
     return re.sub(r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", ".", handoff)
+
+
+def test_powershell_root_persistence_helper_replaces_only_standalone_placeholder():
+    from tree_sitter import Language, Parser
+    import tree_sitter_powershell
+
+    input_path = "/tmp/graphify root"
+    script = _powershell_root_persistence_script(input_path)
+
+    assert "$env:GRAPHIFY_INPUT_PATH" in script
+    assert "GRAPHIFY_'/tmp/graphify root'" not in script
+    assert "root=Path(sys.argv[1]).resolve(strict=True)" in script
+    assert "'/tmp/graphify root'" in script
+    tree = Parser(Language(tree_sitter_powershell.language())).parse(script.encode())
+    assert not tree.root_node.has_error, tree.root_node
 
 
 def _powershell_function_sources(source: str) -> dict[str, str]:
