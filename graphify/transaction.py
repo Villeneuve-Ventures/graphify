@@ -177,6 +177,7 @@ _SAFE_GRAPHLESS_RUNTIME_ENTRIES = frozenset(
 )
 _PLATFORM = "windows" if os.name == "nt" else "posix"
 _MAX_STATE_BYTES = 1024 * 1024
+_MAX_TOKEN_TRANSITION_BYTES = 4 * _MAX_STATE_BYTES
 _ARTIFACT_READ_LIMITS = {
     ".graphify_analysis.json": _MAX_STATE_BYTES,
     ".graphify_labels.json": _MAX_STATE_BYTES,
@@ -2464,12 +2465,17 @@ def _json_bytes(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
-def _load_json(capability: OutputCapability, name: str) -> dict[str, Any] | None:
+def _load_json(
+    capability: OutputCapability,
+    name: str,
+    *,
+    limit: int = _MAX_STATE_BYTES,
+) -> dict[str, Any] | None:
     if _entry_stat(capability, name) is None:
         return None
     try:
         value = json.loads(
-            _read_managed_bytes(capability, name)[0].decode("utf-8")
+            _read_managed_bytes(capability, name, limit)[0].decode("utf-8")
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError(f"malformed managed state: {name}") from exc
@@ -4883,7 +4889,11 @@ def _prepared_owner_for_marker(marker: Mapping[str, object]) -> dict[str, object
 
 
 def _read_token_transition(capability: OutputCapability) -> dict[str, Any] | None:
-    raw = _load_json(capability, TOKEN_TRANSITION_FILE)
+    raw = _load_json(
+        capability,
+        TOKEN_TRANSITION_FILE,
+        limit=_MAX_TOKEN_TRANSITION_BYTES,
+    )
     if raw is None:
         return None
     fields = {
@@ -4982,6 +4992,15 @@ def _read_token_transition(capability: OutputCapability) -> dict[str, Any] | Non
             capability, raw["prepared_transfer"], predecessor, target
         )
     return raw
+
+
+def _write_token_transition(
+    capability: OutputCapability, record: Mapping[str, object]
+) -> None:
+    payload = _json_bytes(record)
+    if len(payload) > _MAX_TOKEN_TRANSITION_BYTES:
+        raise PendingTransactionError("token publication transition exceeds size limit")
+    _replace_bytes(capability, TOKEN_TRANSITION_FILE, payload)
 
 
 def _validate_token_transition_current(
@@ -5340,7 +5359,7 @@ def _resume_token_transition_locked(
         "state": "token-created",
         "token_identity": identity.json(),
     }
-    _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+    _write_token_transition(capability, record)
     pending_drainer = record.get("pending_predecessor_drainer")
     predecessor_protocol = record["predecessor_protocol"]
     if pending_drainer is not None:
@@ -5367,7 +5386,7 @@ def _resume_token_transition_locked(
             raise PendingTransactionError("token publication live owner changed")
         live = target
         record["state"] = "live-bound"
-        _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+        _write_token_transition(capability, record)
         if failpoint is not None:
             failpoint("after_token_live")
 
@@ -5383,7 +5402,7 @@ def _resume_token_transition_locked(
             raise PendingTransactionError("token publication protocol changed")
         protocol = target_protocol
         record["state"] = "protocol-bound"
-        _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+        _write_token_transition(capability, record)
         if failpoint is not None:
             failpoint("after_token_protocol")
 
@@ -5417,7 +5436,7 @@ def _resume_prepared_token_transfer_locked(
     def advance(state: str, failpoint_name: str) -> None:
         nonlocal record
         record = {**record, "state": state}
-        _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+        _write_token_transition(capability, record)
         if failpoint is not None:
             failpoint(failpoint_name)
 
@@ -5645,7 +5664,7 @@ def _start_token_transition_locked(
     }
     if prepared_transfer is not None:
         record["prepared_transfer"] = dict(prepared_transfer)
-    _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+    _write_token_transition(capability, record)
     _read_token_transition(capability)
     if failpoint is not None:
         failpoint("after_token_journal")
@@ -13962,7 +13981,12 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
             graph_name, _inventory, _deletions = _validate_successor_ready_marker(
                 prepared_marker,
                 capability=capability,
-                transaction=live,
+                transaction=(
+                    None
+                    if token_transition is not None
+                    and "prepared_transfer" in token_transition
+                    else live
+                ),
             )
             if live is None:
                 if (
@@ -14432,6 +14456,19 @@ def merge_detached_snapshots(
     other_snapshot, other_payload, _other_identity = (
         _load_detached_merge_snapshot_with_identity(other, role="other")
     )
+    current_metadata = current_snapshot.get("graph")
+    current_watermark = (
+        current_metadata.get(GRAPH_WATERMARK_KEY)
+        if isinstance(current_metadata, dict)
+        else None
+    )
+    if (
+        isinstance(current_watermark, dict)
+        and current_watermark.get("state") == "merge_pending"
+    ):
+        raise PendingTransactionError(
+            "merge-pending current snapshot must be rebuilt before merging again"
+        )
     digests = [
         hashlib.sha256(payload).hexdigest()
         for payload in (ancestor_payload, current_payload, other_payload)

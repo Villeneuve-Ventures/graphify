@@ -9219,6 +9219,63 @@ def test_successor_ready_takeover_replays_every_durable_boundary(tmp_path, bound
     assert {node["id"] for node in graph["nodes"]} == {"other"}
 
 
+def test_successor_ready_takeover_reads_large_bounded_transfer_journal(tmp_path):
+    from graphify import transaction as transaction_module
+
+    root, output, predecessor, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    prepared_output = output.parent / marker["workspace_name"] / "graphify-out"
+    bulk = prepared_output / "bulk"
+    bulk.mkdir()
+    suffix = "x" * 180
+    for index in range(1_202):
+        (bulk / f"{index:04d}-{suffix}.json").write_bytes(b"{}")
+    plan = publication_plan_from_directory(
+        prepared_output,
+        prior_inventory=tuple(marker["prior_inventory"]),
+    )
+    marker["inventory"] = transaction_module._publication_inventory(plan)
+    marker["deletions"] = list(plan.deletions)
+    marker["plan_digest"] = transaction_module._publication_plan_digest(
+        generation=predecessor.generation,
+        graph_name=marker["graph_name"],
+        inventory=marker["inventory"],
+        deletions=marker["deletions"],
+    )
+    marker_payload = transaction_module._json_bytes(marker)
+    assert len(marker_payload) < transaction_module._MAX_STATE_BYTES
+    (output / transaction_module.PREPARED_FILE).write_bytes(marker_payload)
+
+    with pytest.raises(RuntimeError, match="after_token_journal"):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(
+                RuntimeError(name)
+            )
+            if name == "after_token_journal"
+            else None,
+        )
+
+    journal_path = output / transaction_module.TOKEN_TRANSITION_FILE
+    assert journal_path.stat().st_size > transaction_module._MAX_STATE_BYTES
+    target_raw = json.loads(journal_path.read_text(encoding="utf-8"))[
+        "target_transaction"
+    ]
+    recovered = recover_transaction(
+        "update",
+        root,
+        output=output,
+        now=10**12,
+        expected_transaction_id=target_raw["id"],
+        expected_generation=target_raw["generation"],
+        expected_output_identity=predecessor.output_identity,
+    )
+    transaction_module._finalize_successor_ready_transaction(recovered)
+    assert not journal_path.exists()
+
+
 @pytest.mark.parametrize(
     "boundary",
     [
@@ -10192,6 +10249,52 @@ def test_transaction_status_exposes_only_bounded_successor_ready_phase(tmp_path)
         assert private_value not in encoded
 
 
+@pytest.mark.parametrize(
+    ("boundary", "state"),
+    [
+        ("after_prepared_rebound", "prepared-rebound"),
+        ("after_token_protocol", "protocol-bound"),
+    ],
+)
+def test_transaction_status_reports_valid_prepared_transfer_state(
+    tmp_path, boundary, state
+):
+    from graphify import transaction as transaction_module
+
+    _root, output, _predecessor, _token, _admission, _marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(
+                RuntimeError(name)
+            )
+            if name == boundary
+            else None,
+        )
+    journal = json.loads(
+        (output / transaction_module.TOKEN_TRANSITION_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    before = _file_bytes(output)
+
+    status = transaction_status(output)
+
+    assert status["prepared_creation"] == {"state": "successor-ready"}
+    assert status["token_transition"] == {
+        "state": state,
+        "transaction_id": journal["target_transaction"]["id"],
+        "generation": journal["target_transaction"]["generation"],
+        "kind": journal["target_transaction"]["kind"],
+        "root": journal["target_transaction"]["root"],
+        "output_identity": journal["output_identity"],
+    }
+    assert _file_bytes(output) == before
+
+
 def test_transaction_status_rejects_corrupt_successor_ready_marker_without_mutation(
     tmp_path,
 ):
@@ -10764,6 +10867,29 @@ def test_private_merge_pending_opener_requires_receipt_current_input_digest(tmp_
         )
 
     assert _file_bytes(output) == before
+
+
+def test_detached_merge_rejects_chained_pending_current_without_mutation(tmp_path):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    later = tmp_path / "later.json"
+    snapshots = [json.loads(_graph(4)) for _ in range(4)]
+    for index, snapshot in enumerate(snapshots):
+        snapshot["nodes"] = [{"id": f"node-{index}"}]
+    for path, snapshot in zip(
+        (base, current, other, later), snapshots, strict=True
+    ):
+        path.write_text(json.dumps(snapshot), encoding="utf-8")
+    merge_detached_snapshots(base, current, other)
+    before = current.read_bytes()
+    identity = (current.stat().st_dev, current.stat().st_ino)
+
+    with pytest.raises(PendingTransactionError, match="rebuilt before merging"):
+        merge_detached_snapshots(base, current, later)
+
+    assert current.read_bytes() == before
+    assert (current.stat().st_dev, current.stat().st_ino) == identity
 
 
 def test_detached_merge_rejects_oversize_and_unsupported_watermark(tmp_path):

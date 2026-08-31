@@ -1932,6 +1932,78 @@ def test_successor_ready_probe_errors_defer_without_mutation(
     assert _output_tree_bytes(output) == before
 
 
+@pytest.mark.parametrize("late_intent", [False, True], ids=["close", "finish"])
+def test_merge_pending_watch_defers_post_finalization_recovery_errors(
+    tmp_path, monkeypatch, capsys, late_intent
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_recover = transaction_module._recover_successor_ready_transaction
+    recovery_calls = 0
+
+    def recover_then_defer(*args, **kwargs):
+        nonlocal recovery_calls
+        recovery_calls += 1
+        if recovery_calls == 2:
+            raise transaction_module.PendingTransactionError(
+                "post-finalization recovery sentinel"
+            )
+        return real_recover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_recover_successor_ready_transaction",
+        recover_then_defer,
+    )
+    late = root / "late.py"
+    if late_intent:
+        real_publish = transaction_module._publish_successor_ready_transaction
+
+        def publish_then_queue(transaction, *, failpoint=None):
+            generation = real_publish(transaction, failpoint=failpoint)
+            late.write_text("def late():\n    return 3\n", encoding="utf-8")
+            transaction_module.queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=[late],
+                source="post-finalization-deferral-test",
+            )
+            return generation
+
+        monkeypatch.setattr(
+            transaction_module,
+            "_publish_successor_ready_transaction",
+            publish_then_queue,
+        )
+
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    ) is False
+    assert recovery_calls == 2
+    assert (
+        "Rebuild deferred: post-finalization recovery sentinel"
+        in capsys.readouterr().out
+    )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_recover_successor_ready_transaction",
+        real_recover,
+    )
+    assert _rebuild_code(
+        root,
+        changed_paths=[late if late_intent else source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+
+
 @pytest.mark.parametrize(
     "boundary", ["after_prepared_rebound", "after_token_protocol"]
 )

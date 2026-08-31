@@ -1075,20 +1075,30 @@ def _rebuild_code(
                     if close_if_queue_empty(
                         transaction, receipt_digest=receipt_digest
                     ):
-                        if merge_recovery and not _recover_successor_ready_transaction(
-                            actual_out
-                        ):
-                            raise PendingTransactionError(
-                                "completed merge recovery marker is missing"
-                            )
+                        if merge_recovery:
+                            try:
+                                recovered = _recover_successor_ready_transaction(
+                                    actual_out
+                                )
+                            except PendingTransactionError as exc:
+                                print(f"[graphify watch] Rebuild deferred: {exc}")
+                                return False
+                            if not recovered:
+                                raise PendingTransactionError(
+                                    "completed merge recovery marker is missing"
+                                )
                         return True
                 finish_transaction(transaction)
-                if merge_recovery and not _recover_successor_ready_transaction(
-                    actual_out
-                ):
-                    raise PendingTransactionError(
-                        "completed merge recovery marker is missing"
-                    )
+                if merge_recovery:
+                    try:
+                        recovered = _recover_successor_ready_transaction(actual_out)
+                    except PendingTransactionError as exc:
+                        print(f"[graphify watch] Rebuild deferred: {exc}")
+                        return False
+                    if not recovered:
+                        raise PendingTransactionError(
+                            "completed merge recovery marker is missing"
+                        )
                 baseline_snapshot = open_graph_snapshot(
                     actual_out / "graph.json", purpose="watch-prepare"
                 )
