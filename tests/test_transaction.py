@@ -79,7 +79,7 @@ def _graph(generation: int, *, state: str = "active") -> bytes:
 
 
 def test_prepared_public_api_signatures_remain_legacy_compatible():
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     assert str(inspect.signature(transaction_module.prepared_workspace_path)) == "() -> 'Path'"
     assert str(inspect.signature(transaction_module.finalize_prepared_transaction)) == "() -> 'None'"
@@ -150,7 +150,7 @@ def _forge_queue_item_with_reused_id(path: Path) -> None:
 def test_optional_current_transaction_distinguishes_absence_from_corrupt_authority(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     transaction_module._AUTHORITY.set(None)
     for name in transaction_module._TRANSACTION_ENV_SIGNALS:
@@ -282,7 +282,7 @@ def test_server_and_mcp_snapshots_retain_only_consumed_receipt_artifacts(tmp_pat
 
 
 def test_retained_receipt_limit_is_passed_into_streaming_hash(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token = _owner(tmp_path)
     graph_payload = _graph(transaction.generation)
@@ -362,7 +362,7 @@ def test_absent_watch_output_rejects_late_directory_before_enqueue_zero_mutation
 
 
 def test_external_managed_authority_uses_typed_signal(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     source = tmp_path / "source"
     source.mkdir()
@@ -373,7 +373,7 @@ def test_external_managed_authority_uses_typed_signal(tmp_path):
 
 
 def test_report_auxiliaries_share_one_aggregate_budget(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "graphify-out"
     output.mkdir()
@@ -392,7 +392,7 @@ def test_report_auxiliaries_share_one_aggregate_budget(tmp_path, monkeypatch):
 
 
 def test_report_auxiliaries_reject_in_place_content_rewrite(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "graphify-out"
     output.mkdir()
@@ -439,7 +439,7 @@ def test_nested_absent_output_rejects_intermediate_symlink_before_mutation(tmp_p
 
 
 def test_nested_absent_output_rejects_post_mkdir_stage_swap(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root = tmp_path / "root"
     root.mkdir()
@@ -529,7 +529,7 @@ def _close_pending_after_failpoint(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def test_bootstrap_create_interruption_never_exposes_partial_protocol(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root = tmp_path / "corpus"
     root.mkdir()
@@ -585,7 +585,7 @@ def test_bootstrap_recovery_bound_is_checked_before_mutation(tmp_path):
 
 
 def test_receipt_validation_enforces_aggregate_budget_without_retaining_all(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     graph_payload = _graph(tx.generation)
@@ -618,7 +618,7 @@ def test_transaction_status_is_read_only_and_omits_capability_material(tmp_path)
 def test_windows_read_adapter_admits_safe_legacy_snapshot_but_mutation_stays_blocked(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "graphify-out"
     output.mkdir()
@@ -650,7 +650,7 @@ def test_windows_read_adapter_admits_safe_legacy_snapshot_but_mutation_stays_blo
 def test_windows_handle_relative_model_preserves_top_level_and_nested_identity(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "graphify-out"
     nested = output / "wiki"
@@ -693,7 +693,7 @@ def test_windows_handle_relative_model_preserves_top_level_and_nested_identity(
 def test_windows_coordination_enumeration_cannot_hide_incomplete_marker(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root = tmp_path / "corpus"
     root.mkdir()
@@ -769,7 +769,7 @@ def test_queue_rejects_exact_type_corruption_without_new_mutation(
 
 
 def test_invalid_runner_target_clears_process_authority(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, _output, _tx, token = _owner(tmp_path)
     with pytest.raises(PendingTransactionError, match="ambiguous"):
@@ -972,7 +972,7 @@ def test_publication_plan_rejects_payload_deletion_overlap_before_mutation(tmp_p
 def test_publication_plan_rejects_bounded_work_before_mutation(
     tmp_path, monkeypatch, bound
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root = tmp_path / "corpus"
     root.mkdir()
@@ -1009,7 +1009,7 @@ def test_publication_plan_rejects_bounded_work_before_mutation(
 def test_commit_generation_hashing_enforces_aggregate_budget_before_receipt(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root = tmp_path / "corpus"
     root.mkdir()
@@ -1915,7 +1915,7 @@ def test_retired_gc_quarantine_is_visible_and_resumable(tmp_path):
 def test_retired_gc_never_replaces_destination_appearing_during_move(
     tmp_path, monkeypatch, phase
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _tx, token = _owner(tmp_path)
     run_prepared_token(
@@ -2324,7 +2324,7 @@ def test_repeated_build_complete_predecessor_recovers_exact_pending_transition(
     ],
 )
 def test_takeover_recovery_reuses_identity_proven_successor_token(tmp_path, boundary):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
 
@@ -2826,7 +2826,7 @@ def test_managed_tree_html_publishes_as_a_new_receipt_bound_generation(tmp_path)
 def test_managed_render_rejects_live_owner_loss_after_snapshot_admission(
     tmp_path, monkeypatch, publisher
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token = _owner(tmp_path)
     _commit_owner_generation(output, transaction)
@@ -3006,7 +3006,7 @@ def test_external_tree_destination_rejects_watermarked_partial_authority(tmp_pat
 def test_external_tree_destination_detects_parent_replacement(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     destination_dir = tmp_path / "destination"
     destination_dir.mkdir()
@@ -3072,7 +3072,7 @@ def test_legacy_default_managed_tree_creates_receipt_bound_generation(tmp_path):
 def test_unmanaged_lost_stage_preserves_exact_predecessor(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3099,7 +3099,7 @@ def test_unmanaged_lost_stage_preserves_exact_predecessor(
 
 
 def test_unmanaged_rollback_preserves_post_publication_competitor(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3123,7 +3123,7 @@ def test_unmanaged_rollback_preserves_post_publication_competitor(tmp_path):
 
 
 def test_unmanaged_absent_predecessor_cas_preserves_competitor(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3142,7 +3142,7 @@ def test_unmanaged_absent_predecessor_cas_preserves_competitor(tmp_path):
 
 
 def test_unmanaged_exchange_cas_preserves_late_winner(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3170,7 +3170,7 @@ def test_unmanaged_exchange_cas_preserves_late_winner(tmp_path, monkeypatch):
 def test_unmanaged_exchange_exception_restores_displaced_competitor(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3204,7 +3204,7 @@ def test_unmanaged_exchange_exception_restores_displaced_competitor(
 def test_unmanaged_lost_stage_never_unlinks_unowned_competitor(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3253,7 +3253,7 @@ def test_unmanaged_lost_stage_never_unlinks_unowned_competitor(
 def test_unmanaged_replacement_failpoints_leave_exact_terminal_target(
     tmp_path, boundary, expected
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3289,7 +3289,7 @@ def test_unmanaged_replacement_failpoints_leave_exact_terminal_target(
 def test_unmanaged_abrupt_death_retry_reconciles_deterministic_journal(
     tmp_path, boundary
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3318,7 +3318,7 @@ def test_unmanaged_abrupt_death_retry_reconciles_deterministic_journal(
 
 
 def test_unmanaged_nested_missing_parent_retry_finds_stable_journal(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     anchor = tmp_path / "external"
     anchor.mkdir()
@@ -3344,7 +3344,7 @@ def test_unmanaged_nested_missing_parent_retry_finds_stable_journal(tmp_path):
 
 
 def test_unmanaged_death_after_atomic_exchange_never_removes_public_name(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3371,7 +3371,7 @@ def test_unmanaged_death_after_atomic_exchange_never_removes_public_name(tmp_pat
 
 
 def test_unmanaged_death_after_competitor_exchange_restores_on_retry(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3429,7 +3429,7 @@ def test_unmanaged_death_after_competitor_exchange_restores_on_retry(tmp_path):
 def test_unmanaged_competitor_recovery_phases_resume_idempotently(
     tmp_path, recovery_boundary
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3494,7 +3494,7 @@ def test_unmanaged_competitor_recovery_phases_resume_idempotently(
 
 
 def test_unmanaged_recovery_cleanup_failure_retains_journal(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3549,7 +3549,7 @@ def test_unmanaged_recovery_cleanup_failure_retains_journal(tmp_path, monkeypatc
 
 
 def test_unmanaged_recovery_fsync_failure_retains_journal(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3775,7 +3775,7 @@ def test_unmanaged_predecessor_recovers_stage_unlink_and_backup_exchange(tmp_pat
 def test_unmanaged_delete_rejects_same_bytes_replacement_before_rename(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3806,7 +3806,7 @@ def test_unmanaged_delete_rejects_same_bytes_replacement_before_rename(
 def test_unmanaged_delete_restores_competitor_moved_by_atomic_rename(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3838,7 +3838,7 @@ def test_unmanaged_delete_restores_competitor_moved_by_atomic_rename(
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
 def test_unmanaged_delete_recovers_after_quarantine_retirement(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -3876,7 +3876,7 @@ def test_unmanaged_delete_recovers_after_quarantine_retirement(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="POSIX abrupt process termination")
 @pytest.mark.parametrize("terminal", ["deleted", "foreign"])
 def test_unmanaged_delete_pre_rename_terminal_state_resumes(tmp_path, terminal):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -4033,7 +4033,7 @@ def test_unmanaged_obsidian_batch_rejects_malformed_journal_zero_mutation(tmp_pa
 def test_unmanaged_obsidian_batch_budget_is_symmetric_and_preflighted(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -4053,7 +4053,7 @@ def test_unmanaged_obsidian_batch_budget_is_symmetric_and_preflighted(
 
 
 def test_unmanaged_obsidian_near_limit_journal_recovers(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -4129,7 +4129,7 @@ def test_obsidian_delete_restored_foreign_resumes_and_corrects_manifest(tmp_path
     delete_journal = next(vault.glob(".graphify-unmanaged-delete-*.json"))
     assert json.loads(delete_journal.read_text())["state"] == "restored-foreign"
 
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     published = transaction_module.commit_unmanaged_obsidian_batch(
         vault,
@@ -4153,7 +4153,7 @@ def test_obsidian_delete_restored_foreign_resumes_and_corrects_manifest(tmp_path
 def test_obsidian_owned_note_identity_cas_preserves_byte_identical_replacement(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -4198,7 +4198,7 @@ def test_obsidian_owned_note_identity_cas_preserves_byte_identical_replacement(
 
 
 def test_output_identity_json_accepts_uint64_boundary_and_rejects_overflow():
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     maximum = 18_446_744_073_709_551_615
     assert transaction_module._identity_from_json(
@@ -4213,7 +4213,7 @@ def test_output_identity_json_accepts_uint64_boundary_and_rejects_overflow():
 def test_obsidian_batch_rejects_casefold_owned_candidate_collision_zero_mutation(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -4235,7 +4235,7 @@ def test_obsidian_batch_rejects_casefold_owned_candidate_collision_zero_mutation
 def test_obsidian_batch_rejects_casefold_nonregular_owned_collision_zero_mutation(
     tmp_path, replacement,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -4271,7 +4271,7 @@ def test_obsidian_batch_rejects_casefold_nonregular_owned_collision_zero_mutatio
 def test_obsidian_inventory_propagates_unrelated_open_error_zero_mutation(
     tmp_path, monkeypatch,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -4320,7 +4320,7 @@ def test_obsidian_batch_pre_rename_foreign_recovery_corrects_manifest(tmp_path):
     assert interrupted.returncode == 91
     assert (vault / "stale.md").read_bytes() == b"user"
 
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     published = transaction_module.commit_unmanaged_obsidian_batch(
         vault,
@@ -4368,7 +4368,7 @@ def test_obsidian_batch_rejects_malformed_stale_binding_before_pending_item(
     journal.write_text(json.dumps(raw))
     before = _file_bytes(tmp_path)
 
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     with pytest.raises(PendingTransactionError, match="journal is malformed"):
         transaction_module.commit_unmanaged_obsidian_batch(
@@ -4393,7 +4393,7 @@ def test_obsidian_deleted_callback_crash_retires_journal_and_unblocks_publicatio
     (vault / ".graphify_obsidian_manifest.json").write_text(
         json.dumps({"files": ["old.md", "stale.md"]}, indent=2)
     )
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     inventory = transaction_module.open_unmanaged_obsidian_inventory(vault)
     script = (
@@ -4461,7 +4461,7 @@ def test_obsidian_deleted_callback_crash_retires_journal_and_unblocks_publicatio
 
 
 def test_obsidian_batch_rejects_managed_ancestor_zero_mutation(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     managed = tmp_path / "managed"
     managed.mkdir()
@@ -4485,7 +4485,7 @@ def test_obsidian_batch_rejects_managed_ancestor_zero_mutation(tmp_path):
 def test_obsidian_batch_revalidates_ancestor_before_first_mutation(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     external = tmp_path / "external"
     external.mkdir()
@@ -4515,7 +4515,7 @@ def test_obsidian_batch_revalidates_ancestor_before_first_mutation(
 
 
 def test_external_snapshot_reads_only_pinned_graph_leaf(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     source = tmp_path / "external"
     source.mkdir()
@@ -4535,7 +4535,7 @@ def test_external_snapshot_reads_only_pinned_graph_leaf(tmp_path):
 
 
 def test_external_snapshot_rejects_managed_watermark_without_mutation(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     source = tmp_path / "external"
     source.mkdir()
@@ -4551,7 +4551,7 @@ def test_external_snapshot_rejects_managed_watermark_without_mutation(tmp_path):
 def test_external_snapshot_rejects_prefix_coordination_authority_zero_mutation(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     source = tmp_path / "external"
     source.mkdir()
@@ -4573,7 +4573,7 @@ def test_external_snapshot_rejects_prefix_coordination_authority_zero_mutation(
 def test_external_snapshot_rejects_coordination_appearing_after_retained_read(
     tmp_path, monkeypatch,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     source = tmp_path / "external"
     source.mkdir()
@@ -4608,7 +4608,7 @@ def test_external_snapshot_rejects_coordination_appearing_after_retained_read(
 def test_external_snapshot_rejects_graph_replacement_after_retained_read(
     tmp_path, monkeypatch,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     source = tmp_path / "external"
     source.mkdir()
@@ -4674,7 +4674,7 @@ def test_tree_html_public_retry_recovers_its_exact_unmanaged_journal(tmp_path):
 def test_unmanaged_journal_is_not_graph_authority_but_unrelated_one_rejects(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -4695,7 +4695,7 @@ def test_unmanaged_journal_is_not_graph_authority_but_unrelated_one_rejects(
 
 
 def test_unmanaged_large_stage_recovery_streams_within_aggregate_budget(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -4723,7 +4723,7 @@ def test_unmanaged_large_stage_recovery_streams_within_aggregate_budget(tmp_path
 def test_unmanaged_oversized_unowned_stage_is_not_read_or_removed(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "external"
     output.mkdir()
@@ -4757,7 +4757,7 @@ def test_unmanaged_oversized_unowned_stage_is_not_read_or_removed(
 
 
 def test_unmanaged_ancestor_lock_blocks_concurrent_transaction_until_commit(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root = tmp_path / "corpus"
     root.mkdir()
@@ -5439,7 +5439,7 @@ def test_recovered_generation_and_drainer_converge_into_successor(tmp_path):
 def test_legacy_pending_bridge_retains_late_and_open_fd_appends(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root = tmp_path / "corpus"
     root.mkdir()
@@ -5483,7 +5483,7 @@ def test_legacy_pending_bridge_retains_late_and_open_fd_appends(
 
 
 def test_finish_refreshes_lease_before_close_releases_lock(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     _commit_owner_generation(output, tx)
@@ -5696,7 +5696,7 @@ def test_token_content_and_stable_object_identity_are_both_required(tmp_path):
 
 
 def test_managed_entry_identity_distinguishes_reused_inode_incarnations():
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     original = transaction_module.ManagedEntryIdentity(7, 11, 1_000)
     recreated = transaction_module.ManagedEntryIdentity(7, 11, 1_001)
@@ -5710,7 +5710,7 @@ def test_managed_entry_identity_distinguishes_reused_inode_incarnations():
 
 
 def test_managed_entry_identity_survives_managed_rename(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "graphify-out"
     output.mkdir()
@@ -5855,7 +5855,7 @@ def test_prepared_runner_executes_from_retained_workspace_after_rename(tmp_path)
 
 
 def test_prepared_runner_rejects_swap_before_fchdir(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _tx, token = _owner(tmp_path)
     original = transaction_module._pin_prepared_workspace
@@ -6008,7 +6008,7 @@ def test_repeated_build_recovery_keeps_receipt_successor_generation(tmp_path):
 def test_prepared_workspace_creation_resumes_after_identity_binding_interruption(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     original = transaction_module._replace_bytes
@@ -6048,7 +6048,7 @@ def test_prepared_workspace_creation_resumes_after_identity_binding_interruption
 
 
 def test_recovery_retires_owned_planned_prepared_workspace(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     original = transaction_module._replace_bytes
@@ -6078,7 +6078,7 @@ def test_recovery_retires_owned_planned_prepared_workspace(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("with_child", [False, True])
 def test_prepared_workspace_never_adopts_foreign_precreation(tmp_path, with_child):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     workspace = output.parent / f".graphify-prepare-{tx.id}"
@@ -6099,7 +6099,7 @@ def test_prepared_workspace_never_adopts_foreign_precreation(tmp_path, with_chil
 def test_prepared_workspace_resumes_every_ownership_binding_boundary(
     tmp_path, monkeypatch, boundary
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     original_create = transaction_module._create_bytes
@@ -6147,7 +6147,7 @@ def test_prepared_workspace_resumes_every_ownership_binding_boundary(
 def test_prepared_workspace_rotates_unbound_root_stage_without_adoption(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     original = transaction_module._create_bytes
@@ -6177,7 +6177,7 @@ def test_prepared_workspace_rotates_unbound_root_stage_without_adoption(
 def test_prepared_workspace_rotates_unbound_child_stage_without_adoption(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     original = transaction_module._replace_bytes
@@ -6211,7 +6211,7 @@ def test_prepared_workspace_rotates_unbound_child_stage_without_adoption(
 def test_prepared_workspace_rejects_named_stage_replacement_before_publication(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     original = transaction_module._replace_bytes
@@ -6246,7 +6246,7 @@ def test_prepared_workspace_rejects_named_stage_replacement_before_publication(
 
 
 def test_prepared_retirement_preserves_unbound_nonce_stage(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     original = transaction_module._create_bytes
@@ -6275,7 +6275,7 @@ def test_prepared_retirement_preserves_unbound_nonce_stage(tmp_path, monkeypatch
 def test_prepared_retirement_never_replaces_destination_appearing_after_marker(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
@@ -6309,7 +6309,7 @@ def test_prepared_retirement_never_replaces_destination_appearing_after_marker(
 def test_prepared_post_move_foreign_target_is_not_restored_as_workspace(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
@@ -6349,7 +6349,7 @@ def test_prepared_post_move_foreign_target_is_not_restored_as_workspace(
 
 
 def test_prepared_retirement_rejects_traversal_transaction_id(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     with transaction_module.pin_output(output) as capability, transaction_module._locked(capability):
@@ -6368,7 +6368,7 @@ def test_prepared_retirement_rejects_traversal_transaction_id(tmp_path):
 
 
 def test_publication_plan_rejects_leaf_replacement(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -6389,7 +6389,7 @@ def test_publication_plan_rejects_leaf_replacement(tmp_path, monkeypatch):
 
 
 def test_publication_plan_rejects_symlink_substitution(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -6411,7 +6411,7 @@ def test_publication_plan_rejects_symlink_substitution(tmp_path, monkeypatch):
 
 
 def test_publication_plan_rejects_oversized_leaf_before_read(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -6427,7 +6427,7 @@ def test_publication_plan_rejects_oversized_leaf_before_read(tmp_path, monkeypat
 
 
 def test_publication_plan_bounds_empty_directory_entries(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -6450,7 +6450,7 @@ def test_publication_plan_bounds_directory_depth(tmp_path):
 
 
 def test_publication_plan_bounds_relative_path_length(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     prepared = tmp_path / "prepared"
     prepared.mkdir()
@@ -6692,7 +6692,7 @@ def test_recovery_waits_for_leaf_commit_then_revokes_next_publication(tmp_path):
 
 
 def test_interrupted_nested_publication_leaves_no_temporary_residue(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, tx, _token = _owner(tmp_path)
     real_replace = transaction_module.os.replace
@@ -6943,7 +6943,7 @@ queue_rebuild(
 
 
 def test_enqueue_recovery_never_adopts_unselected_foreign_stage(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     with pytest.raises(RuntimeError, match="stop"):
@@ -7357,7 +7357,7 @@ def test_direct_recovery_replays_pending_enqueue_exactly_once(tmp_path, boundary
 def test_run_token_refences_enqueue_inserted_between_locked_sections(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, token = _owner(tmp_path)
     original = transaction_module._fence_pending_enqueue_locked
@@ -7588,7 +7588,7 @@ def test_legacy_callflow_discovery_rejects_unsafe_candidates(tmp_path, unsafe):
 
 
 def test_legacy_callflow_discovery_enforces_aggregate_budget(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "graphify-out"
     output.mkdir()
@@ -7658,7 +7658,7 @@ def test_prepared_first_epoch_deletes_legacy_owned_dynamic_exports_only(tmp_path
 def test_legacy_inventory_combines_graph_fixed_and_dynamic_budget(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     output = tmp_path / "graphify-out"
     output.mkdir()
@@ -7836,7 +7836,7 @@ def test_complete_claim_rejects_same_name_inflight_substitution(
 def test_takeover_rejects_same_name_inflight_substitution(
     tmp_path, monkeypatch, substitution
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -7917,7 +7917,7 @@ def test_close_replay_rejects_same_name_inflight_substitution(
 def test_recovery_retires_only_frozen_inflight_identity(
     tmp_path, monkeypatch, substitution
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -7985,7 +7985,7 @@ def test_recovery_rejects_reused_inflight_id_with_changed_immutable_fields(
 def test_claim_queue_transitions_reject_same_inode_predecessor_drift(
     tmp_path, monkeypatch, target, substitution
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     foreign = tmp_path / "foreign"
@@ -8045,7 +8045,7 @@ def test_claim_queue_transitions_reject_same_inode_predecessor_drift(
 def test_existing_queue_exchange_crash_retains_recoverable_predecessor(
     tmp_path, target, crash_phase
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8117,7 +8117,7 @@ def test_existing_queue_exchange_crash_retains_recoverable_predecessor(
     ],
 )
 def test_queue_transition_every_durable_phase_replays(tmp_path, phase):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8141,7 +8141,7 @@ def test_queue_transition_every_durable_phase_replays(tmp_path, phase):
 
 
 def test_queue_transition_rejects_foreign_retirement_identity(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8170,7 +8170,7 @@ def test_queue_transition_rejects_foreign_retirement_identity(tmp_path):
 
 
 def test_queue_transition_binding_only_rejects_foreign_successor_identity(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8206,7 +8206,7 @@ def test_queue_transition_binding_only_rejects_foreign_successor_identity(tmp_pa
 def test_direct_queue_retirement_crash_replays_exact_record(
     tmp_path, target, crash_phase
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8244,7 +8244,7 @@ def test_direct_queue_retirement_crash_replays_exact_record(
 
 
 def test_direct_queue_retirement_rejects_foreign_quarantine_identity(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8275,7 +8275,7 @@ def test_direct_queue_retirement_rejects_foreign_quarantine_identity(tmp_path):
 def test_queue_retirement_never_replaces_destination_appearing_after_journal(
     tmp_path, monkeypatch, mode
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"], now=1.0)
@@ -8319,7 +8319,7 @@ def test_queue_retirement_never_replaces_destination_appearing_after_journal(
 def test_queue_post_move_foreign_target_is_never_inferred_as_predecessor(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8354,7 +8354,7 @@ def test_queue_post_move_foreign_target_is_never_inferred_as_predecessor(
 
 
 def test_enqueue_retirement_crash_preserves_each_intent_once(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild(
@@ -8425,7 +8425,7 @@ def test_complete_claim_replays_interrupted_shared_inflight_retirement(tmp_path)
 def test_live_recovery_retirement_crash_preserves_inflight_intent(
     tmp_path, operation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     queued = queue_rebuild(
@@ -8470,7 +8470,7 @@ def test_live_recovery_retirement_crash_preserves_inflight_intent(
 def test_queue_transition_discovery_maps_malformed_state(
     tmp_path, kind, payload
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _tx, _token = _owner(tmp_path)
     name = transaction_module.QUEUE_FILE
@@ -8489,7 +8489,7 @@ def test_queue_transition_discovery_maps_malformed_state(
 def test_replace_bytes_fsyncs_and_revalidates_after_vanished_winner_restore(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8531,7 +8531,7 @@ def test_replace_bytes_fsyncs_and_revalidates_after_vanished_winner_restore(
 def test_enqueue_replay_rejects_same_inode_primary_queue_drift(
     tmp_path, monkeypatch, substitution
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _tx, _token = _owner(tmp_path)
     queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8576,7 +8576,7 @@ def test_enqueue_replay_rejects_same_inode_primary_queue_drift(
 def test_completed_recovery_rejects_primary_queue_drift_before_requeue(
     tmp_path, monkeypatch, substitution
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8619,7 +8619,7 @@ def test_completed_recovery_rejects_primary_queue_drift_before_requeue(
 def test_empty_claim_completion_rejects_new_inflight_after_absence_admission(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     foreign = tmp_path / "foreign"
@@ -8660,7 +8660,7 @@ def test_empty_claim_completion_rejects_new_inflight_after_absence_admission(
 def test_selected_recovery_closes_process_lost_completed_live_generation(
     tmp_path, boundary, late_enqueue
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8735,7 +8735,7 @@ def test_selected_recovery_closes_process_lost_completed_live_generation(
 def test_completed_live_recovery_replays_after_close_pending_without_losing_intent(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     intent = queue_rebuild("update", root, output=output, changed_paths=["a.py"])
@@ -8789,7 +8789,7 @@ def test_completed_live_recovery_replays_after_close_pending_without_losing_inte
 def test_cli_recovery_closes_process_lost_completed_live_generation(
     tmp_path, monkeypatch, capsys
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
     from graphify.cli import dispatch_command
 
     root, output, tx, _token = _owner(tmp_path)
@@ -8901,7 +8901,7 @@ def test_close_pending_replay_rejects_substituted_runtime_state_without_mutation
 def test_recover_close_reconstructs_successor_after_complete_reserve_crash(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, tx, _token = _owner(tmp_path)
     _commit_owner_generation(output, tx)
@@ -9029,7 +9029,7 @@ def test_detached_merge_parser_is_private_data_only_and_marks_pending(tmp_path):
 
 
 def _merge_pending_owner(tmp_path: Path, *, include_other_artifact: bool = False):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token = _owner(tmp_path)
     if include_other_artifact:
@@ -9067,7 +9067,7 @@ def _merge_pending_owner(tmp_path: Path, *, include_other_artifact: bool = False
 
 
 def _merge_successor_ready(tmp_path: Path, *, include_other_artifact: bool = False):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _data, _payload, admission = _merge_pending_owner(
         tmp_path, include_other_artifact=include_other_artifact
@@ -9098,7 +9098,7 @@ def _merge_successor_ready(tmp_path: Path, *, include_other_artifact: bool = Fal
 
 
 def test_merge_successor_ready_binds_exact_inventory_and_replays_publication(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, transaction, _token, admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9154,7 +9154,7 @@ def test_merge_successor_ready_binds_exact_inventory_and_replays_publication(tmp
     ],
 )
 def test_successor_ready_takeover_replays_every_durable_boundary(tmp_path, boundary):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, predecessor, predecessor_token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9219,7 +9219,7 @@ def test_successor_ready_takeover_replays_every_durable_boundary(tmp_path, bound
 def test_prepared_transfer_recovery_validates_admission_before_each_replay(
     tmp_path, boundary
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, predecessor, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9268,7 +9268,7 @@ def test_prepared_transfer_recovery_validates_admission_before_each_replay(
 def test_prepared_transfer_terminal_substitution_blocks_recovery_without_mutation(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, predecessor, _token, _admission, _marker = (
         _merge_successor_ready(tmp_path)
@@ -9317,7 +9317,7 @@ def test_prepared_transfer_terminal_substitution_blocks_recovery_without_mutatio
 def test_prepared_transfer_terminal_requires_predecessor_token_revocation(
     tmp_path, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, predecessor, predecessor_token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9395,7 +9395,7 @@ def test_prepared_transfer_terminal_requires_predecessor_token_revocation(
 def test_successor_ready_substitution_blocks_takeover_without_mutation(
     tmp_path, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9433,7 +9433,7 @@ def test_successor_ready_substitution_blocks_takeover_without_mutation(
 def test_claimed_inflight_successor_ready_substitution_is_failure_atomic(
     tmp_path, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9473,7 +9473,7 @@ def test_claimed_inflight_successor_ready_substitution_is_failure_atomic(
 def test_recovery_revalidates_public_inventory_inside_takeover_lock(
     tmp_path, monkeypatch, artifact_name
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path, include_other_artifact=True)
@@ -9544,7 +9544,7 @@ def test_recovery_revalidates_public_inventory_inside_takeover_lock(
 def test_direct_takeover_rejects_substituted_public_inventory_without_mutation(
     tmp_path, artifact_name
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path, include_other_artifact=True)
@@ -9568,7 +9568,7 @@ def test_direct_takeover_rejects_substituted_public_inventory_without_mutation(
 def test_claimed_inflight_successor_ready_requires_exact_merge_binding(
     tmp_path, entrypoint, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9622,7 +9622,7 @@ def test_claimed_inflight_successor_ready_requires_exact_merge_binding(
 def test_successor_ready_binding_is_validated_before_journal_replay(
     tmp_path, monkeypatch, journal_kind, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9696,7 +9696,7 @@ def test_successor_ready_binding_is_validated_before_journal_replay(
 def test_public_recovery_validates_successor_ready_before_residual_journal_replay(
     tmp_path, monkeypatch, entrypoint, journal_kind
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9775,7 +9775,7 @@ def test_public_recovery_validates_successor_ready_before_residual_journal_repla
 def test_public_recovery_rejects_invalid_successor_ready_authority_without_mutation(
     tmp_path, entrypoint, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9824,7 +9824,7 @@ def test_public_recovery_rejects_invalid_successor_ready_authority_without_mutat
 
 @pytest.mark.parametrize("entrypoint", ["recover", "selected"])
 def test_public_recovery_routes_exact_successor_ready_transfer(tmp_path, entrypoint):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -9871,7 +9871,7 @@ def test_selected_recovery_revalidates_interleaved_successor_ready_under_lock(
     interleave_after_lock,
     residual_enqueue,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
     first_lock_released = threading.Event()
@@ -9991,7 +9991,7 @@ def test_cli_recovery_rejects_missing_successor_ready_admission_without_mutation
     tmp_path, monkeypatch
 ):
     from graphify.cli import dispatch_command
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -10036,7 +10036,7 @@ def test_cli_recovery_rejects_missing_successor_ready_admission_without_mutation
 def test_incomplete_successor_ready_enqueue_requires_preserved_merge_admission(
     tmp_path, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -10072,7 +10072,7 @@ def test_incomplete_successor_ready_enqueue_requires_preserved_merge_admission(
 def test_live_partial_publication_enqueue_rejects_corrupt_authority_without_mutation(
     tmp_path, boundary, authority
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -10124,7 +10124,7 @@ def test_live_partial_publication_enqueue_rejects_corrupt_authority_without_muta
 def test_incomplete_successor_ready_enqueue_rejects_substituted_public_inventory(
     tmp_path, boundary, artifact, name
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token, _admission, marker = (
         _merge_successor_ready(tmp_path, include_other_artifact=True)
@@ -10175,7 +10175,7 @@ def test_transaction_status_exposes_only_bounded_successor_ready_phase(tmp_path)
 def test_transaction_status_rejects_corrupt_successor_ready_marker_without_mutation(
     tmp_path,
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _transaction, _token, _admission, _marker = (
         _merge_successor_ready(tmp_path)
@@ -10196,7 +10196,7 @@ def test_transaction_status_rejects_corrupt_successor_ready_marker_without_mutat
 def test_successor_ready_boolean_version_is_rejected_without_mutation(
     tmp_path, field
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _transaction, _token, _admission, _marker = (
         _merge_successor_ready(tmp_path)
@@ -10218,7 +10218,7 @@ def test_successor_ready_boolean_version_is_rejected_without_mutation(
 def test_merge_authority_boolean_version_is_rejected_without_mutation(
     tmp_path, authority, field
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
     before = _file_bytes(output)
@@ -10253,7 +10253,7 @@ def test_merge_authority_boolean_version_is_rejected_without_mutation(
 def test_prepared_transfer_target_substitution_blocks_recovery_without_mutation(
     tmp_path, boundary, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, predecessor, _token, _admission, marker = (
         _merge_successor_ready(tmp_path)
@@ -10304,7 +10304,7 @@ def test_prepared_transfer_target_substitution_blocks_recovery_without_mutation(
 
 
 def test_prepared_takeover_target_token_is_inert_until_transition_retires(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, predecessor, _token, _admission, _marker = (
         _merge_successor_ready(tmp_path)
@@ -10414,7 +10414,7 @@ def test_detached_merge_watermark_binds_exact_raw_inputs_and_union_content(tmp_p
     ],
 )
 def test_merge_pending_enqueue_recovers_exact_admission_transfer(tmp_path, boundary):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
     with pytest.raises(RuntimeError, match=boundary):
@@ -10482,7 +10482,7 @@ def test_merge_pending_enqueue_recovers_exact_admission_transfer(tmp_path, bound
 def test_merge_pending_enqueue_replay_preserves_late_second_intent(
     tmp_path, boundary
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
     first_path = root / "first.py"
@@ -10536,7 +10536,7 @@ def test_merge_pending_enqueue_replay_preserves_late_second_intent(
 def test_private_merge_pending_opener_rejects_watermark_drift_zero_mutation(
     tmp_path, mutation
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, data, _payload, _admission = _merge_pending_owner(tmp_path)
     mutation(data["graph"][GRAPH_WATERMARK_KEY])
@@ -10594,7 +10594,7 @@ def test_merge_pending_enqueue_revalidates_live_graph_zero_mutation(
 def test_legacy_enqueue_and_predecessor_records_omit_merge_admission(
     tmp_path, boundary
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, transaction, _token = _owner(tmp_path)
     _commit_owner_generation(output, transaction)
@@ -10674,7 +10674,7 @@ def test_legacy_enqueue_and_predecessor_records_omit_merge_admission(
 def test_merge_admission_records_reject_schema_drift_zero_mutation(
     tmp_path, record_name, corruption
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
     boundary = (
@@ -10715,7 +10715,7 @@ def test_merge_admission_records_reject_schema_drift_zero_mutation(
 
 
 def test_private_merge_pending_opener_requires_receipt_current_input_digest(tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     _root, output, data, _payload, _admission = _merge_pending_owner(tmp_path)
     watermark = data["graph"][GRAPH_WATERMARK_KEY]
@@ -10797,7 +10797,7 @@ def test_detached_merge_preserves_multigraph_parallel_edges(tmp_path):
 
 
 def test_detached_merge_checks_identity_inside_final_replace(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     base = tmp_path / "base.json"
     current = tmp_path / "current.json"
@@ -10892,7 +10892,7 @@ def test_detached_merge_rejects_composed_node_cap_before_mutation(tmp_path):
 def test_detached_merge_refuses_retargeted_current_snapshot(
     tmp_path, monkeypatch
 ):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     base = tmp_path / "base.json"
     current = tmp_path / "current.json"
@@ -11010,7 +11010,7 @@ def test_stdio_mcp_tool_rejects_pending_managed_graph(tmp_path):
 
 
 def test_windows_adapter_is_guarantee_or_explicit_blocker(monkeypatch, tmp_path):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     monkeypatch.setattr(transaction_module, "_PLATFORM", "windows")
     output = tmp_path / "graphify-out"
