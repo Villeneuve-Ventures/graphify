@@ -658,7 +658,12 @@ def test_pathless_postgres_manifest_failure_is_publication_atomic(
     import graphify.__main__ as main_module
     import graphify.detect as detect_module
     import graphify.pg_introspect as pg_module
-    import graphify.transaction as transaction_module
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PROTOCOL_FILE,
+        RECEIPT_FILE,
+        TRANSACTION_FILE,
+    )
 
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -672,15 +677,15 @@ def test_pathless_postgres_manifest_failure_is_publication_atomic(
     cache_bytes = seeded["cache_bytes"]
     graph_path = output / "graph.json"
     manifest_path = output / "manifest.json"
-    receipt_path = output / transaction_module.RECEIPT_FILE
-    protocol_path = output / transaction_module.PROTOCOL_FILE
+    receipt_path = output / RECEIPT_FILE
+    protocol_path = output / PROTOCOL_FILE
     graph_before = graph_path.read_bytes()
     manifest_before = manifest_path.read_bytes()
     receipt_before = receipt_path.read_bytes()
     completed_receipt = json.loads(receipt_before)
     completed_generation = completed_receipt["generation"]
     watermark_before = json.loads(graph_before)["graph"][
-        transaction_module.GRAPH_WATERMARK_KEY
+        GRAPH_WATERMARK_KEY
     ]
     assert watermark_before["generation"] == completed_generation
     assert json.loads(protocol_path.read_text(encoding="utf-8"))["state"] == "COMPLETE"
@@ -732,12 +737,12 @@ def test_pathless_postgres_manifest_failure_is_publication_atomic(
     assert manifest_path.read_bytes() == manifest_before
     assert receipt_path.read_bytes() == receipt_before
     assert json.loads(graph_path.read_text(encoding="utf-8"))["graph"][
-        transaction_module.GRAPH_WATERMARK_KEY
+        GRAPH_WATERMARK_KEY
     ] == watermark_before
     pending_protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     assert pending_protocol["state"] == "INCOMPLETE"
     assert pending_protocol["generation"] == completed_generation + 1
-    transaction_path = output / transaction_module.TRANSACTION_FILE
+    transaction_path = output / TRANSACTION_FILE
     if transaction_path.exists():
         transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
         assert transaction["generation"] == pending_protocol["generation"]

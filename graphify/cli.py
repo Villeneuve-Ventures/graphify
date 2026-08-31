@@ -3909,7 +3909,7 @@ def _dispatch_command(cmd: str) -> None:
                         try:
                             _live_hashes.add(_file_hash(_abs, out_root))
                         except OSError:
-                            pass
+                            continue  # unreadable files cannot establish a live cache key
                 _prune_semantic_cache(out_root, _live_hashes)
             except Exception as exc:
                 print(f"[graphify extract] warning: could not prune semantic cache: {exc}", file=sys.stderr)
