@@ -565,12 +565,12 @@ def _resolve_extract_destination() -> _TransactionDestination:
 
 
 def _canonical_extract_argv(root: Path) -> list[str]:
-    """Put the parsed extract target in argv[2] without dropping option spelling."""
+    """Canonicalize an explicit extract target without inventing one."""
     arguments = sys.argv[2:]
     options: list[str] = []
     index = 0
     options_enabled = True
-    skipped_target = False
+    has_input_path = False
     while index < len(arguments):
         value = arguments[index]
         if options_enabled and value == "--":
@@ -590,12 +590,14 @@ def _canonical_extract_argv(root: Path) -> list[str]:
             options.append(value)
             index += 1
             continue
-        if not skipped_target:
-            skipped_target = True
+        if not has_input_path:
+            has_input_path = True
         else:
             options.append(value)
         index += 1
-    return [sys.argv[0], "extract", str(root), *options]
+    if has_input_path:
+        return [sys.argv[0], "extract", str(root), *options]
+    return [sys.argv[0], "extract", *options]
 
 
 def _replace_graph_argument(arguments: list[str], graph: Path) -> list[str]:
@@ -3549,6 +3551,7 @@ def _dispatch_command(cmd: str) -> None:
             )
 
         if not has_path:
+            detection = {}
             code_files = []
             doc_files = []
             paper_files = []

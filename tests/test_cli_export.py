@@ -307,6 +307,143 @@ def test_managed_export_rejects_process_owner_for_different_output(
     assert not (managed_output / "graph.html").exists()
 
 
+@pytest.mark.parametrize(
+    ("postgres_args", "use_out"),
+    [
+        (["--postgres", "postgresql://example/test"], False),
+        (["--postgres=postgresql://example/test"], False),
+        (["--postgres", "postgresql://example/test"], True),
+        (["--postgres=postgresql://example/test"], True),
+    ],
+    ids=("P1", "P2", "P3", "P4"),
+)
+def test_pathless_postgres_canonical_argv(
+    postgres_args, use_out, tmp_path, monkeypatch
+):
+    from graphify.cli import _canonical_extract_argv, _resolve_extract_destination
+
+    cwd = tmp_path / "workspace"
+    cwd.mkdir()
+    explicit_out = tmp_path / "explicit-out"
+    monkeypatch.chdir(cwd)
+    options = [*postgres_args]
+    if use_out:
+        options.extend(["--out", str(explicit_out)])
+    monkeypatch.setattr(sys, "argv", ["graphify", "extract", *options])
+
+    destination = _resolve_extract_destination()
+
+    assert destination.root == cwd.resolve()
+    expected_output = (explicit_out if use_out else cwd) / "graphify-out"
+    assert destination.output == expected_output.resolve()
+    assert destination.graph == (expected_output / "graph.json").resolve()
+    assert _canonical_extract_argv(destination.root) == [
+        "graphify",
+        "extract",
+        *options,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("postgres_args", "use_out"),
+    [
+        (["--postgres", "postgresql://example/test"], False),
+        (["--postgres=postgresql://example/test"], False),
+        (["--postgres", "postgresql://example/test"], True),
+        (["--postgres=postgresql://example/test"], True),
+    ],
+    ids=("P1", "P2", "P3", "P4"),
+)
+def test_pathless_postgres_transaction_routing(
+    postgres_args, use_out, tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    import graphify.detect as detect_module
+    import graphify.pg_introspect as pg_introspect_module
+
+    cwd = tmp_path / "workspace"
+    cwd.mkdir()
+    explicit_out = tmp_path / "explicit-out"
+    monkeypatch.chdir(cwd)
+    options = [*postgres_args]
+    if use_out:
+        options.extend(["--out", str(explicit_out)])
+    expected_argv = ["graphify", "extract", *options, "--no-cluster"]
+    monkeypatch.setattr(sys, "argv", expected_argv)
+
+    def unexpected_detector(*_args, **_kwargs):
+        pytest.fail("pathless PostgreSQL extraction must not scan cwd")
+
+    introspection_calls = []
+
+    def deterministic_introspection(dsn):
+        introspection_calls.append((dsn, tuple(sys.argv)))
+        return {
+            "nodes": [
+                {
+                    "id": "postgres:public.widgets",
+                    "label": "public.widgets",
+                    "file_type": "code",
+                    "source_file": "postgresql:/example/test",
+                    "source_location": "schema public",
+                }
+            ],
+            "edges": [],
+        }
+
+    monkeypatch.setattr(detect_module, "detect", unexpected_detector)
+    monkeypatch.setattr(detect_module, "detect_incremental", unexpected_detector)
+    monkeypatch.setattr(
+        pg_introspect_module, "introspect_postgres", deterministic_introspection
+    )
+
+    expected_output = (explicit_out if use_out else cwd) / "graphify-out"
+    generations = []
+    for _ in range(2):
+        with pytest.raises(SystemExit) as exit_info:
+            cli_module.dispatch_command("extract")
+        assert exit_info.value.code in (None, 0)
+        receipt = json.loads(
+            (expected_output / ".graphify_generation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        generations.append(receipt["generation"])
+
+    assert generations[0] == 1
+    assert generations[1] > generations[0]
+    assert introspection_calls == [
+        ("postgresql://example/test", tuple(expected_argv)),
+        ("postgresql://example/test", tuple(expected_argv)),
+    ]
+    assert (expected_output / "graph.json").is_file()
+    assert (expected_output / "manifest.json").is_file()
+    assert (expected_output / ".graphify_protocol.json").is_file()
+    assert (expected_output / ".graphify_generation.json").is_file()
+
+    graph = json.loads(
+        (expected_output / "graph.json").read_text(encoding="utf-8")
+    )
+    receipt = json.loads(
+        (expected_output / ".graphify_generation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    protocol = json.loads(
+        (expected_output / ".graphify_protocol.json").read_text(encoding="utf-8")
+    )
+    watermark = graph["graph"]["_graphify_protocol"]
+    generation_two = generations[1]
+    assert receipt["generation"] == generation_two
+    assert receipt["watermark"] == watermark
+    assert watermark["state"] == "active"
+    assert watermark["generation"] == generation_two
+    assert protocol["state"] == "COMPLETE"
+    assert protocol["generation"] == generation_two
+    if use_out:
+        assert not (cwd / "graphify-out").exists()
+
+
 def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
     tmp_path, monkeypatch
 ):
