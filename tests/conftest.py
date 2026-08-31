@@ -12,6 +12,18 @@ _ANALYZE_WARNING_FILTERS = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_transaction_process_authority(monkeypatch):
+    """Keep process-local transaction authority scoped to one test."""
+    from graphify import transaction as transaction_module
+
+    transaction_module._AUTHORITY.set(None)
+    for name in (*transaction_module._TRANSACTION_ENV_SIGNALS, "GRAPHIFY_PREPARED_OUTPUT"):
+        monkeypatch.delenv(name, raising=False)
+    yield
+    transaction_module._AUTHORITY.set(None)
+
+
 def pytest_collection_modifyitems(items: list[Any]) -> None:
     for item in items:
         if item.path.name != "test_analyze.py":

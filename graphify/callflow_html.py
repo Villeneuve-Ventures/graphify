@@ -29,8 +29,12 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from html import escape
+from typing import TYPE_CHECKING, Any
 
 from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME
+
+if TYPE_CHECKING:
+    from graphify.transaction import GraphSnapshot
 
 
 # ──────────────────────────────────────────────
@@ -252,20 +256,29 @@ def _node_link_payload(data: dict) -> tuple[list, list] | None:
     return nodes, edges
 
 
-def load_graph(path: str | Path) -> tuple:
+def load_graph(path: str | Path, *, snapshot: GraphSnapshot | None = None) -> tuple:
     """Load graph.json. Returns normalized (nodes, edges, hyperedges, metadata)."""
-    if path:
+    if path and snapshot is None:
         from graphify.security import check_graph_file_size_cap
         try:
             check_graph_file_size_cap(Path(path))
         except ValueError as exc:
             raise SystemExit(f"ERROR: {exc}") from exc
-    data = read_json(path)
+    if snapshot is None:
+        from graphify.transaction import open_graph_snapshot
+        snapshot = open_graph_snapshot(Path(path), purpose="callflow-html")
+    data = snapshot.data
     if not isinstance(data, dict):
         raise SystemExit(f"ERROR: graph file must contain a JSON object: {path}")
 
-    graph_block = data.get("graph") if isinstance(data.get("graph"), dict) else {}
-    meta_block = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    raw_graph_block = data.get("graph")
+    graph_block: dict[str, Any] = (
+        raw_graph_block if isinstance(raw_graph_block, dict) else {}
+    )
+    raw_meta_block = data.get("metadata")
+    meta_block: dict[str, Any] = (
+        raw_meta_block if isinstance(raw_meta_block, dict) else {}
+    )
 
     node_link = _node_link_payload(data)
     if node_link:
@@ -284,7 +297,7 @@ def load_graph(path: str | Path) -> tuple:
         if edge:
             edges.append(edge)
 
-    meta = dict(graph_block)
+    meta: dict[str, Any] = dict(graph_block)
     meta.update(meta_block)
     for key in ("built_at_commit", "commit", "project_name", "repo", "repository", "language_breakdown"):
         if data.get(key) and not meta.get(key):
@@ -295,9 +308,15 @@ def load_graph(path: str | Path) -> tuple:
     return nodes, edges, hyperedges, meta
 
 
-def load_labels(path: str | Path | None) -> dict:
+def load_labels(path: str | Path | None, *, payload: bytes | None = None) -> dict:
     """Load community labels from .graphify_labels.json, tolerating wrapper keys."""
-    data = read_json(path, default={})
+    if payload is None:
+        data = read_json(path, default={}) if path is not None else {}
+    else:
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"ERROR: invalid JSON in {path}: {exc}") from exc
     if not isinstance(data, dict):
         return {}
     if isinstance(data.get("labels"), dict):
@@ -312,9 +331,17 @@ def load_labels(path: str | Path | None) -> dict:
     return labels
 
 
-def load_sections(path: str | Path | None) -> list:
+def load_sections(
+    path: str | Path | None, *, payload: bytes | None = None
+) -> list:
     """Load section definitions from JSON file."""
-    data = read_json(path, default=[])
+    if payload is None:
+        data = read_json(path, default=[]) if path is not None else []
+    else:
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"ERROR: invalid JSON in {path}: {exc}") from exc
     if isinstance(data, dict) and isinstance(data.get("sections"), list):
         data = data["sections"]
     if not isinstance(data, list):
@@ -322,8 +349,13 @@ def load_sections(path: str | Path | None) -> list:
     return data
 
 
-def load_report(path: str | Path | None) -> str:
+def load_report(path: str | Path | None, *, payload: bytes | None = None) -> str:
     """Load GRAPH_REPORT.md if it exists."""
+    if payload is not None:
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SystemExit(f"ERROR: invalid UTF-8 in {path}") from exc
     if path and os.path.exists(path):
         return Path(path).read_text(encoding="utf-8")
     return ""
@@ -1615,20 +1647,74 @@ def write_callflow_html(
             "Run graphify first or pass --graph /path/to/graph.json."
         )
 
-    # Load data
-    nodes, edges, hyperedges, meta = load_graph(paths["graph"])
-    labels = load_labels(paths["labels"])
-    lang = detect_lang(args.lang, nodes, labels)
+    # Load graph + default/explicit sidecars from one retained generation.
+    from graphify.transaction import admit_snapshot_artifact, open_graph_snapshot
+    retained_names: list[str] = []
+    retained_limits: dict[str, int] = {}
+    graph_parent = paths["graph"].expanduser().absolute().parent.resolve(strict=True)
+    for key, limit in (
+        ("labels", 1024 * 1024),
+        ("report", 50 * 1024 * 1024),
+        ("sections", 1024 * 1024),
+    ):
+        selected = paths[key]
+        if selected is None:
+            continue
+        selected_parent = selected.expanduser().absolute().parent.resolve(strict=True)
+        if selected_parent == graph_parent:
+            retained_names.append(selected.name)
+            retained_limits[selected.name] = limit
+    snapshot = open_graph_snapshot(
+        paths["graph"],
+        purpose="callflow-html",
+        retain_artifacts=tuple(dict.fromkeys(retained_names)),
+        retain_limits=retained_limits,
+    )
+    labels_payload = admit_snapshot_artifact(
+        snapshot,
+        paths["labels"],
+        canonical_name=".graphify_labels.json",
+    )
+    report_payload = admit_snapshot_artifact(
+        snapshot,
+        paths["report"],
+        canonical_name="GRAPH_REPORT.md",
+        limit=50 * 1024 * 1024,
+    )
+    sections_payload = (
+        admit_snapshot_artifact(
+            snapshot,
+            paths["sections"],
+            canonical_name=paths["sections"].name,
+            limit=1024 * 1024,
+        )
+        if paths["sections"] is not None
+        else None
+    )
+    nodes, edges, hyperedges, meta = load_graph(
+        paths["graph"], snapshot=snapshot
+    )
+    label_map = load_labels(
+        paths["labels"], payload=labels_payload if labels_payload is not None else b"{}"
+    )
+    lang = detect_lang(args.lang, nodes, label_map)
     if paths["sections"]:
-        sections = load_sections(paths["sections"])
+        section_list = load_sections(
+            paths["sections"],
+            payload=sections_payload if sections_payload is not None else b"[]",
+        )
     else:
-        sections = derive_sections_from_communities(nodes, labels, lang, args.max_sections)
-    sections = normalize_sections(sections, lang)
-    report_text = load_report(paths["report"])
+        section_list = derive_sections_from_communities(
+            nodes, label_map, lang, args.max_sections
+        )
+    section_list = normalize_sections(section_list, lang)
+    report_text = load_report(
+        paths["report"], payload=report_payload if report_payload is not None else b""
+    )
 
     if not nodes:
         raise ValueError("graph.json contains 0 nodes")
-    if len(sections) <= 1:
+    if len(section_list) <= 1:
         raise ValueError("no sections defined")
 
     if verbose and len(nodes) >= 5000:
@@ -1652,13 +1738,16 @@ def write_callflow_html(
         output_path = paths["graphify_out"] / f"{safe_filename(meta['project_name'])}-callflow.html"
 
     if verbose:
-        print(f"Loaded: {len(nodes)} nodes, {len(edges)} edges, {len(sections)} sections")
+        print(
+            f"Loaded: {len(nodes)} nodes, {len(edges)} edges, "
+            f"{len(section_list)} sections"
+        )
         print(f"Graph: {paths['graph']}")
 
     # Build index
     comm_idx = build_community_index(nodes)
     meta["community_count"] = len(comm_idx)
-    section_nodes_map = build_section_node_map(sections, comm_idx)
+    section_nodes_map = build_section_node_map(section_list, comm_idx)
     classified = classify_edges(edges, section_nodes_map)
 
     # Build HTML
@@ -1686,19 +1775,36 @@ def write_callflow_html(
 """)
 
     # Header + nav
-    html.append(generate_header(sections, meta, lang))
+    html.append(generate_header(section_list, meta, lang))
 
     # ── Architecture Overview (Section "overview") ──
-    overview_name = sections[0].get("name", "Architecture Overview") if sections else "Architecture Overview"
+    overview_name = (
+        section_list[0].get("name", "Architecture Overview")
+        if section_list
+        else "Architecture Overview"
+    )
     html.append(f"""<!-- ====== Architecture Overview ====== -->
 <h2 id="overview">1. {escape(str(overview_name))}</h2>
 
 <div class="mermaid">
 """)
-    html.append(generate_overview_graph(sections, section_nodes_map, classified, labels, lang, args.diagram_scale))
+    html.append(
+        generate_overview_graph(
+            section_list,
+            section_nodes_map,
+            classified,
+            label_map,
+            lang,
+            args.diagram_scale,
+        )
+    )
     html.append("""</div>
 """)
-    html.append(generate_overview_cards(meta, report_text, sections, section_nodes_map, classified, lang))
+    html.append(
+        generate_overview_cards(
+            meta, report_text, section_list, section_nodes_map, classified, lang
+        )
+    )
     report_card = _report_highlights(report_text, lang)
     if report_card:
         html.append(f'<div class="grid">\n  {report_card}\n</div>')
@@ -1706,7 +1812,7 @@ def write_callflow_html(
 
     # ── Per-section content ──
     section_num = 1  # overview was #1
-    for sec in sections:
+    for sec in section_list:
         if sec["id"] == "overview":
             continue
         section_num += 1
@@ -1771,7 +1877,7 @@ def write_callflow_html(
         html.append("</div>\n<hr>")
 
     # ── Section: Statistics ──
-    total_sections = sum(1 for s in sections if s["id"] != "overview")
+    total_sections = sum(1 for s in section_list if s["id"] != "overview")
     html.append(f"""<h2 id="stats">Project Statistics</h2>
 
 <div class="grid">
@@ -1961,10 +2067,26 @@ def write_callflow_html(
 </body>
 </html>""")
 
-    # Write output
+    # Publish only after rendering. Managed destinations are receipt-owned;
+    # proven external destinations use the crash-recoverable unmanaged writer.
     output = "\n".join(html)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(output, encoding="utf-8")
+    payload = output.encode("utf-8")
+    from graphify.transaction import (
+        _publish_single_derived_artifact,
+        managed_output_containing,
+    )
+    graph_output = paths["graph"].expanduser().resolve().parent
+    resolved_graph = paths["graph"].expanduser().resolve()
+    source_authority = managed_output_containing(resolved_graph)
+    source_is_managed = source_authority == graph_output or graph is None
+    _publish_single_derived_artifact(
+        snapshot,
+        graph_path=paths["graph"],
+        output_path=output_path,
+        payload=payload,
+        source_managed=source_is_managed,
+        artifact_kind="callflow",
+    )
 
     # Summary
     mermaid_count = output.count('<div class="mermaid">')

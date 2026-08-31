@@ -2,6 +2,11 @@
 
 Load this when the user ran `/graphify add <url>` or passed `--watch`. Neither is part of the default build.
 
+Watcher rebuild intent is durable and at-least-once. Do not delete or rewrite
+the transaction queue manually, and do not treat `.pending_changes` as the
+authority source. A pending or incomplete generation must be recovered through
+the exact immutable transaction token before publication resumes.
+
 ## For /graphify add
 
 Fetch a URL and add it to the corpus, then update the graph.
@@ -54,7 +59,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {

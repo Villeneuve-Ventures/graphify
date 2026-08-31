@@ -200,6 +200,19 @@ def _call_tool(client, headers, name, arguments, rid) -> str:
     return resp.json()["result"]["content"][0]["text"]
 
 
+def test_pending_managed_graph_is_rejected_by_http_tool(tmp_path):
+    from graphify.transaction import begin_transaction
+
+    graph_path = Path(_graph_file(tmp_path))
+    begin_transaction("runtime", tmp_path, output=graph_path.parent)
+    app = serve_mod._build_http_app(str(graph_path), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        result = _call_tool(client, headers, "graph_stats", {}, rid=2)
+    assert "Error executing graph_stats" in result
+    assert "receipt" in result.lower()
+
+
 def test_project_path_is_optional_on_every_tool(tmp_path):
     """Multi-project support is additive: every tool gains an optional
     project_path, and none of them makes it required."""
@@ -237,6 +250,107 @@ def test_bad_project_path_errors_without_killing_server(tmp_path):
                          {"project_path": str(tmp_path / "does-not-exist")}, rid=2)
         assert "not found" in bad.lower()
         assert "Nodes: 2" in _call_tool(client, headers, "graph_stats", {}, rid=3)
+
+
+def test_cached_context_is_fenced_when_protocol_becomes_pending(tmp_path):
+    from graphify.transaction import begin_transaction
+
+    graph_path = _graph_file(tmp_path)
+    root = tmp_path / "corpus"
+    root.mkdir()
+    app = serve_mod._build_http_app(graph_path, json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        assert "Nodes: 2" in _call_tool(
+            client, headers, "graph_stats", {}, rid=2
+        )
+        before = Path(graph_path).stat()
+        begin_transaction("runtime", root, output=tmp_path)
+        after = Path(graph_path).stat()
+        assert (before.st_mtime_ns, before.st_size) == (
+            after.st_mtime_ns,
+            after.st_size,
+        )
+        blocked = _call_tool(client, headers, "graph_stats", {}, rid=3)
+        assert "protocol" in blocked.lower() or "pending" in blocked.lower()
+
+
+def test_cached_context_refreshes_when_receipt_artifacts_change_without_graph_change(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+
+    graph_path = Path(_graph_file(tmp_path))
+    payload = graph_path.read_bytes()
+    base = transaction_module.GraphSnapshot(
+        data=json.loads(payload),
+        generation=1,
+        graph_path=graph_path,
+        payload=payload,
+        digest="a" * 64,
+        artifacts={"GRAPH_REPORT.md": b"old report"},
+        receipt_digest="b" * 64,
+    )
+    changed = transaction_module.GraphSnapshot(
+        data=json.loads(payload),
+        generation=2,
+        graph_path=graph_path,
+        payload=payload,
+        digest=base.digest,
+        artifacts={"GRAPH_REPORT.md": b"new report"},
+        receipt_digest="c" * 64,
+    )
+    calls = 0
+
+    def snapshots(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return base if calls == 1 else changed
+
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", snapshots)
+    app = serve_mod._build_http_app(str(graph_path), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        response = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "resources/read",
+                "params": {"uri": "graphify://report"},
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["result"]["contents"][0]["text"] == "new report"
+
+
+def test_cached_context_refreshes_uncached_learning_overlay(tmp_path, monkeypatch):
+    import graphify.reflect as reflect_module
+
+    overlays = iter(
+        (
+            {"a": {"status": "contested", "stale": False}},
+            {"a": {"status": "preferred", "stale": False}},
+        )
+    )
+    monkeypatch.setattr(
+        reflect_module,
+        "load_learning_overlay",
+        lambda _path: next(overlays),
+    )
+    app = serve_mod._build_http_app(_graph_file(tmp_path), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        result = _call_tool(
+            client,
+            headers,
+            "query_graph",
+            {"question": "Alpha"},
+            rid=2,
+        )
+    assert "learning=preferred" in result
+    assert "learning=contested" not in result
 
 
 def test_stateless_mode_initialize(tmp_path):

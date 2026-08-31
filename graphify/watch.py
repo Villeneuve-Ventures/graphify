@@ -6,27 +6,26 @@ import os
 import posixpath
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 # Single source of truth in graphify.paths (#1423); re-exported as _GRAPHIFY_OUT.
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 _PENDING_FILENAME = ".pending_changes"
-_PENDING_DRAIN_MAX_PASSES = 20
 
 
 def _queue_pending(out_dir: Path, changed_paths: list[Path]) -> None:
     """Append ``changed_paths`` to ``out_dir/.pending_changes`` (one per line).
 
-    Used by a post-commit hook process that cannot acquire ``_rebuild_lock``
-    so its change set is not silently dropped (#1059). The lock-holding
-    process drains this file before and after its rebuild and merges the
-    contents with its own change set.
+    This is an old-process compatibility signal for clients that predate the
+    canonical durable rebuild queue.  Current rebuilds checkpoint the file
+    without unlinking it and coordinate through the transaction protocol.
 
     Opened in append mode so concurrent writers do not clobber each other on
     POSIX; each ``write()`` of a small payload is effectively atomic. A
     trailing newline is always written so partial-line corruption stays
-    confined to the offending entry and is skipped on drain.
+    confined to the offending entry.
     """
     if not changed_paths:
         return
@@ -35,40 +34,6 @@ def _queue_pending(out_dir: Path, changed_paths: list[Path]) -> None:
     payload = "".join(f"{os.fspath(p)}\n" for p in changed_paths)
     with open(pending, "a", encoding="utf-8") as fh:
         fh.write(payload)
-
-
-def _drain_pending(out_dir: Path) -> list[Path]:
-    """Read + unlink ``out_dir/.pending_changes`` and return deduplicated paths.
-
-    Returns an empty list if the file does not exist. Empty/whitespace lines
-    are silently skipped so a partial concurrent write that left only a
-    fragment cannot poison the merge.
-    """
-    pending = out_dir / _PENDING_FILENAME
-    if not pending.exists():
-        return []
-    try:
-        raw = pending.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    # Unlink BEFORE returning so a crash between read and process retains the
-    # data in the next caller's view via the lines we are about to return —
-    # i.e. losing the file after reading is fine, losing it before would be a
-    # bug. Use missing_ok to tolerate a racing drain on platforms where
-    # rename/unlink may interleave.
-    with contextlib.suppress(FileNotFoundError):
-        pending.unlink()
-    seen: set[str] = set()
-    out: list[Path] = []
-    for line in raw.splitlines():
-        s = line.strip()
-        if not s or s in seen:
-            continue
-        seen.add(s)
-        out.append(Path(s))
-    return out
-
-
 # Build options that must survive into later rebuilds. The initial `extract`
 # scan honours `--exclude`, but `update`/`watch`/hook rebuilds re-run detect()
 # and would silently re-include excluded paths unless the patterns are persisted
@@ -591,6 +556,11 @@ def _node_community_map(graph_data: dict) -> dict[str, int]:
 def _canonical_graph_for_compare(graph_data: dict) -> dict:
     canonical = dict(graph_data)
     canonical.pop("built_at_commit", None)
+    graph_metadata = canonical.get("graph")
+    if isinstance(graph_metadata, dict):
+        graph_metadata = dict(graph_metadata)
+        graph_metadata.pop("_graphify_protocol", None)
+        canonical["graph"] = graph_metadata
     for key in ("nodes", "links", "edges", "hyperedges"):
         if key in canonical and isinstance(canonical[key], list):
             canonical[key] = sorted(
@@ -603,6 +573,11 @@ def _canonical_graph_for_compare(graph_data: dict) -> dict:
 def _canonical_topology_for_compare(graph_data: dict) -> dict:
     canonical = dict(graph_data)
     canonical.pop("built_at_commit", None)
+    graph_metadata = canonical.get("graph")
+    if isinstance(graph_metadata, dict):
+        graph_metadata = dict(graph_metadata)
+        graph_metadata.pop("_graphify_protocol", None)
+        canonical["graph"] = graph_metadata
 
     nodes = canonical.get("nodes")
     if isinstance(nodes, list):
@@ -773,6 +748,7 @@ def _rebuild_code(
     no_cluster: bool = False,
     acquire_lock: bool = True,
     block_on_lock: bool = False,
+    output_override: Path | None = None,
 ) -> bool:
     """Re-run AST extraction + build + optional cluster + report for code files. No LLM needed.
 
@@ -800,57 +776,209 @@ def _rebuild_code(
     if not _stabilize_rebuild_cwd(watch_path):
         return False
 
-    out = watch_path / _GRAPHIFY_OUT
+    out = output_override if output_override is not None else watch_path / _GRAPHIFY_OUT
     if acquire_lock:
-        # #1059: incremental (changed_paths is not None) hooks must not drop
-        # their change set when another rebuild is already running. Queue
-        # before attempting the lock so a non-blocking failure still records
-        # the work; the lock-holder drains the queue and merges it in. Full-
-        # corpus rebuilds skip the queue entirely — they already cover every
-        # file, so there is nothing to merge.
-        if changed_paths is not None and not block_on_lock:
-            _queue_pending(out, list(changed_paths))
-        with _rebuild_lock(out, blocking=block_on_lock) as got:
-            if not got:
-                print("[graphify watch] Rebuild already in progress for "
-                      f"{watch_path.resolve()} - changes queued.")
+        from graphify.transaction import (
+            GRAPH_WATERMARK_KEY,
+            PendingTransactionError,
+            PublicationPlan,
+            _discard_report_only_directory,
+            admit_report_auxiliaries,
+            begin_transaction,
+            cancel_unpublished_transaction,
+            claim_rebuild_queue,
+            closing_step,
+            close_if_queue_empty,
+            commit_publication_plan,
+            complete_rebuild_claim,
+            finish_transaction,
+            open_graph_snapshot,
+            owned_step,
+            publication_plan_from_directory,
+            queue_rebuild,
+        )
+
+        actual_out = watch_path / _GRAPHIFY_OUT
+        baseline_snapshot = None
+        queued = queue_rebuild(
+            "update" if changed_paths is not None else "full",
+            watch_path,
+            output=actual_out,
+            changed_paths=changed_paths,
+            source="watch",
+            legacy_pending_name=_PENDING_FILENAME,
+        )
+        baseline_graph: dict | None = None
+        baseline_artifacts: dict[str, bytes] = {}
+        report_auxiliaries: dict[str, bytes] = {}
+        if (actual_out / "graph.json").is_file():
+            try:
+                baseline_snapshot = open_graph_snapshot(
+                    actual_out / "graph.json",
+                    purpose="watch-prepare",
+                )
+                baseline_graph = baseline_snapshot.data
+                baseline_artifacts = dict(baseline_snapshot.artifacts)
+                report_auxiliaries = admit_report_auxiliaries(baseline_snapshot)
+            except PendingTransactionError as exc:
+                print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
-            # Lock acquired. Drain anything queued by earlier contenders
-            # (including, importantly, the paths we just queued ourselves)
-            # and merge with our own change set so a single rebuild covers
-            # everything outstanding.
-            if changed_paths is not None:
-                merged = _merge_changed_paths(changed_paths, _drain_pending(out))
-            else:
-                # Full-corpus rebuild supersedes any queued incremental work.
-                _drain_pending(out)
-                merged = None
-            ok = _rebuild_code(
+        # Compatibility signal for an already-running pre-transaction watcher:
+        # probe the legacy lock, release it immediately, and rely exclusively
+        # on durable transaction state for all subsequent ownership.
+        with _rebuild_lock(actual_out, blocking=block_on_lock) as got:
+            if not got:
+                # Preserve the compatibility signal only after the canonical
+                # queue CAS has captured the intent, and only for an older
+                # lock-holder that may not read the durable queue itself.
+                if changed_paths is not None:
+                    _queue_pending(actual_out, list(changed_paths))
+                print(
+                    "[graphify watch] Rebuild already in progress for "
+                    f"{watch_path.resolve()} - changes queued."
+                )
+                return False
+        try:
+            transaction = begin_transaction(
+                "runtime",
                 watch_path,
-                changed_paths=merged,
-                follow_symlinks=follow_symlinks,
-                force=force,
-                no_cluster=no_cluster,
-                acquire_lock=False,
+                output=actual_out,
+                expected_snapshot=baseline_snapshot,
             )
-            # Late-arrival drain: another hook may have queued work while we
-            # were rebuilding. Loop up to _PENDING_DRAIN_MAX_PASSES times so a
-            # storm of commits eventually quiesces without livelocking. A full
-            # rebuild already saw everything, so skip this for changed_paths is None.
-            if merged is not None:
-                for _ in range(_PENDING_DRAIN_MAX_PASSES):
-                    late = _drain_pending(out)
-                    if not late:
-                        break
-                    ok = _rebuild_code(
-                        watch_path,
-                        changed_paths=late,
-                        follow_symlinks=follow_symlinks,
-                        force=force,
-                        no_cluster=no_cluster,
-                        acquire_lock=False,
-                    ) and ok
-            return ok
+        except PendingTransactionError as exc:
+            print(f"[graphify watch] Rebuild deferred: {exc}")
+            return False
+        claim = claim_rebuild_queue(transaction, queued.drainer)
+        receipt_digest: str | None = None
+        while True:
+            if not claim.items:
+                if receipt_digest is None:
+                    cancel_unpublished_transaction(transaction)
+                    return True
+                with closing_step(transaction, drainer=claim.drainer):
+                    complete_rebuild_claim(
+                        transaction, claim, receipt_digest=receipt_digest
+                    )
+                    if close_if_queue_empty(
+                        transaction, receipt_digest=receipt_digest
+                    ):
+                        return True
+                finish_transaction(transaction)
+                baseline_snapshot = open_graph_snapshot(
+                    actual_out / "graph.json", purpose="watch-prepare"
+                )
+                transaction = begin_transaction(
+                    "runtime",
+                    watch_path,
+                    output=actual_out,
+                    expected_snapshot=baseline_snapshot,
+                )
+                claim = claim_rebuild_queue(transaction, transaction.drainer)
+                receipt_digest = None
+                continue
+            full = any(item["kind"] == "full" for item in claim.items)
+            claimed_paths: list[list[Path]] = []
+            for item in claim.items:
+                values = item.get("changed_paths")
+                if isinstance(values, list):
+                    claimed_paths.append(
+                        [Path(value) for value in values if isinstance(value, str)]
+                    )
+            merged = None if full else _merge_changed_paths(
+                changed_paths,
+                *claimed_paths,
+            )
+            changed_paths = None
+            # Keep preparation outside the watched corpus so detect/extract cannot
+            # ingest its own copied graph state on a subsequent rebuild.
+            with tempfile.TemporaryDirectory(
+                prefix="graphify-prepare-"
+            ) as prepared_name:
+                prepared = Path(prepared_name)
+                for name, payload in baseline_artifacts.items():
+                    if name == "graph.json":
+                        continue
+                    target = prepared / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(payload)
+                for name, payload in report_auxiliaries.items():
+                    target = prepared / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(payload)
+                if baseline_graph is not None:
+                    graph_metadata = baseline_graph.get("graph")
+                    if isinstance(graph_metadata, dict):
+                        graph_metadata = dict(graph_metadata)
+                        graph_metadata.pop(GRAPH_WATERMARK_KEY, None)
+                        baseline_graph["graph"] = graph_metadata
+                    (prepared / "graph.json").write_text(
+                        json.dumps(baseline_graph), encoding="utf-8"
+                    )
+                ok = _rebuild_code(
+                    watch_path,
+                    changed_paths=merged,
+                    follow_symlinks=follow_symlinks,
+                    force=force,
+                    no_cluster=no_cluster,
+                    acquire_lock=False,
+                    output_override=prepared,
+                )
+                if not ok:
+                    return False
+                graph_path = prepared / "graph.json"
+                manifest_path = prepared / "manifest.json"
+                if not graph_path.is_file() or not manifest_path.is_file():
+                    print("[graphify watch] Rebuild failed: prepared graph or manifest missing")
+                    return False
+                graph_data = json.loads(graph_path.read_text(encoding="utf-8"))
+                graph_metadata = graph_data.get("graph")
+                if not isinstance(graph_metadata, dict):
+                    graph_metadata = {}
+                    graph_data["graph"] = graph_metadata
+                graph_metadata[GRAPH_WATERMARK_KEY] = {
+                    "schema": 1,
+                    "protocol_epoch": 1,
+                    "generation": transaction.generation,
+                    "state": "active",
+                }
+                graph_payload = json.dumps(
+                    graph_data, ensure_ascii=False, separators=(",", ":")
+                ).encode("utf-8")
+                manifest_payload = manifest_path.read_bytes()
+                (prepared / ".graphify_learning.json").unlink(missing_ok=True)
+                _discard_report_only_directory(prepared / "memory")
+                plan = publication_plan_from_directory(
+                    prepared, prior_inventory=baseline_artifacts
+                )
+                payloads = dict(plan.payloads)
+                payloads["graph.json"] = graph_payload
+                payloads["manifest.json"] = manifest_payload
+                generation = commit_publication_plan(
+                    transaction, PublicationPlan(payloads, plan.deletions)
+                )
+                with closing_step(transaction, drainer=claim.drainer):
+                    receipt_digest = generation.digest
+                    complete_rebuild_claim(
+                        transaction, claim, receipt_digest=receipt_digest
+                    )
+                    if close_if_queue_empty(
+                        transaction, receipt_digest=receipt_digest
+                    ):
+                        return True
+                finish_transaction(transaction)
+                baseline_snapshot = open_graph_snapshot(
+                    actual_out / "graph.json", purpose="watch-prepare"
+                )
+                transaction = begin_transaction(
+                    "runtime",
+                    watch_path,
+                    output=actual_out,
+                    expected_snapshot=baseline_snapshot,
+                )
+                baseline_graph = graph_data
+                baseline_artifacts = dict(payloads)
+                claim = claim_rebuild_queue(transaction, transaction.drainer)
+                receipt_digest = None
 
     watch_root = watch_path.resolve()
     project_root = Path.cwd().resolve() if not watch_path.is_absolute() else watch_root
@@ -1085,11 +1213,11 @@ def _rebuild_code(
                 # scan but still exist on disk (newly excluded) are pruned
                 # instead of surviving as phantom "deleted" entries (#1908).
                 save_manifest(
-                    detected["files"], kind="ast", root=project_root,
+                    detected["files"], manifest_path=str(out / "manifest.json"), kind="ast", root=project_root,
                     scan_corpus={f for _fl in detected["files"].values() for f in _fl},
                 )
             except Exception:
-                pass
+                raise
 
             # clear stale needs_update flag if present
             flag = out / "needs_update"
@@ -1128,11 +1256,11 @@ def _rebuild_code(
                     from graphify.detect import save_manifest
                     # Full-scan save: prune excluded-but-alive rows (#1908).
                     save_manifest(
-                        detected["files"], kind="ast", root=project_root,
+                        detected["files"], manifest_path=str(out / "manifest.json"), kind="ast", root=project_root,
                         scan_corpus={f for _fl in detected["files"].values() for f in _fl},
                     )
                 except Exception:
-                    pass
+                    raise
                 flag = out / "needs_update"
                 if flag.exists():
                     flag.unlink()
@@ -1210,11 +1338,11 @@ def _rebuild_code(
             from graphify.detect import save_manifest
             # Full-scan save: prune excluded-but-alive rows (#1908).
             save_manifest(
-                detected["files"], kind="ast", root=project_root,
+                detected["files"], manifest_path=str(out / "manifest.json"), kind="ast", root=project_root,
                 scan_corpus={f for _fl in detected["files"].values() for f in _fl},
             )
         except Exception:
-            pass
+            raise
 
         # to_html raises ValueError for graphs > MAX_NODES_FOR_VIZ (5000).
         # Wrap so core outputs (graph.json + GRAPH_REPORT.md) always land.
@@ -1273,22 +1401,107 @@ def check_update(watch_path: Path) -> bool:
     re-extraction via `/graphify --update` — this function only signals
     that the update is needed.
     """
-    flag = Path(watch_path) / _GRAPHIFY_OUT / "needs_update"
-    if flag.exists():
+    from graphify.transaction import PendingTransactionError, open_graph_snapshot
+
+    output = Path(watch_path) / _GRAPHIFY_OUT
+    try:
+        snapshot = open_graph_snapshot(
+            output / "graph.json",
+            purpose="watch-check-update",
+            allow_absent=True,
+            retain_artifacts=("needs_update",),
+            retain_limits={"needs_update": 1},
+        )
+        pending = "needs_update" in snapshot.artifacts
+    except PendingTransactionError as exc:
+        print(
+            "[graphify check-update] Managed graph coordination is unavailable: "
+            f"{exc}"
+        )
+        pending = False
+    if pending:
         print(f"[graphify check-update] Pending non-code changes in {watch_path}.")
         print("[graphify check-update] Run `/graphify --update` to apply semantic re-extraction.")
     return True
 
 
-def _notify_only(watch_path: Path) -> None:
-    """Write a flag file and print a notification (fallback for non-code-only corpora)."""
-    flag = watch_path / _GRAPHIFY_OUT / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1", encoding="utf-8")
+def _notify_only(
+    watch_path: Path, changed_paths: list[Path] | None = None
+) -> None:
+    """Durably queue semantic work and publish its marker through one owner."""
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PendingTransactionError,
+        PublicationPlan,
+        begin_transaction,
+        claim_rebuild_queue,
+        commit_publication_plan,
+        open_graph_snapshot,
+        queue_rebuild,
+        recover_selected_transaction,
+    )
+
+    output = watch_path / _GRAPHIFY_OUT
+    queued = queue_rebuild(
+        "update",
+        watch_path,
+        output=output,
+        changed_paths=changed_paths or [],
+        semantic=True,
+        source="watch-notify",
+    )
+    marker_published = False
+    try:
+        snapshot = open_graph_snapshot(
+            output / "graph.json", purpose="watch-prepare", allow_absent=True
+        )
+        if not snapshot.graph_present:
+            raise PendingTransactionError(
+                "semantic intent is queued until the first graph generation"
+            )
+        transaction = begin_transaction(
+            "runtime", watch_path, output=output, expected_snapshot=snapshot
+        )
+        claim = claim_rebuild_queue(transaction, queued.drainer)
+        if not claim.items:
+            raise PendingTransactionError(
+                "semantic intent is queued for another rebuild owner"
+            )
+        payloads = dict(snapshot.artifacts)
+        graph = json.loads(json.dumps(snapshot.data))
+        metadata = graph.get("graph")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            graph["graph"] = metadata
+        metadata[GRAPH_WATERMARK_KEY] = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "state": "active",
+        }
+        payloads["graph.json"] = json.dumps(
+            graph, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        payloads["needs_update"] = b"1"
+        commit_publication_plan(
+            transaction, PublicationPlan(payloads=payloads, deletions=())
+        )
+        marker_published = True
+        recover_selected_transaction(
+            transaction.kind,
+            watch_path,
+            output=output,
+            expected_transaction_id=transaction.id,
+            expected_generation=transaction.generation,
+            expected_output_identity=transaction.output_identity,
+        )
+    except PendingTransactionError as exc:
+        print(f"[graphify watch] Semantic rebuild queued: {exc}")
     print(f"\n[graphify watch] New or changed files detected in {watch_path}")
     print("[graphify watch] Non-code files changed - semantic re-extraction requires LLM.")
     print("[graphify watch] Run `/graphify --update` in Claude Code to update the graph.")
-    print(f"[graphify watch] Flag written to {flag}")
+    if marker_published:
+        print(f"[graphify watch] Flag published to {output / 'needs_update'}")
 
 
 def _has_non_code(changed_paths: list[Path]) -> bool:
@@ -1377,7 +1590,7 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
                 if has_code:
                     _rebuild_code(watch_path)
                 if has_non_code:
-                    _notify_only(watch_path)
+                    _notify_only(watch_path, batch)
     except KeyboardInterrupt:
         print("\n[graphify watch] Stopped.")
     finally:

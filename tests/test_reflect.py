@@ -538,6 +538,84 @@ def test_cli_reflect_groups_by_community_when_graph_present(tmp_path):
     assert "### Uncategorized" not in body
 
 
+def test_reflect_direct_and_cli_honor_explicit_analysis_and_labels(tmp_path):
+    out = _make_graph(tmp_path)
+    graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+    node = graph["nodes"][0]
+    memory = out / "memory"
+    save_query_result(
+        "override topic",
+        "answer",
+        memory,
+        source_nodes=[node["label"]],
+        outcome="useful",
+    )
+    analysis = tmp_path / "custom-analysis.json"
+    analysis.write_text(
+        json.dumps({"communities": {"999": [str(node["id"])]}}),
+        encoding="utf-8",
+    )
+    labels = tmp_path / "custom-labels.json"
+    labels.write_text(json.dumps({"999": "Explicit Reflection Topic"}), encoding="utf-8")
+
+    direct = tmp_path / "direct-lessons.md"
+    reflect(
+        memory,
+        direct,
+        graph_path=out / "graph.json",
+        analysis_path=analysis,
+        labels_path=labels,
+        now=_NOW,
+    )
+    assert "### Explicit Reflection Topic" in direct.read_text(encoding="utf-8")
+
+    cli = tmp_path / "cli-lessons.md"
+    result = _run(
+        [
+            "reflect",
+            "--graph",
+            str(out / "graph.json"),
+            "--analysis",
+            str(analysis),
+            "--labels",
+            str(labels),
+            "--out",
+            str(cli),
+        ],
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "### Explicit Reflection Topic" in cli.read_text(encoding="utf-8")
+
+
+def test_reflect_rejects_foreign_managed_override_without_mutation(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_out = _make_graph(source)
+    assert _run(["export", "html"], source).returncode == 0
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    foreign_out = _make_graph(foreign)
+    assert _run(["export", "html"], foreign).returncode == 0
+    lessons = source_out / "reflections" / "LESSONS.md"
+    lessons.parent.mkdir()
+    lessons.write_bytes(b"unchanged\n")
+
+    result = _run(
+        [
+            "reflect",
+            "--graph",
+            str(source_out / "graph.json"),
+            "--labels",
+            str(foreign_out / ".graphify_labels.json"),
+        ],
+        source,
+    )
+
+    assert result.returncode != 0
+    assert lessons.read_bytes() == b"unchanged\n"
+
+
 def test_cli_node_existence_gate_drops_stale_node_end_to_end(tmp_path):
     """Through reflect()/CLI with a real graph.json: a cited node that isn't in the
     graph is dropped from LESSONS.md; a real one stays. Exercises _load_known_nodes

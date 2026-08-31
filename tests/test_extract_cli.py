@@ -6,6 +6,25 @@ import pytest
 import graphify.__main__ as mainmod
 
 
+def _make_receiptless_legacy_fixture(graphify_out):
+    """Remove transaction metadata before tests intentionally edit old state."""
+    import json
+
+    graph_path = graphify_out / "graph.json"
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    metadata = graph.get("graph")
+    if isinstance(metadata, dict):
+        metadata.pop("_graphify_protocol", None)
+    graph_path.write_text(json.dumps(graph), encoding="utf-8")
+    for name in (
+        ".graphify_protocol.json",
+        ".graphify_generation.json",
+        ".graphify_drainer.json",
+        ".graphify_predecessor.json",
+    ):
+        (graphify_out / name).unlink(missing_ok=True)
+
+
 def _make_corpus(tmp_path):
     """Minimal corpus: one Go code file + one Markdown doc.
 
@@ -520,6 +539,7 @@ def test_missing_manifest_code_only_preserves_semantic_layer(monkeypatch, tmp_pa
     _run_extract(monkeypatch, ["graphify", "extract", str(corpus),
                                "--code-only", "--out", str(out_dir)])
     graph_path = graphify_out / "graph.json"
+    _make_receiptless_legacy_fixture(graphify_out)
     graph = json.loads(graph_path.read_text())
 
     # 2) inject a committed semantic layer for README.md (nodes + edge + hyperedge)
@@ -555,6 +575,7 @@ def test_missing_manifest_code_only_preserves_semantic_layer(monkeypatch, tmp_pa
 
     # 5) a genuine deletion still evicts the doc's semantic nodes
     (corpus / "README.md").unlink()
+    _make_receiptless_legacy_fixture(graphify_out)
     (graphify_out / "manifest.json").unlink(missing_ok=True)
     _run_extract(monkeypatch, ["graphify", "extract", str(corpus),
                                "--code-only", "--out", str(out_dir)])
@@ -719,6 +740,7 @@ def test_incremental_extract_prunes_newly_excluded_file_not_in_manifest(
 
     # Simulate the pre-#1897 manifest state: x.py was never manifest-listed,
     # so `manifest - corpus` can never flag it.
+    _make_receiptless_legacy_fixture(out_dir / "graphify-out")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest = {k: v for k, v in manifest.items() if "x.py" not in k}
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")

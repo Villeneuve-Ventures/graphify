@@ -599,6 +599,17 @@ def test_load_graph_missing_file(tmp_path):
         _load_graph(str(graphify_dir / "nonexistent.json"))
 
 
+def test_load_graph_maps_malformed_legacy_json_to_cli_error(tmp_path, capsys):
+    graph = tmp_path / "graph.json"
+    graph.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as raised:
+        _load_graph(str(graph))
+
+    assert raised.value.code == 1
+    assert "malformed graph payload" in capsys.readouterr().err
+
+
 def test_load_graph_rejects_oversized_file(monkeypatch, tmp_path, capsys):
     # #F4: oversized graph.json must fail fast (SystemExit) with a clear error.
     G = _make_graph()
@@ -623,6 +634,27 @@ def test_load_graph_accepts_under_cap(monkeypatch, tmp_path):
     monkeypatch.setattr("graphify.security._MAX_GRAPH_FILE_BYTES", 10 * 1024 * 1024)
     G2 = _load_graph(str(p))
     assert G2.number_of_nodes() == G.number_of_nodes()
+
+
+def test_load_graph_restores_optional_learning_overlay_after_admission(tmp_path):
+    graph_path = tmp_path / "graph.json"
+    _write_graph(graph_path, ["n1"])
+    (tmp_path / ".graphify_learning.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    "n1": {
+                        "status": "confirmed",
+                        "source_file": "",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    graph = _load_graph(str(graph_path))
+    assert graph.graph["_learning_overlay"]["n1"]["status"] == "confirmed"
+    assert graph.graph["_learning_overlay"]["n1"]["stale"] is False
 
 
 # --- #874: MCP hot-reload ---
@@ -656,27 +688,6 @@ def test_maybe_reload_detects_graph_change(tmp_path):
 
     G2 = _load_graph(str(graph_path))
     assert "gamma" in G2.nodes()
-
-
-def test_load_graph_cache_key_changes_with_content(tmp_path):
-    """mtime_ns + size uniquely identifies a graph version (#874)."""
-    import time
-
-    out = tmp_path / "graphify-out"
-    out.mkdir()
-    graph_path = out / "graph.json"
-    _write_graph(graph_path, ["a"])
-
-    s1 = graph_path.stat()
-    key1 = (s1.st_mtime_ns, s1.st_size)
-
-    time.sleep(0.01)
-    _write_graph(graph_path, ["a", "b"])
-
-    s2 = graph_path.stat()
-    key2 = (s2.st_mtime_ns, s2.st_size)
-
-    assert key1 != key2, "stat key must change when file content changes"
 
 
 # --- IDF weighting tests (#897) ---

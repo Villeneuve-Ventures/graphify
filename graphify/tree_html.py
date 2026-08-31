@@ -568,15 +568,30 @@ def write_tree_html(
     project_label: Optional[str] = None,
     # kept for CLI compatibility with the older signature; ignored now
     top_k_edges: int = 0,
+    source_managed: Optional[bool] = None,
 ) -> Path:
     from graphify.security import check_graph_file_size_cap
     check_graph_file_size_cap(graph_path)
-    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    from graphify.transaction import (
+        _publish_single_derived_artifact,
+        open_graph_snapshot,
+    )
+    snapshot = open_graph_snapshot(graph_path, purpose="tree-prepare")
+    if source_managed is None:
+        source_managed = snapshot.generation is not None
+    graph = snapshot.data
     tree = build_tree(graph, root=root, max_children=max_children,
                       project_label=project_label)
     title = f"{tree['name']} — graphify tree viewer"
     header = f"{tree['name']} — Knowledge Graph"
     html = emit_html(tree, title=title, header=header)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html, encoding="utf-8")
+    payload = html.encode("utf-8")
+    _publish_single_derived_artifact(
+        snapshot,
+        graph_path=graph_path,
+        output_path=output_path,
+        payload=payload,
+        source_managed=source_managed,
+        artifact_kind="tree",
+    )
     return output_path

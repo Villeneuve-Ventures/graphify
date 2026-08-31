@@ -547,7 +547,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -809,7 +809,8 @@ New-Item -ItemType Directory -Force -Path graphify-out -ErrorAction Stop | Out-N
 & $GraphifyPython -E -P -B -m graphify.interpreter_pointer write graphify-out\.graphify_python
 if ($LASTEXITCODE -ne 0) {{
     Write-Warning "Graphify cannot safely publish the advisory interpreter pointer on Windows; continuing with the freshly discovered interpreter."
-}}'''
+}}
+'''
 
 
 def _compact_posix_guard(script: str) -> str:
@@ -1038,7 +1039,192 @@ def _render_saved_interpreter_commands(
     )
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
+    body = _route_full_build_transaction(body)
+    if artifact_role == "reference":
+        body = _route_reference_transaction(body, platform)
     return _render_advisory_pointer_prose(body)
+
+
+def _route_reference_transaction(body: str, platform: Platform) -> str:
+    """Route pre-finalization reference writes through the prepared capability."""
+    local_exports = r"(?:wiki|neo4j|falkordb|svg|graphml)(?![^\n]*--push)"
+    if platform.shell == "powershell":
+        body = re.sub(
+            rf"(?m)^& \$GraphifyPython -E -P -B -m graphify export ({local_exports})\s*$",
+            lambda match: (
+                "$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B "
+                "-c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH\n"
+                "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+                "& $GraphifyPython -E -P -B -m graphify.transaction "
+                "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' "
+                f"-m graphify export {match.group(1)}"
+            ),
+            body,
+        )
+    else:
+        body = re.sub(
+            rf'(?m)^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export ({local_exports})\s*$',
+            lambda match: (
+                'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+                "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
+                "export GRAPHIFY_TRANSACTION_TOKEN; "
+                '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction '
+                'run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- '
+                f"-m graphify export {match.group(1)}"
+            ),
+            body,
+        )
+
+    if "from graphify.transcribe import transcribe_all" in body:
+        body = body.replace(
+            '"$GRAPHIFY_PYTHON" -E -P -B -c "\nimport json, os, sys',
+            'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+            "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
+            "export GRAPHIFY_TRANSACTION_TOKEN; "
+            '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction '
+            'run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "\n'
+            "import json, os, sys",
+            1,
+        )
+        body = body.replace(
+            '& $GraphifyPython -E -P -B -c "\nimport json, os, sys',
+            "$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B "
+            "-c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH\n"
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+            "& $GraphifyPython -E -P -B -m graphify.transaction "
+            "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -c \"\n"
+            "import json, os, sys",
+            1,
+        )
+        body = body.replace("graphify-out/.graphify_detect.json", ".graphify_detect.json")
+        body = body.replace(
+            "graphify-out/.graphify_transcripts.json", ".graphify_transcripts.json"
+        )
+    return body
+
+
+def _route_full_build_transaction(body: str) -> str:
+    """Route full-build Python blocks through the exact live token runner."""
+    starts = [match.start() for match in re.finditer(r"(?m)^### Step 2(?:\s|$)", body)]
+    if not starts:
+        return body
+    if len(starts) != 1:
+        raise ValueError("full-build transaction fence has duplicate Step 2 markers")
+    start = starts[0]
+    interpreter_boundaries = [
+        match.start()
+        for match in re.finditer(
+            r"(?m)^## Interpreter guard", body[start:]
+        )
+    ]
+    update_boundaries = [
+        match.start()
+        for match in re.finditer(r"(?m)^## For --update", body[start:])
+    ]
+    boundaries = interpreter_boundaries or update_boundaries
+    if len(boundaries) != 1:
+        raise ValueError("full-build transaction fence must have one end marker")
+    end = start + boundaries[0]
+    section = body[start:end]
+    if len(re.findall(r"(?m)^### Step 9(?:\s|$)", section)) != 1:
+        raise ValueError("full-build transaction fence must have one Step 9 marker")
+
+    def route_bash(match: re.Match[str]) -> str:
+        block = match.group(1)
+        commands = (
+            '"$GRAPHIFY_PYTHON" -E -P -B -c',
+            '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
+        )
+        command = next((value for value in commands if value in block), None)
+        mutation_markers = (
+            "write_text(",
+            "write_bytes(",
+            "save_manifest(",
+            "to_json(",
+            "unlink(",
+            "> graphify-out/",
+        )
+        if command is None or not any(
+            marker in block for marker in mutation_markers
+        ):
+            return match.group(0)
+        interpreter = (
+            '"$GRAPHIFY_PYTHON"'
+            if "$GRAPHIFY_PYTHON" in command
+            else '"$(cat graphify-out/.graphify_python)"'
+        )
+        runner = (
+            f"GRAPHIFY_TRANSACTION_TOKEN=$({interpreter} -E -P -B -c "
+            "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
+            "export GRAPHIFY_TRANSACTION_TOKEN; "
+            f"{interpreter} -E -P -B -m graphify.transaction run-prepared-token "
+            '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
+        )
+        routed_block = block.replace(command, "@@GRAPHIFY_RUNNER@@", 1)
+        routed_block = routed_block.replace("graphify-out/", "")
+        routed_block = routed_block.replace("@@GRAPHIFY_RUNNER@@", runner, 1)
+        return match.group(0).replace(block, routed_block, 1)
+
+    section = re.sub(
+        r"```(?:bash|sh)\n(.*?)\n```", route_bash, section, flags=re.DOTALL
+    )
+    export_prefix = (
+        'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+        "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
+        "export GRAPHIFY_TRANSACTION_TOKEN; "
+        '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token '
+        '"$GRAPHIFY_TRANSACTION_TOKEN" -- -m graphify export '
+    )
+    section = re.sub(
+        r'(?m)^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export ((?![^\n]*--push).*)$',
+        lambda match: export_prefix + match.group(1),
+        section,
+    )
+    def route_powershell_export(match: re.Match[str]) -> str:
+        arguments, separator, comment = match.group(2).partition(" #")
+        export_arguments = ", ".join(
+            "'" + value.replace("'", "''") + "'"
+            for value in shlex.split(arguments)
+        )
+        routed = (
+            "$GraphifyExportArgs = @('-E', '-P', '-B', '-m', "
+            "'graphify.transaction', 'run-prepared-token', "
+            "$Env:GRAPHIFY_TRANSACTION_TOKEN, '--', '-m', 'graphify', "
+            f"'export') + @({export_arguments})\n"
+            "& $GraphifyPython @GraphifyExportArgs"
+        )
+        if separator:
+            routed = f"# {comment}\n{routed}"
+        return routed
+
+    section = re.sub(
+        r"(?m)^(& \$GraphifyPython -E -P -B -m graphify export )((?![^\n]*--push).*)$",
+        route_powershell_export,
+        section,
+    )
+    step9 = section.find("### Step 9")
+    if step9 >= 0:
+        tail = section[step9:]
+        if "finalize_prepared_transaction" not in tail:
+            finalize = (
+                'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+                "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
+                "export GRAPHIFY_TRANSACTION_TOKEN; "
+                '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token '
+                '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c \'from graphify.transaction '
+                "import finalize_prepared_transaction; "
+                "finalize_prepared_transaction()'"
+            )
+            cleanup_matches = list(re.finditer(r"(?m)^rm -f ", tail))
+            if not cleanup_matches:
+                raise ValueError("Step 9 cleanup boundary is missing")
+            cleanup_start = cleanup_matches[0].start() - 1
+            cleanup_end = tail.find("\n```", cleanup_start)
+            if cleanup_start < 0 or cleanup_end < 0:
+                raise ValueError("Step 9 cleanup boundary is missing")
+            tail = tail[:cleanup_start] + f"\n{finalize}" + tail[cleanup_end:]
+        section = section[:step9] + tail
+    return body[:start] + section + body[end:]
 
 
 def load_platforms() -> dict[str, Platform]:
@@ -1575,6 +1761,7 @@ def _is_zero_node_guard_fix_line(line: str) -> bool:
         or "to_json(G, communities," in line
         or s == "if not wrote:"
         or "refused to shrink graphify-out/graph.json" in line
+        or "refused to shrink graph.json" in line
         or "Guard BEFORE any write" in line
         or "GRAPH_REPORT.md / analysis sidecar" in line
         or "Persist the graph first" in line
@@ -1832,6 +2019,25 @@ def _is_semantic_cache_scope_fix_line(line: str) -> bool:
     ) or stripped.startswith("saved = save_semantic_cache(")
 
 
+def _is_prepared_transaction_runner_line(line: str) -> bool:
+    """Whether a monolith line routes a managed write through the pinned workspace."""
+    stripped = line.strip()
+    suffix = (
+        " -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import "
+        "GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; "
+        "root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); "
+        "output=(configured if configured.is_absolute() else root / configured).resolve(); "
+        "print(active_transaction_token_path(output))' INPUT_PATH) "
+        '|| exit $?; export GRAPHIFY_TRANSACTION_TOKEN; {interpreter} -E -P -B '
+        '-m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" '
+        '-- -c "'
+    )
+    return stripped in {
+        f'GRAPHIFY_TRANSACTION_TOKEN=$({interpreter}{suffix.format(interpreter=interpreter)}'
+        for interpreter in ('"$GRAPHIFY_PYTHON"', '"$(cat graphify-out/.graphify_python)"')
+    }
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
@@ -1853,6 +2059,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_python314_bootstrap_fix_line,
     _is_saved_interpreter_subcommand_fix_line,
     _is_semantic_cache_scope_fix_line,
+    _is_prepared_transaction_runner_line,
 )
 
 
@@ -1887,13 +2094,83 @@ def _normalise_subcommand_guard(lines: list[str], *, validate_current: bool) -> 
     return lines[:start] + ["", "@@VALIDATED_PYTHON_SUBCOMMAND_GUARD@@", ""] + lines[end:], None
 
 
-def _normalise_issue88_monolith_render(text: str) -> str:
+_PREPARED_WORKSPACE_RELOCATIONS = {
+    "aider": Counter(
+        {
+            "detect = json.loads(Path('.graphify_detect.json').read_text())": 1,
+            '" > .graphify_transcripts.json': 1,
+            "chunks = sorted(glob.glob('.graphify_chunk_*.json'))": 1,
+            "Path('.graphify_semantic_new.json').write_text(json.dumps({": 1,
+            "Path('GRAPH_REPORT.md').write_text(report)": 2,
+            "cost_path = Path('cost.json')": 1,
+        }
+    ),
+    "devin": Counter(
+        {
+            '" > .graphify_detect.json': 1,
+            "detect = json.loads(Path('.graphify_detect.json').read_text())": 4,
+            '" > .graphify_transcripts.json': 1,
+            "Path('.graphify_ast.json').write_text(json.dumps(result, indent=2))": 1,
+            "Path('.graphify_ast.json').write_text(json.dumps({'nodes':[],'edges':[],'input_tokens':0,'output_tokens':0}))": 1,
+            "Path('.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges}))": 1,
+            "Path('.graphify_uncached.txt').write_text('\\n'.join(uncached))": 1,
+            "chunks = sorted(glob.glob('.graphify_chunk_*.json'))": 1,
+            "Path('.graphify_semantic_new.json').write_text(json.dumps({": 1,
+            "cached = json.loads(Path('.graphify_cached.json').read_text()) if Path('.graphify_cached.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}": 1,
+            "new = json.loads(Path('.graphify_semantic_new.json').read_text()) if Path('.graphify_semantic_new.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}": 1,
+            "Path('.graphify_semantic.json').write_text(json.dumps(merged, indent=2))": 1,
+            "ast = json.loads(Path('.graphify_ast.json').read_text())": 1,
+            "sem = json.loads(Path('.graphify_semantic.json').read_text())": 1,
+            "Path('.graphify_extract.json').write_text(json.dumps(merged, indent=2))": 1,
+            "extraction = json.loads(Path('.graphify_extract.json').read_text())": 2,
+            "detection  = json.loads(Path('.graphify_detect.json').read_text())": 2,
+            "Path('GRAPH_REPORT.md').write_text(report)": 2,
+            "Path('.graphify_analysis.json').write_text(json.dumps(analysis, indent=2))": 1,
+            "analysis   = json.loads(Path('.graphify_analysis.json').read_text())": 1,
+            "Path('.graphify_labels.json').write_text(json.dumps({str(k): v for k, v in labels.items()}))": 1,
+            "extract = json.loads(Path('.graphify_extract.json').read_text())": 1,
+            "cost_path = Path('cost.json')": 1,
+        }
+    ),
+}
+
+
+def _normalise_prepared_workspace_paths(text: str, platform_key: str) -> str:
+    """Map only the reviewed line multiset back to pristine-v8 path spelling."""
+    normalised: list[str] = []
+    remaining = _PREPARED_WORKSPACE_RELOCATIONS[platform_key].copy()
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        stripped = content.strip()
+        if remaining[stripped] > 0:
+            remaining[stripped] -= 1
+            content = re.sub(
+                r"Path\('(?!graphify-out/)", "Path('graphify-out/", content
+            )
+            content = re.sub(
+                r"glob\.glob\('(?!graphify-out/)",
+                "glob.glob('graphify-out/",
+                content,
+            )
+            content = content.replace('" > .graphify_', '" > graphify-out/.graphify_')
+        normalised.append(content + ending)
+    if any(remaining.values()):
+        return text
+    return "".join(normalised)
+
+
+def _normalise_issue88_monolith_render(
+    text: str, *, validate_current: bool, platform_key: str
+) -> str:
     """Remove issue-88's mechanical render layer for the frozen-v8 audit.
 
     The underlying monolith content and all earlier sanctioned migrations remain
     audited. This avoids broadening the line allowlist for a discovery block
     deliberately injected into every standalone command block.
     """
+    if validate_current:
+        text = _normalise_prepared_workspace_paths(text, platform_key)
     text = re.sub(
         r"(### Step 1[^\n]*\n.*?```bash\n)(.*?)(\n```)",
         lambda match: match.group(1) + "@@ISSUE88_BOOTSTRAP@@" + match.group(3),
@@ -1932,7 +2209,109 @@ def _normalise_issue88_monolith_render(text: str) -> str:
         "fresh discovery binds the runtime interpreter; `graphify-out/.graphify_python` is advisory metadata only.",
         "`graphify-out/.graphify_python` is freshly validated and overwritten.",
     )
+    text = re.sub(
+        r"GRAPHIFY_TRANSACTION_TOKEN=.*?active_transaction_token_path.*?; "
+        r"export GRAPHIFY_TRANSACTION_TOKEN; "
+        r"(?:GRAPHIFY_TRANSACTION_WORKSPACE=.*?prepared_workspace_path.*?; "
+        r"cd \"\$GRAPHIFY_TRANSACTION_WORKSPACE\" \|\| exit \$\?; )?"
+        r'"\$\(cat graphify-out/\.graphify_python\)" -E -P -B -m '
+        r"graphify\.transaction run-token \"\$GRAPHIFY_TRANSACTION_TOKEN\" -- -c",
+        '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
+        text,
+    )
+    text = re.sub(
+        r'"\$\(cat graphify-out/\.graphify_python\)" -E -P -B -c '
+        r"'from graphify\.transaction import finalize_prepared_transaction; "
+        r"finalize_prepared_transaction\(\)'(?:; ?)?",
+        "",
+        re.sub(
+            r"(?m)^rm -f graphify-out/\.needs_update 2>/dev/null \|\| true\n?",
+            "",
+            text,
+        ),
+    )
     return text
+
+
+def _normalise_provider_push_sequence(
+    text: str, *, validate_current: bool
+) -> tuple[str, str | None]:
+    """Collapse only the exact reviewed provider blocks for the frozen-v8 audit."""
+    heading = re.search(
+        r"(?m)^### Step 7 - Neo4j export \(only if --neo4j(?: or --neo4j-push)? flag\)$",
+        text,
+    )
+    step7b = text.find("### Step 7b - SVG export", heading.end() if heading else 0)
+    push_markers = (
+        "**If `--neo4j-push <uri>`**",
+        "If `--neo4j-push <uri>` was requested",
+    )
+    push_start = min(
+        (
+            position
+            for marker in push_markers
+            if (position := text.find(marker, heading.end() if heading else 0)) >= 0
+        ),
+        default=-1,
+    )
+    if heading is None or push_start < 0 or step7b < 0 or push_start >= step7b:
+        return text, "monolith Neo4j push section is malformed"
+    pre_provider = text[push_start:step7b]
+    if validate_current:
+        expected_pre_provider = (
+            "If `--neo4j-push <uri>` was requested, defer it until the post-finalization\n"
+            "provider block after Step 9.\n\n"
+        )
+        if pre_provider != expected_pre_provider:
+            return text, "monolith deferred provider block drifted"
+    text = (
+        text[: heading.start()]
+        + "### Step 7 - Neo4j export (provider push deferred)"
+        + text[heading.end() : push_start]
+        + "@@POST_FINALIZATION_NEO4J_PUSH@@\n\n"
+        + text[step7b:]
+    )
+    post_heading = text.find("### After Step 9 - Neo4j push")
+    if validate_current:
+        if post_heading < 0:
+            return text, "monolith must contain one post-Step-9 provider section"
+        tell = text.find("Tell the user", post_heading)
+        if tell < 0:
+            return text, "post-Step-9 provider section has no terminal boundary"
+        expected_post = (
+            "### After Step 9 - Neo4j push (only if --neo4j-push flag)\n\n"
+            "Run this only after Step 9 has successfully finalized the prepared generation.\n"
+            "It uses the public CLI to admit the finalized snapshot and does not publish a\n"
+            "local artifact:\n\n"
+            "```bash\n"
+            '"$(cat graphify-out/.graphify_python)" -E -P -B -m graphify export '
+            "neo4j --push bolt://localhost:7687 --user neo4j --password PASSWORD\n"
+            "```\n\n"
+            "Replace the URI, user, and password with the requested values. Uses MERGE - safe to re-run without creating duplicates.\n\n"
+        )
+        if text[post_heading:tell] != expected_post:
+            return text, "post-Step-9 provider block drifted"
+        text = text[:post_heading] + text[tell:]
+    elif post_heading >= 0:
+        return text, "v8 baseline unexpectedly contains a post-Step-9 provider block"
+    return text, None
+
+
+def _validate_provider_push_order(text: str) -> str | None:
+    public_push = re.search(
+        r'^"\$GRAPHIFY_PYTHON" -E -P -B -m graphify export neo4j --push '
+        r"bolt://localhost:7687 --user neo4j --password PASSWORD$",
+        text,
+        flags=re.MULTILINE,
+    )
+    if public_push is None or text.count(" -m graphify export neo4j --push ") != 1:
+        return "monolith must contain one public Neo4j push command"
+    if "push_to_neo4j" in text:
+        return "monolith retained the direct Neo4j provider script"
+    finalize = text.find("finalize_prepared_transaction()")
+    if finalize < 0 or public_push.start() < finalize:
+        return "monolith provider push precedes transaction finalization"
+    return None
 
 
 def monolith_roundtrip(platform: Platform) -> list[str]:
@@ -1958,13 +2337,31 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     if platform.roundtrip_ref is None:
         return [f"[{platform.key}] monolith is missing roundtrip_ref"]
 
-    rendered_text = _normalise_issue88_monolith_render(render(platform)[0].content)
+    rendered_text = render(platform)[0].content
+    provider_error = _validate_provider_push_order(rendered_text)
+    if provider_error:
+        return [f"[{platform.key}] {provider_error}"]
+    rendered_text = _normalise_issue88_monolith_render(
+        rendered_text, validate_current=True, platform_key=platform.key
+    )
+    rendered_text, provider_error = _normalise_provider_push_sequence(
+        rendered_text, validate_current=True
+    )
+    if provider_error:
+        return [f"[{platform.key}] {provider_error}"]
     rendered_lines = rendered_text.splitlines()
     # Strip trigger lines from the original — they are non-spec and their removal
     # (#1180) is a permitted diff.
     original_text = _normalise_issue88_monolith_render(
-        _normalise(_git_show(platform.roundtrip_ref))
+        _normalise(_git_show(platform.roundtrip_ref)),
+        validate_current=False,
+        platform_key=platform.key,
     )
+    original_text, provider_error = _normalise_provider_push_sequence(
+        original_text, validate_current=False
+    )
+    if provider_error:
+        return [f"[{platform.key}] v8 baseline {provider_error}"]
     original_lines = [
         l for l in original_text.splitlines()
         if not _is_trigger_line(l)

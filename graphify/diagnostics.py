@@ -271,11 +271,21 @@ def diagnose_extraction(
 def _read_json_file(path: str | Path) -> dict[str, Any]:
     """Read a JSON graph after applying Graphify's graph-load size cap."""
     from graphify.security import check_graph_file_size_cap
+    from graphify.transaction import PendingTransactionError, open_graph_snapshot
 
     json_path = Path(path)
     check_graph_file_size_cap(json_path)
     try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
+        data = open_graph_snapshot(json_path, purpose="diagnostics").data
+    except PendingTransactionError as exc:
+        if str(exc) == "malformed graph payload":
+            if isinstance(exc.__cause__, (UnicodeDecodeError, json.JSONDecodeError)):
+                raise RuntimeError(
+                    f"Cannot parse {json_path}: {exc.__cause__}. "
+                    "The file may be corrupted — re-run 'graphify extract'."
+                ) from exc
+            raise ValueError("diagnostic input must be a JSON object") from exc
+        raise
     except (json.JSONDecodeError, OSError) as exc:
         raise RuntimeError(
             f"Cannot parse {json_path}: {exc}. "

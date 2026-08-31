@@ -85,12 +85,47 @@ if (-not $GRAPHIFY_PYTHON) {
 if ($LASTEXITCODE -ne 0) { throw "Failed to publish the Graphify interpreter pointer." }
 ```
 
+For a full build only (never for `query`, `path`, `explain`, or another
+read-only fast path), begin the immutable transaction handoff separately:
+
+```powershell
+
+# Full-build transaction handoff. The exact token binds the canonical input
+# root and actual output directory; environment ids/roots alone are not owner authority.
+@@GRAPHIFY_GUARD@@
+$GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c @'
+import sys
+from pathlib import Path
+from graphify.paths import GRAPHIFY_OUT
+from graphify.transaction import begin_transaction, stage_transaction_handoff
+root = Path(sys.argv[1]).resolve(strict=True)
+configured = Path(GRAPHIFY_OUT).expanduser()
+output = (configured if configured.is_absolute() else root / configured).resolve()
+print(stage_transaction_handoff(begin_transaction('full', root, output=output)).path, end='')
+'@ INPUT_PATH
+if ($LASTEXITCODE -ne 0) { throw "Graphify transaction handoff failed." }
+$Env:GRAPHIFY_TRANSACTION_TOKEN = [string]$GRAPHIFY_TRANSACTION_TOKEN
+function Invoke-GraphifyTransactionPython {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$PythonArgs)
+    if (-not $Env:GRAPHIFY_TRANSACTION_TOKEN) {
+        throw "Missing immutable Graphify transaction token."
+    }
+    & $GraphifyPython -E -P -B -m graphify.transaction run-token `
+        $Env:GRAPHIFY_TRANSACTION_TOKEN -- @PythonArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+```
+
 If the import succeeds, print nothing and move straight to Step 2.
 
 For a full build with an explicit `INPUT_PATH`, persist the scan root in a separate block:
 
 ```powershell
-(Resolve-Path INPUT_PATH).Path | Out-File -FilePath graphify-out\.graphify_root -Encoding utf8 -NoNewline
+$GraphifyActiveTokenCode = 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))'; $GraphifyPreparedRootCode = 'import sys; from pathlib import Path; Path(".graphify_root").write_text(str(Path(sys.argv[1]).resolve(strict=True)), encoding="utf-8")'
+$GraphifyPreparedRoot = (Resolve-Path INPUT_PATH).Path
+$GraphifyTransactionToken = & $GraphifyPython -E -P -B -c $GraphifyActiveTokenCode $GraphifyPreparedRoot
+& $GraphifyPython -E -P -B -m graphify.transaction run-prepared-token $GraphifyTransactionToken '--' -c $GraphifyPreparedRootCode $GraphifyPreparedRoot
+if ($LASTEXITCODE -ne 0) { throw "Failed to write the prepared Graphify scan root." }
 ```
 
 Do not run that scan-root block for no-path subcommands such as `query`, `path`,

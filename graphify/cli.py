@@ -6,12 +6,19 @@ module. The path-redirect (`graphify <path>` -> extract) re-enters via a lazy
 import of main to avoid a cli<->__main__ import cycle.
 """
 from __future__ import annotations
+import contextlib
+import io
 import json
 import os
 import sys
+import tempfile
+import time
+from dataclasses import dataclass
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 from pathlib import Path
 
+
+_TRANSACTION_OUTPUT_OVERRIDE: Path | None = None
 
 _SEARCH_NUDGE = json.dumps({
     "hookSpecificOutput": {
@@ -133,7 +140,8 @@ def _stale_graph_sources(
     Cargo.toml manifests) are not misread as stale.
     """
     try:
-        data = json.loads(graph_path.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        data = open_graph_snapshot(graph_path, purpose="stale-source-scan").data
     except Exception:
         return []
     if not isinstance(data, dict):
@@ -212,7 +220,8 @@ def _prune_graph_json_sources(graph_path: Path, stale_sources: list[str]) -> int
     graph's own ``source_file`` spellings, so exact string matching is enough.
     """
     try:
-        data = json.loads(graph_path.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        data = open_graph_snapshot(graph_path, purpose="source-prune").data
     except Exception:
         return 0
     if not isinstance(data, dict):
@@ -410,7 +419,1232 @@ def _reenter_main() -> None:
     main()
 
 
+class _CliArgumentError(ValueError):
+    """The command line cannot be routed without guessing its destination."""
+
+
+@dataclass(frozen=True)
+class _TransactionDestination:
+    graph: Path
+    output: Path
+    root: Path
+
+
+_CLUSTER_VALUE_OPTIONS = frozenset(
+    {
+        "--backend",
+        "--batch-size",
+        "--exclude-hubs",
+        "--graph",
+        "--max-concurrency",
+        "--min-community-size",
+        "--model",
+        "--resolution",
+    }
+)
+_CLUSTER_FLAG_OPTIONS = frozenset(
+    {"--force", "--missing-only", "--no-label", "--no-viz", "--timing"}
+)
+_EXTRACT_VALUE_OPTIONS = frozenset(
+    {
+        "--api-timeout",
+        "--as",
+        "--backend",
+        "--exclude",
+        "--exclude-hubs",
+        "--max-concurrency",
+        "--max-workers",
+        "--mode",
+        "--model",
+        "--out",
+        "--postgres",
+        "--resolution",
+        "--token-budget",
+    }
+)
+_EXTRACT_FLAG_OPTIONS = frozenset(
+    {
+        "--cargo",
+        "--code-only",
+        "--dedup-llm",
+        "--directed",
+        "--force",
+        "--global",
+        "--google-workspace",
+        "--no-cluster",
+        "--no-viz",
+        "--obsidian",
+        "--timing",
+        "--wiki",
+    }
+)
+
+
+def _parse_routing_args(
+    arguments: list[str],
+    *,
+    value_options: frozenset[str],
+    flag_options: frozenset[str],
+) -> tuple[list[str], dict[str, str]]:
+    positionals: list[str] = []
+    values: dict[str, str] = {}
+    index = 0
+    options_enabled = True
+    while index < len(arguments):
+        argument = arguments[index]
+        if options_enabled and argument == "--":
+            options_enabled = False
+            index += 1
+            continue
+        option, separator, inline = argument.partition("=")
+        if options_enabled and option in value_options:
+            if option in values and option != "--exclude":
+                raise _CliArgumentError(f"{option} may be specified only once")
+            if separator:
+                if not inline:
+                    raise _CliArgumentError(f"{option} requires a value")
+                values[option] = inline
+                index += 1
+                continue
+            if index + 1 >= len(arguments) or arguments[index + 1] == "--":
+                raise _CliArgumentError(f"{option} requires a value")
+            value = arguments[index + 1]
+            if not value:
+                raise _CliArgumentError(f"{option} requires a value")
+            values[option] = value
+            index += 2
+            continue
+        if options_enabled and argument in flag_options:
+            index += 1
+            continue
+        if options_enabled and argument.startswith("-"):
+            raise _CliArgumentError(f"unknown option: {argument}")
+        positionals.append(argument)
+        index += 1
+    return positionals, values
+
+
+def _resolve_transaction_destination(cmd: str) -> _TransactionDestination:
+    """Resolve the actual managed graph before any transaction is created."""
+    if cmd not in {"cluster-only", "label"}:
+        raise _CliArgumentError(f"no transaction routing specification for {cmd}")
+    positionals, values = _parse_routing_args(
+        sys.argv[2:],
+        value_options=_CLUSTER_VALUE_OPTIONS,
+        flag_options=_CLUSTER_FLAG_OPTIONS,
+    )
+    if len(positionals) > 1:
+        raise _CliArgumentError(f"{cmd} accepts at most one path")
+    root = Path(positionals[0] if positionals else ".").expanduser().resolve()
+    graph = (
+        Path(values["--graph"]).expanduser().resolve()
+        if "--graph" in values
+        else (root / _GRAPHIFY_OUT / "graph.json").resolve()
+    )
+    return _TransactionDestination(graph=graph, output=graph.parent, root=root)
+
+
+def _resolve_extract_destination() -> _TransactionDestination:
+    positionals, values = _parse_routing_args(
+        sys.argv[2:],
+        value_options=_EXTRACT_VALUE_OPTIONS,
+        flag_options=_EXTRACT_FLAG_OPTIONS,
+    )
+    if len(positionals) > 1:
+        raise _CliArgumentError("extract accepts at most one input path")
+    root = Path(positionals[0] if positionals else ".").expanduser().resolve()
+    output_root = (
+        Path(values["--out"]).expanduser().resolve()
+        if "--out" in values
+        else root
+    )
+    output = output_root / _GRAPHIFY_OUT
+    return _TransactionDestination(
+        graph=(output / "graph.json").resolve(), output=output.resolve(), root=root
+    )
+
+
+def _canonical_extract_argv(root: Path) -> list[str]:
+    """Put the parsed extract target in argv[2] without dropping option spelling."""
+    arguments = sys.argv[2:]
+    options: list[str] = []
+    index = 0
+    options_enabled = True
+    skipped_target = False
+    while index < len(arguments):
+        value = arguments[index]
+        if options_enabled and value == "--":
+            options_enabled = False
+            index += 1
+            continue
+        option = value.partition("=")[0]
+        if options_enabled and option in _EXTRACT_VALUE_OPTIONS:
+            options.append(value)
+            if "=" not in value:
+                options.append(arguments[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        if options_enabled and value in _EXTRACT_FLAG_OPTIONS:
+            options.append(value)
+            index += 1
+            continue
+        if not skipped_target:
+            skipped_target = True
+        else:
+            options.append(value)
+        index += 1
+    return [sys.argv[0], "extract", str(root), *options]
+
+
+def _replace_graph_argument(arguments: list[str], graph: Path) -> list[str]:
+    rewritten = list(arguments)
+    index = 0
+    while index < len(rewritten):
+        if rewritten[index] == "--graph" and index + 1 < len(rewritten):
+            rewritten[index + 1] = str(graph)
+            return rewritten
+        if rewritten[index].startswith("--graph="):
+            rewritten[index] = f"--graph={graph}"
+            return rewritten
+        index += 1
+    return [*rewritten, "--graph", str(graph)]
+
+
+def _transactional_extract() -> None:
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        begin_transaction,
+        cancel_unpublished_transaction,
+        commit_publication_plan,
+        finish_transaction,
+        open_graph_snapshot,
+        publication_plan_from_directory,
+        PublicationPlan,
+    )
+
+    destination = _resolve_extract_destination()
+    captured_out = io.StringIO()
+    captured_err = io.StringIO()
+    original_argv = sys.argv
+    original_output_override = globals()["_TRANSACTION_OUTPUT_OVERRIDE"]
+    success_exit: SystemExit | None = None
+    with tempfile.TemporaryDirectory(prefix="graphify-extract-prepare-") as staging_name:
+        staging_root = Path(staging_name)
+        staging_output = staging_root / "graphify-out"
+        staging_output.mkdir()
+        source_snapshot = open_graph_snapshot(
+            destination.graph,
+            purpose="extract-baseline",
+            allow_absent=True,
+        )
+        if source_snapshot.graph_present:
+            for name, payload in source_snapshot.artifacts.items():
+                target = staging_output / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+            prior_inventory = source_snapshot.artifacts
+        else:
+            prior_inventory = {}
+        staged_graph = staging_output / "graph.json"
+        baseline_graph_data: dict | None = None
+        if staged_graph.is_file():
+            baseline = json.loads(staged_graph.read_text(encoding="utf-8"))
+            metadata = baseline.get("graph")
+            if isinstance(metadata, dict):
+                metadata = dict(metadata)
+                metadata.pop(GRAPH_WATERMARK_KEY, None)
+                baseline["graph"] = metadata
+            baseline_graph_data = baseline
+            staged_graph.write_text(json.dumps(baseline), encoding="utf-8")
+        transaction = begin_transaction(
+            "full",
+            destination.root,
+            output=destination.output,
+            expected_snapshot=source_snapshot,
+        )
+        sys.argv = _canonical_extract_argv(destination.root)
+        globals()["_TRANSACTION_OUTPUT_OVERRIDE"] = staging_output
+        try:
+            with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
+                captured_err
+            ):
+                _dispatch_command("extract")
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                sys.stderr.write(captured_err.getvalue())
+                raise
+            success_exit = exc
+        except BaseException:
+            sys.stderr.write(captured_err.getvalue())
+            raise
+        finally:
+            sys.argv = original_argv
+            globals()["_TRANSACTION_OUTPUT_OVERRIDE"] = original_output_override
+        if "--no-viz" in original_argv:
+            (staging_output / "graph.html").unlink(missing_ok=True)
+        prepared_graph_data = (
+            json.loads(staged_graph.read_text(encoding="utf-8"))
+            if staged_graph.is_file()
+            else None
+        )
+        if (
+            "outputs left untouched." in captured_out.getvalue()
+            and baseline_graph_data is not None
+            and prepared_graph_data == baseline_graph_data
+        ):
+            cancel_unpublished_transaction(transaction)
+            sys.stdout.write(captured_out.getvalue())
+            sys.stderr.write(captured_err.getvalue())
+            if success_exit is not None:
+                raise success_exit
+            return
+        if not staged_graph.is_file():
+            raise RuntimeError("extract completed without a prepared graph.json")
+        graph_data = json.loads(staged_graph.read_text(encoding="utf-8"))
+        graph_metadata = graph_data.get("graph")
+        if not isinstance(graph_metadata, dict):
+            graph_metadata = {}
+            graph_data["graph"] = graph_metadata
+        graph_metadata[GRAPH_WATERMARK_KEY] = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "state": "active",
+        }
+        graph_payload = json.dumps(
+            graph_data, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        manifest = staging_output / "manifest.json"
+        if not manifest.is_file():
+            raise RuntimeError("extract completed without a prepared manifest.json")
+        manifest_payload = manifest.read_bytes()
+        plan = publication_plan_from_directory(
+            staging_output, prior_inventory=prior_inventory
+        )
+        payloads = dict(plan.payloads)
+        payloads["graph.json"] = graph_payload
+        payloads["manifest.json"] = manifest_payload
+        commit_publication_plan(
+            transaction, PublicationPlan(payloads, plan.deletions)
+        )
+        finish_transaction(transaction)
+    sys.stdout.write(captured_out.getvalue())
+    sys.stderr.write(captured_err.getvalue())
+    if success_exit is not None:
+        raise success_exit
+
+
+def _transactional_cluster_only(cmd: str) -> None:
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PublicationPlan,
+        _discard_report_only_directory,
+        admit_report_auxiliaries,
+        begin_transaction,
+        commit_publication_plan,
+        finish_transaction,
+        open_graph_snapshot,
+        publication_plan_from_directory,
+    )
+
+    destination = _resolve_transaction_destination(cmd)
+    source_snapshot = open_graph_snapshot(
+        destination.graph, purpose="publication-prepare"
+    )
+    report_auxiliaries = admit_report_auxiliaries(source_snapshot)
+    source_graph_data = source_snapshot.data
+    destination.output.mkdir(parents=True, exist_ok=True)
+    transaction = begin_transaction(
+        "runtime",
+        destination.root,
+        output=destination.output,
+        expected_snapshot=source_snapshot,
+    )
+    captured_out = io.StringIO()
+    captured_err = io.StringIO()
+    original_argv = sys.argv
+    with tempfile.TemporaryDirectory(prefix="graphify-cli-prepare-") as staging_name:
+        staging = Path(staging_name)
+        for name, payload in source_snapshot.artifacts.items():
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        for name, payload in report_auxiliaries.items():
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        staged_graph = staging / destination.graph.name
+        graph_data = source_graph_data
+        graph_metadata = graph_data.get("graph")
+        if isinstance(graph_metadata, dict):
+            graph_metadata = dict(graph_metadata)
+            graph_metadata.pop(GRAPH_WATERMARK_KEY, None)
+            graph_data["graph"] = graph_metadata
+        staged_graph.write_text(json.dumps(graph_data), encoding="utf-8")
+        sys.argv = [
+            *original_argv[:2],
+            *_replace_graph_argument(original_argv[2:], staged_graph),
+        ]
+        try:
+            with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
+                captured_err
+            ):
+                _dispatch_command(cmd)
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                sys.stdout.write(captured_out.getvalue())
+                sys.stderr.write(captured_err.getvalue())
+                raise
+        finally:
+            sys.argv = original_argv
+        if "--no-viz" in original_argv:
+            (staging / "graph.html").unlink(missing_ok=True)
+        published_graph = json.loads(staged_graph.read_text(encoding="utf-8"))
+        published_metadata = published_graph.get("graph")
+        if not isinstance(published_metadata, dict):
+            published_metadata = {}
+            published_graph["graph"] = published_metadata
+        published_metadata[GRAPH_WATERMARK_KEY] = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "state": "active",
+        }
+        graph_payload = json.dumps(
+            published_graph, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        manifest = staging / "manifest.json"
+        if not manifest.is_file():
+            manifest.write_bytes(b"{}")
+        manifest_payload = manifest.read_bytes()
+        (staging / ".graphify_learning.json").unlink(missing_ok=True)
+        _discard_report_only_directory(staging / "memory")
+        plan = publication_plan_from_directory(
+            staging, prior_inventory=source_snapshot.artifacts
+        )
+        payloads = dict(plan.payloads)
+        payloads[destination.graph.name] = graph_payload
+        payloads["manifest.json"] = manifest_payload
+        commit_publication_plan(
+            transaction,
+            PublicationPlan(payloads, plan.deletions),
+            graph_name=destination.graph.name,
+        )
+        finish_transaction(transaction)
+    sys.stdout.write(captured_out.getvalue())
+    sys.stderr.write(captured_err.getvalue())
+
+
+def _export_graph_path() -> Path:
+    arguments = sys.argv[3:]
+    for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
+        if argument == "--graph" and index + 1 < len(arguments):
+            return Path(arguments[index + 1]).expanduser().resolve()
+        if argument.startswith("--graph="):
+            return Path(argument.split("=", 1)[1]).expanduser().resolve()
+    if len(sys.argv) > 2 and sys.argv[2] == "callflow-html":
+        positional = _callflow_positional_graph_index(arguments)
+        if positional is not None:
+            candidate = Path(arguments[positional]).expanduser()
+            if candidate.name == "graph.json" or candidate.suffix.lower() == ".json":
+                return candidate.resolve()
+            if (candidate / "graph.json").exists():
+                return (candidate / "graph.json").resolve()
+            return (candidate / _GRAPHIFY_OUT / "graph.json").resolve()
+    if os.environ.get("GRAPHIFY_PREPARED_OUTPUT") == "1":
+        return Path("graph.json").resolve()
+    return (Path(_GRAPHIFY_OUT) / "graph.json").resolve()
+
+
+def _export_graph_was_explicit() -> bool:
+    arguments = sys.argv[3:]
+    return any(
+        argument == "--graph" or argument.startswith("--graph=")
+        for argument in arguments[: arguments.index("--") if "--" in arguments else None]
+    ) or (
+        len(sys.argv) > 2
+        and sys.argv[2] == "callflow-html"
+        and _callflow_positional_graph_index(arguments) is not None
+    )
+
+
+def _callflow_positional_graph_index(arguments: list[str]) -> int | None:
+    value_options = {
+        "--graph",
+        "--labels",
+        "--report",
+        "--sections",
+        "--output",
+        "--lang",
+        "--max-sections",
+        "--diagram-scale",
+        "--max-diagram-nodes",
+        "--max-diagram-edges",
+    }
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            return index + 1 if index + 1 < len(arguments) else None
+        if argument in value_options:
+            index += 2
+            continue
+        if argument.startswith("--"):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _replace_export_graph_argument(
+    arguments: list[str], graph: Path, *, subcmd: str
+) -> list[str]:
+    option_arguments = arguments[: arguments.index("--") if "--" in arguments else None]
+    if any(
+        argument == "--graph" or argument.startswith("--graph=")
+        for argument in option_arguments
+    ):
+        return _replace_graph_argument(arguments, graph)
+    rewritten = list(arguments)
+    if subcmd == "callflow-html":
+        positional = _callflow_positional_graph_index(rewritten)
+        if positional is not None:
+            rewritten[positional] = str(graph)
+            return rewritten
+    if "--" in rewritten:
+        boundary = rewritten.index("--")
+        return [
+            *rewritten[:boundary],
+            "--graph",
+            str(graph),
+            *rewritten[boundary:],
+        ]
+    return [*rewritten, "--graph", str(graph)]
+
+
+_EXPORT_PATH_OPTIONS = frozenset(
+    {"--graph", "--labels", "--report", "--sections", "--output", "--dir"}
+)
+
+
+def _normalize_export_routing(arguments: list[str]) -> list[str]:
+    """Canonicalize path options once and reject ambiguous export routing."""
+    if not arguments:
+        raise _CliArgumentError("export requires a subcommand")
+    subcmd = arguments[0]
+    normalized = [subcmd]
+    seen: set[str] = set()
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            normalized.append(argument)
+            boundary_values = arguments[index + 1 :]
+            normalized.extend(boundary_values)
+            break
+        option, separator, inline = argument.partition("=")
+        if option in _EXPORT_PATH_OPTIONS:
+            if option in seen:
+                raise _CliArgumentError(f"{option} may be specified only once")
+            if separator:
+                if not inline:
+                    raise _CliArgumentError(f"{option} requires a value")
+                value = inline
+                index += 1
+            else:
+                if index + 1 >= len(arguments) or not arguments[index + 1]:
+                    raise _CliArgumentError(f"{option} requires a value")
+                value = arguments[index + 1]
+                index += 2
+            seen.add(option)
+            normalized.extend((option, value))
+            continue
+        normalized.append(argument)
+        index += 1
+    if subcmd == "callflow-html":
+        # Value arguments are not positional source candidates.
+        parsed_positionals: list[str] = []
+        skip = False
+        after_boundary = False
+        for argument in normalized[1:]:
+            if argument == "--":
+                after_boundary = True
+                continue
+            if after_boundary:
+                parsed_positionals.append(argument)
+                continue
+            if skip:
+                skip = False
+                continue
+            if argument in _EXPORT_PATH_OPTIONS or argument in {
+                "--lang",
+                "--max-sections",
+                "--diagram-scale",
+                "--max-diagram-nodes",
+                "--max-diagram-edges",
+            }:
+                skip = True
+                continue
+            if not argument.startswith("-"):
+                parsed_positionals.append(argument)
+        if len(parsed_positionals) > 1:
+            raise _CliArgumentError("callflow-html accepts at most one graph or directory")
+        if parsed_positionals and "--graph" in seen:
+            raise _CliArgumentError(
+                "callflow-html graph source is ambiguous between positional and --graph"
+            )
+    if "--output" in seen and subcmd != "callflow-html":
+        raise _CliArgumentError("--output is only valid for callflow-html")
+    if "--dir" in seen and subcmd != "obsidian":
+        raise _CliArgumentError("--dir is only valid for obsidian")
+    return normalized
+
+
+def _export_destination_is_managed(graph: Path, *, source_managed: bool) -> bool:
+    if not source_managed:
+        return False
+    arguments = sys.argv[3:]
+    if "--push" in arguments or any(value.startswith("--push=") for value in arguments):
+        return False
+    subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+    option = "--dir" if subcmd == "obsidian" else "--output" if subcmd == "callflow-html" else None
+    if option is None:
+        return True
+    for index, argument in enumerate(arguments):
+        if argument == option and index + 1 < len(arguments):
+            target = Path(arguments[index + 1]).expanduser().resolve()
+            return target == graph.parent or graph.parent in target.parents
+        if argument.startswith(f"{option}="):
+            target = Path(argument.split("=", 1)[1]).expanduser().resolve()
+            return target == graph.parent or graph.parent in target.parents
+    return True
+
+
+def _export_destination_path(graph: Path) -> Path:
+    subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+    if subcmd == "obsidian":
+        return _export_option_path(sys.argv[3:], "--dir") or graph.parent / "obsidian"
+    if subcmd == "callflow-html":
+        return _export_option_path(sys.argv[3:], "--output") or graph.parent
+    return graph.parent
+
+
+def _replace_export_path_argument(
+    arguments: list[str], option: str, target: Path
+) -> list[str]:
+    rewritten = list(arguments)
+    for index, argument in enumerate(rewritten):
+        if argument == "--":
+            break
+        if argument == option and index + 1 < len(rewritten):
+            rewritten[index + 1] = str(target)
+            return rewritten
+        if argument.startswith(f"{option}="):
+            rewritten[index] = f"{option}={target}"
+            return rewritten
+    return [*rewritten, option, str(target)]
+
+
+def _export_option_path(arguments: list[str], option: str) -> Path | None:
+    for index, argument in enumerate(arguments):
+        if argument == "--":
+            break
+        if argument == option and index + 1 < len(arguments):
+            return Path(arguments[index + 1]).expanduser().resolve()
+        if argument.startswith(f"{option}="):
+            return Path(argument.split("=", 1)[1]).expanduser().resolve()
+    return None
+
+
+def _transactional_export_entry() -> None:
+    original_argv = sys.argv
+    normalized = _normalize_export_routing(original_argv[2:])
+    sys.argv = [*original_argv[:2], *normalized]
+    try:
+        option_prefix = normalized[: normalized.index("--") if "--" in normalized else None]
+        if normalized[0] not in {
+            "html", "callflow-html", "obsidian", "wiki", "svg", "graphml", "neo4j", "falkordb"
+        } or any(value in {"-h", "--help"} for value in option_prefix[1:]):
+            _dispatch_command("export")
+            return
+        _transactional_export()
+    finally:
+        sys.argv = original_argv
+
+
+def _transactional_export() -> None:
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        ManagedAuthorityError,
+        PendingTransactionError,
+        PublicationPlan,
+        admit_snapshot_artifact,
+        begin_transaction,
+        commit_unmanaged_obsidian_batch,
+        commit_unmanaged_bytes,
+        commit_unmanaged_unlink,
+        commit_prepared_bytes,
+        commit_publication_plan,
+        finish_transaction,
+        managed_output_containing,
+        open_external_graph_snapshot,
+        open_graph_snapshot,
+        open_unmanaged_obsidian_inventory,
+        open_unmanaged_file,
+        open_prepared_graph,
+        optional_current_transaction,
+        owned_step,
+        publication_plan_from_directory,
+        unlink_prepared,
+    )
+
+    original_argv = sys.argv
+    graph = _export_graph_path()
+    if not graph.is_file():
+        raise FileNotFoundError(graph)
+    retained_overrides: list[str] = []
+    retained_limits: dict[str, int] = {}
+    if sys.argv[2] == "callflow-html":
+        for option in ("--labels", "--report", "--sections"):
+            selected = _export_option_path(sys.argv[3:], option)
+            if selected is not None and selected.parent == graph.parent:
+                retained_overrides.append(selected.name)
+                retained_limits[selected.name] = (
+                    50 * 1024 * 1024 if option == "--report" else 1024 * 1024
+                )
+    active_transaction = optional_current_transaction(graph.parent)
+    if active_transaction is not None:
+        source_snapshot = open_prepared_graph(active_transaction, graph)
+        revalidated_transaction = optional_current_transaction(graph.parent)
+        if (
+            revalidated_transaction is None
+            or revalidated_transaction.id != active_transaction.id
+        ):
+            raise PendingTransactionError(
+                "prepared export transaction authority changed after admission"
+            )
+        source_managed = True
+    else:
+        configured_output = graph.parent == (Path.cwd() / _GRAPHIFY_OUT).resolve()
+        if _export_graph_was_explicit() and not configured_output:
+            retain_external: list[str] = list(retained_overrides)
+            if sys.argv[2] == "callflow-html":
+                arguments = sys.argv[3:]
+                if not any(
+                    argument == "--report" or argument.startswith("--report=")
+                    for argument in arguments
+                ):
+                    retain_external.append("GRAPH_REPORT.md")
+                if not any(
+                    argument == "--labels" or argument.startswith("--labels=")
+                    for argument in arguments
+                ):
+                    retain_external.append(".graphify_labels.json")
+            try:
+                source_snapshot = open_external_graph_snapshot(
+                    graph,
+                    retain_artifacts=retain_external,
+                    retain_limits=retained_limits,
+                )
+            except ManagedAuthorityError:
+                source_snapshot = open_graph_snapshot(
+                    graph,
+                    purpose="export-admission",
+                    retain_artifacts=retained_overrides,
+                    retain_limits=retained_limits,
+                )
+                source_managed = True
+            else:
+                source_managed = False
+        else:
+            source_snapshot = open_graph_snapshot(
+                graph,
+                purpose="export-admission",
+                retain_artifacts=retained_overrides,
+                retain_limits=retained_limits,
+            )
+            source_managed = True
+    explicit_artifacts: dict[str, tuple[str, bytes | None]] = {}
+    artifact_options = [
+        ("--labels", ".graphify_labels.json"),
+        ("--report", "GRAPH_REPORT.md"),
+    ]
+    sections_override = _export_option_path(sys.argv[3:], "--sections")
+    if sys.argv[2] == "callflow-html" and sections_override is not None:
+        artifact_options.append(("--sections", sections_override.name))
+    for option, canonical_name in artifact_options:
+        override = _export_option_path(sys.argv[3:], option)
+        if override is None or (option == "--report" and sys.argv[2] != "callflow-html"):
+            continue
+        explicit_artifacts[option] = (
+            canonical_name,
+            admit_snapshot_artifact(
+                source_snapshot,
+                override,
+                canonical_name=canonical_name,
+            ),
+        )
+    requested_destination = _export_destination_path(graph).resolve()
+    destination_authority = managed_output_containing(requested_destination)
+    prepared_destination = active_transaction is not None and (
+        requested_destination == graph.parent
+        or graph.parent in requested_destination.parents
+    )
+    source_output = (
+        active_transaction.output if active_transaction is not None else graph.parent
+    )
+    if not prepared_destination and destination_authority is not None and (
+        not source_managed or destination_authority != source_output
+    ):
+        raise PendingTransactionError("export destination has foreign managed authority")
+    destination_within_source = (
+        requested_destination == graph.parent
+        or graph.parent in requested_destination.parents
+    )
+    managed_delivery = _export_destination_is_managed(
+        graph, source_managed=source_managed
+    ) and (
+        prepared_destination
+        or source_managed
+        and (
+            destination_authority == source_output
+            or (destination_authority is None and destination_within_source)
+        )
+    )
+    export_subcmd = sys.argv[2]
+    external_obsidian_inventory = None
+    if not managed_delivery and export_subcmd == "obsidian":
+        external_obsidian_inventory = open_unmanaged_obsidian_inventory(
+            requested_destination
+        )
+    external_html_predecessor = None
+    external_html_target = graph.parent / "graph.html"
+    if (
+        not managed_delivery
+        and export_subcmd == "html"
+        and "--no-viz" in original_argv
+    ):
+        external_html_predecessor = open_unmanaged_file(external_html_target)
+    snapshot = source_snapshot
+    captured_out = io.StringIO()
+    captured_err = io.StringIO()
+    normalized_argv = sys.argv
+    success_exit: SystemExit | None = None
+    manifest_payload = snapshot.manifest_payload
+    if manifest_payload is None:
+        if active_transaction is not None:
+            raise PendingTransactionError(
+                "managed export requires an exact prepared manifest"
+            )
+        # Receiptless legacy graphs predate manifest enforcement. A direct
+        # export bootstraps their first coordinated generation with the same
+        # empty-manifest compatibility payload used by legacy extraction.
+        manifest_payload = b"{}"
+    with (
+        tempfile.TemporaryDirectory(prefix="graphify-export-prepare-") as staging_name,
+        tempfile.TemporaryDirectory(prefix="graphify-export-overrides-") as overrides_name,
+    ):
+        staging = Path(staging_name)
+        overrides = Path(overrides_name)
+        external_target: Path | None = None
+        for name, payload in snapshot.artifacts.items():
+            target = staging / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+        if not managed_delivery and export_subcmd == "obsidian":
+            if external_obsidian_inventory is None:
+                raise PendingTransactionError(
+                    "external Obsidian inventory is unavailable"
+                )
+            external_vault = staging / "__external_obsidian"
+            external_vault.mkdir()
+            for name, entry in external_obsidian_inventory.files.items():
+                target = external_vault / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(entry.payload)
+            if external_obsidian_inventory.manifest_payload is not None:
+                (external_vault / ".graphify_obsidian_manifest.json").write_text(
+                    json.dumps(
+                        {"files": sorted(external_obsidian_inventory.files)},
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+        staged_graph = staging / graph.name
+        graph_data = snapshot.data
+        metadata = graph_data.get("graph")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            metadata.pop(GRAPH_WATERMARK_KEY, None)
+            graph_data["graph"] = metadata
+        staged_graph.write_text(json.dumps(graph_data), encoding="utf-8")
+        rewritten = _replace_export_graph_argument(
+            original_argv[3:], staged_graph, subcmd=original_argv[2]
+        )
+        for option, (canonical_name, payload) in explicit_artifacts.items():
+            override_path = overrides / canonical_name
+            if payload is not None:
+                override_path.write_bytes(payload)
+            rewritten = _replace_export_path_argument(
+                rewritten, option, override_path
+            )
+        subcmd = original_argv[2]
+        if subcmd == "obsidian":
+            requested = _export_option_path(original_argv[3:], "--dir")
+            relative = Path("obsidian") if requested is None else (
+                requested.relative_to(graph.parent)
+                if managed_delivery
+                else Path("__external_obsidian")
+            )
+            if not managed_delivery:
+                external_target = requested or graph.parent / "obsidian"
+            rewritten = _replace_export_path_argument(
+                rewritten, "--dir", staging / relative
+            )
+        elif subcmd == "callflow-html":
+            requested = _export_option_path(original_argv[3:], "--output")
+            if requested is not None:
+                relative_output = (
+                    requested.relative_to(graph.parent)
+                    if managed_delivery
+                    else Path("__external_callflow.html")
+                )
+                if not managed_delivery:
+                    external_target = requested
+                rewritten = _replace_export_path_argument(
+                    rewritten,
+                    "--output",
+                    staging / relative_output,
+                )
+        sys.argv = [*normalized_argv[:3], *rewritten]
+        try:
+            with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
+                captured_err
+            ):
+                _dispatch_command("export")
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                sys.stderr.write(captured_err.getvalue())
+                raise
+            success_exit = exc
+        finally:
+            sys.argv = normalized_argv
+        plan = publication_plan_from_directory(
+            staging, prior_inventory=snapshot.artifacts
+        )
+        if not managed_delivery:
+            external_payloads: dict[Path, bytes] = {}
+            exact_output_mapping: tuple[Path, Path] | None = None
+            if subcmd == "obsidian":
+                if external_obsidian_inventory is None:
+                    raise PendingTransactionError(
+                        "external Obsidian inventory is unavailable"
+                    )
+                staged_destination = staging / (
+                    "__external_obsidian" if external_target is not None else "obsidian"
+                )
+                destination = external_target or graph.parent / "obsidian"
+                manifest_path = (
+                    staged_destination / ".graphify_obsidian_manifest.json"
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                generated = {
+                    str(name) for name in manifest.get("files", [])
+                }
+                canvas = staged_destination / "graph.canvas"
+                if canvas.is_file():
+                    generated.add("graph.canvas")
+                generated_payloads: dict[str, bytes] = {}
+                for name in sorted(generated):
+                    path = staged_destination / name
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    generated_payloads[name] = path.read_bytes()
+                commit_unmanaged_obsidian_batch(
+                    destination,
+                    external_obsidian_inventory,
+                    generated_payloads,
+                )
+                exact_output_mapping = (staged_destination, destination)
+            elif subcmd == "callflow-html" and external_target is not None:
+                staged_callflow = staging / "__external_callflow.html"
+                external_payloads[external_target] = staged_callflow.read_bytes()
+                exact_output_mapping = (staged_callflow, external_target)
+            else:
+                for name, payload in plan.payloads.items():
+                    if name == graph.name or snapshot.artifacts.get(name) == payload:
+                        continue
+                    external_payloads[graph.parent / name] = payload
+            if subcmd != "obsidian":
+                for destination, payload in sorted(
+                    external_payloads.items(), key=lambda item: str(item[0])
+                ):
+                    commit_unmanaged_bytes(destination, payload)
+            if subcmd == "html" and "--no-viz" in original_argv:
+                if external_html_predecessor is not None:
+                    outcome = commit_unmanaged_unlink(
+                        external_html_target,
+                        expected_identity=external_html_predecessor.identity,
+                        expected_digest=external_html_predecessor.digest,
+                    )
+                    if outcome != "deleted":
+                        raise PendingTransactionError(
+                            "external graph.html changed before deletion"
+                        )
+            rendered_out = captured_out.getvalue()
+            rendered_err = captured_err.getvalue()
+            if exact_output_mapping is not None:
+                staged_exact, requested_exact = exact_output_mapping
+                rendered_out = rendered_out.replace(
+                    str(staged_exact), str(requested_exact)
+                )
+                rendered_err = rendered_err.replace(
+                    str(staged_exact), str(requested_exact)
+                )
+            rendered_out = rendered_out.replace(str(staging), str(graph.parent))
+            rendered_err = rendered_err.replace(str(staging), str(graph.parent))
+            sys.stdout.write(rendered_out)
+            sys.stderr.write(rendered_err)
+            if success_exit is not None:
+                raise success_exit
+            return
+        transaction = active_transaction or begin_transaction(
+            "runtime",
+            graph.parent,
+            output=graph.parent,
+            expected_snapshot=source_snapshot,
+        )
+        if active_transaction is not None:
+            with owned_step(transaction):
+                for relative, payload in sorted(plan.payloads.items()):
+                    if relative == graph.name:
+                        continue
+                    commit_prepared_bytes(transaction, relative, payload)
+                for relative in plan.deletions:
+                    unlink_prepared(transaction, relative)
+            rendered_out = captured_out.getvalue().replace(str(staging), str(graph.parent))
+            rendered_err = captured_err.getvalue().replace(str(staging), str(graph.parent))
+            sys.stdout.write(rendered_out)
+            sys.stderr.write(rendered_err)
+            if success_exit is not None:
+                raise success_exit
+            return
+        published_graph = json.loads(staged_graph.read_text(encoding="utf-8"))
+        published_metadata = published_graph.get("graph")
+        if not isinstance(published_metadata, dict):
+            published_metadata = {}
+            published_graph["graph"] = published_metadata
+        published_metadata[GRAPH_WATERMARK_KEY] = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "state": "active",
+        }
+        graph_payload = json.dumps(
+            published_graph, ensure_ascii=False, separators=(",", ":")
+        ).encode()
+        payloads = dict(plan.payloads)
+        payloads[graph.name] = graph_payload
+        payloads["manifest.json"] = manifest_payload
+        commit_publication_plan(
+            transaction,
+            PublicationPlan(payloads, plan.deletions),
+            graph_name=graph.name,
+        )
+        finish_transaction(transaction)
+        rendered_out = captured_out.getvalue().replace(str(staging), str(graph.parent))
+        rendered_err = captured_err.getvalue().replace(str(staging), str(graph.parent))
+        sys.stdout.write(rendered_out)
+        sys.stderr.write(rendered_err)
+        if success_exit is not None:
+            raise success_exit
+
+
 def dispatch_command(cmd: str) -> None:
+    if cmd == "transaction":
+        _transaction_command()
+        return
+    if cmd == "extract":
+        try:
+            _transactional_extract()
+            return
+        except _CliArgumentError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+    if cmd in {"cluster-only", "label"}:
+        try:
+            _transactional_cluster_only(cmd)
+            return
+        except _CliArgumentError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+    if cmd == "export":
+        try:
+            _transactional_export_entry()
+        except _CliArgumentError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        except FileNotFoundError as exc:
+            print(f"error: graph.json not found at {exc.filename or exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        return
+    _dispatch_command(cmd)
+
+
+def _transaction_command() -> None:
+    """Bounded operational surface for status, exact recovery, and retired GC."""
+    from graphify.transaction import (
+        CancellationRecovery,
+        CompletedRecovery,
+        OutputIdentity,
+        active_transaction_token_path,
+        gc_retired_workspaces,
+        recover_selected_transaction,
+        stage_transaction_handoff,
+        transaction_status,
+    )
+
+    arguments = sys.argv[2:]
+    if not arguments or arguments[0] not in {"status", "recover", "gc"}:
+        raise SystemExit(
+            "usage: graphify transaction (status|recover|gc) --output PATH [selectors]"
+        )
+    action = arguments[0]
+    values: dict[str, str] = {}
+    apply = False
+    index = 1
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--apply":
+            if apply:
+                raise SystemExit("duplicate transaction selector: --apply")
+            apply = True
+            index += 1
+            continue
+        if argument.startswith("--") and index + 1 < len(arguments):
+            if argument in values:
+                raise SystemExit(f"duplicate transaction selector: {argument}")
+            values[argument] = arguments[index + 1]
+            index += 2
+            continue
+        raise SystemExit(f"invalid transaction argument: {argument}")
+    allowed = {
+        "status": {"--output"},
+        "recover": {
+            "--output",
+            "--generation",
+            "--device",
+            "--inode",
+            "--root",
+            "--transaction-id",
+        },
+        "gc": {
+            "--output",
+            "--device",
+            "--inode",
+            "--workspace",
+            "--workspace-device",
+            "--workspace-inode",
+        },
+    }[action]
+    unknown = set(values) - allowed
+    if unknown:
+        raise SystemExit(
+            f"transaction {action} received unsupported selector: {sorted(unknown)[0]}"
+        )
+    output = Path(values.get("--output", _GRAPHIFY_OUT)).expanduser().resolve()
+    if action == "status":
+        if apply or set(values) - {"--output"}:
+            raise SystemExit("transaction status accepts only --output")
+        print(json.dumps(transaction_status(output), sort_keys=True))
+        return
+    identity_required = {"--device", "--inode"}
+    if not identity_required <= values.keys():
+        raise SystemExit("transaction recover/gc requires output device and inode selectors")
+    identity = OutputIdentity(int(values["--device"]), int(values["--inode"]))
+    if action == "gc":
+        gc_required = {"--workspace", "--workspace-device", "--workspace-inode"}
+        if not gc_required <= values.keys():
+            raise SystemExit("transaction gc requires exact workspace path, device, and inode")
+        removed = gc_retired_workspaces(
+            output,
+            expected_output_identity=identity,
+            workspace=values["--workspace"],
+            expected_workspace_identity=OutputIdentity(
+                int(values["--workspace-device"]),
+                int(values["--workspace-inode"]),
+            ),
+            dry_run=not apply,
+        )
+        print(json.dumps({"dry_run": not apply, "retained_workspaces": removed}))
+        return
+    if apply:
+        raise SystemExit("transaction recover does not accept --apply")
+    if "--generation" not in values:
+        raise SystemExit("transaction recover requires --generation")
+    root = values.get("--root")
+    if root is None:
+        raise SystemExit("transaction recover requires --root")
+    recovered = recover_selected_transaction(
+        None,
+        Path(root),
+        output=output,
+        now=time.time(),
+        expected_transaction_id=values.get("--transaction-id"),
+        expected_generation=int(values["--generation"]),
+        expected_output_identity=identity,
+    )
+    if isinstance(recovered, CancellationRecovery):
+        print(
+            json.dumps(
+                {
+                    "state": "cancelled",
+                    "transaction_id": recovered.transaction_id,
+                    "generation": recovered.generation,
+                    "predecessor_generation": recovered.predecessor_generation,
+                    "protocol_state": "COMPLETE",
+                    "output_identity": recovered.output_identity.json(),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    if isinstance(recovered, CompletedRecovery):
+        print(
+            json.dumps(
+                {
+                    "state": "completed",
+                    "transaction_id": recovered.transaction_id,
+                    "generation": recovered.generation,
+                    "protocol_state": "COMPLETE",
+                    "output_identity": recovered.output_identity.json(),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    token_path = (
+        active_transaction_token_path(output)
+        if recovered.token_identity is not None
+        else stage_transaction_handoff(recovered).path
+    )
+    print(
+        json.dumps(
+            {
+                "transaction_id": recovered.id,
+                "generation": recovered.generation,
+                "token_path": str(token_path),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _dispatch_command(cmd: str) -> None:
     if cmd == "provider":
         from graphify.llm import _custom_providers_path, BACKENDS
         import json as _json
@@ -602,7 +1836,8 @@ def dispatch_command(cmd: str) -> None:
             import json as _json
             import networkx as _nx
 
-            _raw = _json.loads(gp.read_text(encoding="utf-8"))
+            from graphify.transaction import open_graph_snapshot
+            _raw = open_graph_snapshot(gp, purpose="query").data
             if "links" not in _raw and "edges" in _raw:
                 _raw = dict(_raw, links=_raw["edges"])
             try:
@@ -816,7 +2051,8 @@ def dispatch_command(cmd: str) -> None:
             print(f"error: graph file not found: {gp}", file=sys.stderr)
             sys.exit(1)
         _enforce_graph_size_cap_or_exit(gp)
-        _raw = json.loads(gp.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        _raw = open_graph_snapshot(gp, purpose="path").data
         if "links" not in _raw and "edges" in _raw:
             _raw = dict(_raw, links=_raw["edges"])
         # Force directed so the renderer can recover stored caller→callee direction.
@@ -913,7 +2149,8 @@ def dispatch_command(cmd: str) -> None:
             print(f"error: graph file not found: {gp}", file=sys.stderr)
             sys.exit(1)
         _enforce_graph_size_cap_or_exit(gp)
-        _raw = json.loads(gp.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        _raw = open_graph_snapshot(gp, purpose="explain").data
         if "links" not in _raw and "edges" in _raw:
             _raw = dict(_raw, links=_raw["edges"])
         # Force directed so the renderer can recover stored caller→callee direction.
@@ -1227,7 +2464,9 @@ def dispatch_command(cmd: str) -> None:
                 f"falling back to community-aggregation view (node_limit=5000)",
                 file=sys.stderr,
             )
-        _raw = json.loads(graph_json.read_text(encoding="utf-8"))
+        from graphify.transaction import open_graph_snapshot
+        _snapshot = open_graph_snapshot(graph_json, purpose="cluster-only")
+        _raw = _snapshot.data
         _directed = bool(_raw.get("directed", False))
         G = build_from_json(_raw, directed=_directed)
         print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
@@ -1251,27 +2490,19 @@ def dispatch_command(cmd: str) -> None:
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
         stages.mark("analyze")
-        # Where outputs (GRAPH_REPORT.md, re-clustered graph.json, labels,
-        # analysis, html) land. When `--graph` points at a graph INSIDE a
-        # graphify-out/ dir (another project/tenant's output), write beside it,
-        # not into a stray graphify-out/ in the CWD (#1747). But when `--graph`
-        # points at an arbitrary path — e.g. a `backup/graph.json` archived
-        # before re-clustering (#934) — fall back to the CWD's graphify-out/,
-        # which is the restore-into-place workflow that test pins. The default
-        # (no --graph) case already has graph_json under watch_path/graphify-out.
-        _out_name = Path(_GRAPHIFY_OUT).name
-        if graph_override is not None and graph_json.parent.name == _out_name:
-            out = graph_json.parent
-        else:
-            out = watch_path / _GRAPHIFY_OUT
+        # Every sidecar belongs beside the actual graph destination.  This is
+        # intentional for arbitrary ``--graph`` paths: routing back into the
+        # current working tree can mix two independently managed graphs (#89).
+        out = graph_json.parent
         out.mkdir(parents=True, exist_ok=True)
         labels_path = out / ".graphify_labels.json"
         existing_labels: dict[int, str] = {}
-        if labels_path.exists():
+        labels_payload = _snapshot.artifacts.get(".graphify_labels.json")
+        if labels_payload is not None:
             try:
                 existing_labels = {
                     int(k): v
-                    for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()
+                    for k, v in json.loads(labels_payload.decode("utf-8")).items()
                     if isinstance(v, str)
                 }
             except Exception:
@@ -1280,7 +2511,7 @@ def dispatch_command(cmd: str) -> None:
         # reports real cost instead of a hardcoded zero (#1694). Stays {0, 0} on
         # the reuse / no-label paths, which make no LLM calls.
         label_token_usage = {"input": 0, "output": 0}
-        if labels_path.exists() and not force_relabel:
+        if labels_payload is not None and not force_relabel:
             # Reuse saved labels, but don't blindly trust them: the graph may have
             # been re-scoped/re-clustered since labeling, in which case a cid now
             # covers a DIFFERENT community and its old (LLM) name is wrong (#label-stale).
@@ -1293,11 +2524,12 @@ def dispatch_command(cmd: str) -> None:
             from graphify.cluster import community_member_sigs, label_communities_by_hub
             sig_path = labels_path.parent / (labels_path.name + ".sig")
             saved_sigs: dict[int, str] = {}
-            if sig_path.exists():
+            sig_payload = _snapshot.artifacts.get(".graphify_labels.json.sig")
+            if sig_payload is not None:
                 try:
                     saved_sigs = {
                         int(k): v for k, v in
-                        json.loads(sig_path.read_text(encoding="utf-8")).items()
+                        json.loads(sig_payload.decode("utf-8")).items()
                         if isinstance(v, str)
                     }
                 except Exception:
@@ -1382,7 +2614,7 @@ def dispatch_command(cmd: str) -> None:
                           {"warning": "cluster-only mode — file stats not available"},
                           tokens, str(watch_path), suggested_questions=questions,
                           min_community_size=min_community_size, built_at_commit=_commit,
-                          learning=_llfr(out / "graph.json"))
+                          learning=_llfr(graph_json))
         (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
         stages.mark("report")
         from graphify.export import backup_if_protected as _backup
@@ -1398,7 +2630,7 @@ def dispatch_command(cmd: str) -> None:
             json.dumps(analysis, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        to_json(G, communities, str(out / "graph.json"), community_labels=labels)
+        to_json(G, communities, str(graph_json), community_labels=labels)
         labels_path.write_text(json.dumps({str(k): v for k, v in labels.items()}, ensure_ascii=False), encoding="utf-8")
         # Membership signatures beside the labels so a later cluster-only can detect
         # which communities changed and avoid reusing a stale label (see reuse above).
@@ -1516,6 +2748,7 @@ def dispatch_command(cmd: str) -> None:
         from typing import Optional as _Opt
         from graphify.tree_html import write_tree_html, DEFAULT_MAX_CHILDREN
         graph_path = Path(_GRAPHIFY_OUT) / "graph.json"
+        graph_was_explicit = False
         output_path: "_Opt[Path]" = None
         root: "_Opt[str]" = None
         max_children = DEFAULT_MAX_CHILDREN
@@ -1526,7 +2759,7 @@ def dispatch_command(cmd: str) -> None:
         while i_arg < len(args):
             a = args[i_arg]
             if a == "--graph" and i_arg + 1 < len(args):
-                graph_path = Path(args[i_arg + 1]); i_arg += 2
+                graph_path = Path(args[i_arg + 1]); graph_was_explicit = True; i_arg += 2
             elif a == "--output" and i_arg + 1 < len(args):
                 output_path = Path(args[i_arg + 1]); i_arg += 2
             elif a == "--root" and i_arg + 1 < len(args):
@@ -1558,6 +2791,7 @@ def dispatch_command(cmd: str) -> None:
             graph_path=graph_path, output_path=output_path,
             root=root, max_children=max_children,
             top_k_edges=top_k_edges, project_label=project_label,
+            source_managed=True if not graph_was_explicit else None,
         )
         size_kb = out.stat().st_size / 1024
         print(f"wrote {out} ({size_kb:.1f} KB)")
@@ -1570,7 +2804,7 @@ def dispatch_command(cmd: str) -> None:
         # corrupt input so git surfaces the conflict instead of silently
         # accepting a poisoned merge (see F-005).
         # Usage: graphify merge-driver %O %A %B  (set in .git/config merge driver)
-        if len(sys.argv) < 5:
+        if len(sys.argv) != 5:
             print("Usage: graphify merge-driver <base> <current> <other>", file=sys.stderr)
             sys.exit(1)
         _base_path, _current_path, _other_path = sys.argv[2], sys.argv[3], sys.argv[4]
@@ -1578,44 +2812,12 @@ def dispatch_command(cmd: str) -> None:
         # at parse time. 50 MB / 100k nodes are well above any realistic graph
         # (typical graphs are <5 MB / <50k nodes); anything larger should fail
         # the merge so a human can investigate.
-        _MERGE_MAX_BYTES = 50 * 1024 * 1024
-        _MERGE_MAX_NODES = 100_000
-        import networkx as _nx
-        from networkx.readwrite import json_graph as _jg
-        def _load_graph(p: str):
-            path_obj = Path(p)
-            try:
-                size = path_obj.stat().st_size
-            except OSError as exc:
-                raise RuntimeError(f"cannot stat {p}: {exc}") from exc
-            if size > _MERGE_MAX_BYTES:
-                raise RuntimeError(
-                    f"graph.json {p} is {size} bytes, exceeds {_MERGE_MAX_BYTES}-byte cap"
-                )
-            data = json.loads(path_obj.read_text(encoding="utf-8"))
-            try:
-                return _jg.node_link_graph(data, edges="links"), data
-            except TypeError:
-                return _jg.node_link_graph(data), data
         try:
-            G_cur, _ = _load_graph(_current_path)
-            G_oth, _ = _load_graph(_other_path)
+            from graphify.transaction import merge_detached_snapshots
+            merge_detached_snapshots(_base_path, _current_path, _other_path)
         except Exception as exc:
             print(f"[graphify merge-driver] error loading graphs: {exc}", file=sys.stderr)
             sys.exit(1)  # surface the conflict so git doesn't accept a corrupt merge
-        merged = _nx.compose(G_cur, G_oth)
-        if merged.number_of_nodes() > _MERGE_MAX_NODES:
-            print(
-                f"[graphify merge-driver] merged graph has {merged.number_of_nodes()} nodes, "
-                f"exceeds {_MERGE_MAX_NODES}-node cap; aborting merge.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        try:
-            out_data = _jg.node_link_data(merged, edges="links")
-        except TypeError:
-            out_data = _jg.node_link_data(merged)
-        Path(_current_path).write_text(json.dumps(out_data, indent=2), encoding="utf-8")
         sys.exit(0)
 
     elif cmd == "merge-graphs":
@@ -1646,7 +2848,8 @@ def dispatch_command(cmd: str) -> None:
                 print(f"error: not found: {gp}", file=sys.stderr)
                 sys.exit(1)
             _enforce_graph_size_cap_or_exit(gp)
-            data = json.loads(gp.read_text(encoding="utf-8"))
+            from graphify.transaction import open_graph_snapshot
+            data = open_graph_snapshot(gp, purpose="merge-graphs").data
             # Normalize edges/links key before loading — graphify writes "links"
             # via node_link_data but older runs may have used "edges" (#738).
             if "links" not in data and "edges" in data:
@@ -1733,6 +2936,22 @@ def dispatch_command(cmd: str) -> None:
             print("            (or set FALKORDB_PASSWORD instead of --password to keep it off argv)", file=sys.stderr)
             sys.exit(1)
 
+        help_arguments = sys.argv[3:]
+        if "--" in help_arguments:
+            help_arguments = help_arguments[: help_arguments.index("--")]
+        if any(value in {"-h", "--help"} for value in help_arguments):
+            print(f"Usage: graphify export {subcmd} [options]")
+            if subcmd == "callflow-html":
+                print("  [GRAPH|DIR] [--graph PATH] [--labels PATH] [--report PATH]")
+                print("  [--sections PATH] [--output HTML] [--lang LANG]")
+            elif subcmd == "obsidian":
+                print("  [--graph PATH] [--labels PATH] [--dir PATH]")
+            elif subcmd in {"neo4j", "falkordb"}:
+                print("  [--graph PATH] [--push URI] [--user USER] [--password PASSWORD]")
+            else:
+                print("  [--graph PATH] [--labels PATH]")
+            return
+
         # Parse shared args
         args = sys.argv[3:]
         graph_path = Path(_GRAPHIFY_OUT) / "graph.json"
@@ -1767,6 +2986,18 @@ def dispatch_command(cmd: str) -> None:
         i = 0
         while i < len(args):
             a = args[i]
+            if a == "--":
+                i += 1
+                if subcmd == "callflow-html" and i < len(args) and not graph_path_explicit:
+                    candidate = Path(args[i])
+                    if candidate.name == "graph.json" or candidate.suffix.lower() == ".json":
+                        graph_path = candidate
+                    elif (candidate / "graph.json").exists():
+                        graph_path = candidate / "graph.json"
+                    else:
+                        graph_path = candidate / _GRAPHIFY_OUT / "graph.json"
+                    graph_path_explicit = True
+                break
             if a == "--graph" and i + 1 < len(args):
                 graph_path = Path(args[i + 1])
                 graph_path_explicit = True
@@ -1890,7 +3121,9 @@ def dispatch_command(cmd: str) -> None:
             else:
                 print(f"error: {_cap_err}", file=sys.stderr)
                 sys.exit(1)
-        _raw = json.loads(graph_path.read_text(encoding="utf-8"))
+        from graphify.transaction import admit_snapshot_artifact, open_graph_snapshot
+        _snapshot = open_graph_snapshot(graph_path, purpose="export")
+        _raw = _snapshot.data
         if "links" not in _raw and "edges" in _raw:
             _raw = dict(_raw, links=_raw["edges"])
         try:
@@ -1900,8 +3133,9 @@ def dispatch_command(cmd: str) -> None:
 
         # Load optional analysis/labels
         communities: dict[int, list[str]] = {}
-        if analysis_path.exists():
-            _an = json.loads(analysis_path.read_text(encoding="utf-8"))
+        analysis_payload = _snapshot.artifacts.get(".graphify_analysis.json")
+        if analysis_payload is not None:
+            _an = json.loads(analysis_payload.decode("utf-8"))
             communities = {int(k): v for k, v in _an.get("communities", {}).items()}
             cohesion: dict[int, float] = {int(k): v for k, v in _an.get("cohesion", {}).items()}
             gods_data = _an.get("gods", [])
@@ -1933,8 +3167,13 @@ def dispatch_command(cmd: str) -> None:
                 communities = reconstructed
 
         labels: dict[int, str] = {}
-        if labels_path.exists():
-            labels = {int(k): v for k, v in json.loads(labels_path.read_text(encoding="utf-8")).items()}
+        labels_payload = admit_snapshot_artifact(
+            _snapshot,
+            labels_path,
+            canonical_name=".graphify_labels.json",
+        )
+        if labels_payload is not None:
+            labels = {int(k): v for k, v in json.loads(labels_payload.decode("utf-8")).items()}
 
         out_dir = graph_path.parent
 
@@ -2272,7 +3511,7 @@ def dispatch_command(cmd: str) -> None:
         # so a fresh checkout writes graphify-out/ at the project root, matching
         # the skill.md pipeline.
         out_root = (out_dir.resolve() if out_dir else target)
-        graphify_out = out_root / _GRAPHIFY_OUT
+        graphify_out = _TRANSACTION_OUTPUT_OVERRIDE or (out_root / _GRAPHIFY_OUT)
         graphify_out.mkdir(parents=True, exist_ok=True)
         # Persist --exclude so later update/watch/hook rebuilds re-apply it
         # instead of silently re-including the excluded paths (#1886).
@@ -2771,6 +4010,7 @@ def dispatch_command(cmd: str) -> None:
                     _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target, scan_corpus=_scan_corpus)
                 except Exception as exc:
                     print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
+                    raise
                 stages.total()
                 sys.exit(0)
 
@@ -2808,6 +4048,7 @@ def dispatch_command(cmd: str) -> None:
                 _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target, scan_corpus=_scan_corpus)
             except Exception as exc:
                 print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
+                raise
             if global_merge:
                 from graphify.global_graph import global_add as _global_add
                 _tag = global_repo_tag or target.name
@@ -2910,6 +4151,7 @@ def dispatch_command(cmd: str) -> None:
             _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target, scan_corpus=_scan_corpus)
         except Exception as exc:
             print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
+            raise
 
         cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
         print(

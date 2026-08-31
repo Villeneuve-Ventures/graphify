@@ -7,28 +7,125 @@ import time
 from pathlib import Path
 import pytest
 
+
+def test_issue89_manifest_failure_is_not_success(monkeypatch, tmp_path, capsys):
+    import graphify.watch as watch
+
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "a.py").write_text("x = 1\n")
+
+    def fail_manifest(*_args, **_kwargs):
+        raise OSError("manifest unavailable")
+
+    monkeypatch.setattr("graphify.detect.save_manifest", fail_manifest)
+    assert watch._rebuild_code(root, no_cluster=True, block_on_lock=True) is False
+    output = capsys.readouterr().out.lower()
+    assert "manifest unavailable" in output
+    assert "updated" not in output
+    assert (root / "graphify-out" / ".graphify_transaction.json").exists()
+
+
 from graphify.watch import _notify_only, _WATCHED_EXTENSIONS, _rebuild_lock, _check_shrink
 
 
 # --- _notify_only ---
 
-def test_notify_only_creates_flag(tmp_path):
-    _notify_only(tmp_path)
-    flag = tmp_path / "graphify-out" / "needs_update"
-    assert flag.exists()
+def _managed_watch_graph(tmp_path: Path):
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        begin_transaction,
+        commit_bytes,
+        commit_generation,
+        finish_transaction,
+        owned_step,
+        resume_transaction,
+        stage_transaction_handoff,
+    )
+
+    output = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", tmp_path, output=output)
+    stage_transaction_handoff(transaction)
+    transaction = resume_transaction(transaction.id, tmp_path, output=output)
+    payload = json.dumps(
+        {
+            "directed": False,
+            "multigraph": False,
+            "graph": {
+                GRAPH_WATERMARK_KEY: {
+                    "schema": 1,
+                    "protocol_epoch": 1,
+                    "generation": transaction.generation,
+                    "state": "active",
+                }
+            },
+            "nodes": [],
+            "links": [],
+        },
+        sort_keys=True,
+    ).encode()
+    with owned_step(transaction):
+        commit_bytes(transaction, "graph.json", payload)
+        commit_bytes(transaction, "manifest.json", b"{}")
+        commit_generation(
+            transaction,
+            graph_payload=payload,
+            manifest_payload=b"{}",
+            required_artifacts=("graph.json", "manifest.json"),
+        )
+    finish_transaction(transaction)
+    return output
+
+
+def test_notify_only_publishes_receipt_bound_flag_and_retains_intent(tmp_path):
+    output = _managed_watch_graph(tmp_path)
+    changed = tmp_path / "notes.md"
+    _notify_only(tmp_path, [changed])
+    flag = output / "needs_update"
     assert flag.read_text() == "1"
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert receipt["artifact_digests"]["needs_update"]
+    queued = (output / ".graphify_rebuild_queue.jsonl").read_text()
+    assert "notes.md" in queued
 
 def test_notify_only_creates_flag_dir(tmp_path):
-    # graphify-out dir does not exist yet
+    # First-generation intent is durable before graph admission, without an
+    # unreceipted publication.
     assert not (tmp_path / "graphify-out").exists()
-    _notify_only(tmp_path)
+    _notify_only(tmp_path, [tmp_path / "notes.md"])
     assert (tmp_path / "graphify-out").is_dir()
+    assert not (tmp_path / "graphify-out" / "needs_update").exists()
+    assert (tmp_path / "graphify-out" / ".graphify_rebuild_queue.jsonl").is_file()
 
 def test_notify_only_idempotent(tmp_path):
-    _notify_only(tmp_path)
-    _notify_only(tmp_path)
-    flag = tmp_path / "graphify-out" / "needs_update"
+    output = _managed_watch_graph(tmp_path)
+    changed = tmp_path / "notes.md"
+    _notify_only(tmp_path, [changed])
+    _notify_only(tmp_path, [changed])
+    flag = output / "needs_update"
     assert flag.read_text() == "1"
+
+
+def test_notify_only_queues_before_live_transaction_conflict(tmp_path):
+    from graphify.transaction import begin_transaction
+
+    output = _managed_watch_graph(tmp_path)
+    live = begin_transaction("runtime", tmp_path, output=output)
+    stable = {
+        name: (output / name).read_bytes()
+        for name in (
+            ".graphify_transaction.json",
+            ".graphify_protocol.json",
+        )
+    }
+
+    _notify_only(tmp_path, [tmp_path / "contended.md"])
+
+    assert "contended.md" in (output / ".graphify_rebuild_queue.jsonl").read_text()
+    assert not (output / "needs_update").exists()
+    assert live.id in (output / ".graphify_transaction.json").read_text()
+    for name, payload in stable.items():
+        assert (output / name).read_bytes() == payload
 
 
 # --- _WATCHED_EXTENSIONS ---
@@ -67,9 +164,9 @@ def test_check_update_no_flag_returns_true(tmp_path):
 def test_check_update_with_flag_returns_true_and_prints(tmp_path, capsys):
     """check_update returns True and prints notification when flag exists."""
     from graphify.watch import check_update
-    flag = tmp_path / "graphify-out" / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1")
+    _managed_watch_graph(tmp_path)
+    _notify_only(tmp_path, [tmp_path / "notes.md"])
+    capsys.readouterr()
     result = check_update(tmp_path)
     assert result is True
     out = capsys.readouterr().out
@@ -79,11 +176,42 @@ def test_check_update_with_flag_returns_true_and_prints(tmp_path, capsys):
 def test_check_update_does_not_clear_flag(tmp_path):
     """check_update never removes the needs_update flag (clearing is LLM's job)."""
     from graphify.watch import check_update
-    flag = tmp_path / "graphify-out" / "needs_update"
-    flag.parent.mkdir(parents=True, exist_ok=True)
-    flag.write_text("1")
+    output = _managed_watch_graph(tmp_path)
+    _notify_only(tmp_path, [tmp_path / "notes.md"])
+    flag = output / "needs_update"
     check_update(tmp_path)
     assert flag.exists()
+
+
+def test_check_update_does_not_observe_marker_created_after_snapshot(
+    tmp_path, monkeypatch, capsys
+):
+    from types import SimpleNamespace
+    import graphify.transaction as transaction_module
+    from graphify.watch import check_update
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+
+    def admitted_snapshot(*_args, **_kwargs):
+        (output / "needs_update").write_text("1", encoding="utf-8")
+        return SimpleNamespace(artifacts={})
+
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", admitted_snapshot)
+    assert check_update(tmp_path) is True
+    assert capsys.readouterr().out == ""
+
+
+def test_check_update_surfaces_managed_coordination_failure(tmp_path, capsys):
+    from graphify.transaction import begin_transaction
+    from graphify.watch import check_update
+
+    output = _managed_watch_graph(tmp_path)
+    begin_transaction("runtime", tmp_path, output=output)
+    assert check_update(tmp_path) is True
+    message = capsys.readouterr().out
+    assert "coordination is unavailable" in message
+    assert "receipt does not match protocol" in message
 
 
 def test_watch_raises_without_watchdog(tmp_path, monkeypatch):
@@ -825,7 +953,11 @@ def test_rebuild_code_is_idempotent_when_cluster_ids_flap(tmp_path, monkeypatch)
     second_graph = graph_path.read_text(encoding="utf-8")
     second_report = report_path.read_text(encoding="utf-8")
 
-    assert first_graph == second_graph
+    first_payload = json.loads(first_graph)
+    second_payload = json.loads(second_graph)
+    first_payload["graph"].pop("_graphify_protocol")
+    second_payload["graph"].pop("_graphify_protocol")
+    assert first_payload == second_payload
     assert first_report == second_report
 
 
@@ -1388,10 +1520,8 @@ def test_rebuild_code_incremental_rename_preserves_symlink_source_path(tmp_path)
 # --- #1059: pending-changes queue prevents commit drops under lock contention ---
 
 
-def test_queue_and_drain_pending_round_trip(tmp_path):
-    """_queue_pending writes one path per line; _drain_pending reads + unlinks
-    and returns the same set of paths."""
-    from graphify.watch import _queue_pending, _drain_pending, _PENDING_FILENAME
+def test_queue_pending_writes_legacy_compatibility_signal(tmp_path):
+    from graphify.watch import _queue_pending, _PENDING_FILENAME
 
     out = tmp_path / "graphify-out"
     paths = [Path("a.py"), Path("sub/b.py"), Path("c.md")]
@@ -1404,27 +1534,7 @@ def test_queue_and_drain_pending_round_trip(tmp_path):
         "a.py", "sub/b.py", "c.md",
     ]
 
-    drained = _drain_pending(out)
-    assert drained == paths
-    # Drain unlinks so subsequent callers see an empty queue.
-    assert not pending_file.exists()
-    assert _drain_pending(out) == []
-
-
-def test_drain_pending_dedupes_and_skips_blank_lines(tmp_path):
-    """Repeated appends across concurrent contenders must dedupe; partial
-    writes leaving blank lines must not poison the merge."""
-    from graphify.watch import _queue_pending, _drain_pending
-
-    out = tmp_path / "graphify-out"
-    _queue_pending(out, [Path("a.py"), Path("b.py")])
-    _queue_pending(out, [Path("b.py"), Path("c.py")])
-    # Simulate a torn write leaving an empty line.
-    with open(out / ".pending_changes", "a", encoding="utf-8") as fh:
-        fh.write("\n   \n")
-
-    drained = _drain_pending(out)
-    assert drained == [Path("a.py"), Path("b.py"), Path("c.py")]
+    assert pending_file.exists()
 
 
 def test_queue_pending_noop_on_empty_list(tmp_path):
@@ -1464,122 +1574,371 @@ def test_rebuild_code_queues_on_lock_contention(tmp_path, monkeypatch, capsys):
         assert "queued" in captured.lower()
         assert "skipping" not in captured.lower()
 
-        # And the paths must have been written to the pending file so the
-        # eventual lock-holder can drain them.
+        # The append-compatible legacy inode is retained after its paths become
+        # durable so already-open legacy writer descriptors cannot be orphaned.
         pending = out / _PENDING_FILENAME
-        assert pending.exists()
         assert pending.read_text(encoding="utf-8").splitlines() == ["a.py", "b.py"]
+        queued = [
+            json.loads(line)
+            for line in (out / ".graphify_rebuild_queue.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        assert queued[0]["changed_paths"] == ["a.py", "b.py"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="fcntl-only (POSIX)")
-def test_rebuild_code_merges_pending_on_acquire(tmp_path, monkeypatch):
-    """#1059: the process that acquires the lock must drain .pending_changes
-    and pass the merged change set to the inner rebuild call."""
-    from graphify import watch as watch_mod
+def test_rebuild_code_real_transaction_drains_arrival_before_close(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_mod
+    from graphify.watch import _rebuild_code
 
-    out = tmp_path / "graphify-out"
-    out.mkdir()
-    # Pre-populate the queue as if an earlier contender had dropped its paths.
-    watch_mod._queue_pending(out, [Path("queued1.py"), Path("queued2.py")])
+    source = tmp_path / "own.py"
+    source.write_text("def own():\n    return 1\n", encoding="utf-8")
+    real_close = transaction_mod.close_if_queue_empty
+    injected = False
 
-    # Snapshot the original BEFORE monkeypatching so we can drive the outer
-    # dispatch path while the inner recursive call resolves to our spy.
-    orig_rebuild = watch_mod._rebuild_code
-    inner_calls: list[list[str]] = []
+    def queue_once_before_close(transaction, *, receipt_digest, failpoint=None):
+        nonlocal injected
+        if not injected:
+            injected = True
+            late = tmp_path / "late.py"
+            late.write_text("def late():\n    return 2\n", encoding="utf-8")
+            transaction_mod.queue_rebuild(
+                "update",
+                tmp_path,
+                output=tmp_path / "graphify-out",
+                changed_paths=[late],
+                source="late-test",
+            )
+        return real_close(
+            transaction, receipt_digest=receipt_digest, failpoint=failpoint
+        )
 
-    def recording_inner(watch_path, **kwargs):
-        if kwargs.get("acquire_lock") is False:
-            paths = kwargs.get("changed_paths") or []
-            inner_calls.append([p.as_posix() for p in paths])
-        return True
-
-    monkeypatch.setattr(watch_mod, "_rebuild_code", recording_inner)
-
-    ok = orig_rebuild(
-        tmp_path,
-        changed_paths=[Path("own.py"), Path("queued1.py")],
+    monkeypatch.setattr(
+        transaction_mod, "close_if_queue_empty", queue_once_before_close
     )
-    assert ok is True
 
-    # The first inner call must have received the merged + deduped set:
-    # own.py first (caller's order preserved), then drained queued1/queued2,
-    # with queued1.py deduped against own's prior occurrence.
-    assert inner_calls, "inner _rebuild_code should have been called"
-    assert inner_calls[0] == ["own.py", "queued1.py", "queued2.py"]
-
-    # And .pending_changes was drained.
-    assert not (out / watch_mod._PENDING_FILENAME).exists()
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="fcntl-only (POSIX)")
-def test_rebuild_code_drains_late_arrivals(tmp_path, monkeypatch):
-    """#1059: after the primary rebuild, the lock-holder must loop and drain
-    any paths queued by hooks that arrived mid-rebuild."""
-    from graphify import watch as watch_mod
-    from graphify.watch import _rebuild_code as orig_rebuild
-
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
     out = tmp_path / "graphify-out"
-    out.mkdir()
-
-    inner_calls: list[list[str]] = []
-    call_state = {"i": 0}
-
-    def fake_inner(watch_path, **kwargs):
-        if kwargs.get("acquire_lock") is False:
-            paths = [p.as_posix() for p in (kwargs.get("changed_paths") or [])]
-            inner_calls.append(paths)
-            # Simulate a late-arriving hook that queues during the FIRST
-            # inner rebuild only. The outer drain loop must see it.
-            call_state["i"] += 1
-            if call_state["i"] == 1:
-                watch_mod._queue_pending(out, [Path("late.py")])
-        return True
-
-    monkeypatch.setattr(watch_mod, "_rebuild_code", fake_inner)
-
-    ok = orig_rebuild(tmp_path, changed_paths=[Path("own.py")])
-    assert ok is True
-
-    # First inner call covers our own change set; second is the late-drain
-    # pass that picks up "late.py".
-    assert len(inner_calls) >= 2
-    assert inner_calls[0] == ["own.py"]
-    assert inner_calls[1] == ["late.py"]
-    # And the queue is now empty (no further late drains).
-    assert not (out / watch_mod._PENDING_FILENAME).exists()
+    graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+    assert any(node.get("source_file", "").endswith("late.py") for node in graph["nodes"])
+    assert not (out / ".graphify_transaction.json").exists()
+    assert not (out / ".graphify_rebuild_queue.jsonl").read_text(encoding="utf-8")
+    followup = transaction_mod.begin_transaction("runtime", tmp_path, output=out)
+    assert followup.generation >= 2
 
 
-def test_rebuild_code_full_corpus_skips_pending_queue(tmp_path, monkeypatch):
-    """#1059: changed_paths=None means a full-corpus rebuild — the queue
-    must not be touched on the failure path because there is nothing
-    incremental to preserve."""
+def test_watch_queues_changed_path_before_absent_graph_live_owner_admission(
+    tmp_path, capsys
+):
+    from graphify import transaction as transaction_mod
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "changed.py"
+    source.write_text("def changed():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    transaction_mod.begin_transaction("runtime", tmp_path, output=output)
+    transaction_mod._AUTHORITY.set(None)
+
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is False
+    queued = [
+        json.loads(line)
+        for line in (output / transaction_mod.QUEUE_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(queued) == 1
+    assert queued[0]["changed_paths"] == [str(source)]
+    assert "deferred" in capsys.readouterr().out.lower()
+
+
+def test_watch_absent_output_race_queues_before_new_live_owner_admission(
+    tmp_path, monkeypatch, capsys
+):
+    from graphify import transaction as transaction_mod
     from graphify import watch as watch_mod
-    from graphify.watch import _rebuild_code as orig_rebuild
 
-    out = tmp_path / "graphify-out"
-    out.mkdir()
+    source = tmp_path / "changed.py"
+    source.write_text("def changed():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    assert not output.exists()
+    real_queue = transaction_mod.queue_rebuild
+    raced = False
 
-    # Pre-existing queued paths from an earlier incremental hook.
-    watch_mod._queue_pending(out, [Path("earlier.py")])
+    def race_before_queue(*args, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            transaction_mod.begin_transaction("runtime", tmp_path, output=output)
+            transaction_mod._AUTHORITY.set(None)
+        return real_queue(*args, **kwargs)
 
-    # Force the inner call to record what it saw.
-    seen: list = []
+    monkeypatch.setattr(transaction_mod, "queue_rebuild", race_before_queue)
 
-    def fake_inner(watch_path, **kwargs):
-        if kwargs.get("acquire_lock") is False:
-            seen.append(kwargs.get("changed_paths"))
-        return True
+    assert watch_mod._rebuild_code(tmp_path, changed_paths=[source]) is False
+    queued = [
+        json.loads(line)
+        for line in (output / transaction_mod.QUEUE_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert raced is True
+    assert len(queued) == 1
+    assert queued[0]["changed_paths"] == [str(source)]
+    assert "deferred" in capsys.readouterr().out.lower()
 
-    monkeypatch.setattr(watch_mod, "_rebuild_code", fake_inner)
 
-    ok = orig_rebuild(tmp_path, changed_paths=None)
-    assert ok is True
-    # Full-corpus rebuild passes None to the inner call (does not merge in
-    # the queued paths — a full rebuild already covers them).
-    assert seen == [None]
-    # The queue still gets drained on entry so stale entries don't leak,
-    # but no late-arrival loop runs for the full-corpus path.
-    assert not (out / watch_mod._PENDING_FILENAME).exists()
+def test_watch_rolls_back_unpublished_successor_for_foreign_root(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_mod
+    from graphify.watch import _rebuild_code
+
+    watched = tmp_path / "watched"
+    foreign = tmp_path / "foreign"
+    watched.mkdir()
+    foreign.mkdir()
+    source = watched / "own.py"
+    source.write_text("def own():\n    return 1\n", encoding="utf-8")
+    output = watched / "graphify-out"
+    real_close = transaction_mod.close_if_queue_empty
+    injected = False
+
+    def queue_foreign_before_close(transaction, *, receipt_digest, failpoint=None):
+        nonlocal injected
+        if not injected:
+            injected = True
+            transaction_mod.queue_rebuild(
+                "update",
+                foreign,
+                output=output,
+                changed_paths=["foreign.py"],
+                source="foreign-test",
+            )
+        return real_close(
+            transaction, receipt_digest=receipt_digest, failpoint=failpoint
+        )
+
+    monkeypatch.setattr(
+        transaction_mod, "close_if_queue_empty", queue_foreign_before_close
+    )
+    assert _rebuild_code(watched, changed_paths=[source]) is True
+    assert not (output / ".graphify_transaction.json").exists()
+    assert not (output / ".graphify_rebuild_queue.jsonl").read_text(
+        encoding="utf-8"
+    )
+    quarantined = [
+        json.loads(line)
+        for line in (output / ".graphify_rebuild_quarantine.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [item["root"] for item in quarantined] == [str(foreign.resolve())]
+    restored = json.loads((output / ".graphify_protocol.json").read_text())
+    assert restored["state"] == "COMPLETE"
+    assert restored["root"] == str(watched.resolve())
+    assert restored["kind"] == "runtime"
+    assert not (output / ".graphify_predecessor.json").exists()
+
+
+def test_transactional_watch_accepts_legacy_baseline_before_creating_markers(
+    tmp_path,
+):
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "legacy.py"
+    source.write_text("def legacy():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert graph["graph"]["_graphify_protocol"]["state"] == "active"
+
+
+def test_transactional_watch_first_epoch_regenerates_historical_callflow(
+    tmp_path, monkeypatch
+):
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "legacy.py"
+    source.write_text("def legacy():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    historical = output / "Legacy_Project-callflow.html"
+    historical.write_text(
+        "<html><footer>graphify callflow-html</footer>stale</html>",
+        encoding="utf-8",
+    )
+    regenerated = b"<html><footer>graphify callflow-html</footer>fresh</html>"
+
+    def render_callflow(*_args, output, **_kwargs):
+        destination = Path(output)
+        destination.write_bytes(regenerated)
+        return destination
+
+    monkeypatch.setattr(
+        "graphify.callflow_html.write_callflow_html", render_callflow
+    )
+
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
+
+    assert historical.read_bytes() == regenerated
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert historical.name in receipt["required_artifacts"]
+    assert receipt["artifact_digests"][historical.name]
+
+
+def test_transactional_watch_uses_report_memory_without_receipt_ownership(tmp_path):
+    from graphify.ingest import save_query_result
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "source.py"
+    source.write_text("def source():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    learning = output / ".graphify_learning.json"
+    learning.write_text(
+        json.dumps(
+            {"nodes": {"source": {"verdict": "PREFERRED", "label": "Source"}}}
+        ),
+        encoding="utf-8",
+    )
+    save_query_result(
+        "avoid watch path",
+        "failed",
+        output / "memory",
+        outcome="dead_end",
+    )
+    learning_before = learning.read_bytes()
+    memory_before = {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    }
+
+    assert _rebuild_code(tmp_path, changed_paths=[source]) is True
+
+    assert "Work-memory lessons" in (output / "GRAPH_REPORT.md").read_text(
+        encoding="utf-8"
+    )
+    receipt = json.loads((output / ".graphify_generation.json").read_text())
+    assert ".graphify_learning.json" not in receipt["required_artifacts"]
+    assert not any(
+        name.startswith("memory/") for name in receipt["required_artifacts"]
+    )
+    assert learning.read_bytes() == learning_before
+    assert {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    } == memory_before
+
+
+def test_transactional_watch_report_memory_cleanup_failure_blocks_publication(
+    tmp_path, monkeypatch
+):
+    import graphify.transaction as transaction_module
+    from graphify.ingest import save_query_result
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "source.py"
+    source.write_text("def source():\n    return 1\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_text(
+        json.dumps(
+            {
+                "directed": False,
+                "multigraph": False,
+                "graph": {},
+                "nodes": [],
+                "links": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_query_result(
+        "preserve watch cleanup failure",
+        "failed",
+        output / "memory",
+        outcome="dead_end",
+    )
+    graph_before = (output / "graph.json").read_bytes()
+    memory_before = {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    }
+    original_rmtree = transaction_module.shutil.rmtree
+
+    def denied_rmtree(path, *args, **kwargs):
+        if Path(path).name == "memory":
+            raise PermissionError("memory cleanup denied")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_module.shutil, "rmtree", denied_rmtree)
+
+    with pytest.raises(PermissionError, match="memory cleanup denied"):
+        _rebuild_code(tmp_path, changed_paths=[source])
+
+    assert (output / "graph.json").read_bytes() == graph_before
+    assert not (output / transaction_module.RECEIPT_FILE).exists()
+    protocol = json.loads((output / transaction_module.PROTOCOL_FILE).read_text())
+    assert protocol["state"] == "INCOMPLETE"
+    assert {
+        path.name: path.read_bytes() for path in (output / "memory").glob("*.md")
+    } == memory_before
+
+
+def test_transactional_watch_preserves_checkpointed_legacy_paths(tmp_path):
+    import graphify.watch as watch_module
+
+    source = tmp_path / "source.py"
+    late = tmp_path / "late-open-writer.py"
+    source.write_text("def source():\n    return 1\n", encoding="utf-8")
+    late.write_text("def late():\n    return 2\n", encoding="utf-8")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / ".pending_changes").write_text(str(late) + "\n", encoding="utf-8")
+
+    assert watch_module._rebuild_code(tmp_path, changed_paths=[source]) is True
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert any(
+        node.get("source_file", "").endswith("late-open-writer.py")
+        for node in graph["nodes"]
+    )
+    assert (output / ".pending_changes").exists()
 
 
 def test_merge_changed_paths_dedupes_in_order():

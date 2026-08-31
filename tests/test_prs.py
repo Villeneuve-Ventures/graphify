@@ -18,10 +18,18 @@ from graphify.prs import (
     fetch_worktrees,
     format_prs_text,
     _detect_default_branch,
+    _load_graph_json,
 )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def test_load_graph_json_maps_malformed_legacy_json_to_absence(tmp_path):
+    graph = tmp_path / "graph.json"
+    graph.write_text("{not-json", encoding="utf-8")
+
+    assert _load_graph_json(graph) is None
 
 def make_pr(
     number: int = 1,

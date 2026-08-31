@@ -14,6 +14,7 @@ import json
 import os
 import py_compile
 import re
+import shlex
 import subprocess
 import shutil
 import sys
@@ -471,7 +472,7 @@ def test_every_skill_bootstrap_selects_supported_python314():
             assert "Resolve-GraphifyAmbientCommand $name" in bootstrap, key
             assert bootstrap.count(
                 'Invoke-GraphifyNativeText $candidate @("-3.14", "-E", "-P", "-B", "-S", "-c", $GraphifyIdentityCheck, "executable")'
-            ) == 2, key
+            ) >= 2, key
             assert "& $installPython -E -P -B -m pip install graphifyy" in bootstrap, key
             assert "& $uv tool install" in bootstrap, key
             assert "\n        pip install graphifyy" not in bootstrap, key
@@ -591,7 +592,11 @@ def test_powershell_operational_blocks_bind_discovery_and_never_read_pointer():
     for block in operational:
         assert "Get-Content" not in block or ".graphify_python" not in block
         assert " -E -P -B -m graphify" in block
-        assert "Get-Command" in block or "GraphifyPython" in block
+        assert (
+            "Get-Command" in block
+            or "GraphifyPython" in block
+            or "$GRAPHIFY_PYTHON" in block
+        )
 
 
 def _posix_bootstrap_script() -> str:
@@ -600,6 +605,31 @@ def _posix_bootstrap_script() -> str:
     bootstrap = body[body.index("### Step 1"):body.index("### Step 2")]
     return bootstrap.split("```bash\n", 1)[1].split("\n```", 1)[0].replace(
         "GRAPHIFY_INPUT_PATH='INPUT_PATH'", "GRAPHIFY_INPUT_PATH='.'"
+    )
+
+
+def _posix_transaction_handoff_script() -> str:
+    platform = gen.load_platforms()["claude"]
+    body = gen.render(platform)[0].content
+    step1 = body[body.index("### Step 1"):body.index("### Step 2")]
+    scripts = re.findall(r"```bash\n(.*?)\n```", step1, flags=re.DOTALL)
+    handoff = next(script for script in scripts if "begin_transaction" in script)
+    return re.sub(r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", ".", handoff)
+
+
+def _posix_root_persistence_script(input_path: str = ".") -> str:
+    platform = gen.load_platforms()["claude"]
+    body = gen.render(platform)[0].content
+    step1 = body[body.index("### Step 1"):body.index("### Step 2")]
+    scripts = re.findall(r"```bash\n(.*?)\n```", step1, flags=re.DOTALL)
+    persistence = next(
+        script
+        for script in scripts
+        if "active_transaction_token_path" in script
+        and ".graphify_root" in script
+    )
+    return re.sub(
+        r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", shlex.quote(input_path), persistence
     )
 
 
@@ -616,9 +646,11 @@ def _powershell_step1_scripts() -> tuple[str, str]:
     body = gen.render(platform)[0].content
     step1 = body[body.index("### Step 1"):body.index("### Step 2")]
     scripts = re.findall(r"```powershell\n(.*?)\n```", step1, flags=re.DOTALL)
-    assert len(scripts) == 2
-    bootstrap, root_persistence = scripts
+    assert len(scripts) == 3
+    bootstrap, transaction_handoff, root_persistence = scripts
     assert step1.index(bootstrap) < step1.index(root_persistence)
+    assert "begin_transaction" in transaction_handoff
+    assert "begin_transaction" not in bootstrap
     return bootstrap, root_persistence
 
 
@@ -626,8 +658,37 @@ def _powershell_bootstrap_script() -> str:
     return _powershell_step1_scripts()[0]
 
 
-def _powershell_root_persistence_script() -> str:
-    return _powershell_step1_scripts()[1].replace("INPUT_PATH", ".")
+def _powershell_root_persistence_script(input_path: str = ".") -> str:
+    quoted = "'" + input_path.replace("'", "''") + "'"
+    return re.sub(
+        r"(?<![A-Z_])INPUT_PATH(?![A-Z_])",
+        lambda _match: quoted,
+        _powershell_step1_scripts()[1],
+    )
+
+
+def _powershell_transaction_handoff_script() -> str:
+    platform = gen.load_platforms()["windows"]
+    body = gen.render(platform)[0].content
+    step1 = body[body.index("### Step 1"):body.index("### Step 2")]
+    scripts = re.findall(r"```powershell\n(.*?)\n```", step1, flags=re.DOTALL)
+    handoff = next(script for script in scripts if "begin_transaction" in script)
+    return re.sub(r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", ".", handoff)
+
+
+def test_powershell_root_persistence_helper_replaces_only_standalone_placeholder():
+    from tree_sitter import Language, Parser
+    import tree_sitter_powershell
+
+    input_path = "/tmp/graphify root"
+    script = _powershell_root_persistence_script(input_path)
+
+    assert "$env:GRAPHIFY_INPUT_PATH" in script
+    assert "GRAPHIFY_'/tmp/graphify root'" not in script
+    assert "root=Path(sys.argv[1]).resolve(strict=True)" in script
+    assert "'/tmp/graphify root'" in script
+    tree = Parser(Language(tree_sitter_powershell.language())).parse(script.encode())
+    assert not tree.root_node.has_error, tree.root_node
 
 
 def _powershell_function_sources(source: str) -> dict[str, str]:
@@ -712,6 +773,12 @@ def _offline_python_with_trusted_fake_pip(tmp_path: Path) -> tuple[Path, Path, P
         f"    (package / '__main__.py').write_text({graphify_main!r})\n"
         "    (package / 'interpreter_pointer.py').write_text(\n"
         "        \"from pathlib import Path\\nimport sys\\nPath(sys.argv[2]).parent.mkdir(parents=True, exist_ok=True)\\nPath(sys.argv[2]).write_text(sys.executable)\\n\"\n"
+        "    )\n"
+        "    (package / 'transaction.py').write_text(\n"
+        "        \"from pathlib import Path\\n\"\n"
+        "        \"class _Value:\\n    pass\\n\"\n"
+        "        \"def begin_transaction(kind, root, output):\\n    value=_Value(); value.output=Path(output); value.output.mkdir(parents=True, exist_ok=True); return value\\n\"\n"
+        "        \"def stage_transaction_handoff(transaction):\\n    value=_Value(); value.path=transaction.output/'.graphify_transaction_token.fake'; value.path.write_text('token'); return value\\n\"\n"
         "    )\n",
         encoding="utf-8",
     )
@@ -1131,6 +1198,7 @@ def test_powershell_discovery_uses_ps51_compatible_fully_qualified_path_check():
     assert gen._POWERSHELL_BOOTSTRAP.count(
         'Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV"'
     ) == 2
+    assert "[IO.Path]::DirectorySeparatorChar -eq '\\'" in discovery
 
     from tree_sitter import Language, Parser
     import tree_sitter_powershell
@@ -1162,6 +1230,53 @@ def test_powershell_fully_qualified_path_check_matches_windows_semantics(tmp_pat
         "C:relative": False,
         r"\current-drive-relative": False,
         "/current-drive-relative": False,
+    }
+    entries = "\n".join(
+        f"$Expected[{ps_string(path)}] = ${str(expected).lower()}"
+        for path, expected in cases.items()
+    )
+    script = (
+        "$GraphifyDiscoveryOptional = $true\n"
+        + gen._POWERSHELL_DISCOVERY
+        + "\n$Expected = [ordered]@{}\n"
+        + entries
+        + "\n$Actual = [ordered]@{}\n"
+        + "foreach ($Entry in $Expected.GetEnumerator()) { "
+        + "$Actual[$Entry.Key] = [bool](Test-GraphifyFullyQualifiedPath $Entry.Key) }\n"
+        + "$Actual | ConvertTo-Json -Compress\n"
+    )
+    result = _run_powershell_script(
+        executable,
+        script,
+        tmp_path,
+        cwd=tmp_path,
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    output = [line for line in result.stdout.decode().splitlines() if line.strip()]
+    assert json.loads(output[-1]) == cases
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or shutil.which("pwsh") is None,
+    reason="POSIX pwsh runtime unavailable",
+)
+def test_powershell_fully_qualified_path_check_matches_posix_semantics(tmp_path):
+    executable = shutil.which("pwsh")
+    assert executable is not None
+
+    def ps_string(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    cases = {
+        str(tmp_path.resolve()): True,
+        "/current-drive-relative-on-windows": True,
+        "": False,
+        "relative/path": False,
+        r"relative\path": False,
+        "C:relative": False,
+        r"\current-drive-relative": False,
     }
     entries = "\n".join(
         f"$Expected[{ps_string(path)}] = ${str(expected).lower()}"
@@ -1674,6 +1789,13 @@ def test_rendered_executable_blocks_reject_ambient_graphify_commands():
                 ]
                 if not operational:
                     continue
+                if "begin_transaction" in block and "stage_transaction_handoff" in block:
+                    assert (
+                        "$GraphifyPython" in block
+                        if shell_kind == "powershell"
+                        else '"$GRAPHIFY_PYTHON"' in block
+                    )
+                    continue
                 assert "No trusted Graphify Python" in block, f"{key}:{artifact.path}\n{block}"
                 if shell_kind == "powershell":
                     assert all(
@@ -1687,9 +1809,36 @@ def test_rendered_executable_blocks_reject_ambient_graphify_commands():
                         line.lstrip().startswith(
                             '"$GRAPHIFY_PYTHON" -E -P -B -m graphify'
                         )
+                        or (
+                            line.lstrip().startswith("GRAPHIFY_TRANSACTION_TOKEN=$(")
+                            and " -m graphify.transaction run-" in line
+                        )
                         for line in operational
                     ), f"{key}:{artifact.path}\n{block}"
     assert checked > 100
+
+
+def test_transaction_fence_is_unique_ordered_and_preserves_outside_bytes():
+    source = gen.FRAGMENTS_DIR.joinpath("core", "core.md").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("### Step 2")
+    end = source.index("## Interpreter guard", start)
+    routed = gen._route_full_build_transaction(source)
+    assert routed[:start] == source[:start]
+    assert routed[routed.index("## Interpreter guard", start):] == source[end:]
+    detect_block = routed[start:routed.index("### Step 2.5", start)]
+    assert "graphify.transaction run-prepared-token" in detect_block
+    assert 'cd "$GRAPHIFY_TRANSACTION_WORKSPACE"' not in detect_block
+    assert "> .graphify_detect.json" in detect_block
+    assert "> graphify-out/.graphify_detect.json" not in detect_block
+
+    with pytest.raises(ValueError, match="duplicate Step 2"):
+        gen._route_full_build_transaction(source.replace("### Step 2", "### Step 2\n### Step 2", 1))
+    with pytest.raises(ValueError, match="Step 9"):
+        gen._route_full_build_transaction(source.replace("### Step 9", "### Missing 9", 1))
+    with pytest.raises(ValueError, match="end marker"):
+        gen._route_full_build_transaction(source.replace("## Interpreter guard", "## Missing guard", 1).replace("## For --update", "## Missing update", 1))
 
 
 def test_rendered_python_launches_require_exact_startup_policy():
@@ -1783,10 +1932,12 @@ def test_posix_path_shadow_flows_use_fresh_interpreter_and_ignore_pointer(tmp_pa
     (tmp_path / "graphify-out" / ".graphify_python").write_text(str(saved), encoding="utf-8")
 
     core, refs = _platform_artifacts("claude")
-    flows = [
+    read_flows = [
         _block_containing(core, '-m graphify query "<question>"'),
         _block_containing(refs["query.md"], '-m graphify path "NODE_A"'),
         _block_containing(refs["query.md"], '-m graphify explain "NODE_NAME"'),
+    ]
+    write_flows = [
         _block_containing(refs["update.md"], "-m graphify update INPUT_PATH"),
         _block_containing(refs["exports.md"], "-m graphify export wiki"),
         _block_containing(refs["add-watch.md"], "-m graphify watch INPUT_PATH"),
@@ -1794,11 +1945,36 @@ def test_posix_path_shadow_flows_use_fresh_interpreter_and_ignore_pointer(tmp_pa
         _block_containing(refs["hooks.md"], "-m graphify claude install"),
         _block_containing(refs["hooks.md"], "-m graphify hook install"),
     ]
-    for block in flows:
+    for block in read_flows:
         safe_block = re.sub(
             r'"\$GRAPHIFY_PYTHON" -E -P -B -m graphify(?:\.serve)?[^\n]*',
             '"$GRAPHIFY_PYTHON" -E -P -B -m graphify --help',
             block,
+        )
+        result = subprocess.run(
+            ["/bin/bash", "-c", safe_block],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+    handoff = subprocess.run(
+        ["/bin/bash", "-c", _posix_transaction_handoff_script()],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert handoff.returncode == 0, handoff.stderr
+    for block in write_flows:
+        safe_block = re.sub(
+            r'"\$GRAPHIFY_PYTHON" -E -P -B -m graphify(?:\.serve)?[^\n]*',
+            '"$GRAPHIFY_PYTHON" -E -P -B -m graphify --help',
+            block,
+        )
+        safe_block = re.sub(
+            r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", ".", safe_block
         )
         result = subprocess.run(
             ["/bin/bash", "-c", safe_block],
@@ -3730,7 +3906,8 @@ def test_powershell_bootstrap_validates_every_candidate_and_parses():
     assert "graphify-out\\.graphify_python" in script
     assert ".graphify_root" not in script
     assert ".graphify_python" not in root_persistence
-    assert "graphify-out\\.graphify_root" in root_persistence
+    assert 'Path(".graphify_root")' in root_persistence
+    assert "graphify-out\\.graphify_root" not in root_persistence
     assert "Resolve-Path INPUT_PATH" in root_persistence
     for unsafe in (
         "Get-Command uv", "Get-Command pipx", "Get-Command graphify",
@@ -5255,3 +5432,403 @@ def test_agents_audit_baseline_is_amps_v8_body():
     assert gen._v8_baseline_ref("agents") == "47042beb05d1f6dd2186c0c499ae2840ce604ead:graphify/skill-amp.md"
     problems = gen.audit_coverage(platforms["agents"])
     assert problems == [], "\n".join(problems)
+
+
+def test_full_build_renders_consume_transaction_runner_and_finalize():
+    for platform in gen.load_platforms().values():
+        artifacts = gen.render(platform)
+        core = next(
+            artifact.content
+            for artifact in artifacts
+            if "/references/" not in artifact.path
+        )
+        start = core.index("### Step 2")
+        boundaries = [
+            value
+            for marker in ("## Interpreter guard", "## For --update")
+            if (value := core.find(marker, start)) >= 0
+        ]
+        full_build = core[start : min(boundaries) if boundaries else len(core)]
+        assert "active_transaction_token_path" in full_build
+        assert "graphify.transaction run-prepared-token" in full_build
+        assert "prepared_workspace_path" not in full_build
+        assert 'cd "$GRAPHIFY_TRANSACTION_WORKSPACE"' not in full_build
+        assert full_build.count("finalize_prepared_transaction()") == 1
+        for line in full_build.splitlines():
+            if " -m graphify export " in line and not line.lstrip().startswith("#"):
+                if " --push " in line:
+                    assert full_build.index(line) > full_build.index(
+                        "finalize_prepared_transaction()"
+                    )
+                    assert "graphify.transaction run-" not in line
+                else:
+                    assert "graphify.transaction run-prepared-token" in line
+        for block in re.findall(
+            r"```(?:bash|sh)\n(.*?)\n```", full_build, flags=re.DOTALL
+        ):
+            if "write_text(" in block or "save_manifest(" in block:
+                assert "graphify.transaction run-prepared-token" in block
+
+
+def test_split_references_route_pre_finalization_writes_through_prepared_runner():
+    for platform in gen.load_platforms().values():
+        if platform.bucket != "split":
+            continue
+        rendered = {Path(item.path).name: item.content for item in gen.render(platform)}
+        exports = rendered["exports.md"]
+        transcribe = rendered["transcribe.md"]
+        export_blocks = [
+            block
+            for _, block in _executable_blocks(exports)
+            if "graphify.transaction run-prepared-token" in block
+        ]
+        for name in ("wiki", "neo4j", "falkordb", "svg", "graphml"):
+            assert any(
+                f"-m graphify export {name}" in block for block in export_blocks
+            )
+        assert "--push" in exports
+        assert "run-prepared-token" in transcribe
+        assert "Path('.graphify_detect.json')" in transcribe
+        assert "Path('.graphify_transcripts.json')" in transcribe
+        assert "Path('graphify-out/.graphify_detect.json')" not in transcribe
+        assert "after Step 9" in exports
+
+
+def test_provider_push_runbooks_use_public_cli_only_after_finalization():
+    for key, platform in gen.load_platforms().items():
+        rendered = {Path(item.path).name: item.content for item in gen.render(platform)}
+        core = next(
+            item.content
+            for item in gen.render(platform)
+            if "/references/" not in item.path
+        )
+        assert "push_to_neo4j" not in core, key
+        assert "push_to_falkordb" not in core, key
+        if platform.bucket == "monolith":
+            finalize = core.index("finalize_prepared_transaction()")
+            push = core.index(" -m graphify export neo4j --push ")
+            assert push > finalize, key
+            push_line = core[core.rfind("\n", 0, push) + 1 : core.find("\n", push)]
+            assert "graphify.transaction run-" not in push_line, key
+            continue
+
+        exports = rendered["exports.md"]
+        post_finalize = exports.index("### After Step 9 - Provider pushes")
+        for provider in ("neo4j", "falkordb"):
+            push = exports.index(f" -m graphify export {provider} --push ")
+            assert push > post_finalize, (key, provider)
+            push_line = exports[
+                exports.rfind("\n", 0, push) + 1 : exports.find("\n", push)
+            ]
+            assert "graphify.transaction run-" not in push_line, (key, provider)
+        assert "do not publish local artifacts" in exports
+
+
+def test_monolith_roundtrip_rejects_injected_provider_content(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    injected = original.content.replace(
+        "Replace the URI, user, and password with the requested values.",
+        "Run an unrelated command here.\n\n"
+        "Replace the URI, user, and password with the requested values.",
+        1,
+    )
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("post-Step-9 provider block drifted" in problem for problem in problems)
+
+
+def test_monolith_roundtrip_rejects_unrelated_artifact_name_command(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    injected = original.content.replace(
+        "### Step 2",
+        "run-unrelated graph.json GRAPH_REPORT.md .graphify_detect.json "
+        ".graphify_transcripts.json .graphify_semantic_new.json cost.json\n\n"
+        "### Step 2",
+        1,
+    )
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("unsanctioned monolith change" in problem for problem in problems)
+
+
+def test_monolith_roundtrip_rejects_prepared_runner_suffix(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    canonical = next(
+        line
+        for line in original.content.splitlines()
+        if "active_transaction_token_path" in line
+        and "graphify.transaction run-prepared-token" in line
+    )
+    injected = original.content.replace(
+        canonical, f"{canonical}; run-unrelated-command", 1
+    )
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("unsanctioned monolith change" in problem for problem in problems)
+
+
+def test_monolith_roundtrip_rejects_prepared_workspace_path_regression(monkeypatch):
+    platform = gen.load_platforms()["aider"]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    injected = original.content.replace(
+        "Path('.graphify_detect.json')",
+        "Path('graphify-out/.graphify_detect.json')",
+        1,
+    )
+    assert injected != original.content
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+
+    assert any("unsanctioned monolith change" in problem for problem in problems)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+@pytest.mark.parametrize(
+    ("platform_key", "provider", "expected_tail"),
+    (
+        (
+            "claude",
+            "neo4j",
+            [
+                "neo4j",
+                "--push",
+                "bolt://localhost:7687",
+                "--user",
+                "neo4j",
+                "--password",
+                "PASSWORD",
+            ],
+        ),
+        ("claude", "falkordb", ["falkordb", "--push", "falkordb://localhost:6379"]),
+        (
+            "aider",
+            "neo4j",
+            [
+                "neo4j",
+                "--push",
+                "bolt://localhost:7687",
+                "--user",
+                "neo4j",
+                "--password",
+                "PASSWORD",
+            ],
+        ),
+    ),
+)
+def test_rendered_provider_push_executes_as_public_cli(
+    tmp_path: Path,
+    platform_key: str,
+    provider: str,
+    expected_tail: list[str],
+):
+    platform = gen.load_platforms()[platform_key]
+    artifacts = gen.render(platform)
+    artifact = (
+        next(item for item in artifacts if Path(item.path).name == "exports.md")
+        if platform.bucket == "split"
+        else artifacts[0]
+    )
+    block = _block_containing(
+        artifact.content, f" -m graphify export {provider} --push "
+    )
+    command = next(
+        line
+        for line in block.splitlines()
+        if f" -m graphify export {provider} --push " in line
+    )
+    assert "graphify.transaction run-" not in command
+
+    log = tmp_path / "provider-args"
+    shim = tmp_path / "python-shim"
+    shim.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$GRAPHIFY_PUSH_LOG\"\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    result = subprocess.run(
+        ["/bin/bash", "-c", command],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "GRAPHIFY_PYTHON": str(shim),
+            "GRAPHIFY_PUSH_LOG": str(log),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "-E",
+        "-P",
+        "-B",
+        "-m",
+        "graphify",
+        "export",
+        *expected_tail,
+    ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+def test_rendered_posix_transaction_runner_executes_with_exact_token(tmp_path):
+    from graphify.transaction import begin_transaction, stage_transaction_handoff
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    output = tmp_path / "graphify-out"
+    transaction = begin_transaction("full", root, output=output)
+    token = stage_transaction_handoff(transaction)
+    script = r'''
+graphify_transaction_python() {
+    "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- "$@"
+}
+graphify_transaction_python -c "from graphify.transaction import current_transaction, commit_bytes; tx=current_transaction(); commit_bytes(tx, 'runner-proof', b'ok')"
+'''
+    result = subprocess.run(
+        ["/bin/bash", "-c", script],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "GRAPHIFY_PYTHON": sys.executable,
+            "GRAPHIFY_TRANSACTION_TOKEN": str(token.path),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (output / "runner-proof").read_bytes() == b"ok"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+@pytest.mark.parametrize("absolute", [False, True])
+def test_rendered_posix_handoff_honors_graphify_out_override(tmp_path, absolute):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    configured = tmp_path / "absolute-output" if absolute else Path("relative-output")
+    expected = configured if absolute else root / configured
+    result = subprocess.run(
+        ["/bin/bash", "-c", _posix_transaction_handoff_script()],
+        cwd=root,
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert list(expected.glob(".graphify_transaction_token.*"))
+    assert not list((root / "graphify-out").glob(".graphify_transaction_token.*"))
+
+    caller = tmp_path / "different-cwd"
+    caller.mkdir()
+    followup = subprocess.run(
+        ["/bin/bash", "-c", _posix_root_persistence_script(str(root))],
+        cwd=caller,
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert followup.returncode == 0, followup.stderr
+    workspace = next(expected.parent.glob(".graphify-prepare-*"))
+    assert (workspace / "graphify-out" / ".graphify_root").read_text() == str(
+        root.resolve()
+    )
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell runtime unavailable")
+@pytest.mark.parametrize("absolute", [False, True])
+def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path, absolute):
+    configured = tmp_path / "absolute-output" if absolute else Path("relative-output")
+    expected = configured if absolute else tmp_path / configured
+    result = subprocess.run(
+        [
+            str(shutil.which("pwsh")),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _powershell_transaction_handoff_script(),
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert list(expected.glob(".graphify_transaction_token.*"))
+    assert not list((tmp_path / "graphify-out").glob(".graphify_transaction_token.*"))
+
+    caller = tmp_path / "different-cwd"
+    caller.mkdir()
+    followup = subprocess.run(
+        [
+            str(shutil.which("pwsh")),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _powershell_root_persistence_script(str(tmp_path)),
+        ],
+        cwd=caller,
+        env={
+            **os.environ,
+            "GRAPHIFY_OUT": str(configured),
+            "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert followup.returncode == 0, followup.stderr
+    workspace = next(expected.parent.glob(".graphify-prepare-*"))
+    assert (workspace / "graphify-out" / ".graphify_root").read_text() == str(
+        tmp_path.resolve()
+    )

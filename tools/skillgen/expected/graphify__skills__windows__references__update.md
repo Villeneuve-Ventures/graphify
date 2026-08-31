@@ -2,6 +2,11 @@
 
 Load this only when the user passed `--update` or `--cluster-only`. A first-time full build never reads this file.
 
+Both public commands resolve and validate the actual managed graph destination
+before creating or resuming a transaction. Never resume from
+`GRAPHIFY_TRANSACTION_ID` plus `GRAPHIFY_TRANSACTION_ROOT`; only the exact
+immutable token runner may establish local owner context.
+
 ## For --update (incremental re-extraction)
 
 Use when you've added or modified files since the last run. Only re-extracts changed files - saves tokens and time.
@@ -21,7 +26,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -437,7 +442,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
