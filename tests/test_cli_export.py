@@ -14,7 +14,7 @@ import pytest
 
 
 def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypatch):
-    from graphify.cli import _resolve_transaction_destination
+    import graphify.cli as cli_module
 
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -26,7 +26,7 @@ def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypat
         ["graphify", "cluster-only", "--graph", str(external), "--", str(corpus)],
     ):
         monkeypatch.setattr("sys.argv", argv)
-        destination = _resolve_transaction_destination("cluster-only")
+        destination = cli_module._resolve_transaction_destination("cluster-only")
         assert destination.graph == external.resolve()
         assert destination.output == external.parent.resolve()
 
@@ -40,17 +40,17 @@ def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypat
     ],
 )
 def test_issue89_cli_destination_rejects_ambiguous_options(argv, monkeypatch):
-    from graphify.cli import _CliArgumentError, _resolve_transaction_destination
+    import graphify.cli as cli_module
 
     monkeypatch.setattr("sys.argv", argv)
-    with pytest.raises(_CliArgumentError):
-        _resolve_transaction_destination("cluster-only")
+    with pytest.raises(cli_module._CliArgumentError):
+        cli_module._resolve_transaction_destination("cluster-only")
 
 
 def test_export_routing_normalizes_inline_paths_and_rejects_duplicates():
-    from graphify.cli import _CliArgumentError, _normalize_export_routing
+    import graphify.cli as cli_module
 
-    assert _normalize_export_routing(
+    assert cli_module._normalize_export_routing(
         ["callflow-html", "--graph=source.json", "--output=result.html"]
     ) == [
         "callflow-html",
@@ -59,29 +59,31 @@ def test_export_routing_normalizes_inline_paths_and_rejects_duplicates():
         "--output",
         "result.html",
     ]
-    with pytest.raises(_CliArgumentError, match="--graph may be specified only once"):
-        _normalize_export_routing(
+    with pytest.raises(
+        cli_module._CliArgumentError, match="--graph may be specified only once"
+    ):
+        cli_module._normalize_export_routing(
             ["html", "--graph", "one.json", "--graph=two.json"]
         )
-    with pytest.raises(_CliArgumentError, match="ambiguous"):
-        _normalize_export_routing(
+    with pytest.raises(cli_module._CliArgumentError, match="ambiguous"):
+        cli_module._normalize_export_routing(
             ["callflow-html", "source.json", "--graph=other.json"]
         )
-    assert _normalize_export_routing(
+    assert cli_module._normalize_export_routing(
         ["callflow-html", "--", "--graph-looking.json"]
     ) == ["callflow-html", "--", "--graph-looking.json"]
-    with pytest.raises(_CliArgumentError, match="ambiguous"):
-        _normalize_export_routing(
+    with pytest.raises(cli_module._CliArgumentError, match="ambiguous"):
+        cli_module._normalize_export_routing(
             ["callflow-html", "--graph", "source.json", "--", "--other.json"]
         )
 
 
 @pytest.mark.parametrize("subcmd", ["html", "neo4j"])
 def test_staged_export_graph_is_inserted_before_option_boundary(subcmd, tmp_path):
-    from graphify.cli import _replace_export_graph_argument
+    import graphify.cli as cli_module
 
     staged = tmp_path / "staged" / "graph.json"
-    rewritten = _replace_export_graph_argument(
+    rewritten = cli_module._replace_export_graph_argument(
         ["--", "--push", "bolt://provider"], staged, subcmd=subcmd
     )
 
@@ -447,7 +449,7 @@ def test_pathless_postgres_transaction_routing(
 def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
     tmp_path, monkeypatch
 ):
-    from graphify.cli import _canonical_extract_argv, _resolve_extract_destination
+    import graphify.cli as cli_module
 
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -464,9 +466,9 @@ def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
             str(corpus),
         ],
     )
-    destination = _resolve_extract_destination()
+    destination = cli_module._resolve_extract_destination()
     assert destination.root == corpus.resolve()
-    assert _canonical_extract_argv(destination.root) == [
+    assert cli_module._canonical_extract_argv(destination.root) == [
         "graphify",
         "extract",
         str(corpus.resolve()),
@@ -666,8 +668,8 @@ test -f "$PREPARED_OUT/.graphify_detect.json"
 def test_direct_export_transfers_close_race_to_claimable_successor(
     tmp_path, monkeypatch
 ):
+    import graphify.cli as cli_module
     import graphify.transaction as transaction_module
-    from graphify.cli import dispatch_command
 
     out = _make_graph(tmp_path)
     original_close = transaction_module.close_if_queue_empty
@@ -683,7 +685,7 @@ def test_direct_export_transfers_close_race_to_claimable_successor(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(transaction_module, "close_if_queue_empty", raced_close)
     monkeypatch.setattr(sys, "argv", ["graphify", "export", "html"])
-    dispatch_command("export")
+    cli_module.dispatch_command("export")
     assert not (out / ".graphify_transaction.json").exists()
     assert (out / ".graphify_rebuild_queue.jsonl").read_text().strip()
     successor = transaction_module.begin_transaction(
@@ -1492,9 +1494,9 @@ def test_export_graphml_creates_file(tmp_path):
 def test_issue89_provider_push_is_snapshot_only_and_never_publishes_locally(
     tmp_path, monkeypatch, provider, provider_fails,
 ):
+    import graphify.cli as cli_module
     import graphify.export as export_module
     import graphify.transaction as transaction_module
-    from graphify.cli import dispatch_command
 
     out = _make_graph(tmp_path)
     seeded = _run(["export", "html"], tmp_path)
@@ -1548,9 +1550,9 @@ def test_issue89_provider_push_is_snapshot_only_and_never_publishes_locally(
 
     if provider_fails:
         with pytest.raises(RuntimeError, match=f"{provider} provider failed"):
-            dispatch_command("export")
+            cli_module.dispatch_command("export")
     else:
-        dispatch_command("export")
+        cli_module.dispatch_command("export")
 
     assert admissions == ["export-admission", "export"]
     assert len(calls) == 1
