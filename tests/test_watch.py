@@ -1885,6 +1885,147 @@ def _merge_pending_watch_fixture(tmp_path: Path):
     return current, output, current_source
 
 
+def _output_tree_bytes(output: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(output).as_posix(): path.read_bytes()
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "_successor_ready_recovery_pending",
+        "_successor_ready_merge_admission",
+        "_successor_ready_recovery_deferred",
+    ],
+)
+def test_successor_ready_probe_errors_defer_without_mutation(
+    tmp_path, monkeypatch, capsys, probe
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    sentinel = output / "sentinel"
+    sentinel.write_bytes(b"unchanged")
+
+    if probe == "_successor_ready_merge_admission":
+        monkeypatch.setattr(
+            transaction_module, "_successor_ready_recovery_pending", lambda _out: True
+        )
+    elif probe == "_successor_ready_recovery_deferred":
+        monkeypatch.setattr(
+            transaction_module, "_successor_ready_recovery_pending", lambda _out: False
+        )
+
+    def malformed(_output):
+        raise transaction_module.PendingTransactionError(f"{probe} malformed")
+
+    monkeypatch.setattr(transaction_module, probe, malformed)
+    before = _output_tree_bytes(output)
+
+    assert _rebuild_code(tmp_path, changed_paths=[tmp_path / "changed.py"]) is False
+    assert f"Rebuild deferred: {probe} malformed" in capsys.readouterr().out
+    assert _output_tree_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "boundary", ["after_prepared_rebound", "after_token_protocol"]
+)
+def test_merge_pending_watch_resumes_prepared_transfer_before_probes(
+    tmp_path, monkeypatch, boundary
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_after_successor_ready(transaction, *, close=True, failpoint=None):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_successor_ready"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_after_successor_ready,
+    )
+    with pytest.raises(RuntimeError, match="after_successor_ready"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        transaction_module, "_finalize_prepared_transaction", real_finalize
+    )
+    real_takeover = transaction_module.takeover_drainer
+
+    def crash_during_transfer(output_path, *, now=None, **_kwargs):
+        return real_takeover(
+            output_path,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "takeover_drainer",
+        crash_during_transfer,
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    assert (output / transaction_module.TOKEN_TRANSITION_FILE).is_file()
+    before_probes = _output_tree_bytes(output)
+    assert transaction_module._successor_ready_recovery_pending(output) is False
+    assert transaction_module._successor_ready_merge_admission(output) is None
+    assert transaction_module._successor_ready_recovery_deferred(output) is False
+    assert _output_tree_bytes(output) == before_probes
+
+    monkeypatch.setattr(
+        transaction_module,
+        "takeover_drainer",
+        real_takeover,
+    )
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="prepared-transfer-watch-recovery-test"
+    )
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+    assert not (output / transaction_module.TOKEN_TRANSITION_FILE).exists()
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+
+
 def test_subprocess_update_recovers_merge_pending_union(tmp_path):
     from graphify import transaction as transaction_module
 
@@ -1997,6 +2138,57 @@ def test_merge_pending_watch_drains_late_intent_at_successor_boundary(
     assert not (output / transaction_module.PREPARED_FILE).exists()
     assert not (output / transaction_module.TRANSACTION_FILE).exists()
     assert not (output / transaction_module.QUEUE_FILE).read_text(encoding="utf-8")
+
+
+def test_merge_pending_watch_retains_marker_until_claim_acknowledgement(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_complete = transaction_module.complete_rebuild_claim
+
+    def complete_then_crash(*args, **kwargs):
+        real_complete(*args, **kwargs)
+        raise RuntimeError("after_watch_claim_acknowledgement")
+
+    monkeypatch.setattr(
+        transaction_module, "complete_rebuild_claim", complete_then_crash
+    )
+    with pytest.raises(RuntimeError, match="after_watch_claim_acknowledgement"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    assert (output / transaction_module.PREPARED_FILE).is_file()
+    assert (output / transaction_module.TRANSACTION_FILE).is_file()
+
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(transaction_module, "complete_rebuild_claim", real_complete)
+
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="claim-acknowledgement-recovery-test"
+    )
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
 
 
 def test_merge_pending_watch_recovers_expired_successor_ready_owner(

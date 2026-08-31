@@ -9136,6 +9136,26 @@ def test_merge_successor_ready_binds_exact_inventory_and_replays_publication(tmp
     assert not (output / transaction_module.PREPARED_FILE).exists()
 
 
+def test_merge_finalize_without_close_retains_marker_until_owner_closes(tmp_path):
+    from graphify import transaction as transaction_module
+
+    _root, output, transaction, _token, _admission, _marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    generation = transaction_module._finalize_prepared_transaction(
+        transaction, close=False
+    )
+    assert generation is not None
+    assert (output / transaction_module.PREPARED_FILE).is_file()
+    assert (output / transaction_module.TRANSACTION_FILE).is_file()
+
+    transaction_module.finish_transaction(transaction)
+    assert (output / transaction_module.PREPARED_FILE).is_file()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+    assert transaction_module._recover_successor_ready_transaction(output)
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+
+
 @pytest.mark.parametrize(
     "boundary",
     [

@@ -812,15 +812,19 @@ def _rebuild_code(
         report_auxiliaries: dict[str, bytes] = {}
         merge_admission = None
         intent_queued = False
-        successor_pending = (
-            actual_out.is_dir()
-            and _successor_ready_recovery_pending(actual_out)
-        )
-        successor_admission = (
-            _successor_ready_merge_admission(actual_out)
-            if successor_pending
-            else None
-        )
+        try:
+            successor_pending = (
+                actual_out.is_dir()
+                and _successor_ready_recovery_pending(actual_out)
+            )
+            successor_admission = (
+                _successor_ready_merge_admission(actual_out)
+                if successor_pending
+                else None
+            )
+        except PendingTransactionError as exc:
+            print(f"[graphify watch] Rebuild deferred: {exc}")
+            return False
         if successor_pending:
             queue_rebuild(
                 "update" if changed_paths is not None else "full",
@@ -868,10 +872,14 @@ def _rebuild_code(
                 except PendingTransactionError:
                     print(f"[graphify watch] Rebuild deferred: {exc}")
                     return False
-        recovery_deferred = (
-            actual_out.is_dir()
-            and _successor_ready_recovery_deferred(actual_out)
-        )
+        try:
+            recovery_deferred = (
+                actual_out.is_dir()
+                and _successor_ready_recovery_deferred(actual_out)
+            )
+        except PendingTransactionError as exc:
+            print(f"[graphify watch] Rebuild deferred: {exc}")
+            return False
         if recovery_deferred and not intent_queued:
             queue_rebuild(
                 "update" if changed_paths is not None else "full",
@@ -1067,8 +1075,20 @@ def _rebuild_code(
                     if close_if_queue_empty(
                         transaction, receipt_digest=receipt_digest
                     ):
+                        if merge_recovery and not _recover_successor_ready_transaction(
+                            actual_out
+                        ):
+                            raise PendingTransactionError(
+                                "completed merge recovery marker is missing"
+                            )
                         return True
                 finish_transaction(transaction)
+                if merge_recovery and not _recover_successor_ready_transaction(
+                    actual_out
+                ):
+                    raise PendingTransactionError(
+                        "completed merge recovery marker is missing"
+                    )
                 baseline_snapshot = open_graph_snapshot(
                     actual_out / "graph.json", purpose="watch-prepare"
                 )

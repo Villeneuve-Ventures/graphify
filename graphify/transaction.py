@@ -5278,6 +5278,21 @@ def _validate_token_transition_current(
     return target
 
 
+def _prepared_transfer_target_locked(
+    capability: OutputCapability,
+) -> Transaction | None:
+    """Validate and project an in-progress prepared-owner transfer target."""
+    record = _read_token_transition(capability)
+    if record is None or "prepared_transfer" not in record:
+        return None
+    target = _validate_successor_ready_recovery_locked(capability)
+    if target is None:
+        raise PendingTransactionError(
+            "prepared owner transfer recovery target is missing"
+        )
+    return target
+
+
 def _resume_token_transition_locked(
     capability: OutputCapability,
     *,
@@ -13367,6 +13382,25 @@ def recover_transaction(
             and capability.identity != expected_output_identity
         ):
             raise PendingTransactionError("stale output identity selector")
+        prepared_transfer_target = _prepared_transfer_target_locked(capability)
+        if prepared_transfer_target is not None:
+            if (
+                prepared_transfer_target.root != str(root_path)
+                or prepared_transfer_target.kind != kind
+                or (
+                    expected_generation is not None
+                    and prepared_transfer_target.generation != expected_generation
+                )
+                or (
+                    expected_transaction_id is not None
+                    and prepared_transfer_target.id != expected_transaction_id
+                )
+            ):
+                raise PendingTransactionError("stale token recovery selector")
+            resumed_target, _resumed_protocol = _resume_token_transition_locked(
+                capability, failpoint=transition_failpoint
+            )
+            return resumed_target
         successor_ready_recovery = _validate_successor_ready_recovery_locked(
             capability
         )
@@ -14732,34 +14766,55 @@ def _recover_successor_ready_transaction(
     failpoint: Callable[[str], None] | None = None,
 ) -> bool:
     """Take over and finalize only an exact expired successor-ready owner."""
+    prepared_transfer_target: Transaction | None = None
+    output_identity: OutputIdentity | None = None
     with pin_output(output) as capability, _locked(capability):
         marker = _load_json(capability, PREPARED_FILE)
         if marker is None or marker.get("state") != "successor-ready":
             return False
+        prepared_transfer_target = _prepared_transfer_target_locked(capability)
+        if prepared_transfer_target is not None:
+            output_identity = capability.identity
         live = _read_transaction(capability)
-        drainer = _read_drainer(capability)
-        if live is None:
+        if prepared_transfer_target is None and live is None:
             _retire_completed_successor_ready_locked(
                 capability, marker, now=now
             )
             return True
-        if drainer is None:
+        drainer = _read_drainer(capability)
+        if prepared_transfer_target is None and drainer is None:
             raise PendingTransactionError(
                 "successor-ready recovery owner binding is incomplete"
             )
         protocol = _read_protocol(capability)
-        _validate_live_successor_ready_merge_binding_locked(
-            capability,
-            marker,
-            live,
-            protocol=protocol,
-            drainer=drainer,
-        )
-        current_time = time.time() if now is None else now
-        if current_time <= float(drainer[2].get("lease_deadline", 0.0)):
-            raise PendingTransactionError(
-                "successor-ready owner lease has not expired"
+        if prepared_transfer_target is None:
+            assert live is not None and drainer is not None
+            _validate_live_successor_ready_merge_binding_locked(
+                capability,
+                marker,
+                live,
+                protocol=protocol,
+                drainer=drainer,
             )
+            current_time = time.time() if now is None else now
+            if current_time <= float(drainer[2].get("lease_deadline", 0.0)):
+                raise PendingTransactionError(
+                    "successor-ready owner lease has not expired"
+                )
+    if prepared_transfer_target is not None:
+        target = recover_transaction(
+            prepared_transfer_target.kind,
+            prepared_transfer_target.root,
+            output=output,
+            now=now,
+            expected_transaction_id=prepared_transfer_target.id,
+            expected_generation=prepared_transfer_target.generation,
+            expected_output_identity=output_identity,
+            transition_failpoint=failpoint,
+        )
+        _finalize_successor_ready_transaction(target, failpoint=failpoint)
+        return True
+    assert live is not None
     if protocol is not None and protocol.get("state") == "COMPLETE":
         recover_transaction(
             live.kind,
@@ -14799,6 +14854,8 @@ def _successor_ready_recovery_deferred(output: Path | str) -> bool:
         marker = _load_json(capability, PREPARED_FILE)
         if marker is None or marker.get("state") != "successor-ready":
             return False
+        if _prepared_transfer_target_locked(capability) is not None:
+            return False
         live = _read_transaction(capability)
         drainer = _read_drainer(capability)
         if live is None or drainer is None or drainer[0] != live.drainer:
@@ -14816,6 +14873,8 @@ def _successor_ready_merge_admission(
     with pin_output(output, mutation=False) as capability, _locked(capability):
         marker = _load_json(capability, PREPARED_FILE)
         if marker is None or marker.get("state") != "successor-ready":
+            return None
+        if _prepared_transfer_target_locked(capability) is not None:
             return None
         live = _read_transaction(capability)
         _validate_successor_ready_marker(
@@ -14848,6 +14907,8 @@ def _successor_ready_recovery_pending(output: Path | str) -> bool:
         marker = _load_json(capability, PREPARED_FILE)
         if marker is None or marker.get("state") != "successor-ready":
             return False
+        if _prepared_transfer_target_locked(capability) is not None:
+            return False
         _validate_successor_ready_marker(
             marker,
             capability=capability,
@@ -14862,7 +14923,7 @@ def _finalize_prepared_transaction(
     failpoint: Callable[[str], None] | None = None,
     close: bool = True,
 ) -> GenerationReceipt | None:
-    """Capability-commit an owner-prepared full-build generation and close it."""
+    """Capability-commit an owner-prepared generation and optionally close it."""
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         prepared_capability = _pin_prepared_workspace(transaction, capability)
@@ -14942,10 +15003,12 @@ def _finalize_prepared_transaction(
         )
         if close:
             finish_transaction(transaction)
-        with pin_output(transaction.output) as capability, _locked(capability):
-            retired = _retire_prepared_locked(capability)
-            if retired is None:
-                raise PendingTransactionError("prepared workspace binding is missing")
+            with pin_output(transaction.output) as capability, _locked(capability):
+                retired = _retire_prepared_locked(capability)
+                if retired is None:
+                    raise PendingTransactionError(
+                        "prepared workspace binding is missing"
+                    )
         return generation
     payloads = dict(plan.payloads)
     payloads[graph_name] = graph_payload
