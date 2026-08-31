@@ -370,7 +370,11 @@ def test_status_shows_all_hooks(tmp_path):
     assert "post-commit" in result
     assert "post-checkout" in result
     assert "post-merge" in result
-    assert result.count("installed") >= 3
+    assert result.splitlines()[:3] == [
+        "post-commit: installed",
+        "post-checkout: installed",
+        "post-merge: installed",
+    ]
 
 
 

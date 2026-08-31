@@ -10899,7 +10899,6 @@ def test_detached_merge_rejects_receiptless_managed_current_without_mutation(tmp
     current = output / "graph.json"
     other = tmp_path / "other.json"
     legacy = json.loads(_graph(1))
-    legacy["graph"].pop(GRAPH_WATERMARK_KEY)
     for path, payload in (
         (base, legacy),
         (current, legacy),
