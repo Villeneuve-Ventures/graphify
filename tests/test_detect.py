@@ -1949,6 +1949,38 @@ def test_save_manifest_subset_save_preserves_untouched_rows(tmp_path):
     )
 
 
+def test_save_manifest_can_replace_existing_rows(tmp_path):
+    """Explicit replacement writes only supplied rows, including none."""
+    import json
+
+    a = tmp_path / "a.py"
+    b = tmp_path / "b.py"
+    outside = tmp_path.parent / f"{tmp_path.name}-extern.py"
+    a.write_text("x = 1\n", encoding="utf-8")
+    b.write_text("y = 2\n", encoding="utf-8")
+    outside.write_text("z = 3\n", encoding="utf-8")
+    manifest_path = str(tmp_path / "graphify-out" / "manifest.json")
+    try:
+        save_manifest(
+            {"code": [str(a), str(b), str(outside)]},
+            manifest_path,
+            root=tmp_path,
+        )
+        seeded = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        assert set(seeded) == {"a.py", "b.py", str(outside.resolve())}
+
+        save_manifest(
+            {},
+            manifest_path,
+            root=tmp_path,
+            preserve_existing=False,
+        )
+
+        assert json.loads(Path(manifest_path).read_text(encoding="utf-8")) == {}
+    finally:
+        outside.unlink(missing_ok=True)
+
+
 def test_save_manifest_full_scan_keeps_out_of_root_rows(tmp_path):
     """Out-of-root entries (--include sources, symlinked corpora) are never
     walked by detect, so their absence from the corpus is not exclusion

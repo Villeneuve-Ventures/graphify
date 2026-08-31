@@ -446,6 +446,308 @@ def test_pathless_postgres_transaction_routing(
         assert not (cwd / "graphify-out").exists()
 
 
+def _dispatch_extract_success(cli_module):
+    try:
+        cli_module.dispatch_command("extract")
+    except SystemExit as exc:
+        assert exc.code in (None, 0)
+
+
+def _seed_pathless_state_boundary_output(
+    corpus, output_root, *, no_cluster, monkeypatch
+):
+    import graphify.cli as cli_module
+    from graphify.cache import file_hash, save_semantic_cache
+
+    sample = corpus / "sample.py"
+    sample.write_text("def sample():\n    return 1\n", encoding="utf-8")
+    path_args = [
+        "graphify",
+        "extract",
+        str(corpus),
+        "--out",
+        str(output_root),
+        "--code-only",
+    ]
+    if no_cluster:
+        path_args.append("--no-cluster")
+    monkeypatch.setattr(sys, "argv", path_args)
+    _dispatch_extract_success(cli_module)
+
+    output = output_root / "graphify-out"
+    seeded_graph = json.loads(
+        (output / "graph.json").read_text(encoding="utf-8")
+    )
+    assert any(
+        Path(str(node.get("source_file", ""))).name == sample.name
+        for node in seeded_graph["nodes"]
+    )
+
+    cache_paths = {}
+    for mode in (None, "deep"):
+        cache_node = {
+            "id": f"cache:{mode or 'standard'}",
+            "label": f"cache {mode or 'standard'}",
+            "file_type": "code",
+            "source_file": str(sample),
+            "source_location": "L1",
+        }
+        assert save_semantic_cache(
+            [cache_node], [], root=output_root, mode=mode
+        ) == 1
+        namespace = "semantic" if mode is None else "semantic-deep"
+        cache_paths[namespace] = (
+            output
+            / "cache"
+            / namespace
+            / f"{file_hash(sample, output_root)}.json"
+        )
+
+    receipt = json.loads(
+        (output / ".graphify_generation.json").read_text(encoding="utf-8")
+    )
+    required = set(receipt["required_artifacts"])
+    for cache_path in cache_paths.values():
+        assert cache_path.is_file()
+        assert cache_path.relative_to(output).as_posix() not in required
+
+    return {
+        "sample": sample,
+        "output": output,
+        "cache_paths": cache_paths,
+        "cache_bytes": {
+            name: path.read_bytes() for name, path in cache_paths.items()
+        },
+    }
+
+
+@pytest.mark.parametrize("no_cluster", [True, False], ids=("raw", "clustered"))
+def test_pathless_postgres_preserves_cache_resets_manifest_and_reloads_path(
+    no_cluster, tmp_path, monkeypatch
+):
+    import graphify.cargo_introspect as cargo_module
+    import graphify.cli as cli_module
+    import graphify.detect as detect_module
+    import graphify.pg_introspect as pg_module
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    output_root = tmp_path / "shared"
+    monkeypatch.chdir(corpus)
+    seeded = _seed_pathless_state_boundary_output(
+        corpus, output_root, no_cluster=no_cluster, monkeypatch=monkeypatch
+    )
+    output = seeded["output"]
+    cache_paths = seeded["cache_paths"]
+    cache_bytes = seeded["cache_bytes"]
+    cargo_targets = []
+
+    def unexpected_detector(*_args, **_kwargs):
+        pytest.fail("pathless PostgreSQL extraction must not scan cwd")
+
+    def postgres_result(_dsn):
+        return {
+            "nodes": [
+                {
+                    "id": "postgres:widgets",
+                    "label": "PostgreSQL widgets",
+                    "file_type": "code",
+                    "source_file": "postgresql:/example/test",
+                    "source_location": "schema public",
+                }
+            ],
+            "edges": [],
+        }
+
+    def cargo_result(target):
+        cargo_targets.append(target)
+        return {
+            "nodes": [
+                {
+                    "id": "cargo:workspace",
+                    "label": "Cargo workspace",
+                    "file_type": "code",
+                    "source_file": "Cargo.toml",
+                    "source_location": "workspace",
+                }
+            ],
+            "edges": [],
+        }
+
+    with monkeypatch.context() as pathless:
+        pathless.setattr(detect_module, "detect", unexpected_detector)
+        pathless.setattr(detect_module, "detect_incremental", unexpected_detector)
+        pathless.setattr(pg_module, "introspect_postgres", postgres_result)
+        pathless.setattr(cargo_module, "introspect_cargo", cargo_result)
+        pathless_args = [
+            "graphify",
+            "extract",
+            "--postgres",
+            "postgresql://example/test",
+            "--cargo",
+            "--out",
+            str(output_root),
+        ]
+        if no_cluster:
+            pathless_args.append("--no-cluster")
+        pathless.setattr(sys, "argv", pathless_args)
+        _dispatch_extract_success(cli_module)
+
+    assert cargo_targets == [corpus.resolve()]
+    adapter_graph = json.loads(
+        (output / "graph.json").read_text(encoding="utf-8")
+    )
+    adapter_ids = {node["id"] for node in adapter_graph["nodes"]}
+    assert {"postgres:widgets", "cargo:workspace"} <= adapter_ids
+    pathless_receipt = json.loads(
+        (output / ".graphify_generation.json").read_text(encoding="utf-8")
+    )
+    pathless_protocol = json.loads(
+        (output / ".graphify_protocol.json").read_text(encoding="utf-8")
+    )
+    pathless_watermark = adapter_graph["graph"]["_graphify_protocol"]
+    assert pathless_protocol["state"] == "COMPLETE"
+    assert pathless_protocol["generation"] == pathless_receipt["generation"]
+    assert pathless_watermark["generation"] == pathless_receipt["generation"]
+    assert pathless_watermark["state"] == "active"
+
+    manifest_after_pathless = json.loads(
+        (output / "manifest.json").read_text(encoding="utf-8")
+    )
+    cache_preserved = {
+        name: path.is_file() and path.read_bytes() == cache_bytes[name]
+        for name, path in cache_paths.items()
+    }
+
+    reload_args = [
+        "graphify",
+        "extract",
+        str(corpus),
+        "--out",
+        str(output_root),
+        "--code-only",
+    ]
+    if no_cluster:
+        reload_args.append("--no-cluster")
+    monkeypatch.setattr(sys, "argv", reload_args)
+    _dispatch_extract_success(cli_module)
+    reloaded_graph = json.loads(
+        (output / "graph.json").read_text(encoding="utf-8")
+    )
+    sample_reloaded = any(
+        Path(str(node.get("source_file", ""))).name == seeded["sample"].name
+        for node in reloaded_graph["nodes"]
+    )
+
+    problems = []
+    if not all(cache_preserved.values()):
+        problems.append(f"semantic caches were deleted: {cache_preserved}")
+    if manifest_after_pathless != {}:
+        problems.append(
+            "pathless manifest retained filesystem rows: "
+            f"{set(manifest_after_pathless)}"
+        )
+    if not sample_reloaded:
+        problems.append("unchanged local source was not re-admitted")
+    assert not problems, "; ".join(problems)
+
+
+def test_pathless_postgres_manifest_failure_is_publication_atomic(
+    tmp_path, monkeypatch, capsys
+):
+    import graphify.__main__ as main_module
+    import graphify.detect as detect_module
+    import graphify.pg_introspect as pg_module
+    import graphify.transaction as transaction_module
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    output_root = tmp_path / "shared"
+    monkeypatch.chdir(corpus)
+    seeded = _seed_pathless_state_boundary_output(
+        corpus, output_root, no_cluster=True, monkeypatch=monkeypatch
+    )
+    output = seeded["output"]
+    cache_paths = seeded["cache_paths"]
+    cache_bytes = seeded["cache_bytes"]
+    graph_path = output / "graph.json"
+    manifest_path = output / "manifest.json"
+    receipt_path = output / transaction_module.RECEIPT_FILE
+    protocol_path = output / transaction_module.PROTOCOL_FILE
+    graph_before = graph_path.read_bytes()
+    manifest_before = manifest_path.read_bytes()
+    receipt_before = receipt_path.read_bytes()
+    completed_receipt = json.loads(receipt_before)
+    completed_generation = completed_receipt["generation"]
+    watermark_before = json.loads(graph_before)["graph"][
+        transaction_module.GRAPH_WATERMARK_KEY
+    ]
+    assert watermark_before["generation"] == completed_generation
+    assert json.loads(protocol_path.read_text(encoding="utf-8"))["state"] == "COMPLETE"
+
+    def unexpected_detector(*_args, **_kwargs):
+        pytest.fail("pathless PostgreSQL extraction must not scan cwd")
+
+    def failing_manifest(*_args, **_kwargs):
+        raise OSError("manifest failed")
+
+    monkeypatch.setattr(main_module, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(detect_module, "detect", unexpected_detector)
+    monkeypatch.setattr(detect_module, "detect_incremental", unexpected_detector)
+    monkeypatch.setattr(detect_module, "save_manifest", failing_manifest)
+    monkeypatch.setattr(
+        pg_module,
+        "introspect_postgres",
+        lambda _dsn: {
+            "nodes": [
+                {
+                    "id": "postgres:failure",
+                    "label": "PostgreSQL failure fixture",
+                    "file_type": "code",
+                    "source_file": "postgresql:/example/test",
+                    "source_location": "schema public",
+                }
+            ],
+            "edges": [],
+        },
+    )
+    monkeypatch.setattr(
+        main_module.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            "--postgres",
+            "postgresql://example/test",
+            "--out",
+            str(output_root),
+            "--no-cluster",
+        ],
+    )
+
+    with pytest.raises(OSError, match="manifest failed"):
+        main_module.main()
+
+    assert graph_path.read_bytes() == graph_before
+    assert manifest_path.read_bytes() == manifest_before
+    assert receipt_path.read_bytes() == receipt_before
+    assert json.loads(graph_path.read_text(encoding="utf-8"))["graph"][
+        transaction_module.GRAPH_WATERMARK_KEY
+    ] == watermark_before
+    pending_protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+    assert pending_protocol["state"] == "INCOMPLETE"
+    assert pending_protocol["generation"] == completed_generation + 1
+    transaction_path = output / transaction_module.TRANSACTION_FILE
+    if transaction_path.exists():
+        transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+        assert transaction["generation"] == pending_protocol["generation"]
+    assert "success" not in capsys.readouterr().out.lower()
+    assert {
+        name: path.is_file() and path.read_bytes() == cache_bytes[name]
+        for name, path in cache_paths.items()
+    } == {"semantic": True, "semantic-deep": True}
+
+
 def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
     tmp_path, monkeypatch
 ):

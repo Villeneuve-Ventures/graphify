@@ -1478,6 +1478,7 @@ def save_manifest(
     kind: str = "both",
     root: Path | None = None,
     scan_corpus: set[str] | list[str] | None = None,
+    preserve_existing: bool = True,
 ) -> None:
     """Save current file mtimes + content hashes for change detection.
 
@@ -1504,6 +1505,11 @@ def save_manifest(
     --code-only doc rows). Out-of-root entries are never pruned. Callers
     saving a SUBSET of files (changed_paths hooks, skill runbooks, #917)
     must leave this None so their untouched rows are preserved.
+
+    ``preserve_existing=False`` replaces the manifest row set with only the
+    supplied ``files``. Existing entries are still consulted for complementary
+    hash fields on supplied rows, but no untouched row is seeded into the new
+    manifest. The default preserves the historical subset/full-scan behavior.
     """
     existing = load_manifest(manifest_path, root=root)
 
@@ -1555,18 +1561,19 @@ def save_manifest(
     # the scan no longer covers: those files were excluded, not deleted, and
     # keeping the row makes them look deleted on every future run (#1908).
     manifest: dict[str, dict] = {}
-    for f, entry in existing.items():
-        normalised = _normalise_entry(entry)
-        if normalised is None:
-            continue
-        try:
-            if not Path(f).exists():
+    if preserve_existing:
+        for f, entry in existing.items():
+            normalised = _normalise_entry(entry)
+            if normalised is None:
                 continue
-        except OSError:
-            continue
-        if scan_set is not None and not _in_scan(f) and _in_root(f):
-            continue  # excluded-but-alive: drop the stale row (#1908)
-        manifest[f] = normalised
+            try:
+                if not Path(f).exists():
+                    continue
+            except OSError:
+                continue
+            if scan_set is not None and not _in_scan(f) and _in_root(f):
+                continue  # excluded-but-alive: drop the stale row (#1908)
+            manifest[f] = normalised
 
     all_files = [f for file_list in files.values() for f in file_list]
     with ThreadPoolExecutor() as pool:
