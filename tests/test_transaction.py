@@ -2314,6 +2314,8 @@ def test_repeated_build_complete_predecessor_recovers_exact_pending_transition(
     ],
 )
 def test_takeover_recovery_reuses_identity_proven_successor_token(tmp_path, boundary):
+    import graphify.transaction as transaction_module
+
     root, output, _tx, _token = _owner(tmp_path)
 
     def stop(state: str) -> None:
@@ -2327,7 +2329,11 @@ def test_takeover_recovery_reuses_identity_proven_successor_token(tmp_path, boun
     pending = json.loads((output / ".graphify_transition.json").read_text())
     successor = pending["successor_transaction"]
     token_path = output / f".graphify_transaction_token.{successor['id']}"
-    token_identity = token_path.stat(follow_symlinks=False)
+    with pin_output(output) as capability:
+        token_identity = transaction_module._managed_entry_identity(
+            capability, token_path.name
+        )
+    assert token_identity is not None
     recovered = recover_transaction(
         "runtime",
         root,
@@ -2336,9 +2342,12 @@ def test_takeover_recovery_reuses_identity_proven_successor_token(tmp_path, boun
         expected_generation=successor["generation"],
         expected_output_identity=OutputIdentity(**successor["output_identity"]),
     )
-    after = token_path.stat(follow_symlinks=False)
-    assert recovered.token_identity == (token_identity.st_dev, token_identity.st_ino)
-    assert (after.st_dev, after.st_ino) == recovered.token_identity
+    with pin_output(output) as capability:
+        after = transaction_module._managed_entry_identity(
+            capability, token_path.name
+        )
+    assert recovered.token_identity == token_identity
+    assert after == recovered.token_identity
 
 
 @pytest.mark.parametrize(
@@ -5672,8 +5681,42 @@ def test_token_content_and_stable_object_identity_are_both_required(tmp_path):
         run_token(token.path, ["-c", "pass"])
     live = json.loads((output / ".graphify_transaction.json").read_text())
     assert live["token_digest"]
-    assert live["token_identity"]
+    assert set(live["token_identity"]) == {"device", "inode", "birthtime_ns"}
     assert live["generation"] == tx.generation
+
+
+def test_managed_entry_identity_distinguishes_reused_inode_incarnations():
+    import graphify.transaction as transaction_module
+
+    original = transaction_module.ManagedEntryIdentity(7, 11, 1_000)
+    recreated = transaction_module.ManagedEntryIdentity(7, 11, 1_001)
+
+    assert recreated != original
+    assert original.json() == {
+        "device": 7,
+        "inode": 11,
+        "birthtime_ns": 1_000,
+    }
+
+
+def test_managed_entry_identity_survives_managed_rename(tmp_path):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    original = output / ".managed-original"
+    renamed = output / ".managed-renamed"
+    original.write_bytes(b"stable")
+
+    with pin_output(output) as capability:
+        before = transaction_module._managed_entry_identity(
+            capability, original.name
+        )
+        original.rename(renamed)
+        after = transaction_module._managed_entry_identity(capability, renamed.name)
+
+    assert before is not None
+    assert after == before
 
 
 def test_stale_drainer_cannot_stage_handoff_token(tmp_path):

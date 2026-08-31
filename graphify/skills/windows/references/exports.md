@@ -26,7 +26,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -258,7 +258,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -490,7 +490,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -720,7 +720,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -950,7 +950,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -1183,7 +1183,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -1411,7 +1411,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -1651,7 +1651,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -1887,7 +1887,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {
@@ -2117,7 +2117,7 @@ function Test-GraphifyFullyQualifiedPath {
     if (-not $Path -or -not [IO.Path]::IsPathRooted($Path)) { return $false }
     $root = [IO.Path]::GetPathRoot($Path)
     if (-not $root -or $root -match '^[A-Za-z]:$') { return $false }
-    if ($Path -match '^[\\/](?![\\/])') { return $false }
+    if ([IO.Path]::DirectorySeparatorChar -eq '\' -and $Path -match '^[\\/](?![\\/])') { return $false }
     return $true
 }
 function Resolve-GraphifyPolicyPath {

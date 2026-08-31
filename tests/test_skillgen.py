@@ -1179,6 +1179,7 @@ def test_powershell_discovery_uses_ps51_compatible_fully_qualified_path_check():
     assert gen._POWERSHELL_BOOTSTRAP.count(
         'Test-GraphifyFullyQualifiedPath "$env:VIRTUAL_ENV"'
     ) == 2
+    assert "[IO.Path]::DirectorySeparatorChar -eq '\\'" in discovery
 
     from tree_sitter import Language, Parser
     import tree_sitter_powershell
@@ -1210,6 +1211,53 @@ def test_powershell_fully_qualified_path_check_matches_windows_semantics(tmp_pat
         "C:relative": False,
         r"\current-drive-relative": False,
         "/current-drive-relative": False,
+    }
+    entries = "\n".join(
+        f"$Expected[{ps_string(path)}] = ${str(expected).lower()}"
+        for path, expected in cases.items()
+    )
+    script = (
+        "$GraphifyDiscoveryOptional = $true\n"
+        + gen._POWERSHELL_DISCOVERY
+        + "\n$Expected = [ordered]@{}\n"
+        + entries
+        + "\n$Actual = [ordered]@{}\n"
+        + "foreach ($Entry in $Expected.GetEnumerator()) { "
+        + "$Actual[$Entry.Key] = [bool](Test-GraphifyFullyQualifiedPath $Entry.Key) }\n"
+        + "$Actual | ConvertTo-Json -Compress\n"
+    )
+    result = _run_powershell_script(
+        executable,
+        script,
+        tmp_path,
+        cwd=tmp_path,
+        env=os.environ.copy(),
+    )
+
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    output = [line for line in result.stdout.decode().splitlines() if line.strip()]
+    assert json.loads(output[-1]) == cases
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or shutil.which("pwsh") is None,
+    reason="POSIX pwsh runtime unavailable",
+)
+def test_powershell_fully_qualified_path_check_matches_posix_semantics(tmp_path):
+    executable = shutil.which("pwsh")
+    assert executable is not None
+
+    def ps_string(value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    cases = {
+        str(tmp_path.resolve()): True,
+        "/current-drive-relative-on-windows": True,
+        "": False,
+        "relative/path": False,
+        r"relative\path": False,
+        "C:relative": False,
+        r"\current-drive-relative": False,
     }
     entries = "\n".join(
         f"$Expected[{ps_string(path)}] = ${str(expected).lower()}"

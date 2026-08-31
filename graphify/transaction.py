@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import ctypes
 import hashlib
 import json
 import math
@@ -30,6 +31,59 @@ from graphify.paths import GRAPHIFY_OUT
 
 if os.name != "nt":
     import fcntl
+
+
+class _LinuxStatxTimestamp(ctypes.Structure):
+    _fields_ = [
+        ("seconds", ctypes.c_int64),
+        ("nanoseconds", ctypes.c_uint32),
+        ("reserved", ctypes.c_int32),
+    ]
+
+
+class _LinuxStatx(ctypes.Structure):
+    # Linux keeps struct statx at 256 bytes; only the fields through the device
+    # identifier are needed here.  The tail remains reserved for ABI growth.
+    _fields_ = [
+        ("mask", ctypes.c_uint32),
+        ("block_size", ctypes.c_uint32),
+        ("attributes", ctypes.c_uint64),
+        ("link_count", ctypes.c_uint32),
+        ("uid", ctypes.c_uint32),
+        ("gid", ctypes.c_uint32),
+        ("mode", ctypes.c_uint16),
+        ("spare0", ctypes.c_uint16),
+        ("inode", ctypes.c_uint64),
+        ("size", ctypes.c_uint64),
+        ("blocks", ctypes.c_uint64),
+        ("attributes_mask", ctypes.c_uint64),
+        ("access_time", _LinuxStatxTimestamp),
+        ("birth_time", _LinuxStatxTimestamp),
+        ("change_time", _LinuxStatxTimestamp),
+        ("modification_time", _LinuxStatxTimestamp),
+        ("rdev_major", ctypes.c_uint32),
+        ("rdev_minor", ctypes.c_uint32),
+        ("dev_major", ctypes.c_uint32),
+        ("dev_minor", ctypes.c_uint32),
+        ("reserved_tail", ctypes.c_ubyte * 112),
+    ]
+
+
+_AT_NO_AUTOMOUNT = 0x0800
+_AT_EMPTY_PATH = 0x1000
+_STATX_BTIME = 0x0800
+_LINUX_STATX = None
+if sys.platform.startswith("linux"):
+    _LINUX_STATX = getattr(ctypes.CDLL(None, use_errno=True), "statx", None)
+    if _LINUX_STATX is not None:
+        _LINUX_STATX.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_uint,
+            ctypes.POINTER(_LinuxStatx),
+        )
+        _LINUX_STATX.restype = ctypes.c_int
 
 
 GRAPH_WATERMARK_KEY = "_graphify_protocol"
@@ -158,6 +212,27 @@ class OutputIdentity:
         return {"device": self.device, "inode": self.inode}
 
 
+@dataclass(frozen=True)
+class ManagedEntryIdentity:
+    """Stable incarnation identity for one managed regular-file entry.
+
+    Device/inode pairs are stable across rename but can be reused after an
+    unlink.  Creation time supplies the missing incarnation boundary; callers
+    fail closed when the host filesystem cannot expose it.
+    """
+
+    device: int
+    inode: int
+    birthtime_ns: int
+
+    def json(self) -> dict[str, int]:
+        return {
+            "device": self.device,
+            "inode": self.inode,
+            "birthtime_ns": self.birthtime_ns,
+        }
+
+
 @dataclass
 class OutputCapability:
     path: Path
@@ -228,7 +303,7 @@ class Transaction:
     output_identity: OutputIdentity
     generation: int
     token_digest: str
-    token_identity: tuple[int, int] | None
+    token_identity: ManagedEntryIdentity | None
     drainer: DrainerTuple
     phase: str = "building"
 
@@ -271,7 +346,7 @@ class RebuildClaim:
     items: tuple[dict[str, object], ...]
     quarantined: tuple[dict[str, object], ...]
     inflight_path: Path | None
-    inflight_identity: tuple[int, int] | None
+    inflight_identity: ManagedEntryIdentity | None
     inflight_digest: str | None
     drainer: DrainerTuple
 
@@ -290,7 +365,7 @@ class GenerationReceipt:
 class QueueFileRecord:
     name: str
     items: tuple[dict[str, Any], ...]
-    identity: tuple[int, int] | None
+    identity: ManagedEntryIdentity | None
     digest: str | None
 
 
@@ -344,7 +419,7 @@ class _Authority:
     transaction_id: str
     generation: int
     token_digest: str
-    token_identity: tuple[int, int] | None
+    token_identity: ManagedEntryIdentity | None
     output_identity: OutputIdentity
     drainer: DrainerTuple
     root: str
@@ -814,6 +889,139 @@ def _locked(capability: OutputCapability) -> Iterator[None]:
             os.close(lock_fd)
 
 
+def _linux_fd_birthtime_ns(fd: int) -> int:
+    if _LINUX_STATX is None or ctypes.sizeof(_LinuxStatx) != 256:
+        raise PendingTransactionError(
+            "managed entry creation identity is unavailable on this Linux runtime"
+        )
+    result = _LinuxStatx()
+    ctypes.set_errno(0)
+    status_code = _LINUX_STATX(
+        fd,
+        b"",
+        _AT_EMPTY_PATH | _AT_NO_AUTOMOUNT,
+        _STATX_BTIME,
+        ctypes.byref(result),
+    )
+    if status_code != 0:
+        error = ctypes.get_errno()
+        raise PendingTransactionError(
+            "managed entry creation identity is unavailable on this filesystem"
+        ) from OSError(error, os.strerror(error))
+    birth = result.birth_time
+    if (
+        result.mask & _STATX_BTIME == 0
+        or birth.seconds < 0
+        or not 0 <= birth.nanoseconds < 1_000_000_000
+    ):
+        raise PendingTransactionError(
+            "managed entry creation identity is unavailable on this filesystem"
+        )
+    birthtime_ns = birth.seconds * 1_000_000_000 + birth.nanoseconds
+    if birthtime_ns <= 0:
+        raise PendingTransactionError(
+            "managed entry creation identity is unavailable on this filesystem"
+        )
+    return birthtime_ns
+
+
+def _managed_entry_identity_from_fd(
+    fd: int, info: os.stat_result | None = None
+) -> ManagedEntryIdentity:
+    current = os.fstat(fd) if info is None else info
+    if not stat.S_ISREG(current.st_mode):
+        raise PendingTransactionError("unsafe non-regular managed entry")
+    birthtime_ns = getattr(current, "st_birthtime_ns", None)
+    if type(birthtime_ns) is not int:
+        birthtime = getattr(current, "st_birthtime", None)
+        if (
+            not isinstance(birthtime, (int, float))
+            or isinstance(birthtime, bool)
+            or not math.isfinite(float(birthtime))
+        ):
+            birthtime_ns = None
+        else:
+            birthtime_ns = round(float(birthtime) * 1_000_000_000)
+    if birthtime_ns is None and sys.platform.startswith("linux"):
+        birthtime_ns = _linux_fd_birthtime_ns(fd)
+    if type(birthtime_ns) is not int or birthtime_ns <= 0:
+        raise PendingTransactionError(
+            "managed entry creation identity is unavailable on this filesystem"
+        )
+    return ManagedEntryIdentity(
+        int(current.st_dev), int(current.st_ino), birthtime_ns
+    )
+
+
+def _open_managed_entry(
+    capability: OutputCapability, name: str
+) -> tuple[int, os.stat_result, ManagedEntryIdentity]:
+    if Path(name).name != name:
+        raise PendingTransactionError(f"unsafe managed entry name: {name}")
+    fd = (
+        _open_windows_relative_fd(capability, name)
+        if _PLATFORM == "windows"
+        else os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=capability.fd,
+        )
+    )
+    try:
+        info = os.fstat(fd)
+        identity = _managed_entry_identity_from_fd(fd, info)
+        return fd, info, identity
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _managed_entry_identity(
+    capability: OutputCapability, name: str
+) -> ManagedEntryIdentity | None:
+    try:
+        fd, _info, identity = _open_managed_entry(capability, name)
+    except FileNotFoundError:
+        return None
+    try:
+        return identity
+    finally:
+        os.close(fd)
+
+
+def _read_managed_bytes(
+    capability: OutputCapability,
+    name: str,
+    limit: int = _MAX_STATE_BYTES,
+    *,
+    verify_named_identity: bool = True,
+) -> tuple[bytes, ManagedEntryIdentity]:
+    fd, opened, identity = _open_managed_entry(capability, name)
+    try:
+        if opened.st_size > limit:
+            raise PendingTransactionError(f"managed entry exceeds size limit: {name}")
+        chunks: list[bytes] = []
+        remaining = limit + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > limit:
+            raise PendingTransactionError(f"managed entry exceeds size limit: {name}")
+        if (
+            verify_named_identity
+            and _managed_entry_identity(capability, name) != identity
+        ):
+            raise PendingTransactionError(f"managed entry replaced while reading: {name}")
+        capability.validate()
+        return payload, identity
+    finally:
+        os.close(fd)
+
+
 def _entry_stat(capability: OutputCapability, name: str) -> os.stat_result | None:
     if Path(name).name != name:
         raise PendingTransactionError(f"unsafe managed entry name: {name}")
@@ -1095,7 +1303,7 @@ def _replace_bytes(
     name: str,
     payload: bytes,
     *,
-    expected_identity: tuple[int, int] | None = None,
+    expected_identity: ManagedEntryIdentity | tuple[int, int] | None = None,
     expected_digest: str | None = None,
 ) -> None:
     if expected_digest is not None and expected_identity is None:
@@ -1122,10 +1330,18 @@ def _replace_bytes(
     finally:
         os.close(fd)
     capability.validate()
+
+    def current_identity(
+        entry_name: str,
+    ) -> ManagedEntryIdentity | tuple[int, int] | None:
+        if isinstance(expected_identity, ManagedEntryIdentity):
+            return _managed_entry_identity(capability, entry_name)
+        info = _entry_stat(capability, entry_name)
+        return None if info is None else (info.st_dev, info.st_ino)
+
     try:
         if expected_identity is not None:
-            current = _entry_stat(capability, name)
-            if current is None or (current.st_dev, current.st_ino) != expected_identity:
+            if current_identity(name) != expected_identity:
                 raise PendingTransactionError(f"managed entry identity changed: {name}")
             if expected_digest is not None:
                 current_record = _read_queue_record(capability, name)
@@ -1144,11 +1360,7 @@ def _replace_bytes(
                 dst_dir_fd=capability.fd,
             )
             os.fsync(capability.fd)
-            quarantined = _entry_stat(capability, quarantine)
-            if quarantined is None or (
-                quarantined.st_dev,
-                quarantined.st_ino,
-            ) != expected_identity:
+            if current_identity(quarantine) != expected_identity:
                 if _entry_stat(capability, name) is None:
                     os.rename(
                         quarantine,
@@ -1216,11 +1428,7 @@ def _replace_bytes(
                         dst_dir_fd=capability.fd,
                     )
                 else:
-                    quarantined = _entry_stat(capability, quarantine)
-                    if quarantined is None or (
-                        quarantined.st_dev,
-                        quarantined.st_ino,
-                    ) != expected_identity:
+                    if current_identity(quarantine) != expected_identity:
                         raise PendingTransactionError(
                             f"managed entry quarantine identity changed: {name}"
                         )
@@ -1442,40 +1650,50 @@ def _move_identity_no_replace(
     capability: OutputCapability,
     source: str,
     target: str,
-    expected: OutputIdentity | tuple[int, int],
+    expected: OutputIdentity | ManagedEntryIdentity | tuple[int, int],
     *,
     label: str,
     failpoint: Callable[[str], None] | None = None,
 ) -> None:
     """Move one exact entry without replacing a concurrent destination."""
+    managed_entry = isinstance(expected, ManagedEntryIdentity)
     expected_pair = (
         (expected.device, expected.inode)
-        if isinstance(expected, OutputIdentity)
+        if isinstance(expected, (OutputIdentity, ManagedEntryIdentity))
         else expected
     )
-    source_identity = _relative_identity(capability, source)
-    target_identity = _relative_identity(capability, target)
-    if source_identity is None and target_identity == expected_pair:
+    expected_identity = expected if managed_entry else expected_pair
+
+    def current_identity(name: str) -> ManagedEntryIdentity | tuple[int, int] | None:
+        return (
+            _managed_entry_identity(capability, name)
+            if managed_entry
+            else _relative_identity(capability, name)
+        )
+
+    source_identity = current_identity(source)
+    target_identity = current_identity(target)
+    if source_identity is None and target_identity == expected_identity:
         os.fsync(capability.fd)
         capability.validate()
         return
-    if source_identity != expected_pair or target_identity is not None:
+    if source_identity != expected_identity or target_identity is not None:
         raise PendingTransactionError(f"{label} destination changed")
     try:
         _atomic_rename_no_replace(capability, source, target)
     except FileExistsError as exc:
-        source_identity = _relative_identity(capability, source)
-        target_identity = _relative_identity(capability, target)
-        if source_identity is None and target_identity == expected_pair:
+        source_identity = current_identity(source)
+        target_identity = current_identity(target)
+        if source_identity is None and target_identity == expected_identity:
             os.fsync(capability.fd)
             capability.validate()
             return
         raise PendingTransactionError(f"{label} destination changed") from exc
     if failpoint is not None:
         failpoint("after_identity_no_replace_move")
-    moved_identity = _relative_identity(capability, target)
-    source_identity = _relative_identity(capability, source)
-    if source_identity is not None or moved_identity != expected_pair:
+    moved_identity = current_identity(target)
+    source_identity = current_identity(source)
+    if source_identity is not None or moved_identity != expected_identity:
         raise PendingTransactionError(f"{label} identity changed")
     os.fsync(capability.fd)
     capability.validate()
@@ -2182,12 +2400,23 @@ def _replace_unmanaged_relative_bytes(
             os.close(parent_fd)
 
 
-def _unlink(capability: OutputCapability, name: str, *, expected: tuple[int, int] | None = None) -> None:
+def _unlink(
+    capability: OutputCapability,
+    name: str,
+    *,
+    expected: ManagedEntryIdentity | tuple[int, int] | None = None,
+) -> None:
     info = _entry_stat(capability, name)
     if info is None:
         return
-    if expected is not None and (info.st_dev, info.st_ino) != expected:
-        raise PendingTransactionError(f"managed entry identity changed: {name}")
+    if expected is not None:
+        current = (
+            _managed_entry_identity(capability, name)
+            if isinstance(expected, ManagedEntryIdentity)
+            else (info.st_dev, info.st_ino)
+        )
+        if current != expected:
+            raise PendingTransactionError(f"managed entry identity changed: {name}")
     os.unlink(name, dir_fd=capability.fd)
     os.fsync(capability.fd)
     capability.validate()
@@ -2201,7 +2430,9 @@ def _load_json(capability: OutputCapability, name: str) -> dict[str, Any] | None
     if _entry_stat(capability, name) is None:
         return None
     try:
-        value = json.loads(_read_bytes(capability, name).decode("utf-8"))
+        value = json.loads(
+            _read_managed_bytes(capability, name)[0].decode("utf-8")
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError(f"malformed managed state: {name}") from exc
     if not isinstance(value, dict):
@@ -2273,7 +2504,7 @@ def _protocol_from_json(
         if not _is_hex(raw.get("transaction_id")):
             raise PendingTransactionError("malformed protocol owner")
         try:
-            _token_identity_from_json(raw.get("token_identity"))
+            _managed_entry_identity_from_json(raw.get("token_identity"))
         except PendingTransactionError as exc:
             raise PendingTransactionError(
                 "malformed protocol token identity"
@@ -2303,11 +2534,25 @@ def _identity_from_json(value: object) -> OutputIdentity:
     return OutputIdentity(value["device"], value["inode"])
 
 
-def _token_identity_from_json(value: object) -> tuple[int, int] | None:
+def _managed_entry_identity_from_json(
+    value: object,
+) -> ManagedEntryIdentity | None:
     if value is None:
         return None
-    identity = _identity_from_json(value)
-    return identity.device, identity.inode
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"device", "inode", "birthtime_ns"}
+        or type(value.get("device")) is not int
+        or type(value.get("inode")) is not int
+        or type(value.get("birthtime_ns")) is not int
+        or not 0 <= value["device"] <= 18_446_744_073_709_551_615
+        or not 0 < value["inode"] <= (1 << 128) - 1
+        or not 0 < value["birthtime_ns"] <= (1 << 127) - 1
+    ):
+        raise PendingTransactionError("malformed managed entry identity")
+    return ManagedEntryIdentity(
+        value["device"], value["inode"], value["birthtime_ns"]
+    )
 
 
 def _is_hex(value: object, length: int = 64) -> bool:
@@ -2417,7 +2662,7 @@ def _transaction_from_json(
         output_identity=_identity_from_json(raw["output_identity"]),
         generation=raw["generation"],
         token_digest=raw["token_digest"],
-        token_identity=_token_identity_from_json(raw["token_identity"]),
+        token_identity=_managed_entry_identity_from_json(raw["token_identity"]),
         drainer=_drainer_from_json(raw["drainer"]),
         phase=raw["phase"],
     )
@@ -2447,7 +2692,7 @@ def _transaction_json(tx: Transaction, *, phase: str) -> dict[str, object]:
         "token_identity": (
             None
             if tx.token_identity is None
-            else {"device": tx.token_identity[0], "inode": tx.token_identity[1]}
+            else tx.token_identity.json()
         ),
         "drainer": _drainer_json(tx.drainer),
     }
@@ -2582,7 +2827,7 @@ def _read_pending_transition(
         != (
             None
             if successor.token_identity is None
-            else {"device": successor.token_identity[0], "inode": successor.token_identity[1]}
+            else successor.token_identity.json()
         )
     ):
         raise PendingTransactionError("malformed pending transition successor binding")
@@ -2590,10 +2835,7 @@ def _read_pending_transition(
         prior_token_identity = (
             None
             if prior_tx.token_identity is None
-            else {
-                "device": prior_tx.token_identity[0],
-                "inode": prior_tx.token_identity[1],
-            }
+            else prior_tx.token_identity.json()
         )
         if (
             predecessor is None
@@ -2613,10 +2855,19 @@ def _read_pending_transition(
                 "malformed pending transition predecessor binding"
             )
     if successor.token_identity is not None:
-        token = _entry_stat(capability, f".graphify_transaction_token.{successor.id}")
-        if token is None or (token.st_dev, token.st_ino) != successor.token_identity:
+        try:
+            token_payload, token_identity = _read_managed_bytes(
+                capability,
+                f".graphify_transaction_token.{successor.id}",
+                _TOKEN_MAX_BYTES,
+            )
+        except FileNotFoundError as exc:
+            raise PendingTransactionError(
+                "pending successor token identity changed"
+            ) from exc
+        if token_identity != successor.token_identity:
             raise PendingTransactionError("pending successor token identity changed")
-        if hashlib.sha256(_read_bytes(capability, f".graphify_transaction_token.{successor.id}")).hexdigest() != successor.token_digest:
+        if hashlib.sha256(token_payload).hexdigest() != successor.token_digest:
             raise PendingTransactionError("pending successor token digest changed")
     return predecessor, predecessor_protocol, prior_tx, successor, successor_protocol
 
@@ -3813,8 +4064,7 @@ def active_transaction_token_path(output: Path | str | None = None) -> Path:
         if live is None or live.token_identity is None:
             raise PendingTransactionError("live transaction token is unavailable")
         name = f".graphify_transaction_token.{live.id}"
-        info = _entry_stat(capability, name)
-        if info is None or (info.st_dev, info.st_ino) != live.token_identity:
+        if _managed_entry_identity(capability, name) != live.token_identity:
             raise PendingTransactionError("live transaction token identity changed")
         return capability.path / name
 
@@ -4257,7 +4507,7 @@ def _read_token_transition(capability: OutputCapability) -> dict[str, Any] | Non
     target_protocol = _protocol_from_json(capability, raw["target_protocol"])
     payload = _json_bytes(raw["token_payload"])
     expected_name = f".graphify_transaction_token.{target.id}"
-    identity = _token_identity_from_json(raw.get("token_identity"))
+    identity = _managed_entry_identity_from_json(raw.get("token_identity"))
     if (
         raw.get("token_name") != expected_name
         or hashlib.sha256(payload).hexdigest() != raw.get("token_digest")
@@ -4349,7 +4599,7 @@ def _validate_token_transition_current(
     predecessor_identity = (
         None
         if predecessor.token_identity is None
-        else {"device": predecessor.token_identity[0], "inode": predecessor.token_identity[1]}
+        else predecessor.token_identity.json()
     )
     expected_target_protocol = dict(predecessor_protocol)
     expected_target_protocol.update(
@@ -4381,12 +4631,17 @@ def _validate_token_transition_current(
         raise PendingTransactionError("token publication protocol binding changed")
 
     name = str(record["token_name"])
-    token_info = _entry_stat(capability, name)
-    token_identity = None if token_info is None else (token_info.st_dev, token_info.st_ino)
-    recorded_identity = _token_identity_from_json(record.get("token_identity"))
-    if token_info is not None and hashlib.sha256(
-        _read_bytes(capability, name, _TOKEN_MAX_BYTES)
-    ).hexdigest() != record["token_digest"]:
+    try:
+        token_payload, token_identity = _read_managed_bytes(
+            capability, name, _TOKEN_MAX_BYTES
+        )
+    except FileNotFoundError:
+        token_payload = None
+        token_identity = None
+    recorded_identity = _managed_entry_identity_from_json(record.get("token_identity"))
+    if token_payload is not None and hashlib.sha256(token_payload).hexdigest() != record[
+        "token_digest"
+    ]:
         raise PendingTransactionError("published transaction token changed")
     if record["state"] == "planned":
         if recorded_identity is not None:
@@ -4399,7 +4654,7 @@ def _validate_token_transition_current(
     target_protocol["token_identity"] = (
         None
         if token_identity is None
-        else {"device": token_identity[0], "inode": token_identity[1]}
+        else token_identity.json()
     )
     live = _read_transaction(capability)
     protocol = _read_protocol(capability)
@@ -4468,25 +4723,34 @@ def _resume_token_transition_locked(
     target = _transaction_from_json(capability, record["target_transaction"])
     payload = _json_bytes(record["token_payload"])
     name = str(record["token_name"])
-    info = _entry_stat(capability, name)
-    if info is None:
+    try:
+        current_payload, identity = _read_managed_bytes(
+            capability, name, _TOKEN_MAX_BYTES
+        )
+    except FileNotFoundError:
+        current_payload = None
+        identity = None
+    if identity is None:
         if record["state"] != "planned":
             raise PendingTransactionError("published transaction token disappeared")
-        identity = _create_bytes(capability, name, payload)
+        _create_bytes(capability, name, payload)
+        identity = _managed_entry_identity(capability, name)
+        if identity is None:
+            raise PendingTransactionError("published transaction token disappeared")
     else:
-        if hashlib.sha256(_read_bytes(capability, name)).hexdigest() != record["token_digest"]:
+        assert current_payload is not None
+        if hashlib.sha256(current_payload).hexdigest() != record["token_digest"]:
             raise PendingTransactionError("published transaction token changed")
-        identity = (info.st_dev, info.st_ino)
-        recorded_identity = _token_identity_from_json(record.get("token_identity"))
+        recorded_identity = _managed_entry_identity_from_json(record.get("token_identity"))
         if recorded_identity is not None and recorded_identity != identity:
             raise PendingTransactionError("published transaction token identity changed")
     target = replace(target, token_identity=identity)
     target_protocol = dict(record["target_protocol"])
-    target_protocol["token_identity"] = {"device": identity[0], "inode": identity[1]}
+    target_protocol["token_identity"] = identity.json()
     record = {
         **record,
         "state": "token-created",
-        "token_identity": {"device": identity[0], "inode": identity[1]},
+        "token_identity": identity.json(),
     }
     _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
     pending_drainer = record.get("pending_predecessor_drainer")
@@ -4652,7 +4916,9 @@ def stage_transaction_handoff(
         )
 
 
-def _open_token(path: Path) -> tuple[dict[str, object], bytes, tuple[int, int]]:
+def _open_token(
+    path: Path,
+) -> tuple[dict[str, object], bytes, ManagedEntryIdentity]:
     output = path.parent
     with pin_output(output) as capability, _locked(capability):
         token_transition = _read_token_transition(capability)
@@ -4663,10 +4929,12 @@ def _open_token(path: Path) -> tuple[dict[str, object], bytes, tuple[int, int]]:
             )
         if path.name.startswith(".graphify_transaction_token.") is False:
             raise PendingTransactionError("transaction token has an invalid name")
-        before = _entry_stat(capability, path.name)
-        if before is None:
+        try:
+            payload, identity = _read_managed_bytes(
+                capability, path.name, _TOKEN_MAX_BYTES
+            )
+        except FileNotFoundError:
             raise PendingTransactionError("transaction token is missing")
-        payload = _read_bytes(capability, path.name, _TOKEN_MAX_BYTES)
         try:
             raw = json.loads(payload.decode())
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -4674,7 +4942,6 @@ def _open_token(path: Path) -> tuple[dict[str, object], bytes, tuple[int, int]]:
         if not isinstance(raw, dict):
             raise PendingTransactionError("malformed transaction token")
         live = _read_transaction(capability)
-        identity = (before.st_dev, before.st_ino)
         if (
             live is None
             or raw.get("id") != live.id
@@ -4865,7 +5132,7 @@ def _validate_authority(
         or protocol.get("root") != live.root
         or protocol.get("kind") != live.kind
         or protocol.get("owner_capability_digest") != live.token_digest
-        or _token_identity_from_json(protocol.get("token_identity"))
+        or _managed_entry_identity_from_json(protocol.get("token_identity"))
         != live.token_identity
     ):
         raise PendingTransactionError("exact live drainer owner context required")
@@ -4892,7 +5159,7 @@ def _validate_durable_live_binding(
     token_identity = (
         None
         if live.token_identity is None
-        else {"device": live.token_identity[0], "inode": live.token_identity[1]}
+        else live.token_identity.json()
     )
     if durable_drainer[0] != live.drainer:
         raise PendingTransactionError("exact live drainer binding changed")
@@ -4912,10 +5179,19 @@ def _validate_durable_live_binding(
         raise PendingTransactionError("durable live transaction binding changed")
     if live.token_identity is not None:
         token_name = f".graphify_transaction_token.{live.id}"
-        token = _entry_stat(capability, token_name)
-        if token is None or (token.st_dev, token.st_ino) != live.token_identity:
+        try:
+            token_payload, token_identity = _read_managed_bytes(
+                capability, token_name, _TOKEN_MAX_BYTES
+            )
+        except FileNotFoundError:
+            token_payload = None
+            token_identity = None
+        if token_identity != live.token_identity:
             raise PendingTransactionError("durable live transaction token changed")
-        if hashlib.sha256(_read_bytes(capability, token_name)).hexdigest() != live.token_digest:
+        if (
+            token_payload is None
+            or hashlib.sha256(token_payload).hexdigest() != live.token_digest
+        ):
             raise PendingTransactionError("durable live transaction token changed")
     return durable_protocol, durable_drainer
 
@@ -8489,45 +8765,16 @@ def _parse_queue_payload(payload: bytes) -> list[dict[str, Any]]:
 def _read_queue_record(
     capability: OutputCapability, name: str = QUEUE_FILE
 ) -> QueueFileRecord:
-    if _entry_stat(capability, name) is None:
+    try:
+        body, identity = _read_managed_bytes(capability, name, _MAX_STATE_BYTES)
+    except FileNotFoundError:
         return QueueFileRecord(name, (), None, None)
-    try:
-        fd = (
-            _open_windows_relative_fd(capability, name)
-            if _PLATFORM == "windows"
-            else os.open(
-                name,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=capability.fd,
-            )
-        )
-    except FileNotFoundError as exc:
-        raise PendingTransactionError("rebuild queue identity changed") from exc
-    try:
-        opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_STATE_BYTES:
-            raise PendingTransactionError("malformed rebuild queue")
-        payload = bytearray()
-        while len(payload) <= _MAX_STATE_BYTES:
-            chunk = os.read(fd, min(65536, _MAX_STATE_BYTES + 1 - len(payload)))
-            if not chunk:
-                break
-            payload.extend(chunk)
-        if len(payload) > _MAX_STATE_BYTES:
-            raise PendingTransactionError("rebuild queue exceeds serialized budget")
-        current = _entry_stat(capability, name)
-        identity = (opened.st_dev, opened.st_ino)
-        if current is None or (current.st_dev, current.st_ino) != identity:
-            raise PendingTransactionError("rebuild queue identity changed")
-        body = bytes(payload)
-        return QueueFileRecord(
-            name,
-            tuple(_parse_queue_payload(body)),
-            identity,
-            hashlib.sha256(body).hexdigest(),
-        )
-    finally:
-        os.close(fd)
+    return QueueFileRecord(
+        name,
+        tuple(_parse_queue_payload(body)),
+        identity,
+        hashlib.sha256(body).hexdigest(),
+    )
 
 
 def _read_queue(capability: OutputCapability, name: str = QUEUE_FILE) -> list[dict[str, Any]]:
@@ -8553,7 +8800,7 @@ def _queue_record_json(record: QueueFileRecord) -> dict[str, object]:
         "identity": (
             None
             if record.identity is None
-            else {"device": record.identity[0], "inode": record.identity[1]}
+            else record.identity.json()
         ),
         "digest": record.digest,
     }
@@ -8578,7 +8825,7 @@ def _queue_record_from_json(
             raise PendingTransactionError("malformed absent queue record binding")
         identity = None
     else:
-        identity = _token_identity_from_json(identity_raw)
+        identity = _managed_entry_identity_from_json(identity_raw)
         if identity is None or not _is_hex(digest):
             raise PendingTransactionError("malformed queue record binding")
         expected_digest = hashlib.sha256(
@@ -8636,7 +8883,7 @@ def _queue_transition_binding_name(name: str) -> str:
 
 def _read_queue_transition_successor_binding(
     capability: OutputCapability, name: str
-) -> tuple[tuple[int, int], str] | None:
+) -> tuple[ManagedEntryIdentity, str] | None:
     binding_name = _queue_transition_binding_name(name)
     if _entry_stat(capability, binding_name) is None:
         return None
@@ -8653,7 +8900,7 @@ def _read_queue_transition_successor_binding(
         or not _is_hex(raw.get("digest"))
     ):
         raise PendingTransactionError("malformed queue transition binding")
-    identity = _token_identity_from_json(raw.get("identity"))
+    identity = _managed_entry_identity_from_json(raw.get("identity"))
     if identity is None:
         raise PendingTransactionError("malformed queue transition binding")
     return identity, str(raw["digest"])
@@ -8663,7 +8910,9 @@ def _decode_queue_transition_state(
     capability: OutputCapability, name: str, *, limit: int = _MAX_STATE_BYTES
 ) -> dict[str, Any]:
     try:
-        raw = json.loads(_read_bytes(capability, name, limit).decode("utf-8"))
+        raw = json.loads(
+            _read_managed_bytes(capability, name, limit)[0].decode("utf-8")
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("malformed queue transition state") from exc
     if not isinstance(raw, dict):
@@ -8674,12 +8923,7 @@ def _decode_queue_transition_state(
 def _queue_transition_binding(record: QueueFileRecord) -> dict[str, object]:
     if record.identity is None or record.digest is None:
         raise PendingTransactionError("queue transition predecessor is absent")
-    return {
-        "name": record.name,
-        "device": record.identity[0],
-        "inode": record.identity[1],
-        "digest": record.digest,
-    }
+    return {"name": record.name, **record.identity.json(), "digest": record.digest}
 
 
 def _read_queue_transition(
@@ -8731,10 +8975,12 @@ def _read_queue_transition(
         or not retirement_name.startswith(_QUEUE_RETIRE_PREFIX)
         or not _is_hex(retirement_name.removeprefix(_QUEUE_RETIRE_PREFIX))
         or not isinstance(predecessor, dict)
-        or set(predecessor) != {"name", "device", "inode", "digest"}
+        or set(predecessor)
+        != {"name", "device", "inode", "birthtime_ns", "digest"}
         or predecessor.get("name") != name
         or type(predecessor.get("device")) is not int
         or type(predecessor.get("inode")) is not int
+        or type(predecessor.get("birthtime_ns")) is not int
         or not _is_hex(predecessor.get("digest"))
     ):
         raise PendingTransactionError("malformed queue transition journal")
@@ -8782,7 +9028,11 @@ def _recover_queue_retirement(
     predecessor = QueueFileRecord(
         name,
         (),
-        (int(predecessor_raw["device"]), int(predecessor_raw["inode"])),
+        ManagedEntryIdentity(
+            int(predecessor_raw["device"]),
+            int(predecessor_raw["inode"]),
+            int(predecessor_raw["birthtime_ns"]),
+        ),
         str(predecessor_raw["digest"]),
     )
     retirement_name = str(raw["retirement_name"])
@@ -8885,9 +9135,10 @@ def _recover_queue_transition(
             capability, name, raw, failpoint=failpoint
         )
     predecessor_raw = cast(dict[str, Any], raw["predecessor"])
-    predecessor_identity = (
+    predecessor_identity = ManagedEntryIdentity(
         int(predecessor_raw["device"]),
         int(predecessor_raw["inode"]),
+        int(predecessor_raw["birthtime_ns"]),
     )
     predecessor_digest = str(predecessor_raw["digest"])
     successor_items = cast(list[dict[str, Any]], raw["successor_queue"])
@@ -8945,10 +9196,7 @@ def _recover_queue_transition(
                         "schema": 1,
                         "protocol_epoch": 1,
                         "public_name": name,
-                        "identity": {
-                            "device": stage.identity[0],
-                            "inode": stage.identity[1],
-                        },
+                        "identity": stage.identity.json(),
                         "digest": successor_digest,
                     }
                 ),
@@ -9806,26 +10054,31 @@ def _queue_record_binding(record: QueueFileRecord) -> dict[str, object] | None:
         return None
     if record.digest is None:
         raise PendingTransactionError("inflight queue digest is missing")
-    return {
-        "device": record.identity[0],
-        "inode": record.identity[1],
-        "digest": record.digest,
-    }
+    return {**record.identity.json(), "digest": record.digest}
 
 
-def _queue_identity_binding(value: object) -> tuple[tuple[int, int], str] | None:
+def _queue_identity_binding(
+    value: object,
+) -> tuple[ManagedEntryIdentity, str] | None:
     if value is None:
         return None
     if (
         not isinstance(value, dict)
-        or set(value) != {"device", "inode", "digest"}
-        or type(value.get("device")) is not int
-        or type(value.get("inode")) is not int
+        or set(value) != {"device", "inode", "birthtime_ns", "digest"}
         or not _is_hex(value.get("digest"))
     ):
         raise PendingTransactionError("close inflight binding is malformed")
     return (
-        (int(value["device"]), int(value["inode"])),
+        cast(
+            ManagedEntryIdentity,
+            _managed_entry_identity_from_json(
+                {
+                    "device": value["device"],
+                    "inode": value["inode"],
+                    "birthtime_ns": value["birthtime_ns"],
+                }
+            ),
+        ),
         str(value["digest"]),
     )
 
@@ -9965,7 +10218,7 @@ def _drainer_state_from_json(
             or not all(_is_hex(value) for value in acked_ids)
         ):
             raise PendingTransactionError("malformed close drainer binding")
-        _token_identity_from_json(raw.get("token_identity"))
+        _managed_entry_identity_from_json(raw.get("token_identity"))
         _queue_identity_binding(raw.get("inflight"))
     return drainer, str(state), raw
 
@@ -10292,7 +10545,9 @@ def queue_rebuild(
                 if isinstance(raw_offset, int) and 0 <= raw_offset <= legacy_info.st_size:
                     offset = raw_offset
             try:
-                legacy_bytes = _read_bytes(capability, legacy_pending_name)
+                legacy_bytes = _read_managed_bytes(
+                    capability, legacy_pending_name
+                )[0]
                 unread = legacy_bytes[offset:]
                 complete_length = unread.rfind(b"\n") + 1
                 legacy_payload = unread[:complete_length].decode("utf-8")
@@ -10822,7 +11077,7 @@ def close_if_queue_empty(
             "token_identity": (
                 None
                 if live.token_identity is None
-                else {"device": live.token_identity[0], "inode": live.token_identity[1]}
+                else live.token_identity.json()
             ),
             "inflight": _queue_record_binding(
                 _read_queue_record(
@@ -10866,29 +11121,20 @@ def _validate_close_pending_locked(
     live = _read_transaction(capability)
     if live is not None and live.id != pending["transaction_id"]:
         raise PendingTransactionError("close-pending transaction identity changed")
-    token_identity_raw = pending.get("token_identity")
-    if token_identity_raw is None:
-        pending_token_identity = None
-    elif (
-        isinstance(token_identity_raw, dict)
-        and type(token_identity_raw.get("device")) is int
-        and type(token_identity_raw.get("inode")) is int
-    ):
-        pending_token_identity = (
-            token_identity_raw["device"],
-            token_identity_raw["inode"],
+    try:
+        pending_token_identity = _managed_entry_identity_from_json(
+            pending.get("token_identity")
         )
-    else:
-        raise PendingTransactionError("close-pending token identity is malformed")
+    except PendingTransactionError as exc:
+        raise PendingTransactionError(
+            "close-pending token identity is malformed"
+        ) from exc
     token_name = f".graphify_transaction_token.{pending['transaction_id']}"
-    token_info = _entry_stat(capability, token_name)
+    token_identity = _managed_entry_identity(capability, token_name)
     if live is not None:
         if pending_token_identity != live.token_identity:
             raise PendingTransactionError("close-pending token identity changed")
-        if token_info is not None and (
-            live.token_identity is None
-            or (token_info.st_dev, token_info.st_ino) != live.token_identity
-        ):
+        if token_identity is not None and token_identity != live.token_identity:
             raise PendingTransactionError("close-pending token file was replaced")
     elif any(
         name.startswith(".graphify_transaction_token.")
@@ -10968,9 +11214,7 @@ def _finish_close_locked(
     if live is not None and live.id == transaction_id:
         token_name = f".graphify_transaction_token.{transaction_id}"
         token_identity_raw = pending.get("token_identity")
-        expected = None
-        if isinstance(token_identity_raw, dict):
-            expected = (int(token_identity_raw["device"]), int(token_identity_raw["inode"]))
+        expected = _managed_entry_identity_from_json(token_identity_raw)
         _unlink(capability, token_name, expected=expected)
         if failpoint:
             failpoint("after_token_unlink")
@@ -11048,7 +11292,7 @@ def _recover_completed_live_locked(
             "token_identity": (
                 None
                 if live.token_identity is None
-                else {"device": live.token_identity[0], "inode": live.token_identity[1]}
+                else live.token_identity.json()
             ),
             "inflight": _queue_record_binding(inflight_record),
         }
@@ -11137,7 +11381,7 @@ def _recover_close_pending_without_live_locked(
         output_identity=capability.identity,
         generation=cast(int, protocol["generation"]),
         token_digest=str(protocol["owner_capability_digest"]),
-        token_identity=_token_identity_from_json(protocol.get("token_identity")),
+        token_identity=_managed_entry_identity_from_json(protocol.get("token_identity")),
         drainer=completed[0],
         phase="complete",
     )
@@ -12287,10 +12531,7 @@ def finish_transaction(transaction: Transaction) -> None:
                 "token_identity": (
                     None
                     if transaction.token_identity is None
-                    else {
-                        "device": transaction.token_identity[0],
-                        "inode": transaction.token_identity[1],
-                    }
+                    else transaction.token_identity.json()
                 ),
                 "inflight": _queue_record_binding(
                     _read_queue_record(
@@ -12560,11 +12801,11 @@ def _validate_cancellation_state_locked(
     drainer = _read_drainer(capability)
     live = _read_transaction(capability)
     token_name = f".graphify_transaction_token.{successor.id}"
-    token_info = _entry_stat(capability, token_name)
-    token_present = token_info is not None
+    token_identity = _managed_entry_identity(capability, token_name)
+    token_present = token_identity is not None
     if token_present and (
         successor.token_identity is None
-        or (token_info.st_dev, token_info.st_ino) != successor.token_identity
+        or token_identity != successor.token_identity
     ):
         raise PendingTransactionError("cancellation token identity changed")
 
@@ -12804,12 +13045,12 @@ def cancel_unpublished_transaction(
 
         token_name = f".graphify_transaction_token.{successor.id}"
         if state_index == 3:
-            token_info = _entry_stat(capability, token_name)
-            if token_info is not None:
-                if successor.token_identity is None or (
-                    token_info.st_dev,
-                    token_info.st_ino,
-                ) != successor.token_identity:
+            token_identity = _managed_entry_identity(capability, token_name)
+            if token_identity is not None:
+                if (
+                    successor.token_identity is None
+                    or token_identity != successor.token_identity
+                ):
                     raise PendingTransactionError(
                         "cancellation token identity changed"
                     )
