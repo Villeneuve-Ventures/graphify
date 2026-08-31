@@ -16,6 +16,8 @@ from graphify.hooks import (
     _CHECKOUT_MARKER_END,
     _HOOK_MARKER,
     _HOOK_MARKER_END,
+    _POST_MERGE_MARKER,
+    _POST_MERGE_MARKER_END,
     _hooks_dir,
     install,
     status,
@@ -53,6 +55,7 @@ def test_install_idempotent(tmp_path, monkeypatch):
     hook_paths = {
         repo / ".git" / "hooks" / "post-commit",
         repo / ".git" / "hooks" / "post-checkout",
+        repo / ".git" / "hooks" / "post-merge",
     }
     original_write_text = Path.write_text
     original_write_bytes = Path.write_bytes
@@ -71,7 +74,7 @@ def test_install_idempotent(tmp_path, monkeypatch):
     assert "already installed" in result
     for hook_path, marker in zip(
         sorted(hook_paths),
-        (_CHECKOUT_MARKER, _HOOK_MARKER),
+        (_CHECKOUT_MARKER, _HOOK_MARKER, _POST_MERGE_MARKER),
         strict=True,
     ):
         assert hook_path.read_text().count(marker) == 1
@@ -334,6 +337,14 @@ def test_install_creates_post_checkout_hook(tmp_path):
     assert _CHECKOUT_MARKER in hook.read_text()
 
 
+def test_install_creates_post_merge_hook(tmp_path):
+    repo = _make_git_repo(tmp_path)
+    install(repo)
+    hook = repo / ".git" / "hooks" / "post-merge"
+    assert hook.exists()
+    assert _POST_MERGE_MARKER in hook.read_text()
+
+
 def test_install_post_checkout_is_executable(tmp_path):
     repo = _make_git_repo(tmp_path)
     install(repo)
@@ -352,13 +363,14 @@ def test_uninstall_removes_post_checkout_hook(tmp_path):
     assert not hook.exists()
 
 
-def test_status_shows_both_hooks(tmp_path):
+def test_status_shows_all_hooks(tmp_path):
     repo = _make_git_repo(tmp_path)
     install(repo)
     result = status(repo)
     assert "post-commit" in result
     assert "post-checkout" in result
-    assert result.count("installed") >= 2
+    assert "post-merge" in result
+    assert result.count("installed") >= 3
 
 
 
@@ -701,12 +713,21 @@ import re  # noqa: E402
 from graphify.hooks import (  # noqa: E402
     _HOOK_SCRIPT,
     _CHECKOUT_SCRIPT,
+    _POST_MERGE_SCRIPT,
     _REBUILD_BODY_COMMIT,
     _REBUILD_BODY_CHECKOUT,
     _detached_launch,
 )
 
-_HOOK_SCRIPTS = [("post-commit", _HOOK_SCRIPT), ("post-checkout", _CHECKOUT_SCRIPT)]
+_HOOK_SCRIPTS = [
+    ("post-commit", _HOOK_SCRIPT),
+    ("post-checkout", _CHECKOUT_SCRIPT),
+    ("post-merge", _POST_MERGE_SCRIPT),
+]
+_WORKTREE_SKIPPING_HOOK_SCRIPTS = [
+    ("post-commit", _HOOK_SCRIPT),
+    ("post-checkout", _CHECKOUT_SCRIPT),
+]
 
 
 @pytest.mark.parametrize("name,script", _HOOK_SCRIPTS)
@@ -816,7 +837,7 @@ def test_installed_hooks_contain_no_nohup(tmp_path):
     """End-to-end: the files written to .git/hooks must be nohup-free (#1161)."""
     repo = _make_git_repo(tmp_path)
     install(repo)
-    for name in ("post-commit", "post-checkout"):
+    for name in ("post-commit", "post-checkout", "post-merge"):
         text = (repo / ".git" / "hooks" / name).read_text(encoding="utf-8")
         assert "nohup" not in text, f"installed {name} still references nohup"
         assert "start_new_session=True" in text
@@ -919,9 +940,9 @@ def test_hooks_honor_skip_env(name, script):
     )
 
 
-@pytest.mark.parametrize("name,script", _HOOK_SCRIPTS)
+@pytest.mark.parametrize("name,script", _WORKTREE_SKIPPING_HOOK_SCRIPTS)
 def test_hooks_skip_linked_worktrees(name, script):
-    """Both hooks must short-circuit in a linked worktree (git-dir != common-dir),
+    """Ordinary rebuild hooks must short-circuit in a linked worktree,
     and must compare ABSOLUTE paths so the primary checkout (where --git-common-dir
     is the relative ".git") is not false-positived and wrongly skipped (#1809, #1806)."""
     assert script.count("_GFY_GITDIR=") == 1, f"{name} guard not present exactly once"
@@ -929,6 +950,11 @@ def test_hooks_skip_linked_worktrees(name, script):
     # absolute-normalized compare, not a raw string compare of git output
     assert 'cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd' in script
     assert '[ "$_GFY_GITDIR" != "$_GFY_COMMONDIR" ]' in script
+
+
+def test_post_merge_hook_only_skips_active_linked_worktrees():
+    assert "git rev-parse --git-common-dir" in _POST_MERGE_SCRIPT
+    assert 'w.get("state") == "merge_pending"' in _POST_MERGE_SCRIPT
 
 
 def _worktree_guard_snippet() -> str:
@@ -1021,7 +1047,10 @@ def test_install_registers_merge_driver(tmp_path):
     assert res.returncode == 0
     driver = res.stdout.strip()
     assert driver
-    assert "merge-driver %O %A %B" in driver
+    assert (
+        "merge-driver --managed-current graphify-out/graph.json %O %A %B"
+        in driver
+    )
     attrs = (repo / ".gitattributes").read_text(encoding="utf-8")
     assert any(
         "graph.json" in line and "merge=graphify" in line
@@ -1038,6 +1067,30 @@ def test_install_merge_driver_idempotent(tmp_path):
     lines = (repo / ".gitattributes").read_text(encoding="utf-8").splitlines()
     matches = [l for l in lines if "merge=graphify" in l]
     assert len(matches) == 1
+
+
+def test_install_rebinds_merge_driver_when_output_changes(tmp_path, monkeypatch):
+    """Reinstall must migrate every merge surface to the configured output."""
+    import graphify.paths as paths_module
+
+    repo = _make_git_repo(tmp_path)
+    install(repo)
+
+    monkeypatch.setattr(paths_module, "GRAPHIFY_OUT", "custom-out")
+    result = install(repo)
+
+    attrs = (repo / ".gitattributes").read_text(encoding="utf-8").splitlines()
+    assert "graphify-out/graph.json merge=graphify" not in attrs
+    assert attrs.count("custom-out/graph.json merge=graphify") == 1
+    driver = subprocess.run(
+        ["git", "-C", str(repo), "config", "--get", "merge.graphify.driver"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "--managed-current custom-out/graph.json %O %A %B" in driver
+    assert "merge driver: registered" in result
+    assert "merge driver: registered" in status(repo)
 
 
 def test_install_preserves_existing_gitattributes(tmp_path):
@@ -1127,7 +1180,7 @@ def test_installed_hooks_quote_special_pin_and_execute_exact_token(tmp_path, mon
 
     install(repo)
     (repo / "graphify-out").mkdir()
-    for hook_name in ("post-commit", "post-checkout"):
+    for hook_name in ("post-commit", "post-checkout", "post-merge"):
         hook = repo / ".git" / "hooks" / hook_name
         syntax = subprocess.run(["/bin/sh", "-n", str(hook)], capture_output=True, text=True)
         assert syntax.returncode == 0, syntax.stderr
@@ -1187,6 +1240,47 @@ def test_configured_merge_driver_keeps_special_executable_and_arguments_distinct
     assert not sentinel.exists()
     assert argv_log.read_text(encoding="utf-8").splitlines() == [
         "-E", "-P", "-B", "-m", "graphify", "merge-driver",
+        "--managed-current", "graphify-out/graph.json",
+        str(base), str(current), str(other),
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Git invokes merge drivers through POSIX sh here")
+def test_configured_merge_driver_preserves_literal_percent_in_managed_path(
+    tmp_path, monkeypatch
+):
+    """Git placeholders must not rewrite percent text in the managed selector."""
+    import graphify.hooks as hooks
+    import graphify.paths as paths_module
+
+    repo = _make_git_repo(tmp_path / "repo")
+    argv_log = tmp_path / "merge-driver-percent-argv.log"
+    pinned = tmp_path / "capture"
+    _write_capturing_executable(pinned, argv_log)
+    monkeypatch.setattr(hooks, "_pinned_python", lambda: str(pinned))
+    monkeypatch.setattr(paths_module, "GRAPHIFY_OUT", "custom%O-out")
+    install(repo)
+    driver = subprocess.check_output(
+        ["git", "-C", str(repo), "config", "--get", "merge.graphify.driver"],
+        text=True,
+    ).strip()
+    base, current, other = (tmp_path / name for name in ("base", "current", "other"))
+    command = driver.replace("%O", shlex.quote(str(base))).replace(
+        "%A", shlex.quote(str(current))
+    ).replace("%B", shlex.quote(str(other)))
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=repo,
+        env={**os.environ, "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv_log.read_text(encoding="utf-8").splitlines() == [
+        "-E", "-P", "-B", "-m", "graphify", "merge-driver",
+        "--managed-current", "custom%O-out/graph.json",
         str(base), str(current), str(other),
     ]
 
@@ -1941,8 +2035,9 @@ def test_real_git_merge_preserves_percent_in_pinned_executable(
     assert merged.returncode == 0, merged.stderr
     argv = argv_log.read_text(encoding="utf-8").splitlines()
     assert argv[:6] == ["-E", "-P", "-B", "-m", "graphify", "merge-driver"]
-    assert len(argv) == 9
-    assert len(set(argv[6:])) == 3
+    assert argv[6:8] == ["--managed-current", "graphify-out/graph.json"]
+    assert len(argv) == 11
+    assert len(set(argv[8:])) == 3
 
 
 @pytest.mark.skipif(os.name == "nt", reason="installed hook E2E uses POSIX shell")
@@ -2004,24 +2099,14 @@ def test_installed_post_commit_hook_recovers_merge_pending_union(tmp_path):
     assert committed.returncode == 0, committed.stdout + committed.stderr
     assert "launching background rebuild" in committed.stdout + committed.stderr
 
-    deadline = time.monotonic() + 15.0
-    snapshot = None
-    while time.monotonic() < deadline:
-        try:
-            candidate = transaction_module.open_graph_snapshot(
-                graph, purpose="installed-post-commit-merge-recovery-test"
-            )
-        except transaction_module.PendingTransactionError:
-            time.sleep(0.1)
-            continue
-        node_ids = {node["id"] for node in candidate.data["nodes"]}
-        if {"current_current", "current_changed", "other_other"} <= node_ids:
-            snapshot = candidate
-            break
-        time.sleep(0.1)
-
     log = disposable_home / ".cache" / "graphify-rebuild.log"
-    assert snapshot is not None, log.read_text(encoding="utf-8") if log.exists() else ""
+    snapshot = _wait_for_hook_recovery(
+        transaction_module,
+        graph,
+        {"current_current", "current_changed", "other_other"},
+        log=log,
+        purpose="installed-post-commit-merge-recovery-test",
+    )
     assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
         "state"
     ] == "active"
@@ -2037,3 +2122,204 @@ def test_installed_post_commit_hook_recovers_merge_pending_union(tmp_path):
     assert status_snapshot["transaction"] is None
     assert status_snapshot["prepared_creation"] is None
     assert status_snapshot["token_transition"] is None
+
+
+def _wait_for_hook_recovery(
+    transaction_module,
+    graph: Path,
+    expected_node_ids: set[str],
+    *,
+    log: Path,
+    purpose: str,
+):
+    output = graph.parent
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        try:
+            candidate = transaction_module.open_graph_snapshot(graph, purpose=purpose)
+            status_snapshot = transaction_module.transaction_status(output)
+        except transaction_module.PendingTransactionError:
+            time.sleep(0.1)
+            continue
+        node_ids = {node["id"] for node in candidate.data["nodes"]}
+        coordination_absent = all(
+            not (output / name).exists()
+            for name in (
+                transaction_module.PREPARED_FILE,
+                transaction_module.TRANSACTION_FILE,
+                transaction_module.TRANSITION_FILE,
+                transaction_module.TOKEN_TRANSITION_FILE,
+            )
+        ) and not list(output.glob(".graphify_transaction_token.*"))
+        status_terminal = all(
+            status_snapshot[name] is None
+            for name in ("transaction", "prepared_creation", "token_transition")
+        )
+        if expected_node_ids <= node_ids and coordination_absent and status_terminal:
+            return candidate
+        time.sleep(0.1)
+    pytest.fail(
+        log.read_text(encoding="utf-8") if log.exists() else "hook recovery timed out"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="installed hook E2E uses POSIX shell")
+@pytest.mark.parametrize(
+    ("output_name", "linked_worktree"),
+    [
+        ("graphify-out", False),
+        ("custom-out", False),
+        ("graphify-out", True),
+    ],
+    ids=["default-output", "custom-output", "linked-worktree"],
+)
+def test_installed_post_merge_hook_recovers_real_merge_pending_union(
+    tmp_path, monkeypatch, output_name, linked_worktree
+):
+    from graphify import transaction as transaction_module
+    from graphify import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "GRAPHIFY_OUT", output_name)
+
+    def rebuild(root: Path) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-E",
+                "-P",
+                "-B",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "from graphify.watch import _rebuild_code; "
+                    "raise SystemExit(0 if _rebuild_code(Path('.'), "
+                    "no_cluster=True, block_on_lock=True) else 1)"
+                ),
+            ],
+            cwd=root,
+            env={**os.environ, "GRAPHIFY_OUT": output_name},
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    repo = _make_git_repo(tmp_path / "repo")
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "hook-tests@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Graphify Hook Tests"],
+        check=True,
+    )
+    (repo / "base.py").write_text("def base():\n    return 1\n", encoding="utf-8")
+    rebuild(repo)
+    install(repo)
+
+    setup_env = {**os.environ, "GRAPHIFY_SKIP_HOOK": "1"}
+
+    def git(*args: str, cwd=None, env=None, check=True):
+        return subprocess.run(
+            ["git", "-C", str(cwd or repo), *args],
+            check=check,
+            capture_output=True,
+            text=True,
+            env=setup_env if env is None else env,
+        )
+
+    graph = repo / output_name / "graph.json"
+    graph_pathspec = f"{output_name}/graph.json"
+    git("add", ".gitattributes", "base.py", graph_pathspec)
+    git("commit", "-m", "base")
+    base_branch = git("branch", "--show-current").stdout.strip()
+    base_output = {
+        path.relative_to(graph.parent): path.read_bytes()
+        for path in graph.parent.rglob("*")
+        if path.is_file()
+    }
+
+    git("checkout", "-b", "side")
+    (repo / "side.py").write_text("def side():\n    return 2\n", encoding="utf-8")
+    rebuild(repo)
+    git("add", "side.py", graph_pathspec)
+    git("commit", "-m", "side")
+
+    merge_repo = repo
+    if linked_worktree:
+        merge_repo = tmp_path / "linked"
+        git("worktree", "add", "-b", "linked-main", str(merge_repo), base_branch)
+        graph = merge_repo / output_name / "graph.json"
+        shutil.rmtree(graph.parent)
+        rebuild(merge_repo)
+    else:
+        git("checkout", base_branch)
+        for path in graph.parent.rglob("*"):
+            if path.is_file() and path.relative_to(graph.parent) not in base_output:
+                path.unlink()
+        for relative, payload in base_output.items():
+            target = graph.parent / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+    (merge_repo / "main.py").write_text(
+        "def main():\n    return 3\n", encoding="utf-8"
+    )
+    rebuild(merge_repo)
+    git("add", "main.py", graph_pathspec, cwd=merge_repo)
+    git("commit", "-m", "main", cwd=merge_repo)
+
+    disposable_home = tmp_path / "home"
+    disposable_home.mkdir()
+    merged = git(
+        "merge",
+        "--no-edit",
+        "side",
+        cwd=merge_repo,
+        env={**os.environ, "HOME": str(disposable_home)},
+        check=False,
+    )
+    assert merged.returncode == 0, merged.stdout + merged.stderr
+    assert "Merge completed - launching background rebuild" in (
+        merged.stdout + merged.stderr
+    )
+
+    log = disposable_home / ".cache" / "graphify-rebuild.log"
+    snapshot = _wait_for_hook_recovery(
+        transaction_module,
+        graph,
+        {"base_base", "main_main", "side_side"},
+        log=log,
+        purpose="installed-post-merge-recovery-test",
+    )
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+    if linked_worktree:
+        active_probe = subprocess.run(
+            ["/bin/sh", str(repo / ".git" / "hooks" / "post-merge")],
+            cwd=merge_repo,
+            env={**os.environ, "HOME": str(disposable_home)},
+            capture_output=True,
+            text=True,
+        )
+        assert active_probe.returncode == 0, active_probe.stderr
+        assert "launching background rebuild" not in active_probe.stdout
+
+        probe_base = tmp_path / "probe-base.json"
+        probe_current = tmp_path / "probe-current.json"
+        probe_other = tmp_path / "probe-other.json"
+        for probe in (probe_base, probe_current, probe_other):
+            probe.write_bytes(graph.read_bytes())
+        transaction_module.merge_detached_snapshots(
+            probe_base, probe_current, probe_other
+        )
+        graph.unlink()
+        graph.symlink_to(probe_current)
+        symlink_probe = subprocess.run(
+            ["/bin/sh", str(repo / ".git" / "hooks" / "post-merge")],
+            cwd=merge_repo,
+            env={**os.environ, "HOME": str(disposable_home)},
+            capture_output=True,
+            text=True,
+        )
+        assert symlink_probe.returncode == 0, symlink_probe.stderr
+        assert "launching background rebuild" not in symlink_probe.stdout

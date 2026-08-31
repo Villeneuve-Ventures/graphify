@@ -14445,7 +14445,11 @@ def _open_merge_pending_watch_snapshot(
 
 
 def merge_detached_snapshots(
-    ancestor: Path | str, current: Path | str, other: Path | str
+    ancestor: Path | str,
+    current: Path | str,
+    other: Path | str,
+    *,
+    managed_current: Path | str | None = None,
 ) -> None:
     _ancestor_snapshot, ancestor_payload, _ancestor_identity = (
         _load_detached_merge_snapshot_with_identity(ancestor, role="ancestor")
@@ -14511,7 +14515,8 @@ def merge_detached_snapshots(
     if len(merged_payload) > _DETACHED_MAX_BYTES:
         raise PendingTransactionError("composed detached merge exceeds size limit")
     current_path = Path(current).absolute()
-    with pin_output(current_path.parent) as capability, _locked(capability):
+
+    def replace_current_locked(capability: OutputCapability) -> None:
         current_entry = _entry_stat(capability, current_path.name)
         if current_entry is None or (
             current_entry.st_dev,
@@ -14524,6 +14529,65 @@ def merge_detached_snapshots(
             merged_payload,
             expected_identity=current_identity,
         )
+
+    if managed_current is None:
+        with pin_output(current_path.parent) as capability, _locked(capability):
+            replace_current_locked(capability)
+        return
+
+    managed_path = Path(managed_current).absolute()
+
+    def validate_managed_current_locked(capability: OutputCapability) -> None:
+        active_watermark = (
+            current_metadata.get(GRAPH_WATERMARK_KEY)
+            if isinstance(current_metadata, dict)
+            else None
+        )
+        try:
+            managed_payload, _managed_identity = _read_managed_bytes(
+                capability, managed_path.name, _DETACHED_MAX_BYTES
+            )
+        except FileNotFoundError as exc:
+            raise PendingTransactionError(
+                "receipt-backed active current snapshot is required before merging"
+            ) from exc
+        if (
+            managed_payload != current_payload
+            or not isinstance(active_watermark, dict)
+            or active_watermark.get("state") != "active"
+            or _entry_stat(capability, RECEIPT_FILE) is None
+        ):
+            raise PendingTransactionError(
+                "receipt-backed active current snapshot is required before merging"
+            )
+        receipt, _receipt_digest, _inventory = _validate_receipt_locked(
+            capability, graph_payload=current_payload
+        )
+        if (
+            receipt.get("graph_name", "graph.json") != managed_path.name
+            or receipt.get("artifact_digests", {}).get(managed_path.name)
+            != digests[1]
+            or receipt.get("generation") != active_watermark.get("generation")
+            or receipt.get("watermark") != active_watermark
+        ):
+            raise PendingTransactionError(
+                "receipt-backed active current snapshot is required before merging"
+            )
+
+    if managed_path.parent.resolve() == current_path.parent.resolve():
+        with pin_output(current_path.parent) as capability, _locked(capability):
+            validate_managed_current_locked(capability)
+            replace_current_locked(capability)
+        return
+
+    with pin_output(managed_path.parent) as managed_capability, _locked(
+        managed_capability
+    ):
+        validate_managed_current_locked(managed_capability)
+        with pin_output(current_path.parent) as current_capability, _locked(
+            current_capability
+        ):
+            replace_current_locked(current_capability)
 
 
 def _finish_transaction(

@@ -10892,6 +10892,30 @@ def test_detached_merge_rejects_chained_pending_current_without_mutation(tmp_pat
     assert (current.stat().st_dev, current.stat().st_ino) == identity
 
 
+def test_detached_merge_rejects_receiptless_managed_current_without_mutation(tmp_path):
+    base = tmp_path / "base.json"
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    current = output / "graph.json"
+    other = tmp_path / "other.json"
+    legacy = json.loads(_graph(1))
+    legacy["graph"].pop(GRAPH_WATERMARK_KEY)
+    for path, payload in (
+        (base, legacy),
+        (current, legacy),
+        (other, json.loads(_graph(1))),
+    ):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    before = current.read_bytes()
+    identity = (current.stat().st_dev, current.stat().st_ino)
+
+    with pytest.raises(PendingTransactionError, match="receipt-backed"):
+        merge_detached_snapshots(base, current, other, managed_current=current)
+
+    assert current.read_bytes() == before
+    assert (current.stat().st_dev, current.stat().st_ino) == identity
+
+
 def test_detached_merge_rejects_oversize_and_unsupported_watermark(tmp_path):
     oversized = tmp_path / "oversized.json"
     with oversized.open("wb") as stream:
@@ -11067,7 +11091,7 @@ def test_detached_merge_refuses_retargeted_current_snapshot(
 
 def test_merge_driver_cli_accepts_exact_three_snapshots_only(tmp_path):
     base = tmp_path / "base.json"
-    current = tmp_path / "current.json"
+    current = tmp_path / "graph.json"
     other = tmp_path / "other.json"
     for path in (base, current, other):
         path.write_bytes(_graph(3))

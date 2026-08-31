@@ -1,4 +1,4 @@
-# git hook integration - install/uninstall graphify post-commit and post-checkout hooks
+# git hook integration - install/uninstall graphify repository lifecycle hooks
 from __future__ import annotations
 import os
 import re
@@ -13,6 +13,8 @@ _HOOK_MARKER = "# graphify-hook-start"
 _HOOK_MARKER_END = "# graphify-hook-end"
 _CHECKOUT_MARKER = "# graphify-checkout-hook-start"
 _CHECKOUT_MARKER_END = "# graphify-checkout-hook-end"
+_POST_MERGE_MARKER = "# graphify-post-merge-hook-start"
+_POST_MERGE_MARKER_END = "# graphify-post-merge-hook-end"
 
 # __PINNED_PYTHON__ is replaced at install time with the absolute path of the
 # Python interpreter that ran `graphify hook install`.  For uv-tool and pipx
@@ -422,6 +424,19 @@ fi
 """
 
 
+# Unlike proactive commit/checkout rebuilds, a post-merge hook must recover a
+# merge-driver-created pending graph in the linked worktree where Git wrote it.
+# Preserve the ordinary linked-worktree suppression when the graph is already
+# active, but admit exact merge-pending state to the detached recovery child.
+_POST_MERGE_WORKTREE_GUARD = """\
+_GFY_GITDIR=$(cd "$(git rev-parse --git-dir 2>/dev/null)" 2>/dev/null && pwd)
+_GFY_COMMONDIR=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd)
+if [ -n "$_GFY_COMMONDIR" ] && [ "$_GFY_GITDIR" != "$_GFY_COMMONDIR" ]; then
+    "$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from graphify.transaction import GRAPH_WATERMARK_KEY, load_detached_merge_snapshot; p=load_detached_merge_snapshot(sys.argv[1], role="current"); m=p.get("graph", {}); w=m.get(GRAPH_WATERMARK_KEY, {}) if isinstance(m, dict) else {}; sys.exit(0 if w.get("state") == "merge_pending" else 1)' "$GRAPHIFY_OUT/graph.json" 2>/dev/null || exit 0
+fi
+"""
+
+
 _HOOK_SCRIPT = """\
 # graphify-hook-start
 # Auto-rebuilds the knowledge graph after each commit (code files only, no LLM needed).
@@ -527,6 +542,40 @@ mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
 echo "[graphify] Branch switched - launching background rebuild (log: $_GRAPHIFY_LOG)"
 """ + _detached_launch(_REBUILD_BODY_CHECKOUT) + """# graphify-checkout-hook-end
+"""
+
+
+_POST_MERGE_SCRIPT = """\
+# graphify-post-merge-hook-start
+# Finalizes a merge-driver union after Git creates a merge commit.
+# Installed by: graphify hook install
+
+export PYTHONHASHSEED=0
+
+if [ -n "${WINDIR:-}" ] || [ -n "${MSYSTEM:-}" ]; then
+    export GRAPHIFY_MAX_WORKERS="${GRAPHIFY_MAX_WORKERS:-1}"
+fi
+
+# Bind recovery to the same output path recorded in .gitattributes.
+GRAPHIFY_OUT=__GRAPHIFY_OUTPUT__
+export GRAPHIFY_OUT
+if [ ! -d "$GRAPHIFY_OUT" ]; then
+    exit 0
+fi
+
+GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
+[ -d "$GIT_DIR/rebase-merge" ] && exit 0
+[ -d "$GIT_DIR/rebase-apply" ] && exit 0
+[ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0
+
+[ "${GRAPHIFY_SKIP_HOOK:-0}" = "1" ] && exit 0
+
+""" + _PYTHON_DETECT + _POST_MERGE_WORKTREE_GUARD + """
+_GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
+mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
+export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
+echo "[graphify] Merge completed - launching background rebuild (log: $_GRAPHIFY_LOG)"
+""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """# graphify-post-merge-hook-end
 """
 
 
@@ -762,6 +811,16 @@ def _pinned_python() -> str:
     return sys.executable
 
 
+def _merge_output_path() -> str:
+    """Return the relative output path supported by the Git merge integration."""
+    from graphify.paths import GRAPHIFY_OUT
+
+    out = GRAPHIFY_OUT
+    if not out or Path(out).is_absolute() or "\\" in out:
+        out = "graphify-out"
+    return out.rstrip("/")
+
+
 def _merge_attr_line() -> str:
     """The .gitattributes line assigning the graphify merge driver to graph.json.
 
@@ -770,23 +829,31 @@ def _merge_attr_line() -> str:
     absolute output-dir override cannot be expressed there — fall back to the
     default name in that case.
     """
-    from graphify.paths import GRAPHIFY_OUT
-    out = GRAPHIFY_OUT
-    if not out or Path(out).is_absolute() or "\\" in out:
-        out = "graphify-out"
-    return f"{out.rstrip('/')}/graph.json merge=graphify"
+    return f"{_merge_output_path()}/graph.json merge=graphify"
 
 
-def _has_merge_attr(content: str) -> bool:
-    """True if a (non-comment) `<...>graph.json ... merge=graphify` line exists."""
-    for raw in content.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split()
-        if fields and fields[0].endswith("graph.json") and "merge=graphify" in fields[1:]:
-            return True
-    return False
+def _quote_git_driver_literal(value: str) -> str:
+    """Shell-quote data while hiding literal percents from Git placeholders."""
+    return "'%'".join(shlex.quote(part) for part in value.split("%"))
+
+
+def _is_merge_attr(raw: str) -> bool:
+    """True for one Graphify-owned graph.json merge-attribute line."""
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        return False
+    fields = line.split()
+    return bool(
+        fields
+        and fields[0].endswith("graph.json")
+        and "merge=graphify" in fields[1:]
+    )
+
+
+def _has_exact_merge_attr(content: str, expected: str) -> bool:
+    """True only when the sole Graphify merge selector is ``expected``."""
+    managed = [raw.strip() for raw in content.splitlines() if _is_merge_attr(raw)]
+    return managed == [expected]
 
 
 def _register_merge_driver(root: Path) -> str:
@@ -800,6 +867,7 @@ def _register_merge_driver(root: Path) -> str:
     launcher is not on PATH at merge time.
     """
     import subprocess as _sp
+    managed_graph = _quote_git_driver_literal(f"{_merge_output_path()}/graph.json")
     pinned = _pinned_python()
     if pinned:
         # Git expands %O/%A/%B anywhere in the configured driver string,
@@ -807,14 +875,16 @@ def _register_merge_driver(root: Path) -> str:
         # between each literal percent and the following path character; POSIX
         # shell concatenation reconstructs one exact token without executing a
         # command, while only the three placeholders below remain visible.
-        percent = "'%'"
-        executable = percent.join(shlex.quote(part) for part in pinned.split("%"))
+        executable = _quote_git_driver_literal(pinned)
         driver = (
             "unset -f printf 2>/dev/null; "
-            f"{executable} -E -P -B -m graphify merge-driver %O %A %B"
+            f"{executable} -E -P -B -m graphify merge-driver "
+            f"--managed-current {managed_graph} %O %A %B"
         )
     else:
-        driver = "graphify merge-driver %O %A %B"
+        driver = (
+            f"graphify merge-driver --managed-current {managed_graph} %O %A %B"
+        )
     try:
         for key, value in (
             ("merge.graphify.name", "graphify graph.json union merge"),
@@ -831,12 +901,12 @@ def _register_merge_driver(root: Path) -> str:
     attrs = root / ".gitattributes"
     if attrs.exists():
         content = attrs.read_text(encoding="utf-8")
-        if _has_merge_attr(content):
+        if _has_exact_merge_attr(content, line):
             return f"already registered ({line})"
-        # Never clobber other entries; preserve a trailing newline.
-        if content and not content.endswith("\n"):
-            content += "\n"
-        attrs.write_text(content + line + "\n", encoding="utf-8", newline="\n")
+        # Rebind stale Graphify selectors while preserving unrelated entries.
+        kept = [raw for raw in content.splitlines() if not _is_merge_attr(raw)]
+        kept.append(line)
+        attrs.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
     else:
         attrs.write_text(line + "\n", encoding="utf-8", newline="\n")
     return f"registered ({line})"
@@ -860,7 +930,7 @@ def _unregister_merge_driver(root: Path) -> str:
     content = attrs.read_text(encoding="utf-8")
     kept = [
         raw for raw in content.splitlines()
-        if not _has_merge_attr(raw)
+        if not _is_merge_attr(raw)
     ]
     if kept == content.splitlines():
         return "gitattributes entry not found - nothing to remove."
@@ -884,7 +954,9 @@ def _merge_driver_status(root: Path) -> str:
     except OSError:
         cfg_ok = False
     attrs = root / ".gitattributes"
-    attr_ok = attrs.exists() and _has_merge_attr(attrs.read_text(encoding="utf-8"))
+    attr_ok = attrs.exists() and _has_exact_merge_attr(
+        attrs.read_text(encoding="utf-8"), _merge_attr_line()
+    )
     if cfg_ok and attr_ok:
         return "registered"
     if cfg_ok:
@@ -908,7 +980,7 @@ def _user_hooks_dir(hooks_dir: Path) -> Path:
 
 
 def install(path: Path = Path(".")) -> str:
-    """Install graphify post-commit and post-checkout hooks in the nearest git repo."""
+    """Install Graphify lifecycle hooks in the nearest git repository."""
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
@@ -926,6 +998,9 @@ def install(path: Path = Path(".")) -> str:
     quoted_pinned = shlex.quote(pinned)
     hook = _HOOK_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
     checkout = _CHECKOUT_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
+    post_merge = _POST_MERGE_SCRIPT.replace(
+        "__PINNED_PYTHON__", quoted_pinned
+    ).replace("__GRAPHIFY_OUTPUT__", shlex.quote(_merge_output_path()))
 
     # Prepare both hooks before applying either so deterministic malformed
     # ownership in one hook cannot leave the other partially upgraded.
@@ -939,15 +1014,28 @@ def install(path: Path = Path(".")) -> str:
         _CHECKOUT_MARKER,
         _CHECKOUT_MARKER_END,
     )
+    post_merge_plan = _prepare_hook_install(
+        hooks_dir,
+        "post-merge",
+        post_merge,
+        _POST_MERGE_MARKER,
+        _POST_MERGE_MARKER_END,
+    )
     commit_msg = _apply_hook_install(commit_plan)
     checkout_msg = _apply_hook_install(checkout_plan)
+    post_merge_msg = _apply_hook_install(post_merge_plan)
     merge_msg = _register_merge_driver(root)
 
-    return f"post-commit: {commit_msg}\npost-checkout: {checkout_msg}\nmerge driver: {merge_msg}"
+    return (
+        f"post-commit: {commit_msg}\n"
+        f"post-checkout: {checkout_msg}\n"
+        f"post-merge: {post_merge_msg}\n"
+        f"merge driver: {merge_msg}"
+    )
 
 
 def uninstall(path: Path = Path(".")) -> str:
-    """Remove graphify post-commit and post-checkout hooks."""
+    """Remove Graphify lifecycle hooks."""
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
@@ -962,11 +1050,23 @@ def uninstall(path: Path = Path(".")) -> str:
         _CHECKOUT_MARKER,
         _CHECKOUT_MARKER_END,
     )
+    post_merge_plan = _prepare_hook_uninstall(
+        hooks_dir,
+        "post-merge",
+        _POST_MERGE_MARKER,
+        _POST_MERGE_MARKER_END,
+    )
     commit_msg = _apply_hook_uninstall(commit_plan)
     checkout_msg = _apply_hook_uninstall(checkout_plan)
+    post_merge_msg = _apply_hook_uninstall(post_merge_plan)
     merge_msg = _unregister_merge_driver(root)
 
-    return f"post-commit: {commit_msg}\npost-checkout: {checkout_msg}\nmerge driver: {merge_msg}"
+    return (
+        f"post-commit: {commit_msg}\n"
+        f"post-checkout: {checkout_msg}\n"
+        f"post-merge: {post_merge_msg}\n"
+        f"merge driver: {merge_msg}"
+    )
 
 
 def status(path: Path = Path(".")) -> str:
@@ -992,5 +1092,13 @@ def status(path: Path = Path(".")) -> str:
 
     commit = _check("post-commit", _HOOK_MARKER, _HOOK_MARKER_END)
     checkout = _check("post-checkout", _CHECKOUT_MARKER, _CHECKOUT_MARKER_END)
+    post_merge = _check(
+        "post-merge", _POST_MERGE_MARKER, _POST_MERGE_MARKER_END
+    )
     merge = _merge_driver_status(root)
-    return f"post-commit: {commit}\npost-checkout: {checkout}\nmerge driver: {merge}"
+    return (
+        f"post-commit: {commit}\n"
+        f"post-checkout: {checkout}\n"
+        f"post-merge: {post_merge}\n"
+        f"merge driver: {merge}"
+    )

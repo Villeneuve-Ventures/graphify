@@ -2805,18 +2805,34 @@ def _dispatch_command(cmd: str) -> None:
         # the union of current+other nodes/edges back to current. Exits 1 on
         # corrupt input so git surfaces the conflict instead of silently
         # accepting a poisoned merge (see F-005).
-        # Usage: graphify merge-driver %O %A %B  (set in .git/config merge driver)
-        if len(sys.argv) != 5:
-            print("Usage: graphify merge-driver <base> <current> <other>", file=sys.stderr)
+        # Usage: graphify merge-driver --managed-current %O %A %B
+        # (set in .git/config by `graphify hook install`). Without the private
+        # managed-current flag, the command preserves generic detached-file use.
+        managed_current = (
+            sys.argv[3]
+            if len(sys.argv) == 7 and sys.argv[2] == "--managed-current"
+            else None
+        )
+        paths = sys.argv[4:] if managed_current is not None else sys.argv[2:]
+        if len(paths) != 3:
+            print(
+                "Usage: graphify merge-driver [--managed-current] <base> <current> <other>",
+                file=sys.stderr,
+            )
             sys.exit(1)
-        _base_path, _current_path, _other_path = sys.argv[2], sys.argv[3], sys.argv[4]
+        _base_path, _current_path, _other_path = paths
         # Hard caps so a malicious or corrupted graph.json cannot exhaust memory
         # at parse time. 50 MB / 100k nodes are well above any realistic graph
         # (typical graphs are <5 MB / <50k nodes); anything larger should fail
         # the merge so a human can investigate.
         try:
             from graphify.transaction import merge_detached_snapshots
-            merge_detached_snapshots(_base_path, _current_path, _other_path)
+            merge_detached_snapshots(
+                _base_path,
+                _current_path,
+                _other_path,
+                managed_current=managed_current,
+            )
         except Exception as exc:
             print(f"[graphify merge-driver] error loading graphs: {exc}", file=sys.stderr)
             sys.exit(1)  # surface the conflict so git doesn't accept a corrupt merge

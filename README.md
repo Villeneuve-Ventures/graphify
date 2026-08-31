@@ -187,7 +187,7 @@ for example `graphify claude install --project` or `graphify codex install --pro
 
 > **Avoid `pip install` on Mac/Windows** if possible. Fresh generated-skill commands discover and validate their runtime instead of executing the advisory `graphify-out/.graphify_python` pointer. Git hooks separately pin the already-running Graphify interpreter when you run `graphify hook install`; `uv tool install` and `pipx install` keep that interpreter and package together in an isolated environment.
 
-> **Git hooks and uv tool / pipx:** `graphify hook install` embeds the current interpreter path directly into the hook scripts at install time, so the post-commit hook fires correctly even in GUI git clients and CI runners where `~/.local/bin` is not on PATH. If you reinstall or upgrade graphify, re-run `graphify hook install` to refresh the embedded path.
+> **Git hooks and uv tool / pipx:** `graphify hook install` embeds the current interpreter path directly into the hook scripts at install time, so the post-commit, post-checkout, and post-merge hooks fire correctly even in GUI git clients and CI runners where `~/.local/bin` is not on PATH. If you reinstall or upgrade graphify, re-run `graphify hook install` to refresh the embedded path.
 
 <details>
 <summary><b>Pick your platform</b> (20+ assistants, click to expand)</summary>
@@ -418,7 +418,7 @@ graphify-out/cost.json        # local only
 **Workflow:**
 1. One person runs `/graphify .` and commits `graphify-out/`.
 2. Everyone pulls — their assistant reads the graph immediately.
-3. Run `graphify hook install` to auto-rebuild after each commit (AST only, no API cost). This also sets up a git merge driver so `graph.json` is never left with conflict markers — two devs committing in parallel get their graphs union-merged automatically.
+3. Run `graphify hook install` to auto-rebuild after commits, checkouts, and merges (AST only, no API cost). This also sets up a git merge driver so `graph.json` is union-merged and then finalized automatically after a successful merge. Legacy outputs without generation receipts must be rebuilt once with `graphify update .` before Git can safely merge their graph snapshots.
 4. When docs or papers change, run `/graphify --update` to refresh those nodes.
 
 ---
@@ -643,7 +643,7 @@ graphify uninstall                 # remove from all platforms in one shot
 graphify uninstall --purge         # also delete graphify-out/
 graphify uninstall --project --platform codex  # remove project-scoped install files only
 
-graphify hook install              # post-commit + post-checkout hooks
+graphify hook install              # post-commit + post-checkout + post-merge hooks
 graphify hook uninstall
 graphify hook status
 
