@@ -320,7 +320,7 @@ def test_managed_export_rejects_process_owner_for_different_output(
 def test_pathless_postgres_canonical_argv(
     postgres_args, use_out, tmp_path, monkeypatch
 ):
-    from graphify.cli import _canonical_extract_argv, _resolve_extract_destination
+    import graphify.cli as cli_module
 
     cwd = tmp_path / "workspace"
     cwd.mkdir()
@@ -331,13 +331,13 @@ def test_pathless_postgres_canonical_argv(
         options.extend(["--out", str(explicit_out)])
     monkeypatch.setattr(sys, "argv", ["graphify", "extract", *options])
 
-    destination = _resolve_extract_destination()
+    destination = cli_module._resolve_extract_destination()
 
     assert destination.root == cwd.resolve()
     expected_output = (explicit_out if use_out else cwd) / "graphify-out"
     assert destination.output == expected_output.resolve()
     assert destination.graph == (expected_output / "graph.json").resolve()
-    assert _canonical_extract_argv(destination.root) == [
+    assert cli_module._canonical_extract_argv(destination.root) == [
         "graphify",
         "extract",
         *options,
