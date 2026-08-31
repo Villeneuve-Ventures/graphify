@@ -565,12 +565,12 @@ def _resolve_extract_destination() -> _TransactionDestination:
 
 
 def _canonical_extract_argv(root: Path) -> list[str]:
-    """Put the parsed extract target in argv[2] without dropping option spelling."""
+    """Canonicalize an explicit extract target without inventing one."""
     arguments = sys.argv[2:]
     options: list[str] = []
     index = 0
     options_enabled = True
-    skipped_target = False
+    has_input_path = False
     while index < len(arguments):
         value = arguments[index]
         if options_enabled and value == "--":
@@ -590,12 +590,14 @@ def _canonical_extract_argv(root: Path) -> list[str]:
             options.append(value)
             index += 1
             continue
-        if not skipped_target:
-            skipped_target = True
+        if not has_input_path:
+            has_input_path = True
         else:
             options.append(value)
         index += 1
-    return [sys.argv[0], "extract", str(root), *options]
+    if has_input_path:
+        return [sys.argv[0], "extract", str(root), *options]
+    return [sys.argv[0], "extract", *options]
 
 
 def _replace_graph_argument(arguments: list[str], graph: Path) -> list[str]:
@@ -3549,6 +3551,7 @@ def _dispatch_command(cmd: str) -> None:
             )
 
         if not has_path:
+            detection = {}
             code_files = []
             doc_files = []
             paper_files = []
@@ -3892,23 +3895,24 @@ def _dispatch_command(cmd: str) -> None:
         # incremental and full branches), NOT the incremental ``semantic_files``
         # changed-subset, which would delete every unchanged doc's valid entry.
         # Best-effort: a prune failure must never break extraction.
-        try:
-            from graphify.cache import file_hash as _file_hash
-            _live_hashes: set[str] = set()
-            for _kind in ("document", "paper", "image"):
-                for _fp in files_by_type.get(_kind, []):
-                    _abs = Path(_fp)
-                    if not _abs.is_absolute():
-                        _abs = Path(out_root) / _abs
-                    if not _abs.is_file():
-                        continue  # deleted/missing — leave out so its entry is pruned
-                    try:
-                        _live_hashes.add(_file_hash(_abs, out_root))
-                    except OSError:
-                        pass
-            _prune_semantic_cache(out_root, _live_hashes)
-        except Exception as exc:
-            print(f"[graphify extract] warning: could not prune semantic cache: {exc}", file=sys.stderr)
+        if has_path:
+            try:
+                from graphify.cache import file_hash as _file_hash
+                _live_hashes: set[str] = set()
+                for _kind in ("document", "paper", "image"):
+                    for _fp in files_by_type.get(_kind, []):
+                        _abs = Path(_fp)
+                        if not _abs.is_absolute():
+                            _abs = Path(out_root) / _abs
+                        if not _abs.is_file():
+                            continue  # deleted/missing — leave out so its entry is pruned
+                        try:
+                            _live_hashes.add(_file_hash(_abs, out_root))
+                        except OSError:
+                            continue  # unreadable files cannot establish a live cache key
+                _prune_semantic_cache(out_root, _live_hashes)
+            except Exception as exc:
+                print(f"[graphify extract] warning: could not prune semantic cache: {exc}", file=sys.stderr)
         stages.mark("semantic extract")
 
         pg_result: dict = {"nodes": [], "edges": []}
@@ -4007,7 +4011,14 @@ def _dispatch_command(cmd: str) -> None:
                     "(--no-cluster); outputs left untouched."
                 )
                 try:
-                    _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target, scan_corpus=_scan_corpus)
+                    _save_manifest(
+                        _manifest_files,
+                        manifest_path=str(manifest_path),
+                        kind="both",
+                        root=target,
+                        scan_corpus=_scan_corpus,
+                        preserve_existing=has_path,
+                    )
                 except Exception as exc:
                     print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
                     raise
@@ -4045,7 +4056,14 @@ def _dispatch_command(cmd: str) -> None:
                     f"est. cost: ${cost:.4f}"
                 )
             try:
-                _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target, scan_corpus=_scan_corpus)
+                _save_manifest(
+                    _manifest_files,
+                    manifest_path=str(manifest_path),
+                    kind="both",
+                    root=target,
+                    scan_corpus=_scan_corpus,
+                    preserve_existing=has_path,
+                )
             except Exception as exc:
                 print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
                 raise
@@ -4148,7 +4166,14 @@ def _dispatch_command(cmd: str) -> None:
         }
         analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
         try:
-            _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target, scan_corpus=_scan_corpus)
+            _save_manifest(
+                _manifest_files,
+                manifest_path=str(manifest_path),
+                kind="both",
+                root=target,
+                scan_corpus=_scan_corpus,
+                preserve_existing=has_path,
+            )
         except Exception as exc:
             print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
             raise

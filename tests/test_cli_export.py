@@ -14,7 +14,7 @@ import pytest
 
 
 def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypatch):
-    from graphify.cli import _resolve_transaction_destination
+    import graphify.cli as cli_module
 
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -26,7 +26,7 @@ def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypat
         ["graphify", "cluster-only", "--graph", str(external), "--", str(corpus)],
     ):
         monkeypatch.setattr("sys.argv", argv)
-        destination = _resolve_transaction_destination("cluster-only")
+        destination = cli_module._resolve_transaction_destination("cluster-only")
         assert destination.graph == external.resolve()
         assert destination.output == external.parent.resolve()
 
@@ -40,17 +40,17 @@ def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypat
     ],
 )
 def test_issue89_cli_destination_rejects_ambiguous_options(argv, monkeypatch):
-    from graphify.cli import _CliArgumentError, _resolve_transaction_destination
+    import graphify.cli as cli_module
 
     monkeypatch.setattr("sys.argv", argv)
-    with pytest.raises(_CliArgumentError):
-        _resolve_transaction_destination("cluster-only")
+    with pytest.raises(cli_module._CliArgumentError):
+        cli_module._resolve_transaction_destination("cluster-only")
 
 
 def test_export_routing_normalizes_inline_paths_and_rejects_duplicates():
-    from graphify.cli import _CliArgumentError, _normalize_export_routing
+    import graphify.cli as cli_module
 
-    assert _normalize_export_routing(
+    assert cli_module._normalize_export_routing(
         ["callflow-html", "--graph=source.json", "--output=result.html"]
     ) == [
         "callflow-html",
@@ -59,29 +59,31 @@ def test_export_routing_normalizes_inline_paths_and_rejects_duplicates():
         "--output",
         "result.html",
     ]
-    with pytest.raises(_CliArgumentError, match="--graph may be specified only once"):
-        _normalize_export_routing(
+    with pytest.raises(
+        cli_module._CliArgumentError, match="--graph may be specified only once"
+    ):
+        cli_module._normalize_export_routing(
             ["html", "--graph", "one.json", "--graph=two.json"]
         )
-    with pytest.raises(_CliArgumentError, match="ambiguous"):
-        _normalize_export_routing(
+    with pytest.raises(cli_module._CliArgumentError, match="ambiguous"):
+        cli_module._normalize_export_routing(
             ["callflow-html", "source.json", "--graph=other.json"]
         )
-    assert _normalize_export_routing(
+    assert cli_module._normalize_export_routing(
         ["callflow-html", "--", "--graph-looking.json"]
     ) == ["callflow-html", "--", "--graph-looking.json"]
-    with pytest.raises(_CliArgumentError, match="ambiguous"):
-        _normalize_export_routing(
+    with pytest.raises(cli_module._CliArgumentError, match="ambiguous"):
+        cli_module._normalize_export_routing(
             ["callflow-html", "--graph", "source.json", "--", "--other.json"]
         )
 
 
 @pytest.mark.parametrize("subcmd", ["html", "neo4j"])
 def test_staged_export_graph_is_inserted_before_option_boundary(subcmd, tmp_path):
-    from graphify.cli import _replace_export_graph_argument
+    import graphify.cli as cli_module
 
     staged = tmp_path / "staged" / "graph.json"
-    rewritten = _replace_export_graph_argument(
+    rewritten = cli_module._replace_export_graph_argument(
         ["--", "--push", "bolt://provider"], staged, subcmd=subcmd
     )
 
@@ -307,10 +309,454 @@ def test_managed_export_rejects_process_owner_for_different_output(
     assert not (managed_output / "graph.html").exists()
 
 
+@pytest.mark.parametrize(
+    ("postgres_args", "use_out"),
+    [
+        (["--postgres", "postgresql://example/test"], False),
+        (["--postgres=postgresql://example/test"], False),
+        (["--postgres", "postgresql://example/test"], True),
+        (["--postgres=postgresql://example/test"], True),
+    ],
+    ids=("P1", "P2", "P3", "P4"),
+)
+def test_pathless_postgres_canonical_argv(
+    postgres_args, use_out, tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+
+    cwd = tmp_path / "workspace"
+    cwd.mkdir()
+    explicit_out = tmp_path / "explicit-out"
+    monkeypatch.chdir(cwd)
+    options = [*postgres_args]
+    if use_out:
+        options.extend(["--out", str(explicit_out)])
+    monkeypatch.setattr(sys, "argv", ["graphify", "extract", *options])
+
+    destination = cli_module._resolve_extract_destination()
+
+    assert destination.root == cwd.resolve()
+    expected_output = (explicit_out if use_out else cwd) / "graphify-out"
+    assert destination.output == expected_output.resolve()
+    assert destination.graph == (expected_output / "graph.json").resolve()
+    assert cli_module._canonical_extract_argv(destination.root) == [
+        "graphify",
+        "extract",
+        *options,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("postgres_args", "use_out"),
+    [
+        (["--postgres", "postgresql://example/test"], False),
+        (["--postgres=postgresql://example/test"], False),
+        (["--postgres", "postgresql://example/test"], True),
+        (["--postgres=postgresql://example/test"], True),
+    ],
+    ids=("P1", "P2", "P3", "P4"),
+)
+def test_pathless_postgres_transaction_routing(
+    postgres_args, use_out, tmp_path, monkeypatch
+):
+    import graphify.cli as cli_module
+    import graphify.detect as detect_module
+    import graphify.pg_introspect as pg_introspect_module
+
+    cwd = tmp_path / "workspace"
+    cwd.mkdir()
+    explicit_out = tmp_path / "explicit-out"
+    monkeypatch.chdir(cwd)
+    options = [*postgres_args]
+    if use_out:
+        options.extend(["--out", str(explicit_out)])
+    expected_argv = ["graphify", "extract", *options, "--no-cluster"]
+    monkeypatch.setattr(sys, "argv", expected_argv)
+
+    def unexpected_detector(*_args, **_kwargs):
+        pytest.fail("pathless PostgreSQL extraction must not scan cwd")
+
+    introspection_calls = []
+
+    def deterministic_introspection(dsn):
+        introspection_calls.append((dsn, tuple(sys.argv)))
+        return {
+            "nodes": [
+                {
+                    "id": "postgres:public.widgets",
+                    "label": "public.widgets",
+                    "file_type": "code",
+                    "source_file": "postgresql:/example/test",
+                    "source_location": "schema public",
+                }
+            ],
+            "edges": [],
+        }
+
+    monkeypatch.setattr(detect_module, "detect", unexpected_detector)
+    monkeypatch.setattr(detect_module, "detect_incremental", unexpected_detector)
+    monkeypatch.setattr(
+        pg_introspect_module, "introspect_postgres", deterministic_introspection
+    )
+
+    expected_output = (explicit_out if use_out else cwd) / "graphify-out"
+    generations = []
+    for _ in range(2):
+        with pytest.raises(SystemExit) as exit_info:
+            cli_module.dispatch_command("extract")
+        assert exit_info.value.code in (None, 0)
+        receipt = json.loads(
+            (expected_output / ".graphify_generation.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        generations.append(receipt["generation"])
+
+    assert generations[0] == 1
+    assert generations[1] > generations[0]
+    assert introspection_calls == [
+        ("postgresql://example/test", tuple(expected_argv)),
+        ("postgresql://example/test", tuple(expected_argv)),
+    ]
+    assert (expected_output / "graph.json").is_file()
+    assert (expected_output / "manifest.json").is_file()
+    assert (expected_output / ".graphify_protocol.json").is_file()
+    assert (expected_output / ".graphify_generation.json").is_file()
+
+    graph = json.loads(
+        (expected_output / "graph.json").read_text(encoding="utf-8")
+    )
+    receipt = json.loads(
+        (expected_output / ".graphify_generation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    protocol = json.loads(
+        (expected_output / ".graphify_protocol.json").read_text(encoding="utf-8")
+    )
+    watermark = graph["graph"]["_graphify_protocol"]
+    generation_two = generations[1]
+    assert receipt["generation"] == generation_two
+    assert receipt["watermark"] == watermark
+    assert watermark["state"] == "active"
+    assert watermark["generation"] == generation_two
+    assert protocol["state"] == "COMPLETE"
+    assert protocol["generation"] == generation_two
+    if use_out:
+        assert not (cwd / "graphify-out").exists()
+
+
+def _dispatch_extract_success(cli_module):
+    try:
+        cli_module.dispatch_command("extract")
+    except SystemExit as exc:
+        assert exc.code in (None, 0)
+
+
+def _seed_pathless_state_boundary_output(
+    corpus, output_root, *, no_cluster, monkeypatch
+):
+    import graphify.cli as cli_module
+    from graphify.cache import file_hash, save_semantic_cache
+
+    sample = corpus / "sample.py"
+    sample.write_text("def sample():\n    return 1\n", encoding="utf-8")
+    path_args = [
+        "graphify",
+        "extract",
+        str(corpus),
+        "--out",
+        str(output_root),
+        "--code-only",
+    ]
+    if no_cluster:
+        path_args.append("--no-cluster")
+    monkeypatch.setattr(sys, "argv", path_args)
+    _dispatch_extract_success(cli_module)
+
+    output = output_root / "graphify-out"
+    seeded_graph = json.loads(
+        (output / "graph.json").read_text(encoding="utf-8")
+    )
+    assert any(
+        Path(str(node.get("source_file", ""))).name == sample.name
+        for node in seeded_graph["nodes"]
+    )
+
+    cache_paths = {}
+    for mode in (None, "deep"):
+        cache_node = {
+            "id": f"cache:{mode or 'standard'}",
+            "label": f"cache {mode or 'standard'}",
+            "file_type": "code",
+            "source_file": str(sample),
+            "source_location": "L1",
+        }
+        assert save_semantic_cache(
+            [cache_node], [], root=output_root, mode=mode
+        ) == 1
+        namespace = "semantic" if mode is None else "semantic-deep"
+        cache_paths[namespace] = (
+            output
+            / "cache"
+            / namespace
+            / f"{file_hash(sample, output_root)}.json"
+        )
+
+    receipt = json.loads(
+        (output / ".graphify_generation.json").read_text(encoding="utf-8")
+    )
+    required = set(receipt["required_artifacts"])
+    for cache_path in cache_paths.values():
+        assert cache_path.is_file()
+        assert cache_path.relative_to(output).as_posix() not in required
+
+    return {
+        "sample": sample,
+        "output": output,
+        "cache_paths": cache_paths,
+        "cache_bytes": {
+            name: path.read_bytes() for name, path in cache_paths.items()
+        },
+    }
+
+
+@pytest.mark.parametrize("no_cluster", [True, False], ids=("raw", "clustered"))
+def test_pathless_postgres_preserves_cache_resets_manifest_and_reloads_path(
+    no_cluster, tmp_path, monkeypatch
+):
+    import graphify.cargo_introspect as cargo_module
+    import graphify.cli as cli_module
+    import graphify.detect as detect_module
+    import graphify.pg_introspect as pg_module
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    output_root = tmp_path / "shared"
+    monkeypatch.chdir(corpus)
+    seeded = _seed_pathless_state_boundary_output(
+        corpus, output_root, no_cluster=no_cluster, monkeypatch=monkeypatch
+    )
+    output = seeded["output"]
+    cache_paths = seeded["cache_paths"]
+    cache_bytes = seeded["cache_bytes"]
+    cargo_targets = []
+
+    def unexpected_detector(*_args, **_kwargs):
+        pytest.fail("pathless PostgreSQL extraction must not scan cwd")
+
+    def postgres_result(_dsn):
+        return {
+            "nodes": [
+                {
+                    "id": "postgres:widgets",
+                    "label": "PostgreSQL widgets",
+                    "file_type": "code",
+                    "source_file": "postgresql:/example/test",
+                    "source_location": "schema public",
+                }
+            ],
+            "edges": [],
+        }
+
+    def cargo_result(target):
+        cargo_targets.append(target)
+        return {
+            "nodes": [
+                {
+                    "id": "cargo:workspace",
+                    "label": "Cargo workspace",
+                    "file_type": "code",
+                    "source_file": "Cargo.toml",
+                    "source_location": "workspace",
+                }
+            ],
+            "edges": [],
+        }
+
+    with monkeypatch.context() as pathless:
+        pathless.setattr(detect_module, "detect", unexpected_detector)
+        pathless.setattr(detect_module, "detect_incremental", unexpected_detector)
+        pathless.setattr(pg_module, "introspect_postgres", postgres_result)
+        pathless.setattr(cargo_module, "introspect_cargo", cargo_result)
+        pathless_args = [
+            "graphify",
+            "extract",
+            "--postgres",
+            "postgresql://example/test",
+            "--cargo",
+            "--out",
+            str(output_root),
+        ]
+        if no_cluster:
+            pathless_args.append("--no-cluster")
+        pathless.setattr(sys, "argv", pathless_args)
+        _dispatch_extract_success(cli_module)
+
+    assert cargo_targets == [corpus.resolve()]
+    adapter_graph = json.loads(
+        (output / "graph.json").read_text(encoding="utf-8")
+    )
+    adapter_ids = {node["id"] for node in adapter_graph["nodes"]}
+    assert {"postgres:widgets", "cargo:workspace"} <= adapter_ids
+    pathless_receipt = json.loads(
+        (output / ".graphify_generation.json").read_text(encoding="utf-8")
+    )
+    pathless_protocol = json.loads(
+        (output / ".graphify_protocol.json").read_text(encoding="utf-8")
+    )
+    pathless_watermark = adapter_graph["graph"]["_graphify_protocol"]
+    assert pathless_protocol["state"] == "COMPLETE"
+    assert pathless_protocol["generation"] == pathless_receipt["generation"]
+    assert pathless_watermark["generation"] == pathless_receipt["generation"]
+    assert pathless_watermark["state"] == "active"
+
+    manifest_after_pathless = json.loads(
+        (output / "manifest.json").read_text(encoding="utf-8")
+    )
+    cache_preserved = {
+        name: path.is_file() and path.read_bytes() == cache_bytes[name]
+        for name, path in cache_paths.items()
+    }
+
+    reload_args = [
+        "graphify",
+        "extract",
+        str(corpus),
+        "--out",
+        str(output_root),
+        "--code-only",
+    ]
+    if no_cluster:
+        reload_args.append("--no-cluster")
+    monkeypatch.setattr(sys, "argv", reload_args)
+    _dispatch_extract_success(cli_module)
+    reloaded_graph = json.loads(
+        (output / "graph.json").read_text(encoding="utf-8")
+    )
+    sample_reloaded = any(
+        Path(str(node.get("source_file", ""))).name == seeded["sample"].name
+        for node in reloaded_graph["nodes"]
+    )
+
+    problems = []
+    if not all(cache_preserved.values()):
+        problems.append(f"semantic caches were deleted: {cache_preserved}")
+    if manifest_after_pathless != {}:
+        problems.append(
+            "pathless manifest retained filesystem rows: "
+            f"{set(manifest_after_pathless)}"
+        )
+    if not sample_reloaded:
+        problems.append("unchanged local source was not re-admitted")
+    assert not problems, "; ".join(problems)
+
+
+def test_pathless_postgres_manifest_failure_is_publication_atomic(
+    tmp_path, monkeypatch, capsys
+):
+    import graphify.__main__ as main_module
+    import graphify.detect as detect_module
+    import graphify.pg_introspect as pg_module
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PROTOCOL_FILE,
+        RECEIPT_FILE,
+        TRANSACTION_FILE,
+    )
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    output_root = tmp_path / "shared"
+    monkeypatch.chdir(corpus)
+    seeded = _seed_pathless_state_boundary_output(
+        corpus, output_root, no_cluster=True, monkeypatch=monkeypatch
+    )
+    output = seeded["output"]
+    cache_paths = seeded["cache_paths"]
+    cache_bytes = seeded["cache_bytes"]
+    graph_path = output / "graph.json"
+    manifest_path = output / "manifest.json"
+    receipt_path = output / RECEIPT_FILE
+    protocol_path = output / PROTOCOL_FILE
+    graph_before = graph_path.read_bytes()
+    manifest_before = manifest_path.read_bytes()
+    receipt_before = receipt_path.read_bytes()
+    completed_receipt = json.loads(receipt_before)
+    completed_generation = completed_receipt["generation"]
+    watermark_before = json.loads(graph_before)["graph"][
+        GRAPH_WATERMARK_KEY
+    ]
+    assert watermark_before["generation"] == completed_generation
+    assert json.loads(protocol_path.read_text(encoding="utf-8"))["state"] == "COMPLETE"
+
+    def unexpected_detector(*_args, **_kwargs):
+        pytest.fail("pathless PostgreSQL extraction must not scan cwd")
+
+    def failing_manifest(*_args, **_kwargs):
+        raise OSError("manifest failed")
+
+    monkeypatch.setattr(main_module, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(detect_module, "detect", unexpected_detector)
+    monkeypatch.setattr(detect_module, "detect_incremental", unexpected_detector)
+    monkeypatch.setattr(detect_module, "save_manifest", failing_manifest)
+    monkeypatch.setattr(
+        pg_module,
+        "introspect_postgres",
+        lambda _dsn: {
+            "nodes": [
+                {
+                    "id": "postgres:failure",
+                    "label": "PostgreSQL failure fixture",
+                    "file_type": "code",
+                    "source_file": "postgresql:/example/test",
+                    "source_location": "schema public",
+                }
+            ],
+            "edges": [],
+        },
+    )
+    monkeypatch.setattr(
+        main_module.sys,
+        "argv",
+        [
+            "graphify",
+            "extract",
+            "--postgres",
+            "postgresql://example/test",
+            "--out",
+            str(output_root),
+            "--no-cluster",
+        ],
+    )
+
+    with pytest.raises(OSError, match="manifest failed"):
+        main_module.main()
+
+    assert graph_path.read_bytes() == graph_before
+    assert manifest_path.read_bytes() == manifest_before
+    assert receipt_path.read_bytes() == receipt_before
+    assert json.loads(graph_path.read_text(encoding="utf-8"))["graph"][
+        GRAPH_WATERMARK_KEY
+    ] == watermark_before
+    pending_protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+    assert pending_protocol["state"] == "INCOMPLETE"
+    assert pending_protocol["generation"] == completed_generation + 1
+    transaction_path = output / TRANSACTION_FILE
+    if transaction_path.exists():
+        transaction = json.loads(transaction_path.read_text(encoding="utf-8"))
+        assert transaction["generation"] == pending_protocol["generation"]
+    assert "success" not in capsys.readouterr().out.lower()
+    assert {
+        name: path.is_file() and path.read_bytes() == cache_bytes[name]
+        for name, path in cache_paths.items()
+    } == {"semantic": True, "semantic-deep": True}
+
+
 def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
     tmp_path, monkeypatch
 ):
-    from graphify.cli import _canonical_extract_argv, _resolve_extract_destination
+    import graphify.cli as cli_module
 
     corpus = tmp_path / "corpus"
     corpus.mkdir()
@@ -327,9 +773,9 @@ def test_extract_routing_preserves_repeatable_excludes_and_options_before_path(
             str(corpus),
         ],
     )
-    destination = _resolve_extract_destination()
+    destination = cli_module._resolve_extract_destination()
     assert destination.root == corpus.resolve()
-    assert _canonical_extract_argv(destination.root) == [
+    assert cli_module._canonical_extract_argv(destination.root) == [
         "graphify",
         "extract",
         str(corpus.resolve()),
@@ -529,8 +975,8 @@ test -f "$PREPARED_OUT/.graphify_detect.json"
 def test_direct_export_transfers_close_race_to_claimable_successor(
     tmp_path, monkeypatch
 ):
+    import graphify.cli as cli_module
     import graphify.transaction as transaction_module
-    from graphify.cli import dispatch_command
 
     out = _make_graph(tmp_path)
     original_close = transaction_module.close_if_queue_empty
@@ -546,7 +992,7 @@ def test_direct_export_transfers_close_race_to_claimable_successor(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(transaction_module, "close_if_queue_empty", raced_close)
     monkeypatch.setattr(sys, "argv", ["graphify", "export", "html"])
-    dispatch_command("export")
+    cli_module.dispatch_command("export")
     assert not (out / ".graphify_transaction.json").exists()
     assert (out / ".graphify_rebuild_queue.jsonl").read_text().strip()
     successor = transaction_module.begin_transaction(
@@ -1355,9 +1801,9 @@ def test_export_graphml_creates_file(tmp_path):
 def test_issue89_provider_push_is_snapshot_only_and_never_publishes_locally(
     tmp_path, monkeypatch, provider, provider_fails,
 ):
+    import graphify.cli as cli_module
     import graphify.export as export_module
     import graphify.transaction as transaction_module
-    from graphify.cli import dispatch_command
 
     out = _make_graph(tmp_path)
     seeded = _run(["export", "html"], tmp_path)
@@ -1411,9 +1857,9 @@ def test_issue89_provider_push_is_snapshot_only_and_never_publishes_locally(
 
     if provider_fails:
         with pytest.raises(RuntimeError, match=f"{provider} provider failed"):
-            dispatch_command("export")
+            cli_module.dispatch_command("export")
     else:
-        dispatch_command("export")
+        cli_module.dispatch_command("export")
 
     assert admissions == ["export-admission", "export"]
     assert len(calls) == 1
