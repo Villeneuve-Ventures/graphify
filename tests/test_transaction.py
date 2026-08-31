@@ -9097,6 +9097,81 @@ def _merge_successor_ready(tmp_path: Path, *, include_other_artifact: bool = Fal
     return root, output, transaction, token, admission, marker
 
 
+def test_finalize_rejects_oversized_successor_marker_before_publication(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+
+    _root, output, transaction, token, _admission, _marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    marker_path = output / transaction_module.PREPARED_FILE
+    marker_stat = marker_path.stat()
+    public_before = {
+        path.relative_to(output): path.read_bytes()
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    long_suffix = "x" * 240
+    payloads = {
+        "graph.json": b"{}",
+        "manifest.json": b"{}",
+        **{
+            f"bulk/{index:04d}-{long_suffix}.json": b"{}"
+            for index in range(transaction_module._MAX_RECEIPT_ARTIFACTS - 2)
+        },
+    }
+    plan = transaction_module.PublicationPlan(payloads)
+    inventory = transaction_module._publication_inventory(plan)
+    oversized_marker = {
+        **json.loads(marker_path.read_text(encoding="utf-8")),
+        "inventory": inventory,
+        "deletions": [],
+    }
+    oversized_marker["plan_digest"] = transaction_module._publication_plan_digest(
+        generation=transaction.generation,
+        graph_name="graph.json",
+        inventory=inventory,
+        deletions=(),
+    )
+    with transaction_module.pin_output(output, mutation=False) as capability:
+        transaction_module._validate_successor_ready_marker(
+            oversized_marker,
+            capability=capability,
+            transaction=transaction,
+        )
+    assert (
+        len(transaction_module._json_bytes(oversized_marker))
+        > transaction_module._MAX_STATE_BYTES
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "publication_plan_from_directory",
+        lambda *_args, **_kwargs: plan,
+    )
+
+    with pytest.raises(
+        PendingTransactionError,
+        match="successor-ready prepared binding exceeds size limit",
+    ):
+        transaction_module._finalize_prepared_transaction(transaction)
+
+    public_after = {
+        path.relative_to(output): path.read_bytes()
+        for path in output.rglob("*")
+        if path.is_file()
+    }
+    assert public_after == public_before
+    retained_stat = marker_path.stat()
+    assert (retained_stat.st_dev, retained_stat.st_ino) == (
+        marker_stat.st_dev,
+        marker_stat.st_ino,
+    )
+    status_snapshot = transaction_module.transaction_status(output)
+    assert status_snapshot["prepared_creation"] == {"state": "successor-ready"}
+    assert transaction_module.active_transaction_token_path(output) == token.path
+
+
 def test_merge_successor_ready_binds_exact_inventory_and_replays_publication(tmp_path):
     from graphify import transaction as transaction_module
 

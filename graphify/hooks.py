@@ -454,6 +454,11 @@ if [ -n "${WINDIR:-}" ] || [ -n "${MSYSTEM:-}" ]; then
     export GRAPHIFY_MAX_WORKERS="${GRAPHIFY_MAX_WORKERS:-1}"
 fi
 
+# Bind recovery to the same output path recorded in .gitattributes. This must
+# precede interpreter detection because its trust-root lookup reads GRAPHIFY_OUT.
+GRAPHIFY_OUT=__GRAPHIFY_OUTPUT__
+export GRAPHIFY_OUT
+
 # Skip during rebase/merge/cherry-pick to avoid blocking --continue with unstaged changes
 # git exports GIT_DIR to hooks; the rev-parse fallback only runs when invoked by
 # hand (each git exec costs 1s+ on AV-scanned Windows machines).
@@ -996,11 +1001,15 @@ def install(path: Path = Path(".")) -> str:
     # pin so it safely falls through to dynamic detection.
     pinned = _pinned_python()
     quoted_pinned = shlex.quote(pinned)
-    hook = _HOOK_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
+    output_path = _merge_output_path()
+    quoted_output = shlex.quote(output_path)
+    hook = _HOOK_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned).replace(
+        "__GRAPHIFY_OUTPUT__", quoted_output
+    )
     checkout = _CHECKOUT_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
     post_merge = _POST_MERGE_SCRIPT.replace(
         "__PINNED_PYTHON__", quoted_pinned
-    ).replace("__GRAPHIFY_OUTPUT__", shlex.quote(_merge_output_path()))
+    ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
 
     # Prepare both hooks before applying either so deterministic malformed
     # ownership in one hook cannot leave the other partially upgraded.

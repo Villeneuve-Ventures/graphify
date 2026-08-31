@@ -81,7 +81,11 @@ def test_install_idempotent(tmp_path, monkeypatch):
 
 
 def _rendered_hook(script: str) -> bytes:
-    return script.replace("__PINNED_PYTHON__", shlex.quote(hooks._pinned_python())).encode()
+    return (
+        script.replace("__PINNED_PYTHON__", shlex.quote(hooks._pinned_python()))
+        .replace("__GRAPHIFY_OUTPUT__", shlex.quote(hooks._merge_output_path()))
+        .encode()
+    )
 
 
 def test_install_updates_existing_graphify_sections_and_preserves_other_content(tmp_path):
@@ -1093,8 +1097,44 @@ def test_install_rebinds_merge_driver_when_output_changes(tmp_path, monkeypatch)
         text=True,
     ).stdout
     assert "--managed-current custom-out/graph.json %O %A %B" in driver
+    for hook_name in ("post-commit", "post-merge"):
+        hook = (repo / ".git" / "hooks" / hook_name).read_text(encoding="utf-8")
+        assert "GRAPHIFY_OUT=custom-out\nexport GRAPHIFY_OUT\n" in hook
+        assert "__GRAPHIFY_OUTPUT__" not in hook
     assert "merge driver: registered" in result
     assert "merge driver: registered" in status(repo)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell quoting contract")
+def test_install_quotes_custom_output_in_recovery_hooks(tmp_path, monkeypatch):
+    """Output configuration is data, never executable hook syntax."""
+    import graphify.paths as paths_module
+
+    repo = _make_git_repo(tmp_path)
+    sentinel = repo / "custom-output-injected"
+    output_name = f"custom'; touch {sentinel}; #"
+    monkeypatch.setattr(paths_module, "GRAPHIFY_OUT", output_name)
+
+    install(repo)
+
+    expected = f"GRAPHIFY_OUT={shlex.quote(output_name)}\nexport GRAPHIFY_OUT\n"
+    for hook_name in ("post-commit", "post-merge"):
+        hook = repo / ".git" / "hooks" / hook_name
+        content = hook.read_text(encoding="utf-8")
+        assert expected in content
+        syntax = subprocess.run(
+            ["/bin/sh", "-n", str(hook)], capture_output=True, text=True
+        )
+        assert syntax.returncode == 0, syntax.stderr
+        probe = subprocess.run(
+            ["/bin/sh", str(hook)],
+            cwd=repo,
+            env={**os.environ, "GRAPHIFY_SKIP_HOOK": "1"},
+            capture_output=True,
+            text=True,
+        )
+        assert probe.returncode == 0, probe.stderr
+    assert not sentinel.exists()
 
 
 def test_install_preserves_existing_gitattributes(tmp_path):
@@ -2327,3 +2367,141 @@ def test_installed_post_merge_hook_recovers_real_merge_pending_union(
         )
         assert symlink_probe.returncode == 0, symlink_probe.stderr
         assert "launching background rebuild" not in symlink_probe.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="installed hook E2E uses POSIX shell")
+def test_installed_post_commit_hook_recovers_conflicted_merge_at_custom_output(
+    tmp_path, monkeypatch
+):
+    from graphify import paths as paths_module
+    from graphify import transaction as transaction_module
+
+    output_name = "custom-out"
+    monkeypatch.setattr(paths_module, "GRAPHIFY_OUT", output_name)
+
+    def rebuild(root: Path) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-E",
+                "-P",
+                "-B",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "from graphify.watch import _rebuild_code; "
+                    "raise SystemExit(0 if _rebuild_code(Path('.'), "
+                    "no_cluster=True, block_on_lock=True) else 1)"
+                ),
+            ],
+            cwd=root,
+            env={**os.environ, "GRAPHIFY_OUT": output_name},
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    repo = _make_git_repo(tmp_path / "repo")
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "hook-tests@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Graphify Hook Tests"],
+        check=True,
+    )
+    (repo / "base.py").write_text("def base():\n    return 1\n", encoding="utf-8")
+    conflict = repo / "conflict.txt"
+    conflict.write_text("base\n", encoding="utf-8")
+    rebuild(repo)
+    install(repo)
+
+    setup_env = {**os.environ, "GRAPHIFY_SKIP_HOOK": "1"}
+
+    def git(*args: str, env=None, check=True):
+        return subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=check,
+            capture_output=True,
+            text=True,
+            env=setup_env if env is None else env,
+        )
+
+    graph = repo / output_name / "graph.json"
+    graph_pathspec = f"{output_name}/graph.json"
+    git("add", ".gitattributes", "base.py", "conflict.txt", graph_pathspec)
+    git("commit", "-m", "base")
+    base_branch = git("branch", "--show-current").stdout.strip()
+    base_output = {
+        path.relative_to(graph.parent): path.read_bytes()
+        for path in graph.parent.rglob("*")
+        if path.is_file()
+    }
+
+    git("checkout", "-b", "side")
+    (repo / "side.py").write_text("def side():\n    return 2\n", encoding="utf-8")
+    conflict.write_text("side\n", encoding="utf-8")
+    rebuild(repo)
+    git("add", "side.py", "conflict.txt", graph_pathspec)
+    git("commit", "-m", "side")
+
+    git("checkout", base_branch)
+    for path in graph.parent.rglob("*"):
+        if path.is_file():
+            path.unlink()
+    for relative, payload in base_output.items():
+        target = graph.parent / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    (repo / "main.py").write_text("def main():\n    return 3\n", encoding="utf-8")
+    conflict.write_text("main\n", encoding="utf-8")
+    rebuild(repo)
+    git("add", "main.py", "conflict.txt", graph_pathspec)
+    git("commit", "-m", "main")
+
+    disposable_home = tmp_path / "home"
+    disposable_home.mkdir()
+    runtime_env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in {"GRAPHIFY_OUT", "GRAPHIFY_OUTPUT_ROOT", "GRAPHIFY_SKIP_HOOK"}
+    }
+    runtime_env["HOME"] = str(disposable_home)
+    merged = git("merge", "--no-edit", "side", env=runtime_env, check=False)
+    assert merged.returncode != 0
+    assert "CONFLICT" in merged.stdout + merged.stderr
+    assert "launching background rebuild" not in merged.stdout + merged.stderr
+    assert "Merge completed - launching background rebuild" not in (
+        merged.stdout + merged.stderr
+    )
+
+    pending = transaction_module.load_detached_merge_snapshot(graph, role="current")
+    assert pending["graph"][transaction_module.GRAPH_WATERMARK_KEY]["state"] == (
+        "merge_pending"
+    )
+    assert {node["id"] for node in pending["nodes"]} >= {
+        "base_base",
+        "main_main",
+        "side_side",
+    }
+    log = disposable_home / ".cache" / "graphify-rebuild.log"
+    assert not log.exists()
+    assert not (repo / "graphify-out").exists()
+
+    conflict.write_text("resolved\n", encoding="utf-8")
+    git("add", "conflict.txt", env=runtime_env)
+    committed = git("commit", "--no-edit", env=runtime_env, check=False)
+    assert committed.returncode == 0, committed.stdout + committed.stderr
+    assert "launching background rebuild" in committed.stdout + committed.stderr
+
+    snapshot = _wait_for_hook_recovery(
+        transaction_module,
+        graph,
+        {"base_base", "main_main", "side_side"},
+        log=log,
+        purpose="installed-post-commit-conflicted-merge-recovery-test",
+    )
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+    assert not (repo / "graphify-out").exists()

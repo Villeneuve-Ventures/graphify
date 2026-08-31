@@ -15090,9 +15090,12 @@ def _finalize_prepared_transaction(
                     capability=capability,
                     transaction=transaction,
                 )
-                _replace_bytes(
-                    capability, PREPARED_FILE, _json_bytes(prepared_marker)
-                )
+                prepared_payload = _json_bytes(prepared_marker)
+                if len(prepared_payload) > _MAX_STATE_BYTES:
+                    raise PendingTransactionError(
+                        "successor-ready prepared binding exceeds size limit"
+                    )
+                _replace_bytes(capability, PREPARED_FILE, prepared_payload)
             prepared_capability.validate()
         finally:
             prepared_capability.close()
