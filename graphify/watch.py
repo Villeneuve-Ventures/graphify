@@ -783,6 +783,13 @@ def _rebuild_code(
             PendingTransactionError,
             PublicationPlan,
             _discard_report_only_directory,
+            _finalize_prepared_transaction,
+            _open_merge_pending_watch_snapshot,
+            _prepared_output_path,
+            _recover_successor_ready_transaction,
+            _successor_ready_merge_admission,
+            _successor_ready_recovery_pending,
+            _successor_ready_recovery_deferred,
             admit_report_auxiliaries,
             begin_transaction,
             cancel_unpublished_transaction,
@@ -800,18 +807,44 @@ def _rebuild_code(
 
         actual_out = watch_path / _GRAPHIFY_OUT
         baseline_snapshot = None
-        queued = queue_rebuild(
-            "update" if changed_paths is not None else "full",
-            watch_path,
-            output=actual_out,
-            changed_paths=changed_paths,
-            source="watch",
-            legacy_pending_name=_PENDING_FILENAME,
-        )
         baseline_graph: dict | None = None
         baseline_artifacts: dict[str, bytes] = {}
         report_auxiliaries: dict[str, bytes] = {}
-        if (actual_out / "graph.json").is_file():
+        merge_admission = None
+        intent_queued = False
+        successor_pending = (
+            actual_out.is_dir()
+            and _successor_ready_recovery_pending(actual_out)
+        )
+        successor_admission = (
+            _successor_ready_merge_admission(actual_out)
+            if successor_pending
+            else None
+        )
+        if successor_pending:
+            queue_rebuild(
+                "update" if changed_paths is not None else "full",
+                watch_path,
+                output=actual_out,
+                changed_paths=changed_paths,
+                source="watch",
+                legacy_pending_name=_PENDING_FILENAME,
+                merge_admission=successor_admission,
+            )
+            intent_queued = True
+            try:
+                recovered = _recover_successor_ready_transaction(actual_out)
+            except PendingTransactionError as exc:
+                print(f"[graphify watch] Rebuild deferred: {exc}")
+                return False
+            if recovered:
+                baseline_snapshot = open_graph_snapshot(
+                    actual_out / "graph.json", purpose="watch-prepare"
+                )
+                baseline_graph = baseline_snapshot.data
+                baseline_artifacts = dict(baseline_snapshot.artifacts)
+                report_auxiliaries = admit_report_auxiliaries(baseline_snapshot)
+        if baseline_snapshot is None and (actual_out / "graph.json").is_file():
             try:
                 baseline_snapshot = open_graph_snapshot(
                     actual_out / "graph.json",
@@ -821,8 +854,59 @@ def _rebuild_code(
                 baseline_artifacts = dict(baseline_snapshot.artifacts)
                 report_auxiliaries = admit_report_auxiliaries(baseline_snapshot)
             except PendingTransactionError as exc:
+                try:
+                    merge_snapshot = _open_merge_pending_watch_snapshot(
+                        actual_out / "graph.json"
+                    )
+                    baseline_snapshot = merge_snapshot
+                    merge_admission = merge_snapshot.merge_admission
+                    baseline_graph = baseline_snapshot.data
+                    baseline_artifacts = dict(baseline_snapshot.artifacts)
+                    report_auxiliaries = admit_report_auxiliaries(
+                        baseline_snapshot
+                    )
+                except PendingTransactionError:
+                    print(f"[graphify watch] Rebuild deferred: {exc}")
+                    return False
+        recovery_deferred = (
+            actual_out.is_dir()
+            and _successor_ready_recovery_deferred(actual_out)
+        )
+        if recovery_deferred and not intent_queued:
+            queue_rebuild(
+                "update" if changed_paths is not None else "full",
+                watch_path,
+                output=actual_out,
+                changed_paths=changed_paths,
+                source="watch",
+                legacy_pending_name=_PENDING_FILENAME,
+                merge_admission=merge_admission,
+            )
+        recovered = False
+        if actual_out.is_dir():
+            try:
+                recovered = _recover_successor_ready_transaction(actual_out)
+            except PendingTransactionError as exc:
                 print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
+        if recovered:
+            baseline_snapshot = open_graph_snapshot(
+                actual_out / "graph.json", purpose="watch-prepare"
+            )
+            baseline_graph = baseline_snapshot.data
+            baseline_artifacts = dict(baseline_snapshot.artifacts)
+            report_auxiliaries = admit_report_auxiliaries(baseline_snapshot)
+            merge_admission = None
+        if not recovery_deferred and not intent_queued:
+            queue_rebuild(
+                "update" if changed_paths is not None else "full",
+                watch_path,
+                output=actual_out,
+                changed_paths=changed_paths,
+                source="watch",
+                legacy_pending_name=_PENDING_FILENAME,
+                merge_admission=merge_admission,
+            )
         # Compatibility signal for an already-running pre-transaction watcher:
         # probe the legacy lock, release it immediately, and rely exclusively
         # on durable transaction state for all subsequent ownership.
@@ -848,7 +932,7 @@ def _rebuild_code(
         except PendingTransactionError as exc:
             print(f"[graphify watch] Rebuild deferred: {exc}")
             return False
-        claim = claim_rebuild_queue(transaction, queued.drainer)
+        claim = claim_rebuild_queue(transaction, transaction.drainer)
         receipt_digest: str | None = None
         while True:
             if not claim.items:
@@ -891,9 +975,13 @@ def _rebuild_code(
             changed_paths = None
             # Keep preparation outside the watched corpus so detect/extract cannot
             # ingest its own copied graph state on a subsequent rebuild.
-            with tempfile.TemporaryDirectory(
-                prefix="graphify-prepare-"
-            ) as prepared_name:
+            merge_recovery = merge_admission is not None
+            preparation = (
+                contextlib.nullcontext(_prepared_output_path(transaction))
+                if merge_recovery
+                else tempfile.TemporaryDirectory(prefix="graphify-prepare-")
+            )
+            with preparation as prepared_name:
                 prepared = Path(prepared_name)
                 for name, payload in baseline_artifacts.items():
                     if name == "graph.json":
@@ -935,27 +1023,42 @@ def _rebuild_code(
                 if not isinstance(graph_metadata, dict):
                     graph_metadata = {}
                     graph_data["graph"] = graph_metadata
-                graph_metadata[GRAPH_WATERMARK_KEY] = {
-                    "schema": 1,
-                    "protocol_epoch": 1,
-                    "generation": transaction.generation,
-                    "state": "active",
-                }
-                graph_payload = json.dumps(
-                    graph_data, ensure_ascii=False, separators=(",", ":")
-                ).encode("utf-8")
-                manifest_payload = manifest_path.read_bytes()
                 (prepared / ".graphify_learning.json").unlink(missing_ok=True)
                 _discard_report_only_directory(prepared / "memory")
-                plan = publication_plan_from_directory(
-                    prepared, prior_inventory=baseline_artifacts
-                )
-                payloads = dict(plan.payloads)
-                payloads["graph.json"] = graph_payload
-                payloads["manifest.json"] = manifest_payload
-                generation = commit_publication_plan(
-                    transaction, PublicationPlan(payloads, plan.deletions)
-                )
+                if merge_recovery:
+                    generation = _finalize_prepared_transaction(
+                        transaction, close=False
+                    )
+                    if generation is None:
+                        raise PendingTransactionError(
+                            "merge recovery did not publish a successor receipt"
+                        )
+                    published_snapshot = open_graph_snapshot(
+                        actual_out / "graph.json", purpose="watch-prepare"
+                    )
+                    graph_data = published_snapshot.data
+                    payloads = dict(published_snapshot.artifacts)
+                    merge_admission = None
+                else:
+                    graph_metadata[GRAPH_WATERMARK_KEY] = {
+                        "schema": 1,
+                        "protocol_epoch": 1,
+                        "generation": transaction.generation,
+                        "state": "active",
+                    }
+                    graph_payload = json.dumps(
+                        graph_data, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8")
+                    manifest_payload = manifest_path.read_bytes()
+                    plan = publication_plan_from_directory(
+                        prepared, prior_inventory=baseline_artifacts
+                    )
+                    payloads = dict(plan.payloads)
+                    payloads["graph.json"] = graph_payload
+                    payloads["manifest.json"] = manifest_payload
+                    generation = commit_publication_plan(
+                        transaction, PublicationPlan(payloads, plan.deletions)
+                    )
                 with closing_step(transaction, drainer=claim.drainer):
                     receipt_digest = generation.digest
                     complete_rebuild_claim(

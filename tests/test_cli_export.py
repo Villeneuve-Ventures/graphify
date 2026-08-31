@@ -2296,3 +2296,42 @@ def test_graph_json_node_ids_are_portable_across_checkout_paths(tmp_path):
     leak = {"alice_home", "bob_elsewhere", "checkout", "tmp", "private", "users", "home", "var"}
     assert not any(part in leak for ident in a for part in ident.split("_")), \
         f"node id embeds an absolute-path component: {a}"
+
+
+def test_cli_update_subprocess_recovers_merge_pending_union(tmp_path):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    current = tmp_path / "current"
+    other = tmp_path / "other"
+    current.mkdir()
+    other.mkdir()
+    (current / "current.py").write_text(
+        "def current():\n    return 1\n", encoding="utf-8"
+    )
+    other_source = other / "other.py"
+    other_source.write_text("def other():\n    return 2\n", encoding="utf-8")
+    assert _rebuild_code(current, no_cluster=True, block_on_lock=True)
+    assert _rebuild_code(other, no_cluster=True, block_on_lock=True)
+
+    output = current / "graphify-out"
+    graph = output / "graph.json"
+    ancestor = tmp_path / "ancestor.json"
+    ancestor.write_bytes(graph.read_bytes())
+    (current / other_source.name).write_bytes(other_source.read_bytes())
+    transaction_module.merge_detached_snapshots(
+        ancestor, graph, other / "graphify-out" / "graph.json"
+    )
+
+    result = _run(["update", str(current), "--no-cluster"], tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    snapshot = transaction_module.open_graph_snapshot(
+        graph, purpose="cli-update-merge-recovery-test"
+    )
+    assert {"current_current", "other_other"} <= {
+        node["id"] for node in snapshot.data["nodes"]
+    }
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"

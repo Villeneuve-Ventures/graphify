@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -1942,3 +1943,97 @@ def test_real_git_merge_preserves_percent_in_pinned_executable(
     assert argv[:6] == ["-E", "-P", "-B", "-m", "graphify", "merge-driver"]
     assert len(argv) == 9
     assert len(set(argv[6:])) == 3
+
+
+@pytest.mark.skipif(os.name == "nt", reason="installed hook E2E uses POSIX shell")
+def test_installed_post_commit_hook_recovers_merge_pending_union(tmp_path):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    repo = _make_git_repo(tmp_path / "repo")
+    other = tmp_path / "other"
+    other.mkdir()
+    current_source = repo / "current.py"
+    other_source = other / "other.py"
+    current_source.write_text("def current():\n    return 1\n", encoding="utf-8")
+    other_source.write_text("def other():\n    return 2\n", encoding="utf-8")
+    assert _rebuild_code(repo, no_cluster=True, block_on_lock=True)
+    assert _rebuild_code(other, no_cluster=True, block_on_lock=True)
+
+    output = repo / "graphify-out"
+    graph = output / "graph.json"
+    ancestor = tmp_path / "ancestor.json"
+    ancestor.write_bytes(graph.read_bytes())
+    (repo / other_source.name).write_bytes(other_source.read_bytes())
+    transaction_module.merge_detached_snapshots(
+        ancestor, graph, other / "graphify-out" / "graph.json"
+    )
+
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "hook-tests@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Graphify Hook Tests"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "current.py", "other.py"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "baseline"], check=True
+    )
+    install(repo)
+
+    current_source.write_text(
+        "def current():\n    return 3\n\ndef changed():\n    return current()\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "current.py"], check=True
+    )
+    disposable_home = tmp_path / "home"
+    disposable_home.mkdir()
+    committed = subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "trigger hook"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(disposable_home)},
+    )
+    assert committed.returncode == 0, committed.stdout + committed.stderr
+    assert "launching background rebuild" in committed.stdout + committed.stderr
+
+    deadline = time.monotonic() + 15.0
+    snapshot = None
+    while time.monotonic() < deadline:
+        try:
+            candidate = transaction_module.open_graph_snapshot(
+                graph, purpose="installed-post-commit-merge-recovery-test"
+            )
+        except transaction_module.PendingTransactionError:
+            time.sleep(0.1)
+            continue
+        node_ids = {node["id"] for node in candidate.data["nodes"]}
+        if {"current_current", "current_changed", "other_other"} <= node_ids:
+            snapshot = candidate
+            break
+        time.sleep(0.1)
+
+    log = disposable_home / ".cache" / "graphify-rebuild.log"
+    assert snapshot is not None, log.read_text(encoding="utf-8") if log.exists() else ""
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+    for name in (
+        transaction_module.PREPARED_FILE,
+        transaction_module.TRANSACTION_FILE,
+        transaction_module.TRANSITION_FILE,
+        transaction_module.TOKEN_TRANSITION_FILE,
+    ):
+        assert not (output / name).exists()
+    assert not list(output.glob(".graphify_transaction_token.*"))
+    status_snapshot = transaction_module.transaction_status(output)
+    assert status_snapshot["transaction"] is None
+    assert status_snapshot["prepared_creation"] is None
+    assert status_snapshot["token_transition"] is None

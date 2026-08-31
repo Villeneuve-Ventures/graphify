@@ -130,6 +130,13 @@ _PREPARED_MARKER_FIELDS = {
     "child_nonce",
     "prior_inventory",
 }
+_PREPARED_SUCCESSOR_FIELDS = _PREPARED_MARKER_FIELDS | {
+    "merge_snapshot_generation",
+    "graph_name",
+    "inventory",
+    "deletions",
+    "plan_digest",
+}
 LEGACY_PENDING_STATE_FILE = ".graphify_legacy_pending_state.json"
 DRAINER_FILE = ".graphify_drainer.json"
 TRANSITION_FILE = ".graphify_transition.json"
@@ -186,6 +193,13 @@ _MAX_REPORT_AUXILIARY_BYTES = 50 * 1024 * 1024
 _MAX_QUEUE_ITEMS = 4096
 _MAX_QUEUE_PATHS = 4096
 _MAX_QUEUE_PATH_LENGTH = 4096
+_DETACHED_UNION_SELECTOR = {
+    "kind": "graphify.detached-union",
+    "graph_name": "graph.json",
+    "roles": ["ancestor", "current", "other"],
+}
+_MERGE_PENDING_GENERATION_DOMAIN = b"graphify.merge-pending.snapshot-generation.v1\0"
+_PUBLICATION_PLAN_DOMAIN = b"graphify.publication-plan.v1\0"
 
 
 class PendingTransactionError(RuntimeError):
@@ -378,6 +392,12 @@ class PublicationPlan:
 
 
 @dataclass(frozen=True)
+class _PreparedPublication:
+    plan: PublicationPlan
+    graph_name: str
+
+
+@dataclass(frozen=True)
 class GraphSnapshot:
     data: dict[str, Any]
     generation: int | None
@@ -395,6 +415,24 @@ class GraphSnapshot:
     graph_present: bool = True
     output_parent_identity: OutputIdentity | None = None
     output_name: str | None = None
+
+
+@dataclass(frozen=True)
+class _MergePendingAdmission:
+    snapshot_generation: str
+    input_digests: tuple[str, str, str]
+    merged_content_digest: str
+    pending_payload_digest: str
+    predecessor_receipt_digest: str
+    predecessor_generation: int
+    graph_name: str
+    output_identity: OutputIdentity
+    graph_identity: ManagedEntryIdentity
+
+
+@dataclass(frozen=True, kw_only=True)
+class _MergePendingGraphSnapshot(GraphSnapshot):
+    merge_admission: _MergePendingAdmission
 
 
 @dataclass(frozen=True)
@@ -2563,6 +2601,77 @@ def _is_hex(value: object, length: int = 64) -> bool:
     )
 
 
+def _merge_pending_admission_json(
+    admission: _MergePendingAdmission,
+) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "snapshot_generation": admission.snapshot_generation,
+        "input_digests": list(admission.input_digests),
+        "merged_content_digest": admission.merged_content_digest,
+        "pending_payload_digest": admission.pending_payload_digest,
+        "predecessor_receipt_digest": admission.predecessor_receipt_digest,
+        "predecessor_generation": admission.predecessor_generation,
+        "graph_name": admission.graph_name,
+        "output_identity": admission.output_identity.json(),
+        "graph_identity": admission.graph_identity.json(),
+    }
+
+
+def _merge_pending_admission_from_json(
+    capability: OutputCapability, raw: object
+) -> _MergePendingAdmission:
+    fields = {
+        "schema",
+        "protocol_epoch",
+        "snapshot_generation",
+        "input_digests",
+        "merged_content_digest",
+        "pending_payload_digest",
+        "predecessor_receipt_digest",
+        "predecessor_generation",
+        "graph_name",
+        "output_identity",
+        "graph_identity",
+    }
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != fields
+        or type(raw.get("schema")) is not int
+        or raw.get("schema") != 1
+        or type(raw.get("protocol_epoch")) is not int
+        or raw.get("protocol_epoch") != 1
+        or not _is_hex(raw.get("snapshot_generation"))
+        or not isinstance(raw.get("input_digests"), list)
+        or len(cast(list[object], raw["input_digests"])) != 3
+        or not all(_is_hex(value) for value in cast(list[object], raw["input_digests"]))
+        or not _is_hex(raw.get("merged_content_digest"))
+        or not _is_hex(raw.get("pending_payload_digest"))
+        or not _is_hex(raw.get("predecessor_receipt_digest"))
+        or type(raw.get("predecessor_generation")) is not int
+        or cast(int, raw["predecessor_generation"]) < 1
+        or raw.get("graph_name") != "graph.json"
+        or _identity_from_json(raw.get("output_identity")) != capability.identity
+    ):
+        raise PendingTransactionError("merge-pending admission is malformed")
+    graph_identity = _managed_entry_identity_from_json(raw.get("graph_identity"))
+    if graph_identity is None:
+        raise PendingTransactionError("merge-pending admission is malformed")
+    inputs = cast(list[str], raw["input_digests"])
+    return _MergePendingAdmission(
+        snapshot_generation=cast(str, raw["snapshot_generation"]),
+        input_digests=(inputs[0], inputs[1], inputs[2]),
+        merged_content_digest=cast(str, raw["merged_content_digest"]),
+        pending_payload_digest=cast(str, raw["pending_payload_digest"]),
+        predecessor_receipt_digest=cast(str, raw["predecessor_receipt_digest"]),
+        predecessor_generation=cast(int, raw["predecessor_generation"]),
+        graph_name="graph.json",
+        output_identity=capability.identity,
+        graph_identity=graph_identity,
+    )
+
+
 def _validated_transaction_id(value: object) -> str:
     if not _is_hex(value):
         raise PendingTransactionError("transaction id is malformed")
@@ -3056,7 +3165,11 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
         return None
     transaction_id = _validated_transaction_id(marker.get("transaction_id"))
     if (
-        set(marker) != _PREPARED_MARKER_FIELDS
+        set(marker)
+        not in {
+            frozenset(_PREPARED_MARKER_FIELDS),
+            frozenset(_PREPARED_SUCCESSOR_FIELDS),
+        }
         or type(marker.get("generation")) is not int
         or not _is_hex(marker.get("token_digest"))
         or not _is_hex(marker.get("ownership_nonce"), 32)
@@ -3065,7 +3178,13 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
         or not all(type(name) is str for name in marker["prior_inventory"])
     ):
         raise PendingTransactionError("prepared workspace binding is malformed")
-    workspace = capability.path.parent / f".graphify-prepare-{transaction_id}"
+    workspace_name = marker.get("workspace_name")
+    if (
+        type(workspace_name) is not str
+        or not re.fullmatch(r"\.graphify-prepare-[0-9a-f]{64}", workspace_name)
+    ):
+        raise PendingTransactionError("prepared workspace binding is malformed")
+    workspace = capability.path.parent / workspace_name
     stage_name = _prepared_stage_name(marker)
     if marker.get("state") == "planned":
         if (
@@ -3195,7 +3314,8 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
     if (
         marker.get("schema") != 1
         or marker.get("protocol_epoch") != 1
-        or marker.get("state") not in {"workspace-created", "ready"}
+        or marker.get("state")
+        not in {"workspace-created", "ready", "successor-ready"}
         or marker.get("workspace_name") != workspace.name
         or expected is None
         or expected_output is None
@@ -3827,19 +3947,43 @@ def begin_transaction(
                     raise PendingTransactionError(
                         "graph state already has bootstrap or live ownership"
                     )
+                preserved = (
+                    _read_predecessor_authority(capability)
+                    if current_drainer is not None
+                    and current_drainer[1] == "reserved"
+                    else None
+                )
+                merge_admission = (
+                    None
+                    if preserved is None or "merge_admission" not in preserved[3]
+                    else _merge_pending_admission_from_json(
+                        capability, preserved[3]["merge_admission"]
+                    )
+                )
+                merge_supersession = (
+                    None
+                    if merge_admission is None
+                    else (
+                        merge_admission.input_digests[1],
+                        merge_admission.pending_payload_digest,
+                    )
+                )
                 if current_drainer is None:
                     receipt, predecessor_receipt, _inventory = _validate_receipt_locked(
                         capability,
                         allow_missing_completed_drainer=True,
+                        merge_supersession=merge_supersession,
                     )
                 elif current_drainer[1] == "complete":
                     receipt, predecessor_receipt, _inventory = _validate_receipt_locked(
                         capability,
                         require_closed=True,
+                        merge_supersession=merge_supersession,
                     )
                 else:
                     receipt, predecessor_receipt, _inventory = _validate_receipt_locked(
-                        capability
+                        capability,
+                        merge_supersession=merge_supersession,
                     )
                 generation = int(receipt["generation"]) + 1
                 if current_drainer is not None and current_drainer[1] == "complete":
@@ -3854,7 +3998,6 @@ def begin_transaction(
                         predecessor_receipt,
                     )
                 elif current_drainer is not None and current_drainer[1] == "reserved":
-                    preserved = _read_predecessor_authority(capability)
                     if (
                         preserved is None
                         or preserved[0] != prior_protocol
@@ -4069,6 +4212,117 @@ def active_transaction_token_path(output: Path | str | None = None) -> Path:
         return capability.path / name
 
 
+def _publication_inventory(plan: PublicationPlan) -> list[dict[str, object]]:
+    inventory: list[dict[str, object]] = []
+    for name in sorted(plan.payloads):
+        payload = plan.payloads[name]
+        if type(payload) is not bytes:
+            raise PendingTransactionError("publication plan payloads are malformed")
+        inventory.append(
+            {
+                "name": _validated_relative_name(name),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        )
+    return inventory
+
+
+def _publication_plan_digest(
+    *,
+    generation: int,
+    graph_name: str,
+    inventory: Sequence[Mapping[str, object]],
+    deletions: Sequence[str],
+) -> str:
+    payload = {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "generation": generation,
+        "graph_name": graph_name,
+        "inventory": [dict(item) for item in inventory],
+        "deletions": list(deletions),
+    }
+    return hashlib.sha256(_PUBLICATION_PLAN_DOMAIN + _json_bytes(payload)).hexdigest()
+
+
+def _validate_successor_ready_marker(
+    marker: Mapping[str, object],
+    *,
+    capability: OutputCapability,
+    transaction: Transaction | None = None,
+) -> tuple[str, tuple[dict[str, object], ...], tuple[str, ...]]:
+    if (
+        set(marker) != _PREPARED_SUCCESSOR_FIELDS
+        or type(marker.get("schema")) is not int
+        or marker.get("schema") != 1
+        or type(marker.get("protocol_epoch")) is not int
+        or marker.get("protocol_epoch") != 1
+        or marker.get("state") != "successor-ready"
+        or type(marker.get("generation")) is not int
+        or not _is_hex(marker.get("transaction_id"))
+        or not _is_hex(marker.get("token_digest"))
+        or not _is_hex(marker.get("ownership_nonce"), 32)
+        or not _is_hex(marker.get("child_nonce"), 32)
+        or not _is_hex(marker.get("merge_snapshot_generation"))
+        or not _is_hex(marker.get("plan_digest"))
+        or not isinstance(marker.get("inventory"), list)
+        or not isinstance(marker.get("deletions"), list)
+        or not isinstance(marker.get("prior_inventory"), list)
+    ):
+        raise PendingTransactionError("successor-ready prepared binding is malformed")
+    workspace_name = marker.get("workspace_name")
+    if (
+        type(workspace_name) is not str
+        or not re.fullmatch(r"\.graphify-prepare-[0-9a-f]{64}", workspace_name)
+        or _identity_from_json(marker.get("identity")) is None
+        or _identity_from_json(marker.get("output_identity")) is None
+    ):
+        raise PendingTransactionError("successor-ready prepared identity is malformed")
+    graph_name = _validated_relative_name(cast(str, marker.get("graph_name")))
+    raw_inventory = cast(list[object], marker["inventory"])
+    inventory: list[dict[str, object]] = []
+    names: list[str] = []
+    for raw in raw_inventory:
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"name", "sha256", "size"}
+            or not _is_hex(raw.get("sha256"))
+            or type(raw.get("size")) is not int
+            or cast(int, raw["size"]) < 0
+        ):
+            raise PendingTransactionError("successor-ready inventory is malformed")
+        name = _validated_relative_name(cast(str, raw.get("name")))
+        names.append(name)
+        inventory.append({"name": name, "sha256": raw["sha256"], "size": raw["size"]})
+    if names != sorted(names) or len(names) != len(set(names)) or graph_name not in names:
+        raise PendingTransactionError("successor-ready inventory is not canonical")
+    deletions = tuple(
+        _validated_relative_name(cast(str, name))
+        for name in cast(list[object], marker["deletions"])
+    )
+    if list(deletions) != sorted(deletions) or len(deletions) != len(set(deletions)):
+        raise PendingTransactionError("successor-ready deletions are not canonical")
+    if set(names).intersection(deletions):
+        raise PendingTransactionError("successor-ready plan overlaps deletions")
+    digest = _publication_plan_digest(
+        generation=cast(int, marker["generation"]),
+        graph_name=graph_name,
+        inventory=inventory,
+        deletions=deletions,
+    )
+    if digest != marker["plan_digest"]:
+        raise PendingTransactionError("successor-ready publication plan changed")
+    if transaction is not None and (
+        marker["transaction_id"] != transaction.id
+        or marker["generation"] != transaction.generation
+        or marker["token_digest"] != transaction.token_digest
+        or capability.identity != transaction.output_identity
+    ):
+        raise PendingTransactionError("successor-ready owner binding changed")
+    return graph_name, tuple(inventory), deletions
+
+
 def _pin_prepared_workspace(
     transaction: Transaction, capability: OutputCapability
 ) -> PreparedWorkspaceCapability:
@@ -4143,6 +4397,12 @@ def _pin_prepared_workspace(
             "prior_inventory": list(prior_inventory),
         }
         _create_bytes(capability, PREPARED_FILE, _json_bytes(marker))
+    successor_ready = set(marker) == _PREPARED_SUCCESSOR_FIELDS
+    if successor_ready:
+        _validate_successor_ready_marker(
+            marker, capability=capability, transaction=transaction
+        )
+        workspace = transaction.output.parent / cast(str, marker["workspace_name"])
     marker_fields = _PREPARED_MARKER_FIELDS
     legacy_fields = marker_fields - {
         "protocol_epoch",
@@ -4154,10 +4414,16 @@ def _pin_prepared_workspace(
     legacy_marker = set(marker) == legacy_fields
     marker_state = "ready" if legacy_marker else marker.get("state")
     if (
-        set(marker) not in {frozenset(marker_fields), frozenset(legacy_fields)}
+        set(marker)
+        not in {
+            frozenset(marker_fields),
+            frozenset(legacy_fields),
+            frozenset(_PREPARED_SUCCESSOR_FIELDS),
+        }
         or marker.get("schema") != 1
         or (not legacy_marker and marker.get("protocol_epoch") != 1)
-        or marker_state not in {"planned", "workspace-created", "ready"}
+        or marker_state
+        not in {"planned", "workspace-created", "ready", "successor-ready"}
         or marker.get("transaction_id") != transaction.id
         or type(marker.get("generation")) is not int
         or marker.get("generation") != transaction.generation
@@ -4173,6 +4439,7 @@ def _pin_prepared_workspace(
         )
         or (
             not legacy_marker
+            and not successor_ready
             and marker.get("workspace_name") != workspace.name
         )
         or not isinstance(marker.get("prior_inventory"), list)
@@ -4186,6 +4453,7 @@ def _pin_prepared_workspace(
     if len(prior_inventory) != len(set(prior_inventory)):
         raise PendingTransactionError("prepared workspace inventory is malformed")
     prior_receipt = _load_json(capability, RECEIPT_FILE)
+    merge_admission = _preserved_merge_admission(capability)
     if marker_state == "planned":
         for _attempt in range(4):
             stage_name = _prepared_stage_name(marker)
@@ -4436,13 +4704,31 @@ def _pin_prepared_workspace(
         if marker_state == "workspace-created":
             seed_inventory = prior_inventory or MANAGED_PUBLICATION_PATHS
             for name in seed_inventory:
-                try:
-                    payload = _read_relative_bytes(capability, name)
-                except PendingTransactionError as exc:
-                    if isinstance(exc.__cause__, FileNotFoundError):
-                        continue
-                    raise
-                if prior_receipt is not None and hashlib.sha256(payload).hexdigest() != prior_receipt["artifact_digests"][name]:
+                if merge_admission is not None and name == merge_admission.graph_name:
+                    data = _read_preserved_merge_content_locked(
+                        capability, merge_admission
+                    )
+                    metadata = dict(cast(dict[str, Any], data.get("graph", {})))
+                    metadata.pop(GRAPH_WATERMARK_KEY, None)
+                    data["graph"] = metadata
+                    payload = _json_bytes(data)
+                    if hashlib.sha256(payload).hexdigest() != merge_admission.merged_content_digest:
+                        raise PendingTransactionError(
+                            "merge-pending prepared content changed"
+                        )
+                else:
+                    try:
+                        payload = _read_relative_bytes(capability, name)
+                    except PendingTransactionError as exc:
+                        if isinstance(exc.__cause__, FileNotFoundError):
+                            continue
+                        raise
+                if (
+                    prior_receipt is not None
+                    and name != (None if merge_admission is None else merge_admission.graph_name)
+                    and hashlib.sha256(payload).hexdigest()
+                    != prior_receipt["artifact_digests"][name]
+                ):
                     raise PendingTransactionError(
                         f"prior managed artifact digest changed: {name}"
                     )
@@ -4456,8 +4742,18 @@ def _pin_prepared_workspace(
         raise
 
 
+def _prepared_output_path(transaction: Transaction) -> Path:
+    """Return the identity-bound prepared output directory for one owner."""
+    with pin_output(transaction.output) as capability, _locked(capability):
+        prepared_capability = _pin_prepared_workspace(transaction, capability)
+        try:
+            return prepared_capability.output.path
+        finally:
+            prepared_capability.close()
+
+
 def prepared_workspace_path() -> Path:
-    """Return the identity-bound external preparation workspace for the owner."""
+    """Return the current owner's identity-bound preparation workspace."""
     transaction = current_transaction()
     with pin_output(transaction.output) as capability, _locked(capability):
         prepared_capability = _pin_prepared_workspace(transaction, capability)
@@ -4465,6 +4761,125 @@ def prepared_workspace_path() -> Path:
             return prepared_capability.path
         finally:
             prepared_capability.close()
+
+
+def _prepared_transfer_record(
+    capability: OutputCapability,
+    predecessor: Transaction,
+    target: Transaction,
+) -> dict[str, object] | None:
+    marker = _load_json(capability, PREPARED_FILE)
+    if marker is None or marker.get("state") != "successor-ready":
+        return None
+    _validate_successor_ready_marker(
+        marker, capability=capability, transaction=predecessor
+    )
+    workspace = capability.path.parent / cast(str, marker["workspace_name"])
+    with pin_output(workspace) as workspace_capability:
+        if workspace_capability.identity != _identity_from_json(marker["identity"]):
+            raise PendingTransactionError("successor-ready prepared identity changed")
+        owner_state, output_identity = _validate_prepared_owner_binding(
+            workspace_capability, marker
+        )
+        if owner_state != "child-created" or output_identity != _identity_from_json(
+            marker["output_identity"]
+        ):
+            raise PendingTransactionError("successor-ready prepared owner changed")
+    with pin_output(workspace / "graphify-out") as output_capability:
+        if output_capability.identity != _identity_from_json(marker["output_identity"]):
+            raise PendingTransactionError("successor-ready prepared identity changed")
+        plan = publication_plan_from_directory(
+            output_capability.path,
+            prior_inventory=tuple(cast(list[str], marker["prior_inventory"])),
+        )
+    if (
+        _publication_inventory(plan) != marker["inventory"]
+        or list(plan.deletions) != marker["deletions"]
+    ):
+        raise PendingTransactionError("successor-ready prepared inventory changed")
+    target_marker = {
+        **marker,
+        "transaction_id": target.id,
+        "generation": target.generation,
+        "token_digest": target.token_digest,
+    }
+    _validate_successor_ready_marker(
+        target_marker, capability=capability, transaction=target
+    )
+    return {
+        "predecessor_marker": marker,
+        "target_marker": target_marker,
+        "workspace_name": marker["workspace_name"],
+        "workspace_identity": marker["identity"],
+        "output_identity": marker["output_identity"],
+        "inventory": marker["inventory"],
+        "deletions": marker["deletions"],
+        "plan_digest": marker["plan_digest"],
+        "merge_snapshot_generation": marker["merge_snapshot_generation"],
+    }
+
+
+def _validate_prepared_transfer(
+    capability: OutputCapability,
+    raw: object,
+    predecessor: Transaction,
+    target: Transaction,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    fields = {
+        "predecessor_marker",
+        "target_marker",
+        "workspace_name",
+        "workspace_identity",
+        "output_identity",
+        "inventory",
+        "deletions",
+        "plan_digest",
+        "merge_snapshot_generation",
+    }
+    if not isinstance(raw, dict) or set(raw) != fields:
+        raise PendingTransactionError("prepared owner transfer is malformed")
+    predecessor_marker = cast(dict[str, Any], raw["predecessor_marker"])
+    target_marker = cast(dict[str, Any], raw["target_marker"])
+    _validate_successor_ready_marker(
+        predecessor_marker, capability=capability, transaction=predecessor
+    )
+    _validate_successor_ready_marker(
+        target_marker, capability=capability, transaction=target
+    )
+    if (
+        target_marker
+        != {
+            **predecessor_marker,
+            "transaction_id": target.id,
+            "generation": target.generation,
+            "token_digest": target.token_digest,
+        }
+        or any(
+            raw[name] != predecessor_marker[marker_name]
+            for name, marker_name in (
+                ("workspace_name", "workspace_name"),
+                ("workspace_identity", "identity"),
+                ("output_identity", "output_identity"),
+                ("inventory", "inventory"),
+                ("deletions", "deletions"),
+                ("plan_digest", "plan_digest"),
+                ("merge_snapshot_generation", "merge_snapshot_generation"),
+            )
+        )
+    ):
+        raise PendingTransactionError("prepared owner transfer binding changed")
+    return predecessor_marker, target_marker
+
+
+def _prepared_owner_for_marker(marker: Mapping[str, object]) -> dict[str, object]:
+    return _prepared_owner_binding(
+        marker,
+        state="child-created",
+        identity=cast(OutputIdentity, _identity_from_json(marker["identity"])),
+        output_identity=cast(
+            OutputIdentity, _identity_from_json(marker["output_identity"])
+        ),
+    )
 
 
 def _read_token_transition(capability: OutputCapability) -> dict[str, Any] | None:
@@ -4489,12 +4904,30 @@ def _read_token_transition(capability: OutputCapability) -> dict[str, Any] | Non
         "pending_predecessor_transaction",
         "binding_order",
     }
+    has_prepared_transfer = set(raw) == fields | {"prepared_transfer"}
+    prepared_states = {
+        "planned",
+        "token-created",
+        "prepared-owner-written",
+        "prepared-rebound",
+        "protocol-bound",
+        "live-bound",
+        "owner-bound",
+        "drainer-reserved",
+        "drainer-launching",
+        "drainer-claimed",
+        "predecessor-token-removed",
+    }
     if (
-        set(raw) != fields
+        (set(raw) != fields and not has_prepared_transfer)
         or raw.get("schema") != 1
         or raw.get("protocol_epoch") != 1
         or raw.get("state")
-        not in {"planned", "token-created", "live-bound", "protocol-bound"}
+        not in (
+            prepared_states
+            if has_prepared_transfer
+            else {"planned", "token-created", "live-bound", "protocol-bound"}
+        )
         or raw.get("binding_order") not in {"live-protocol", "protocol-live"}
         or _identity_from_json(raw.get("output_identity")) != capability.identity
         or not isinstance(raw.get("token_payload"), dict)
@@ -4542,13 +4975,143 @@ def _read_token_transition(capability: OutputCapability) -> dict[str, Any] | Non
             or _transaction_from_json(capability, pending_transaction) != predecessor
         ):
             raise PendingTransactionError("token takeover transition binding changed")
+    if has_prepared_transfer:
+        if pending_drainer is None:
+            raise PendingTransactionError("prepared owner transfer requires takeover")
+        _validate_prepared_transfer(
+            capability, raw["prepared_transfer"], predecessor, target
+        )
     return raw
 
 
 def _validate_token_transition_current(
-    capability: OutputCapability, record: Mapping[str, Any]
+    capability: OutputCapability,
+    record: Mapping[str, Any],
+    *,
+    allow_building_target: bool = False,
+    allow_missing_pending: bool = False,
 ) -> Transaction:
     """Validate one replay point without changing any durable state."""
+    if "prepared_transfer" in record:
+        state = str(record["state"])
+        if state == "planned":
+            mapped_state = "planned"
+        elif state in {
+            "token-created",
+            "prepared-owner-written",
+            "prepared-rebound",
+        }:
+            mapped_state = "token-created"
+        elif state == "protocol-bound":
+            mapped_state = "protocol-bound"
+        else:
+            mapped_state = "live-bound"
+        legacy_record = dict(record)
+        legacy_record.pop("prepared_transfer")
+        legacy_record["state"] = mapped_state
+        terminal_transfer = state == "predecessor-token-removed"
+        target = _validate_token_transition_current(
+            capability,
+            legacy_record,
+            allow_building_target=terminal_transfer,
+            allow_missing_pending=terminal_transfer,
+        )
+        predecessor = _transaction_from_json(
+            capability, record["predecessor_transaction"]
+        )
+        if state == "predecessor-token-removed":
+            predecessor_name = f".graphify_transaction_token.{predecessor.id}"
+            predecessor_identity = _managed_entry_identity(
+                capability, predecessor_name
+            )
+            if predecessor_identity is not None:
+                if (
+                    predecessor.token_identity is not None
+                    and predecessor_identity != predecessor.token_identity
+                ):
+                    raise PendingTransactionError(
+                        "prepared transfer predecessor token identity changed"
+                    )
+                raise PendingTransactionError(
+                    "prepared transfer predecessor token was not removed"
+                )
+        predecessor_marker, target_marker = _validate_prepared_transfer(
+            capability, record["prepared_transfer"], predecessor, target
+        )
+        public_marker = _load_json(capability, PREPARED_FILE)
+        workspace = capability.path.parent / cast(
+            str, predecessor_marker["workspace_name"]
+        )
+        with pin_output(workspace) as workspace_capability:
+            if workspace_capability.identity != _identity_from_json(
+                predecessor_marker["identity"]
+            ):
+                raise PendingTransactionError("prepared transfer workspace changed")
+            owner = _load_json(workspace_capability, _PREPARED_OWNER_FILE)
+        predecessor_owner = _prepared_owner_for_marker(predecessor_marker)
+        target_owner = _prepared_owner_for_marker(target_marker)
+        if state == "planned":
+            allowed_owner = [predecessor_owner]
+            allowed_public = [predecessor_marker]
+        elif state == "token-created":
+            allowed_owner = [predecessor_owner, target_owner]
+            allowed_public = [predecessor_marker]
+        elif state == "prepared-owner-written":
+            allowed_owner = [target_owner]
+            allowed_public = [predecessor_marker, target_marker]
+        else:
+            allowed_owner = [target_owner]
+            allowed_public = [target_marker]
+        if owner not in allowed_owner or public_marker not in allowed_public:
+            raise PendingTransactionError("prepared owner transfer markers changed")
+        prepared_output = workspace / "graphify-out"
+        plan = publication_plan_from_directory(
+            prepared_output,
+            prior_inventory=tuple(
+                cast(list[str], predecessor_marker["prior_inventory"])
+            ),
+        )
+        if (
+            _publication_inventory(plan) != predecessor_marker["inventory"]
+            or list(plan.deletions) != predecessor_marker["deletions"]
+        ):
+            raise PendingTransactionError("prepared transfer inventory changed")
+        pending_drainer = cast(dict[str, Any], record["pending_predecessor_drainer"])
+        predecessor_drainer = (
+            _drainer_from_json(pending_drainer["drainer"]),
+            str(pending_drainer["state"]),
+        )
+        current_drainer = _read_drainer(capability)
+        if state in {
+            "planned",
+            "token-created",
+            "prepared-owner-written",
+            "prepared-rebound",
+            "protocol-bound",
+            "live-bound",
+        }:
+            if current_drainer is None or current_drainer[:2] != predecessor_drainer:
+                raise PendingTransactionError("prepared transfer drainer changed")
+        else:
+            allowed_drainers = {
+                "owner-bound": {
+                    predecessor_drainer,
+                    (target.drainer, "reserved"),
+                },
+                "drainer-reserved": {
+                    (target.drainer, "reserved"),
+                    (target.drainer, "launching"),
+                },
+                "drainer-launching": {
+                    (target.drainer, "launching"),
+                    (target.drainer, "claimed"),
+                },
+                "drainer-claimed": {(target.drainer, "claimed")},
+                "predecessor-token-removed": {(target.drainer, "claimed")},
+            }[state]
+            if current_drainer is None or current_drainer[:2] not in allowed_drainers:
+                raise PendingTransactionError("prepared transfer drainer changed")
+        return target
     predecessor = _transaction_from_json(capability, record["predecessor_transaction"])
     target_base = _transaction_from_json(capability, record["target_transaction"])
     predecessor_protocol = _protocol_from_json(
@@ -4673,6 +5236,11 @@ def _validate_token_transition_current(
             "protocol-bound": ({predecessor, target}, [target_protocol]),
             "live-bound": ({target}, [target_protocol]),
         }
+        if allow_building_target and state == "live-bound":
+            state_matrix["live-bound"] = (
+                {target, replace(target, phase="building")},
+                [target_protocol],
+            )
     allowed_live, allowed_protocol = state_matrix[state]
     if live not in allowed_live or protocol not in allowed_protocol:
         raise PendingTransactionError("token publication filesystem binding changed")
@@ -4702,8 +5270,9 @@ def _validate_token_transition_current(
             or pending[4] != target_protocol
         ):
             raise PendingTransactionError("token takeover pending binding changed")
-    elif state in {"live-bound", "protocol-bound"} or (
-        state == "token-created" and protocol == target_protocol
+    elif not allow_missing_pending and (
+        state in {"live-bound", "protocol-bound"}
+        or (state == "token-created" and protocol == target_protocol)
     ):
         raise PendingTransactionError("token takeover pending transition disappeared")
     return target
@@ -4719,6 +5288,10 @@ def _resume_token_transition_locked(
         raise PendingTransactionError("token publication transition is missing")
     record: dict[str, Any] = loaded_record
     _validate_token_transition_current(capability, record)
+    if "prepared_transfer" in record:
+        return _resume_prepared_token_transfer_locked(
+            capability, record, failpoint=failpoint
+        )
     predecessor = _transaction_from_json(capability, record["predecessor_transaction"])
     target = _transaction_from_json(capability, record["target_transaction"])
     payload = _json_bytes(record["token_payload"])
@@ -4812,6 +5385,199 @@ def _resume_token_transition_locked(
     return target, target_protocol
 
 
+def _resume_prepared_token_transfer_locked(
+    capability: OutputCapability,
+    record: dict[str, Any],
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> tuple[Transaction, dict[str, Any]]:
+    predecessor = _transaction_from_json(capability, record["predecessor_transaction"])
+    target_base = _transaction_from_json(capability, record["target_transaction"])
+    predecessor_marker, target_marker = _validate_prepared_transfer(
+        capability, record["prepared_transfer"], predecessor, target_base
+    )
+    name = cast(str, record["token_name"])
+    payload = _json_bytes(record["token_payload"])
+
+    def advance(state: str, failpoint_name: str) -> None:
+        nonlocal record
+        record = {**record, "state": state}
+        _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
+        if failpoint is not None:
+            failpoint(failpoint_name)
+
+    if record["state"] == "planned":
+        try:
+            current_payload, identity = _read_managed_bytes(
+                capability, name, _TOKEN_MAX_BYTES
+            )
+        except FileNotFoundError:
+            current_payload = None
+            identity = None
+        if identity is None:
+            _create_bytes(capability, name, payload)
+            identity = _managed_entry_identity(capability, name)
+        elif current_payload is None or hashlib.sha256(current_payload).hexdigest() != record[
+            "token_digest"
+        ]:
+            raise PendingTransactionError("published transaction token changed")
+        if identity is None:
+            raise PendingTransactionError("published transaction token disappeared")
+        record = {**record, "token_identity": identity.json()}
+        target = replace(target_base, token_identity=identity)
+        target_protocol = dict(record["target_protocol"])
+        target_protocol["token_identity"] = identity.json()
+        pending_drainer = cast(dict[str, Any], record["pending_predecessor_drainer"])
+        _write_pending_transition(
+            capability,
+            predecessor_drainer=(
+                _drainer_from_json(pending_drainer["drainer"]),
+                cast(str, pending_drainer["state"]),
+            ),
+            predecessor_protocol=cast(
+                Mapping[str, object], record["predecessor_protocol"]
+            ),
+            predecessor_transaction=predecessor,
+            successor=target,
+            successor_protocol=target_protocol,
+        )
+        advance("token-created", "after_token_created")
+    target = replace(
+        target_base,
+        token_identity=_managed_entry_identity_from_json(record["token_identity"]),
+    )
+    target_protocol = dict(record["target_protocol"])
+    target_protocol["token_identity"] = cast(
+        ManagedEntryIdentity, target.token_identity
+    ).json()
+    workspace = capability.path.parent / cast(str, predecessor_marker["workspace_name"])
+    if record["state"] == "token-created":
+        with pin_output(workspace) as workspace_capability:
+            owner = _load_json(workspace_capability, _PREPARED_OWNER_FILE)
+            target_owner = _prepared_owner_for_marker(target_marker)
+            if owner != target_owner:
+                if owner != _prepared_owner_for_marker(predecessor_marker):
+                    raise PendingTransactionError("prepared transfer owner changed")
+                _replace_bytes(
+                    workspace_capability,
+                    _PREPARED_OWNER_FILE,
+                    _json_bytes(target_owner),
+                )
+        advance("prepared-owner-written", "after_prepared_owner_written")
+    if record["state"] == "prepared-owner-written":
+        public_marker = _load_json(capability, PREPARED_FILE)
+        if public_marker != target_marker:
+            if public_marker != predecessor_marker:
+                raise PendingTransactionError("prepared transfer marker changed")
+            _replace_bytes(capability, PREPARED_FILE, _json_bytes(target_marker))
+        advance("prepared-rebound", "after_prepared_rebound")
+    if record["state"] == "prepared-rebound":
+        protocol = _read_protocol(capability)
+        if protocol != target_protocol:
+            if protocol != record["predecessor_protocol"]:
+                raise PendingTransactionError("token publication protocol changed")
+            _replace_bytes(capability, PROTOCOL_FILE, _json_bytes(target_protocol))
+        advance("protocol-bound", "after_token_protocol")
+    if record["state"] == "protocol-bound":
+        live = _read_transaction(capability)
+        if live != target:
+            if live != predecessor:
+                raise PendingTransactionError("token publication live owner changed")
+            _write_transaction(capability, target, phase=target.phase)
+        advance("live-bound", "after_token_live")
+    if record["state"] == "live-bound":
+        advance("owner-bound", "after_prepared_owner_bound")
+    pending_drainer = cast(dict[str, Any], record["pending_predecessor_drainer"])
+    predecessor_drainer = (
+        _drainer_from_json(pending_drainer["drainer"]),
+        cast(str, pending_drainer["state"]),
+    )
+    lease_deadline = float(target_protocol.get("lease_deadline", time.time() + 30.0))
+    if record["state"] == "owner-bound":
+        current = _read_drainer(capability)
+        if current is None or current[:2] == predecessor_drainer:
+            _transition_drainer(
+                capability,
+                expected=predecessor_drainer,
+                drainer=target.drainer,
+                state="reserved",
+                lease_deadline=lease_deadline,
+            )
+        elif current[:2] != (target.drainer, "reserved"):
+            raise PendingTransactionError("prepared transfer drainer changed")
+        advance("drainer-reserved", "after_prepared_drainer_reserved")
+    if record["state"] == "drainer-reserved":
+        current = _read_drainer(capability)
+        if current is not None and current[:2] == (target.drainer, "reserved"):
+            _transition_drainer(
+                capability,
+                expected=(target.drainer, "reserved"),
+                drainer=target.drainer,
+                state="launching",
+                lease_deadline=lease_deadline,
+            )
+        elif current is None or current[:2] != (target.drainer, "launching"):
+            raise PendingTransactionError("prepared transfer drainer changed")
+        advance("drainer-launching", "after_prepared_drainer_launching")
+    if record["state"] == "drainer-launching":
+        current = _read_drainer(capability)
+        if current is not None and current[:2] == (target.drainer, "launching"):
+            _transition_drainer(
+                capability,
+                expected=(target.drainer, "launching"),
+                drainer=target.drainer,
+                state="claimed",
+                acked_ids=[],
+                lease_deadline=lease_deadline,
+            )
+        elif current is None or current[:2] != (target.drainer, "claimed"):
+            raise PendingTransactionError("prepared transfer drainer changed")
+        advance("drainer-claimed", "after_prepared_drainer_claimed")
+    if record["state"] == "drainer-claimed":
+        if predecessor.token_identity is not None:
+            predecessor_name = f".graphify_transaction_token.{predecessor.id}"
+            predecessor_identity = _managed_entry_identity(
+                capability, predecessor_name
+            )
+            if predecessor_identity is not None:
+                _unlink(
+                    capability,
+                    predecessor_name,
+                    expected=predecessor.token_identity,
+                )
+        advance(
+            "predecessor-token-removed", "after_prepared_predecessor_token_removed"
+        )
+    if record["state"] != "predecessor-token-removed":
+        raise PendingTransactionError("prepared transfer did not reach retirement")
+    _unlink(capability, TRANSITION_FILE)
+    if failpoint is not None:
+        failpoint("after_prepared_transition_retired")
+    building_target = replace(target, phase="building")
+    live = _read_transaction(capability)
+    if live == target:
+        _write_transaction(capability, building_target, phase="building")
+    elif live != building_target:
+        raise PendingTransactionError(
+            "prepared transfer terminal live owner changed"
+        )
+    if failpoint is not None:
+        failpoint("after_prepared_live_building")
+    protocol, drainer = _validate_durable_live_binding(
+        capability, building_target, protocol=target_protocol
+    )
+    if drainer[:2] != (target.drainer, "claimed"):
+        raise PendingTransactionError("prepared transfer owner is not claimed")
+    marker = _load_json(capability, PREPARED_FILE)
+    if marker != target_marker:
+        raise PendingTransactionError("prepared transfer target marker changed")
+    _unlink(capability, TOKEN_TRANSITION_FILE)
+    if failpoint is not None:
+        failpoint("after_token_transition")
+    _AUTHORITY.set(_authority_for(building_target))
+    return building_target, protocol
+
+
 def _start_token_transition_locked(
     capability: OutputCapability,
     *,
@@ -4823,6 +5589,7 @@ def _start_token_transition_locked(
     pending_predecessor_drainer: tuple[DrainerTuple, str] | None = None,
     pending_predecessor_protocol: Mapping[str, object] | None = None,
     binding_order: str = "live-protocol",
+    prepared_transfer: Mapping[str, object] | None = None,
     failpoint: Callable[[str], None] | None = None,
 ) -> tuple[Transaction, dict[str, Any]]:
     payload = _json_bytes(token_payload)
@@ -4861,6 +5628,8 @@ def _start_token_transition_locked(
         ),
         "binding_order": binding_order,
     }
+    if prepared_transfer is not None:
+        record["prepared_transfer"] = dict(prepared_transfer)
     _replace_bytes(capability, TOKEN_TRANSITION_FILE, _json_bytes(record))
     _read_token_transition(capability)
     if failpoint is not None:
@@ -5079,6 +5848,8 @@ def commit_prepared_bytes(
         _validate_authority(capability, transaction)
         prepared = _pin_prepared_workspace(transaction, capability)
         try:
+            if (_load_json(capability, PREPARED_FILE) or {}).get("state") == "successor-ready":
+                raise PendingTransactionError("successor-ready preparation is immutable")
             _replace_relative_bytes(prepared.output, relative_name, payload)
         finally:
             prepared.close()
@@ -5091,6 +5862,8 @@ def unlink_prepared(transaction: Transaction, name: str) -> None:
         _validate_authority(capability, transaction)
         prepared = _pin_prepared_workspace(transaction, capability)
         try:
+            if (_load_json(capability, PREPARED_FILE) or {}).get("state") == "successor-ready":
+                raise PendingTransactionError("successor-ready preparation is immutable")
             _unlink_relative(prepared.output, name)
         finally:
             prepared.close()
@@ -5468,11 +6241,12 @@ def _unlink_relative(capability: OutputCapability, relative_name: str) -> None:
         os.close(parent_fd)
 
 
-def commit_publication_plan(
+def _commit_publication_plan(
     transaction: Transaction,
     plan: PublicationPlan,
     *,
     graph_name: str = "graph.json",
+    failpoint: Callable[[str], None] | None = None,
 ) -> GenerationReceipt:
     """Publish one validated inventory, its explicit deletions, and receipt last."""
     graph_name = _validated_relative_name(graph_name)
@@ -5516,13 +6290,26 @@ def commit_publication_plan(
                 commit_relative_bytes(transaction, name, payload)
             else:
                 commit_bytes(transaction, name, payload)
+        if failpoint is not None:
+            failpoint("after_publication_plan")
         return commit_generation(
             transaction,
             graph_payload=graph_payload,
             manifest_payload=manifest_payload,
             required_artifacts=tuple(payloads),
             graph_name=graph_name,
+            failpoint=failpoint,
         )
+
+
+def commit_publication_plan(
+    transaction: Transaction,
+    plan: PublicationPlan,
+    *,
+    graph_name: str = "graph.json",
+) -> GenerationReceipt:
+    """Publish one validated inventory, its explicit deletions, and receipt last."""
+    return _commit_publication_plan(transaction, plan, graph_name=graph_name)
 
 
 def _publish_single_derived_artifact(
@@ -5778,6 +6565,7 @@ def _validate_receipt_locked(
     retain_limits: Mapping[str, int] | None = None,
     protocol_override: Mapping[str, object] | None = None,
     drainer_override: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
+    merge_supersession: tuple[str, str] | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, bytes]]:
     try:
         receipt_payload = _read_bytes(capability, RECEIPT_FILE)
@@ -5834,6 +6622,12 @@ def _validate_receipt_locked(
         raise PendingTransactionError(
             "generation receipt inventory is unsafe"
         ) from exc
+    if merge_supersession is not None and (
+        graph_payload is not None
+        or len(merge_supersession) != 2
+        or not all(_is_hex(value) for value in merge_supersession)
+    ):
+        raise PendingTransactionError("merge-pending graph supersession is malformed")
     if transaction is not None and (
         receipt.get("transaction_id") != transaction.id
         or receipt.get("generation") != transaction.generation
@@ -5878,7 +6672,7 @@ def _validate_receipt_locked(
         if type(raw_limit) is not int or isinstance(raw_limit, bool) or raw_limit < 1:
             raise PendingTransactionError("retained artifact limit is invalid")
         validated_retain_limits[name] = raw_limit
-    if allow_missing_completed_drainer:
+    if allow_missing_completed_drainer and merge_supersession is None:
         retained.add(graph_name)
     retain_all = "*" in retained
     aggregate_size = 0
@@ -5900,8 +6694,18 @@ def _validate_receipt_locked(
             ),
         )
         aggregate_size += artifact_size
-        actual_digests[name] = artifact_digest
-        if artifact_digest != artifact_digests[name]:
+        expected_artifact_digest = artifact_digests[name]
+        if name == graph_name and merge_supersession is not None:
+            predecessor_digest, pending_digest = merge_supersession
+            if artifact_digest != pending_digest:
+                raise PendingTransactionError("merge-pending graph changed after admission")
+            if expected_artifact_digest != predecessor_digest:
+                raise PendingTransactionError("merge-pending predecessor graph changed")
+            actual_digests[name] = predecessor_digest
+            artifact_body = None
+        else:
+            actual_digests[name] = artifact_digest
+        if actual_digests[name] != expected_artifact_digest:
             raise PendingTransactionError(f"managed artifact digest changed: {name}")
         if artifact_body is not None:
             inventory[name] = artifact_body
@@ -5916,7 +6720,7 @@ def _validate_receipt_locked(
         raise PendingTransactionError("graph digest changed after receipt")
     if graph_payload is not None:
         inventory[graph_name] = graph_payload
-    if allow_missing_completed_drainer:
+    if allow_missing_completed_drainer and merge_supersession is None:
         retained_graph = inventory.get(graph_name)
         if retained_graph is None:
             raise PendingTransactionError("completed graph payload was not retained")
@@ -7966,6 +8770,22 @@ def _validate_expected_snapshot_locked(
     )
     if hashlib.sha256(current_graph).hexdigest() != snapshot.digest:
         raise PendingTransactionError("admitted snapshot graph changed before begin")
+    if isinstance(snapshot, _MergePendingGraphSnapshot):
+        _data, _payload, admission = _validate_merge_pending_admission_locked(
+            capability, expected=snapshot.merge_admission
+        )
+        receipt_stat = _entry_stat(capability, RECEIPT_FILE)
+        if (
+            admission.pending_payload_digest != snapshot.digest
+            or receipt_stat is None
+            or snapshot.receipt_identity
+            != OutputIdentity(receipt_stat.st_dev, receipt_stat.st_ino)
+            or admission.predecessor_receipt_digest != snapshot.receipt_digest
+        ):
+            raise PendingTransactionError(
+                "admitted merge-pending snapshot changed before begin"
+            )
+        return
     if snapshot.receipt_digest is not None:
         receipt_stat = _entry_stat(capability, RECEIPT_FILE)
         if (
@@ -7991,7 +8811,17 @@ def _validate_expected_snapshot_locked(
             raise PendingTransactionError("admitted snapshot receipt changed before begin")
         return
     if snapshot.coordination_absent:
-        if _coordination_present(capability):
+        drainer = _read_drainer(capability)
+        watch_reservation = (
+            snapshot.purpose == "watch-prepare"
+            and _read_protocol(capability) is None
+            and _entry_stat(capability, RECEIPT_FILE) is None
+            and _entry_stat(capability, TRANSACTION_FILE) is None
+            and drainer is not None
+            and drainer[1] == "reserved"
+            and bool(_read_queue(capability))
+        )
+        if _coordination_present(capability) and not watch_reservation:
             raise PendingTransactionError("admitted legacy snapshot gained coordination")
     else:
         drainer = _read_drainer(capability)
@@ -9553,7 +10383,7 @@ def _derive_enqueue_predecessor_mode(
 def _enqueue_journal_from_json(
     capability: OutputCapability, raw: object
 ) -> dict[str, Any]:
-    if not isinstance(raw, dict) or set(raw) != {
+    base_fields = {
         "schema",
         "protocol_epoch",
         "state",
@@ -9578,8 +10408,18 @@ def _enqueue_journal_from_json(
         "expected_drainer",
         "successor_drainer",
         "mutate_drainer",
-    }:
+    }
+    raw_fields = set(raw) if isinstance(raw, dict) else set()
+    has_merge_admission = raw_fields == base_fields | {"merge_admission"}
+    if not isinstance(raw, dict) or (
+        raw_fields != base_fields and not has_merge_admission
+    ):
         raise PendingTransactionError("malformed enqueue journal")
+    merge_admission = (
+        _merge_pending_admission_from_json(capability, raw.get("merge_admission"))
+        if has_merge_admission
+        else None
+    )
     item = _validate_queue_item(raw.get("item"))
     candidate = _validate_queue_item(raw.get("candidate"))
     predecessor_queue = raw.get("predecessor_queue")
@@ -9648,7 +10488,12 @@ def _enqueue_journal_from_json(
     if (
         raw.get("schema") != 1
         or raw.get("protocol_epoch") != 1
-        or raw.get("state") not in {"planned", "queued", "reserved"}
+        or raw.get("state")
+        not in (
+            {"planned", "queued", "predecessor-bound", "reserved"}
+            if merge_admission is not None
+            else {"planned", "queued", "reserved"}
+        )
         or raw.get("output_identity") != capability.identity.json()
         or item["id"] != hashlib.sha256(_json_bytes(item_identity)).hexdigest()
         or raw.get("item_digest") != hashlib.sha256(_json_bytes(item)).hexdigest()
@@ -9667,7 +10512,7 @@ def _enqueue_journal_from_json(
             and successor_record is not None
         )
         or (
-            raw.get("state") in {"queued", "reserved"}
+            raw.get("state") in {"queued", "predecessor-bound", "reserved"}
             and successor_record is None
         )
         or raw.get("predecessor_mode")
@@ -9705,6 +10550,23 @@ def _enqueue_journal_from_json(
         or (
             not raw["mutate_drainer"]
             and (expected is None or successor != expected)
+        )
+        or (
+            merge_admission is not None
+            and (
+                raw.get("predecessor_mode")
+                not in {"complete", "reserved"}
+                or raw.get("predecessor_receipt_digest")
+                != merge_admission.predecessor_receipt_digest
+                or raw.get("predecessor_graph_digest")
+                != merge_admission.input_digests[1]
+                or successor[0].generation
+                != merge_admission.predecessor_generation + 1
+                or (
+                    raw.get("state") == "predecessor-bound"
+                    and not raw["mutate_drainer"]
+                )
+            )
         )
     ):
         raise PendingTransactionError("malformed enqueue journal")
@@ -9760,6 +10622,13 @@ def _validate_enqueue_journal_current(
     successor = _drainer_state_from_json(capability, journal["successor_drainer"])
     current = _read_drainer(capability)
     state = journal["state"]
+    merge_admission = (
+        _merge_pending_admission_from_json(
+            capability, journal.get("merge_admission")
+        )
+        if "merge_admission" in journal
+        else None
+    )
     if state == "planned":
         queue_valid = _queue_record_matches(queue_record, predecessor_record)
         if staged_record is None:
@@ -9795,7 +10664,7 @@ def _validate_enqueue_journal_current(
                 )
             )
         valid = current == expected and queue_valid
-    elif state == "queued":
+    elif state in {"queued", "predecessor-bound"}:
         valid = (
             successor_record is not None
             and _queue_record_matches(queue_record, successor_record)
@@ -9810,6 +10679,29 @@ def _validate_enqueue_journal_current(
         )
     if not valid:
         raise PendingTransactionError("enqueue journal durable state changed")
+    if merge_admission is not None:
+        _validate_merge_pending_admission_locked(
+            capability, expected=merge_admission
+        )
+        preserved = _read_predecessor_authority(capability)
+        preserved_admission = (
+            None
+            if preserved is None or "merge_admission" not in preserved[3]
+            else _merge_pending_admission_from_json(
+                capability, preserved[3]["merge_admission"]
+            )
+        )
+        predecessor_required = (
+            state in {"predecessor-bound", "reserved"}
+            or current == successor
+        )
+        if (
+            preserved_admission is not None
+            and preserved_admission != merge_admission
+        ) or (predecessor_required and preserved_admission != merge_admission):
+            raise PendingTransactionError(
+                "enqueue merge predecessor authority changed"
+            )
     protocol = _read_protocol(capability)
     mode = _derive_enqueue_predecessor_mode(
         capability, expected=expected, protocol=protocol
@@ -9863,6 +10755,14 @@ def _validate_enqueue_journal_current(
             transaction=live,
             require_closed=mode == "complete" and current == expected,
             allow_missing_completed_drainer=mode == "missing",
+            merge_supersession=(
+                None
+                if merge_admission is None
+                else (
+                    merge_admission.input_digests[1],
+                    merge_admission.pending_payload_digest,
+                )
+            ),
         )
         graph_name = cast(str, receipt.get("graph_name", "graph.json"))
         if (
@@ -9914,6 +10814,13 @@ def _recover_enqueue_journal(
     item = cast(dict[str, Any], journal["item"])
     predecessor_queue = cast(list[dict[str, Any]], journal["predecessor_queue"])
     successor_queue = cast(list[dict[str, Any]], journal["successor_queue"])
+    merge_admission = (
+        _merge_pending_admission_from_json(
+            capability, journal.get("merge_admission")
+        )
+        if "merge_admission" in journal
+        else None
+    )
     predecessor_record = _queue_record_from_json(
         journal["predecessor_queue_record"],
         items=predecessor_queue,
@@ -10000,13 +10907,58 @@ def _recover_enqueue_journal(
         if expected is not None and expected[1] == "complete":
             protocol = _read_protocol(capability)
             receipt, receipt_digest, _inventory = _validate_receipt_locked(
-                capability, require_closed=True
+                capability,
+                require_closed=True,
+                merge_supersession=(
+                    None
+                    if merge_admission is None
+                    else (
+                        merge_admission.input_digests[1],
+                        merge_admission.pending_payload_digest,
+                    )
+                ),
             )
             if protocol is None or int(receipt["generation"]) + 1 != successor[0].generation:
                 raise PendingTransactionError("enqueue predecessor authority changed")
-            _write_predecessor_authority(
-                capability, protocol, expected, receipt_digest
-            )
+            preserved = _read_predecessor_authority(capability)
+            if preserved is None:
+                _write_predecessor_authority(
+                    capability,
+                    protocol,
+                    expected,
+                    receipt_digest,
+                    merge_admission=merge_admission,
+                )
+            elif (
+                preserved[0] != protocol
+                or preserved[1] != expected
+                or preserved[2] != receipt_digest
+            ):
+                raise PendingTransactionError(
+                    "enqueue predecessor authority changed"
+                )
+            elif merge_admission is not None:
+                if "merge_admission" not in preserved[3]:
+                    _write_predecessor_authority(
+                        capability,
+                        protocol,
+                        expected,
+                        receipt_digest,
+                        merge_admission=merge_admission,
+                    )
+                elif _merge_pending_admission_from_json(
+                    capability, preserved[3]["merge_admission"]
+                ) != merge_admission:
+                    raise PendingTransactionError(
+                        "enqueue predecessor authority changed"
+                    )
+                if failpoint is not None:
+                    failpoint("after_enqueue_predecessor_authority")
+            if merge_admission is not None:
+                journal["state"] = "predecessor-bound"
+                _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
+                if failpoint is not None:
+                    failpoint("after_enqueue_predecessor")
         _replace_bytes(
             capability,
             DRAINER_FILE,
@@ -10016,6 +10968,7 @@ def _recover_enqueue_journal(
     _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
     if failpoint is not None:
         failpoint("after_enqueue_drainer")
+    _validate_enqueue_journal_current(capability, journal)
     _unlink(capability, ENQUEUE_FILE)
     if failpoint is not None:
         failpoint("after_enqueue_retired")
@@ -10245,21 +11198,23 @@ def _predecessor_authority_from_json(
         "token-removed",
         "live-removed",
     }
+    base_fields = {
+        "schema",
+        "protocol_epoch",
+        "state",
+        "output_identity",
+        "successor_generation",
+        "receipt_digest",
+        "protocol",
+        "drainer",
+        "successor_transaction",
+        "prepared_workspace",
+    }
+    raw_fields = set(raw) if isinstance(raw, dict) else set()
+    has_merge_admission = raw_fields == base_fields | {"merge_admission"}
     if (
         not isinstance(raw, dict)
-        or set(raw)
-        != {
-            "schema",
-            "protocol_epoch",
-            "state",
-            "output_identity",
-            "successor_generation",
-            "receipt_digest",
-            "protocol",
-            "drainer",
-            "successor_transaction",
-            "prepared_workspace",
-        }
+        or (raw_fields != base_fields and not has_merge_admission)
         or raw.get("schema") != 1
         or raw.get("protocol_epoch") != 1
         or raw.get("state") not in states
@@ -10270,6 +11225,11 @@ def _predecessor_authority_from_json(
     protocol = _protocol_from_json(capability, raw.get("protocol"))
     drainer = _drainer_state_from_json(capability, raw.get("drainer"))
     receipt_digest = str(raw["receipt_digest"])
+    merge_admission = (
+        _merge_pending_admission_from_json(capability, raw.get("merge_admission"))
+        if has_merge_admission
+        else None
+    )
     successor_raw = raw.get("successor_transaction")
     if raw["state"] == "preserved-complete":
         if successor_raw is not None:
@@ -10288,6 +11248,16 @@ def _predecessor_authority_from_json(
     if raw["state"] == "preserved-complete" and raw.get("prepared_workspace") is not None:
         raise PendingTransactionError(
             "preserved predecessor prepared binding is malformed"
+        )
+    if merge_admission is not None and (
+        raw["state"] != "preserved-complete"
+        or merge_admission.predecessor_receipt_digest != receipt_digest
+        or merge_admission.predecessor_generation != drainer[0].generation
+        or merge_admission.output_identity != capability.identity
+        or raw.get("successor_generation") != drainer[0].generation + 1
+    ):
+        raise PendingTransactionError(
+            "preserved predecessor merge admission changed"
         )
     if (
         protocol.get("state") != "COMPLETE"
@@ -10317,11 +11287,123 @@ def _read_predecessor_authority(
     return None if raw is None else _predecessor_authority_from_json(capability, raw)
 
 
+def _preserved_merge_admission(
+    capability: OutputCapability,
+) -> _MergePendingAdmission | None:
+    preserved = _read_predecessor_authority(capability)
+    if preserved is None or "merge_admission" not in preserved[3]:
+        return None
+    return _merge_pending_admission_from_json(
+        capability, preserved[3]["merge_admission"]
+    )
+
+
+def _validate_live_successor_ready_merge_binding_locked(
+    capability: OutputCapability,
+    marker: Mapping[str, object],
+    live: Transaction,
+    *,
+    protocol: Mapping[str, object] | None = None,
+    drainer: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
+) -> _MergePendingAdmission | None:
+    """Cross-bind an INCOMPLETE successor-ready owner to preserved merge input."""
+    _validate_successor_ready_marker(marker, capability=capability, transaction=live)
+    durable_protocol, _durable_drainer = _validate_durable_live_binding(
+        capability,
+        live,
+        protocol=protocol,
+        drainer=drainer,
+        allowed_protocol_states=frozenset({"INCOMPLETE", "COMPLETE"}),
+    )
+    if durable_protocol["state"] != "INCOMPLETE":
+        return None
+    preserved = _read_predecessor_authority(capability)
+    if preserved is None or "merge_admission" not in preserved[3]:
+        raise PendingTransactionError(
+            "successor-ready preserved merge admission is missing"
+        )
+    admission = _merge_pending_admission_from_json(
+        capability, preserved[3]["merge_admission"]
+    )
+    _validate_successor_ready_marker_merge_binding_locked(
+        capability, marker, live, admission, preserved=preserved
+    )
+    return admission
+
+
+def _validate_successor_ready_marker_merge_binding_locked(
+    capability: OutputCapability,
+    marker: Mapping[str, object],
+    owner: Transaction,
+    admission: _MergePendingAdmission,
+    *,
+    preserved: tuple[
+        dict[str, Any],
+        tuple[DrainerTuple, str, dict[str, Any]],
+        str,
+        dict[str, Any],
+    ]
+    | None = None,
+) -> None:
+    graph_name, _inventory, _deletions = _validate_successor_ready_marker(
+        marker, capability=capability, transaction=owner
+    )
+    preserved = _read_predecessor_authority(capability) if preserved is None else preserved
+    successor_generation = admission.predecessor_generation + 1
+    if (
+        preserved is None
+        or graph_name != admission.graph_name
+        or graph_name != "graph.json"
+        or marker.get("merge_snapshot_generation")
+        != admission.snapshot_generation
+        or marker.get("generation") != successor_generation
+        or owner.generation != successor_generation
+        or preserved[2] != admission.predecessor_receipt_digest
+        or preserved[3].get("successor_generation") != successor_generation
+    ):
+        raise PendingTransactionError(
+            "successor-ready preserved merge admission changed"
+        )
+
+
+def _read_preserved_merge_content_locked(
+    capability: OutputCapability,
+    admission: _MergePendingAdmission,
+) -> dict[str, Any]:
+    try:
+        payload, identity = _read_managed_bytes(
+            capability, admission.graph_name, _DETACHED_MAX_BYTES
+        )
+        data = json.loads(payload.decode("utf-8"))
+    except FileNotFoundError as exc:
+        raise PendingTransactionError("merge-pending graph is missing") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError("malformed merge-pending graph") from exc
+    if not isinstance(data, dict):
+        raise PendingTransactionError("malformed merge-pending graph shape")
+    inputs, merged_digest, snapshot_generation = _merge_pending_watermark_fields(
+        data
+    )
+    if (
+        identity != admission.graph_identity
+        or hashlib.sha256(payload).hexdigest() != admission.pending_payload_digest
+        or inputs != admission.input_digests
+        or merged_digest != admission.merged_content_digest
+        or snapshot_generation != admission.snapshot_generation
+        or admission.output_identity != capability.identity
+        or _preserved_merge_admission(capability) != admission
+    ):
+        raise PendingTransactionError("preserved merge-pending admission changed")
+    return data
+
+
 def _write_predecessor_authority(
     capability: OutputCapability,
     protocol: Mapping[str, object],
     drainer: tuple[DrainerTuple, str, dict[str, Any]],
     receipt_digest: str,
+    *,
+    merge_admission: _MergePendingAdmission | None = None,
 ) -> None:
     record = {
         "schema": 1,
@@ -10335,6 +11417,8 @@ def _write_predecessor_authority(
         "successor_transaction": None,
         "prepared_workspace": None,
     }
+    if merge_admission is not None:
+        record["merge_admission"] = _merge_pending_admission_json(merge_admission)
     _predecessor_authority_from_json(capability, record)
     _replace_bytes(capability, PREDECESSOR_FILE, _json_bytes(record))
 
@@ -10397,6 +11481,410 @@ def _transition_drainer(
         failpoint(f"after_drainer_{state}")
 
 
+def _validate_successor_ready_public_overlap_locked(
+    capability: OutputCapability,
+    *,
+    graph_name: str,
+    predecessor_receipt: Mapping[str, object],
+    successor_inventory: Sequence[Mapping[str, object]],
+    successor_deletions: Sequence[str],
+    admission: _MergePendingAdmission,
+) -> None:
+    """Accept only exact predecessor, pending-merge, or successor artifact bytes."""
+    required = predecessor_receipt.get("required_artifacts")
+    raw_predecessor_digests = predecessor_receipt.get("artifact_digests")
+    if (
+        not isinstance(required, list)
+        or not required
+        or len(required) > _MAX_RECEIPT_ARTIFACTS
+        or not all(type(name) is str for name in required)
+        or len(required) != len(set(required))
+        or graph_name not in required
+        or "manifest.json" not in required
+        or not isinstance(raw_predecessor_digests, dict)
+        or set(raw_predecessor_digests) != set(required)
+        or not all(_is_hex(value) for value in raw_predecessor_digests.values())
+    ):
+        raise PendingTransactionError(
+            "successor-ready enqueue predecessor inventory is malformed"
+        )
+    predecessor_names = tuple(
+        _validated_relative_name(cast(str, name)) for name in required
+    )
+    successor = {
+        cast(str, item["name"]): (cast(str, item["sha256"]), cast(int, item["size"]))
+        for item in successor_inventory
+    }
+    deletions = set(successor_deletions)
+    all_names = set(predecessor_names).union(successor, deletions)
+    _reject_casefold_collisions(tuple(sorted(all_names)))
+    aggregate_size = 0
+    for name in sorted(all_names):
+        try:
+            digest, size, _payload = _hash_relative_bytes(
+                capability,
+                name,
+                aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES - aggregate_size,
+            )
+        except PendingTransactionError as exc:
+            missing = isinstance(exc.__cause__, (FileNotFoundError, NotADirectoryError))
+            if missing and (name in deletions or name not in raw_predecessor_digests):
+                continue
+            raise
+        aggregate_size += size
+        predecessor_digest = raw_predecessor_digests.get(name)
+        successor_entry = successor.get(name)
+        if (name != graph_name and digest == predecessor_digest) or (
+            successor_entry is not None
+            and (digest, size) == successor_entry
+        ):
+            continue
+        if name == graph_name and digest == admission.pending_payload_digest:
+            if _managed_entry_identity(capability, name) != admission.graph_identity:
+                raise PendingTransactionError(
+                    "successor-ready enqueue merge-pending graph identity changed"
+                )
+            continue
+        raise PendingTransactionError(
+            f"successor-ready enqueue managed artifact changed: {name}"
+        )
+
+
+def _validate_successor_ready_recovery_locked(
+    capability: OutputCapability,
+) -> Transaction | None:
+    """Recognize exact live successor-ready work without mutating recovery state."""
+    token_transition = _read_token_transition(capability)
+    if token_transition is not None and "prepared_transfer" in token_transition:
+        target = _validate_token_transition_current(capability, token_transition)
+        predecessor = _transaction_from_json(
+            capability, token_transition["predecessor_transaction"]
+        )
+        transfer = cast(dict[str, Any], token_transition["prepared_transfer"])
+        marker = cast(dict[str, Any], transfer["predecessor_marker"])
+        preserved = _read_predecessor_authority(capability)
+        if preserved is None or "merge_admission" not in preserved[3]:
+            raise PendingTransactionError(
+                "successor-ready preserved merge admission is missing"
+            )
+        admission = _merge_pending_admission_from_json(
+            capability, preserved[3]["merge_admission"]
+        )
+        _validate_successor_ready_marker_merge_binding_locked(
+            capability,
+            marker,
+            predecessor,
+            admission,
+            preserved=preserved,
+        )
+        receipt_payload = _read_bytes(capability, RECEIPT_FILE)
+        if hashlib.sha256(receipt_payload).hexdigest() != preserved[2]:
+            raise PendingTransactionError(
+                "successor-ready predecessor receipt changed during transfer"
+            )
+        try:
+            predecessor_receipt = json.loads(receipt_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PendingTransactionError(
+                "successor-ready predecessor receipt is malformed"
+            ) from exc
+        if not isinstance(predecessor_receipt, dict):
+            raise PendingTransactionError(
+                "successor-ready predecessor receipt is malformed"
+            )
+        graph_name, inventory, deletions = _validate_successor_ready_marker(
+            marker, capability=capability, transaction=predecessor
+        )
+        _validate_successor_ready_public_overlap_locked(
+            capability,
+            graph_name=graph_name,
+            predecessor_receipt=predecessor_receipt,
+            successor_inventory=inventory,
+            successor_deletions=deletions,
+            admission=admission,
+        )
+        return target
+    marker = _load_json(capability, PREPARED_FILE)
+    live = _read_transaction(capability)
+    if (
+        marker is None
+        or marker.get("state") != "successor-ready"
+        or live is None
+    ):
+        return None
+    protocol = _read_protocol(capability)
+    drainer = _read_drainer(capability)
+    admission = _validate_live_successor_ready_merge_binding_locked(
+        capability,
+        marker,
+        live,
+        protocol=protocol,
+        drainer=drainer,
+    )
+    if admission is None:
+        _validate_receipt_locked(
+            capability,
+            transaction=live,
+            protocol_override=protocol,
+            drainer_override=drainer,
+        )
+        return None
+    preserved = _read_predecessor_authority(capability)
+    if preserved is None:
+        raise PendingTransactionError(
+            "successor-ready preserved predecessor is missing"
+        )
+    receipt_payload = _read_bytes(capability, RECEIPT_FILE)
+    try:
+        receipt = json.loads(receipt_payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError(
+            "successor-ready recovery receipt is malformed"
+        ) from exc
+    receipt_digest = hashlib.sha256(receipt_payload).hexdigest()
+    if receipt_digest == preserved[2]:
+        if not isinstance(receipt, dict):
+            raise PendingTransactionError(
+                "successor-ready recovery receipt is malformed"
+            )
+        graph_name, inventory, deletions = _validate_successor_ready_marker(
+            marker, capability=capability, transaction=live
+        )
+        _validate_successor_ready_public_overlap_locked(
+            capability,
+            graph_name=graph_name,
+            predecessor_receipt=receipt,
+            successor_inventory=inventory,
+            successor_deletions=deletions,
+            admission=admission,
+        )
+    else:
+        partial_protocol = {
+            **cast(dict[str, Any], protocol),
+            "state": "COMPLETE",
+            "receipt_digest": receipt_digest,
+        }
+        _validate_receipt_locked(
+            capability,
+            transaction=live,
+            protocol_override=partial_protocol,
+            drainer_override=drainer,
+        )
+    return live
+
+
+def _queue_successor_ready_rebuild_locked(
+    capability: OutputCapability,
+    *,
+    kind: TransactionKind,
+    root: Path,
+    durable_paths: Sequence[str],
+    semantic: bool,
+    source: str,
+    intent: str | None,
+    now: float | None,
+    failpoint: Callable[[str], None] | None,
+    merge_admission: _MergePendingAdmission | None,
+) -> QueueReceipt | None:
+    """Durably append intent without disturbing an exact successor-ready owner."""
+    marker = _load_json(capability, PREPARED_FILE)
+    if marker is None or marker.get("state") != "successor-ready":
+        return None
+    live = _read_transaction(capability)
+    protocol = _read_protocol(capability)
+    drainer = _read_drainer(capability)
+    graph_name, successor_inventory, successor_deletions = (
+        _validate_successor_ready_marker(
+        marker,
+        capability=capability,
+        transaction=live,
+        )
+    )
+    preserved_admission: _MergePendingAdmission | None = None
+    if live is not None:
+        if drainer is None or drainer[0] != live.drainer:
+            raise PendingTransactionError(
+                "successor-ready enqueue owner binding changed"
+            )
+        if protocol is None or protocol.get("state") not in {
+            "INCOMPLETE",
+            "COMPLETE",
+        }:
+            raise PendingTransactionError(
+                "successor-ready enqueue live protocol changed"
+            )
+        preserved_admission = _validate_live_successor_ready_merge_binding_locked(
+            capability,
+            marker,
+            live,
+            protocol=protocol,
+            drainer=drainer,
+        )
+        if protocol["state"] == "INCOMPLETE":
+            preserved = _read_predecessor_authority(capability)
+            if preserved is None or preserved_admission is None:
+                raise PendingTransactionError(
+                    "successor-ready enqueue predecessor admission is missing"
+                )
+            try:
+                receipt_payload = _read_bytes(capability, RECEIPT_FILE)
+                receipt = json.loads(receipt_payload.decode("utf-8"))
+            except (FileNotFoundError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise PendingTransactionError(
+                    "successor-ready enqueue receipt is malformed"
+                ) from exc
+            receipt_digest = hashlib.sha256(receipt_payload).hexdigest()
+            if receipt_digest == preserved[2]:
+                if (
+                    not isinstance(receipt, dict)
+                    or type(receipt.get("schema")) is not int
+                    or receipt.get("schema") != 1
+                    or type(receipt.get("protocol_epoch")) is not int
+                    or receipt.get("protocol_epoch") != 1
+                    or receipt.get("generation")
+                    != preserved_admission.predecessor_generation
+                    or receipt.get("transaction_id")
+                    != preserved[0].get("transaction_id")
+                    or receipt.get("token_digest")
+                    != preserved[0].get("owner_capability_digest")
+                    or _identity_from_json(receipt.get("output_identity"))
+                    != capability.identity
+                    or _drainer_from_json(receipt.get("drainer"))
+                    != preserved[1][0]
+                    or receipt.get("graph_name", "graph.json") != graph_name
+                    or not isinstance(receipt.get("artifact_digests"), dict)
+                    or cast(dict[str, object], receipt["artifact_digests"]).get(
+                        graph_name
+                    )
+                    != preserved_admission.input_digests[1]
+                ):
+                    raise PendingTransactionError(
+                        "successor-ready enqueue predecessor receipt changed"
+                    )
+                _validate_successor_ready_public_overlap_locked(
+                    capability,
+                    graph_name=graph_name,
+                    predecessor_receipt=receipt,
+                    successor_inventory=successor_inventory,
+                    successor_deletions=successor_deletions,
+                    admission=preserved_admission,
+                )
+            else:
+                partial_protocol = {
+                    **protocol,
+                    "state": "COMPLETE",
+                    "receipt_digest": receipt_digest,
+                }
+                _validate_receipt_locked(
+                    capability,
+                    transaction=live,
+                    protocol_override=partial_protocol,
+                    drainer_override=drainer,
+                )
+        else:
+            _validate_receipt_locked(
+                capability,
+                transaction=live,
+                protocol_override=protocol,
+                drainer_override=drainer,
+            )
+    else:
+        if (
+            protocol is None
+            or drainer is None
+            or protocol.get("state") != "COMPLETE"
+            or marker.get("transaction_id") != protocol.get("transaction_id")
+            or marker.get("generation") != protocol.get("generation")
+            or marker.get("token_digest") != protocol.get("owner_capability_digest")
+            or drainer[1] not in {"CLOSE_PENDING", "complete", "reserved"}
+        ):
+            raise PendingTransactionError(
+                "successor-ready enqueue authority changed"
+            )
+        receipt, _receipt_digest, _retained = _validate_receipt_locked(
+            capability,
+            require_closed=drainer[1] == "complete",
+        )
+        if graph_name != receipt.get("graph_name", "graph.json"):
+            raise PendingTransactionError("successor-ready enqueue receipt changed")
+    if drainer is None:
+        raise PendingTransactionError("successor-ready enqueue drainer is missing")
+    if merge_admission is not None:
+        if preserved_admission is None:
+            preserved_admission = _preserved_merge_admission(capability)
+        if preserved_admission != merge_admission:
+            raise PendingTransactionError(
+                "successor-ready enqueue merge admission changed"
+            )
+        metadata = _load_json(capability, "graph.json") or {}
+        graph_metadata = metadata.get("graph")
+        watermark = (
+            graph_metadata.get(GRAPH_WATERMARK_KEY)
+            if isinstance(graph_metadata, dict)
+            else None
+        )
+        if isinstance(watermark, dict) and watermark.get("state") == "merge_pending":
+            _validate_merge_pending_admission_locked(
+                capability, expected=merge_admission
+            )
+        elif marker.get("merge_snapshot_generation") != merge_admission.snapshot_generation:
+            raise PendingTransactionError(
+                "successor-ready enqueue merge selector changed"
+            )
+    predecessor = _read_queue_record(capability)
+    candidate_identity = {
+        "schema": 1,
+        "kind": kind,
+        "intent": intent or kind,
+        "root": str(root),
+        "changed_paths": None if not durable_paths else list(durable_paths),
+        "semantic": bool(semantic) or (
+            kind == "full"
+            and any(
+                value["root"] == str(root) and value["semantic"]
+                for value in predecessor.items
+            )
+        ),
+        "source": source,
+    }
+    candidate = {
+        **candidate_identity,
+        "id": hashlib.sha256(_json_bytes(candidate_identity)).hexdigest(),
+        "time": time.time() if now is None else now,
+    }
+    if live is not None:
+        inflight = _read_queue_record(
+            capability,
+            f".graphify_rebuild_inflight.{live.id}.jsonl",
+        )
+        represented = next(
+            (item for item in inflight.items if item["id"] == candidate["id"]),
+            None,
+        )
+        if represented is not None:
+            candidate = represented
+    operation = (
+        "replace-root"
+        if kind == "full"
+        else "covered-by-full"
+        if any(
+            value["root"] == candidate["root"] and value["kind"] == "full"
+            for value in predecessor.items
+        )
+        else "append"
+    )
+    queued, item = _canonical_enqueue_transform(
+        list(predecessor.items), candidate, operation
+    )
+    _transition_queue(
+        capability,
+        predecessor,
+        queued,
+        failpoint=failpoint,
+    )
+    return QueueReceipt(str(item["id"]), drainer[0])
+
+
 def queue_rebuild(
     kind: TransactionKind,
     root: Path | str,
@@ -10410,11 +11898,14 @@ def queue_rebuild(
     legacy_pending_name: str | None = None,
     failpoint: Callable[[str], None] | None = None,
     expected_snapshot: GraphSnapshot | None = None,
+    merge_admission: _MergePendingAdmission | None = None,
 ) -> QueueReceipt:
     if type(kind) is not str or kind not in {"full", "update", "runtime"}:
         raise PendingTransactionError("malformed rebuild kind")
     if type(semantic) is not bool:
         raise PendingTransactionError("malformed rebuild semantic flag")
+    if merge_admission is not None and type(merge_admission) is not _MergePendingAdmission:
+        raise PendingTransactionError("malformed merge-pending admission")
     if type(source) is not str or not 0 < len(source) <= _MAX_QUEUE_PATH_LENGTH or "\x00" in source:
         raise PendingTransactionError("malformed rebuild source")
     if intent is not None and (
@@ -10447,10 +11938,55 @@ def queue_rebuild(
     with pin_output(output_path, create=True) as capability, _locked(capability):
         if expected_snapshot is not None:
             _validate_expected_snapshot_locked(capability, expected_snapshot)
+        successor_ready_marker = _load_json(capability, PREPARED_FILE)
+        successor_ready_live = _read_transaction(capability)
+        if (
+            successor_ready_marker is not None
+            and successor_ready_marker.get("state") == "successor-ready"
+            and successor_ready_live is not None
+        ):
+            _validate_live_successor_ready_merge_binding_locked(
+                capability,
+                successor_ready_marker,
+                successor_ready_live,
+                protocol=_read_protocol(capability),
+                drainer=_read_drainer(capability),
+            )
+        pending_journal = _read_enqueue_journal(capability)
+        if merge_admission is not None and pending_journal is not None:
+            pending_admission = (
+                _merge_pending_admission_from_json(
+                    capability, pending_journal.get("merge_admission")
+                )
+                if "merge_admission" in pending_journal
+                else None
+            )
+            if pending_admission != merge_admission:
+                raise PendingTransactionError(
+                    "enqueue merge-pending admission changed"
+                )
         _recover_enqueue_journal(capability, failpoint=failpoint)
         protocol = _read_protocol(capability)
         receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
         existing_drainer = _read_drainer(capability)
+        successor_ready_receipt = _queue_successor_ready_rebuild_locked(
+            capability,
+            kind=kind,
+            root=root_path,
+            durable_paths=durable_paths,
+            semantic=semantic,
+            source=source,
+            intent=intent,
+            now=now,
+            failpoint=failpoint,
+            merge_admission=merge_admission,
+        )
+        if successor_ready_receipt is not None:
+            return successor_ready_receipt
+        if merge_admission is not None:
+            _validate_merge_pending_admission_locked(
+                capability, expected=merge_admission
+            )
         if protocol is None and not receipt_present:
             allowed_without_graph = list(_SAFE_GRAPHLESS_RUNTIME_ENTRIES)
             if existing_drainer is not None:
@@ -10498,6 +12034,14 @@ def queue_rebuild(
                     receipt, predecessor_receipt, _inventory = _validate_receipt_locked(
                         capability,
                         allow_missing_completed_drainer=True,
+                        merge_supersession=(
+                            None
+                            if merge_admission is None
+                            else (
+                                merge_admission.input_digests[1],
+                                merge_admission.pending_payload_digest,
+                            )
+                        ),
                     )
                     graph_name = cast(str, receipt.get("graph_name", "graph.json"))
                     predecessor_graph_digest = cast(
@@ -10512,6 +12056,14 @@ def queue_rebuild(
                 receipt, predecessor_receipt, _inventory = _validate_receipt_locked(
                     capability,
                     require_closed=True,
+                    merge_supersession=(
+                        None
+                        if merge_admission is None
+                        else (
+                            merge_admission.input_digests[1],
+                            merge_admission.pending_payload_digest,
+                        )
+                    ),
                 )
                 graph_name = cast(str, receipt.get("graph_name", "graph.json"))
                 predecessor_graph_digest = cast(
@@ -10618,6 +12170,14 @@ def queue_rebuild(
                 completed, predecessor_receipt, _inventory = _validate_receipt_locked(
                     capability,
                     transaction=live if predecessor_mode == "live" else None,
+                    merge_supersession=(
+                        None
+                        if merge_admission is None
+                        else (
+                            merge_admission.input_digests[1],
+                            merge_admission.pending_payload_digest,
+                        )
+                    ),
                 )
                 graph_name = cast(
                     str, completed.get("graph_name", "graph.json")
@@ -10676,6 +12236,10 @@ def queue_rebuild(
             "successor_drainer": successor_drainer,
             "mutate_drainer": reserve_drainer,
         }
+        if merge_admission is not None:
+            journal["merge_admission"] = _merge_pending_admission_json(
+                merge_admission
+            )
         _enqueue_journal_from_json(capability, journal)
         _validate_enqueue_journal_current(capability, journal)
         _replace_bytes(capability, ENQUEUE_FILE, _json_bytes(journal))
@@ -10781,6 +12345,7 @@ def takeover_drainer(
             transition_failpoint(alias)
 
     with pin_output(output) as capability, _locked(capability):
+        _validate_successor_ready_recovery_locked(capability)
         _recover_queue_transitions_locked(
             capability, failpoint=transition_failpoint
         )
@@ -10859,23 +12424,22 @@ def takeover_drainer(
                 drainer=current,
             )
             predecessor_live = live
-            _retire_prepared_locked(capability)
-            inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
-            inflight_record = _read_queue_record(capability, inflight_name)
-            inflight = list(inflight_record.items)
-            if inflight:
-                queue_predecessor = _read_queue_record(capability)
-                _transition_queue(
-                    capability,
-                    queue_predecessor,
-                    _merge_intents(queue_predecessor.items, inflight),
-                    failpoint=transition_failpoint,
-                )
-            _retire_queue_record(
-                capability, inflight_record, failpoint=transition_failpoint
+            prepared_marker = _load_json(capability, PREPARED_FILE)
+            transfer_prepared = (
+                prepared_marker is not None
+                and prepared_marker.get("state") == "successor-ready"
             )
+            if transfer_prepared:
+                _validate_live_successor_ready_merge_binding_locked(
+                    capability,
+                    cast(Mapping[str, object], prepared_marker),
+                    live,
+                    protocol=protocol,
+                    drainer=current,
+                )
+            if not transfer_prepared:
+                _retire_prepared_locked(capability)
             successor_id = secrets.token_hex(32)
-            token_name = f".graphify_transaction_token.{successor_id}"
             token_payload = _json_bytes(
                 {
                     "schema": 1,
@@ -10903,6 +12467,28 @@ def takeover_drainer(
                 token_identity=None,
                 lease_deadline=current_time + lease_seconds,
             )
+            prepared_transfer = (
+                _prepared_transfer_record(
+                    capability, predecessor_live, target
+                )
+                if transfer_prepared
+                else None
+            )
+            inflight_name = f".graphify_rebuild_inflight.{live.id}.jsonl"
+            inflight_record = _read_queue_record(capability, inflight_name)
+            inflight = list(inflight_record.items)
+            if inflight and not transfer_prepared:
+                queue_predecessor = _read_queue_record(capability)
+                _transition_queue(
+                    capability,
+                    queue_predecessor,
+                    _merge_intents(queue_predecessor.items, inflight),
+                    failpoint=transition_failpoint,
+                )
+            _retire_queue_record(
+                capability, inflight_record, failpoint=transition_failpoint
+            )
+            token_name = f".graphify_transaction_token.{successor_id}"
             target, successor_protocol = _start_token_transition_locked(
                 capability,
                 predecessor=predecessor_live,
@@ -10913,9 +12499,12 @@ def takeover_drainer(
                 pending_predecessor_drainer=(drainer, state),
                 pending_predecessor_protocol=protocol,
                 binding_order="protocol-live",
+                prepared_transfer=prepared_transfer,
                 failpoint=token_failpoint,
             )
             live = target
+            if prepared_transfer is not None:
+                return successor
         _transition_drainer(
             capability,
             expected=(drainer, state),
@@ -11235,6 +12824,7 @@ def _recover_completed_live_locked(
     drainer: tuple[DrainerTuple, str, dict[str, Any]],
     *,
     now: float | None = None,
+    failpoint: Callable[[str], None] | None = None,
 ) -> CompletedRecovery:
     """Close one exact receipt-backed live generation after process loss."""
     _recover_queue_transitions_locked(capability)
@@ -11249,7 +12839,7 @@ def _recover_completed_live_locked(
             or protocol.get("output_identity") != capability.identity.json()
         ):
             raise PendingTransactionError("completed live protocol binding changed")
-        _finish_close_locked(capability, drainer[2])
+        _finish_close_locked(capability, drainer[2], failpoint=failpoint)
         receipt_digest = str(drainer[2]["receipt_digest"])
     elif drainer[1] == "claimed":
         _validate_durable_live_binding(
@@ -11299,7 +12889,7 @@ def _recover_completed_live_locked(
         if receipt.get("transaction_id") != live.id:
             raise PendingTransactionError("completed live receipt owner changed")
         _replace_bytes(capability, DRAINER_FILE, _json_bytes(pending))
-        _finish_close_locked(capability, pending)
+        _finish_close_locked(capability, pending, failpoint=failpoint)
     else:
         raise PendingTransactionError(
             "completed live recovery requires an exact claimed drainer"
@@ -11439,6 +13029,36 @@ def recover_close(output: Path | str) -> None:
             )
 
 
+def _validate_selected_successor_ready_locked(
+    capability: OutputCapability,
+    *,
+    kind: TransactionKind | None,
+    root: Path,
+    expected_generation: int,
+    expected_output_identity: OutputIdentity,
+    expected_transaction_id: str | None,
+) -> Transaction | None:
+    if capability.identity != expected_output_identity:
+        raise PendingTransactionError("stale output identity selector")
+    successor_ready = _validate_successor_ready_recovery_locked(capability)
+    if successor_ready is not None and (
+        successor_ready.generation != expected_generation
+        or successor_ready.root != str(root)
+        or (kind is not None and successor_ready.kind != kind)
+        or (
+            expected_transaction_id is not None
+            and successor_ready.id != expected_transaction_id
+        )
+    ):
+        raise PendingTransactionError("stale successor-ready recovery selector")
+    return successor_ready
+
+
+class _SelectedSuccessorReadyRecovery(Exception):
+    def __init__(self, transaction: Transaction) -> None:
+        self.transaction = transaction
+
+
 def recover_selected_transaction(
     kind: TransactionKind | None,
     root: Path | str,
@@ -11454,178 +13074,251 @@ def recover_selected_transaction(
     if type(max_attempts) is not int or max_attempts <= 0:
         raise RecoverableTransactionError("recovery attempt bound exhausted")
     root_path = _canonical_directory(Path(root))
+    with pin_output(output) as capability, _locked(capability):
+        successor_ready = _validate_selected_successor_ready_locked(
+            capability,
+            kind=kind,
+            root=root_path,
+            expected_generation=expected_generation,
+            expected_output_identity=expected_output_identity,
+            expected_transaction_id=expected_transaction_id,
+        )
+    if successor_ready is not None:
+        return recover_transaction(
+            successor_ready.kind,
+            root_path,
+            output=output,
+            now=now,
+            max_attempts=max_attempts,
+            expected_transaction_id=expected_transaction_id,
+            expected_generation=expected_generation,
+            expected_output_identity=expected_output_identity,
+        )
     cancellation_successor: Transaction | None = None
     with pin_output(output) as capability, _locked(capability):
-        if capability.identity != expected_output_identity:
-            raise PendingTransactionError("stale output identity selector")
-        enqueue = _read_enqueue_journal(capability)
-        if enqueue is not None:
-            enqueue_item = cast(dict[str, Any], enqueue["item"])
-            enqueue_successor = _drainer_state_from_json(
-                capability, enqueue["successor_drainer"]
-            )[0]
-            if (
-                enqueue_item["root"] != str(root_path)
-                or enqueue_successor.generation != expected_generation
-                or (kind is not None and enqueue_item["kind"] != kind)
-                or expected_transaction_id is not None
-            ):
-                raise PendingTransactionError("stale enqueue recovery selector")
-            _recover_enqueue_journal(capability)
-        pending_before_token = _read_pending_transition(capability)
-        if pending_before_token is not None:
-            _validate_pending_transition_current(capability, pending_before_token)
-        token_transition = _read_token_transition(capability)
-        if token_transition is not None:
-            token_target = _transaction_from_json(
-                capability, token_transition["target_transaction"]
-            )
-            if (
-                token_target.generation != expected_generation
-                or token_target.root != str(root_path)
-                or (kind is not None and token_target.kind != kind)
-                or (
-                    expected_transaction_id is not None
-                    and token_target.id != expected_transaction_id
+        successor_ready = _validate_selected_successor_ready_locked(
+            capability,
+            kind=kind,
+            root=root_path,
+            expected_generation=expected_generation,
+            expected_output_identity=expected_output_identity,
+            expected_transaction_id=expected_transaction_id,
+        )
+        if successor_ready is None:
+            enqueue = _read_enqueue_journal(capability)
+            if enqueue is not None:
+                enqueue_item = cast(dict[str, Any], enqueue["item"])
+                enqueue_successor = _drainer_state_from_json(
+                    capability, enqueue["successor_drainer"]
+                )[0]
+                if (
+                    enqueue_item["root"] != str(root_path)
+                    or enqueue_successor.generation != expected_generation
+                    or (kind is not None and enqueue_item["kind"] != kind)
+                    or expected_transaction_id is not None
+                ):
+                    raise PendingTransactionError("stale enqueue recovery selector")
+                _recover_enqueue_journal(capability)
+            pending_before_token = _read_pending_transition(capability)
+            if pending_before_token is not None:
+                _validate_pending_transition_current(capability, pending_before_token)
+            token_transition = _read_token_transition(capability)
+            if token_transition is not None:
+                token_target = _transaction_from_json(
+                    capability, token_transition["target_transaction"]
                 )
-            ):
-                raise PendingTransactionError("stale token recovery selector")
-            _resume_token_transition_locked(capability)
-        cancellation = _read_predecessor_authority(capability)
-        if cancellation is not None and cancellation[3]["state"] != "preserved-complete":
-            successor = _validate_cancellation_state_locked(capability, cancellation)
+                if (
+                    token_target.generation != expected_generation
+                    or token_target.root != str(root_path)
+                    or (kind is not None and token_target.kind != kind)
+                    or (
+                        expected_transaction_id is not None
+                        and token_target.id != expected_transaction_id
+                    )
+                ):
+                    raise PendingTransactionError("stale token recovery selector")
+                _resume_token_transition_locked(capability)
+            cancellation = _read_predecessor_authority(capability)
             if (
-                successor.generation != expected_generation
-                or successor.root != str(root_path)
-                or (kind is not None and successor.kind != kind)
-                or (
-                    expected_transaction_id is not None
-                    and successor.id != expected_transaction_id
-                )
+                cancellation is not None
+                and cancellation[3]["state"] != "preserved-complete"
             ):
-                raise PendingTransactionError("stale cancellation recovery selector")
-            cancellation_successor = successor
+                successor = _validate_cancellation_state_locked(
+                    capability, cancellation
+                )
+                if (
+                    successor.generation != expected_generation
+                    or successor.root != str(root_path)
+                    or (kind is not None and successor.kind != kind)
+                    or (
+                        expected_transaction_id is not None
+                        and successor.id != expected_transaction_id
+                    )
+                ):
+                    raise PendingTransactionError(
+                        "stale cancellation recovery selector"
+                    )
+                cancellation_successor = successor
+    if successor_ready is not None:
+        return recover_transaction(
+            successor_ready.kind,
+            root_path,
+            output=output,
+            now=now,
+            max_attempts=max_attempts,
+            expected_transaction_id=expected_transaction_id,
+            expected_generation=expected_generation,
+            expected_output_identity=expected_output_identity,
+        )
     if cancellation_successor is not None:
         cancel_unpublished_transaction(cancellation_successor)
         return _cancellation_recovery(cancellation_successor)
-    with pin_output(output) as capability, _locked(capability):
-        if capability.identity != expected_output_identity:
-            raise PendingTransactionError("stale output identity selector")
-        current = _read_transaction(capability)
-        pending = _read_pending_transition(capability)
-        if pending is not None:
-            _validate_pending_transition_current(capability, pending)
-        pending_successor = None if pending is None else pending[3]
-        protocol = _read_protocol(capability)
-        drainer = _read_drainer(capability)
-        queue = _read_queue(capability)
-        matching_queue = [
-            item for item in queue if item.get("root") == str(root_path)
-        ]
-        selected_generation = (
-            pending_successor.generation
-            if pending_successor is not None
-            else current.generation
-            if current is not None
-            else int(protocol["generation"])
-            if protocol is not None
-            else drainer[0].generation
-            if drainer is not None
-            else -1
-        )
-        if selected_generation != expected_generation:
-            raise PendingTransactionError("stale transaction generation selector")
-        selected_transaction_id = (
-            pending_successor.id
-            if pending_successor is not None
-            else current.id
-            if current is not None
-            else (
-                str(drainer[2].get("transaction_id"))
+    try:
+        with pin_output(output) as capability, _locked(capability):
+            successor_ready = _validate_selected_successor_ready_locked(
+                capability,
+                kind=kind,
+                root=root_path,
+                expected_generation=expected_generation,
+                expected_output_identity=expected_output_identity,
+                expected_transaction_id=expected_transaction_id,
+            )
+            if successor_ready is not None:
+                raise _SelectedSuccessorReadyRecovery(successor_ready)
+            current = _read_transaction(capability)
+            pending = _read_pending_transition(capability)
+            if pending is not None:
+                _validate_pending_transition_current(capability, pending)
+            pending_successor = None if pending is None else pending[3]
+            protocol = _read_protocol(capability)
+            drainer = _read_drainer(capability)
+            queue = _read_queue(capability)
+            matching_queue = [
+                item for item in queue if item.get("root") == str(root_path)
+            ]
+            selected_generation = (
+                pending_successor.generation
+                if pending_successor is not None
+                else current.generation
+                if current is not None
+                else int(protocol["generation"])
+                if protocol is not None
+                else drainer[0].generation
                 if drainer is not None
-                and isinstance(drainer[2].get("transaction_id"), str)
+                else -1
+            )
+            if selected_generation != expected_generation:
+                raise PendingTransactionError("stale transaction generation selector")
+            selected_transaction_id = (
+                pending_successor.id
+                if pending_successor is not None
+                else current.id
+                if current is not None
+                else (
+                    str(drainer[2].get("transaction_id"))
+                    if drainer is not None
+                    and isinstance(drainer[2].get("transaction_id"), str)
+                    else None
+                )
+            )
+            if (
+                expected_transaction_id is not None
+                and selected_transaction_id != expected_transaction_id
+            ):
+                raise PendingTransactionError("stale transaction id selector")
+            if current is not None and current.root != str(root_path):
+                raise PendingTransactionError("selected transaction root does not match durable state")
+            if (
+                pending_successor is None
+                and current is None
+                and protocol is not None
+                and protocol.get("state") == "COMPLETE"
+                and drainer is not None
+                and drainer[1] == "CLOSE_PENDING"
+            ):
+                if (
+                    protocol.get("root") != str(root_path)
+                    or (kind is not None and protocol.get("kind") != kind)
+                ):
+                    raise PendingTransactionError(
+                        "selected completed transaction root or kind changed"
+                    )
+                return _recover_close_pending_without_live_locked(
+                    capability, protocol, drainer, now=now
+                )
+            if (
+                pending_successor is None
+                and current is None
+                and protocol is not None
+                and protocol.get("state") == "COMPLETE"
+                and not queue
+            ):
+                raise PendingTransactionError("completed generation has no recoverable work")
+            durable_kind: TransactionKind | None = (
+                pending_successor.kind
+                if pending_successor is not None
+                else current.kind
+                if current is not None
                 else None
             )
-        )
-        if (
-            expected_transaction_id is not None
-            and selected_transaction_id != expected_transaction_id
-        ):
-            raise PendingTransactionError("stale transaction id selector")
-        if current is not None and current.root != str(root_path):
-            raise PendingTransactionError("selected transaction root does not match durable state")
-        if (
-            pending_successor is None
-            and current is None
-            and protocol is not None
-            and protocol.get("state") == "COMPLETE"
-            and drainer is not None
-            and drainer[1] == "CLOSE_PENDING"
-        ):
+            if durable_kind is None and queue:
+                if not matching_queue:
+                    raise PendingTransactionError(
+                        "durable rebuild queue has no intent for the selected root"
+                    )
+                kinds = {str(item["kind"]) for item in matching_queue}
+                durable_kind = (
+                    "full" if "full" in kinds else "update" if "update" in kinds else "runtime"
+                )
             if (
-                protocol.get("root") != str(root_path)
-                or (kind is not None and protocol.get("kind") != kind)
+                durable_kind is None
+                and protocol is not None
+                and protocol.get("state") == "BOOTSTRAP_PENDING"
+                and protocol.get("kind") in {"full", "update", "runtime"}
             ):
-                raise PendingTransactionError(
-                    "selected completed transaction root or kind changed"
+                durable_kind = str(protocol["kind"])  # type: ignore[assignment]
+            if durable_kind is None:
+                raise PendingTransactionError("completed generation has no recoverable work")
+            if kind is not None and kind != durable_kind:
+                raise PendingTransactionError("selected transaction kind does not match durable state")
+            if (
+                pending is None
+                and current is not None
+                and protocol is not None
+                and protocol.get("state") == "COMPLETE"
+            ):
+                if drainer is None:
+                    raise PendingTransactionError("completed live drainer is missing")
+                return _recover_completed_live_locked(
+                    capability,
+                    current,
+                    protocol,
+                    drainer,
+                    now=now,
                 )
-            return _recover_close_pending_without_live_locked(
-                capability, protocol, drainer, now=now
-            )
-        if (
-            pending_successor is None
-            and current is None
-            and protocol is not None
-            and protocol.get("state") == "COMPLETE"
-            and not queue
-        ):
-            raise PendingTransactionError("completed generation has no recoverable work")
-        durable_kind: TransactionKind | None = (
-            pending_successor.kind
-            if pending_successor is not None
-            else current.kind
-            if current is not None
-            else None
-        )
-        if durable_kind is None and queue:
-            if not matching_queue:
-                raise PendingTransactionError(
-                    "durable rebuild queue has no intent for the selected root"
+            if pending is None and current is not None:
+                _validate_durable_live_binding(
+                    capability,
+                    current,
+                    protocol=protocol,
+                    drainer=drainer,
                 )
-            kinds = {str(item["kind"]) for item in matching_queue}
-            durable_kind = (
-                "full" if "full" in kinds else "update" if "update" in kinds else "runtime"
-            )
-        if (
-            durable_kind is None
-            and protocol is not None
-            and protocol.get("state") == "BOOTSTRAP_PENDING"
-            and protocol.get("kind") in {"full", "update", "runtime"}
-        ):
-            durable_kind = str(protocol["kind"])  # type: ignore[assignment]
-        if durable_kind is None:
-            raise PendingTransactionError("completed generation has no recoverable work")
-        if kind is not None and kind != durable_kind:
-            raise PendingTransactionError("selected transaction kind does not match durable state")
-        if (
-            pending is None
-            and current is not None
-            and protocol is not None
-            and protocol.get("state") == "COMPLETE"
-        ):
-            if drainer is None:
-                raise PendingTransactionError("completed live drainer is missing")
-            return _recover_completed_live_locked(
-                capability, current, protocol, drainer, now=now
-            )
-        if pending is None and current is not None:
-            _validate_durable_live_binding(
-                capability,
-                current,
-                protocol=protocol,
-                drainer=drainer,
-            )
-        if pending_successor is not None:
+            if pending_successor is not None:
+                return recover_transaction(
+                    durable_kind,
+                    root_path,
+                    output=output,
+                    now=now,
+                    max_attempts=max_attempts,
+                    expected_transaction_id=expected_transaction_id,
+                    expected_generation=expected_generation,
+                    expected_output_identity=expected_output_identity,
+                )
+            recover_close(output)
+            if _read_transaction(capability) is None:
+                if not queue:
+                    raise PendingTransactionError("completed generation has no recoverable work")
+                return begin_transaction(durable_kind, root_path, output=output, now=now)
             return recover_transaction(
                 durable_kind,
                 root_path,
@@ -11636,21 +13329,18 @@ def recover_selected_transaction(
                 expected_generation=expected_generation,
                 expected_output_identity=expected_output_identity,
             )
-        recover_close(output)
-        if _read_transaction(capability) is None:
-            if not queue:
-                raise PendingTransactionError("completed generation has no recoverable work")
-            return begin_transaction(durable_kind, root_path, output=output, now=now)
-        return recover_transaction(
-            durable_kind,
-            root_path,
-            output=output,
-            now=now,
-            max_attempts=max_attempts,
-            expected_transaction_id=expected_transaction_id,
-            expected_generation=expected_generation,
-            expected_output_identity=expected_output_identity,
-        )
+    except _SelectedSuccessorReadyRecovery as selected:
+        successor_ready = selected.transaction
+    return recover_transaction(
+        successor_ready.kind,
+        root_path,
+        output=output,
+        now=now,
+        max_attempts=max_attempts,
+        expected_transaction_id=expected_transaction_id,
+        expected_generation=expected_generation,
+        expected_output_identity=expected_output_identity,
+    )
 
 
 def recover_transaction(
@@ -11670,15 +13360,34 @@ def recover_transaction(
     root_path = _canonical_directory(Path(root))
     cancellation_successor: Transaction | None = None
     recovered_enqueue_generation: int | None = None
+    successor_ready_recovery: Transaction | None = None
     with pin_output(output) as capability, _locked(capability):
-        _recover_queue_transitions_locked(
-            capability, failpoint=transition_failpoint
-        )
         if (
             expected_output_identity is not None
             and capability.identity != expected_output_identity
         ):
             raise PendingTransactionError("stale output identity selector")
+        successor_ready_recovery = _validate_successor_ready_recovery_locked(
+            capability
+        )
+        if successor_ready_recovery is not None and (
+            successor_ready_recovery.root != str(root_path)
+            or successor_ready_recovery.kind != kind
+            or (
+                expected_generation is not None
+                and successor_ready_recovery.generation != expected_generation
+            )
+            or (
+                expected_transaction_id is not None
+                and successor_ready_recovery.id != expected_transaction_id
+            )
+        ):
+            raise PendingTransactionError(
+                "stale successor-ready recovery selector"
+            )
+        _recover_queue_transitions_locked(
+            capability, failpoint=transition_failpoint
+        )
         enqueue = _read_enqueue_journal(capability)
         if enqueue is not None:
             enqueue_item = cast(dict[str, Any], enqueue["item"])
@@ -11718,9 +13427,11 @@ def recover_transaction(
                 )
             ):
                 raise PendingTransactionError("stale token recovery selector")
-            _resume_token_transition_locked(
+            resumed_target, _resumed_protocol = _resume_token_transition_locked(
                 capability, failpoint=transition_failpoint
             )
+            if "prepared_transfer" in token_transition:
+                return resumed_target
         if (
             expected_output_identity is not None
             and capability.identity != expected_output_identity
@@ -11746,6 +13457,18 @@ def recover_transaction(
     if cancellation_successor is not None:
         cancel_unpublished_transaction(cancellation_successor)
         return _cancellation_recovery(cancellation_successor)
+    if successor_ready_recovery is not None:
+        takeover_drainer(
+            output,
+            now=now,
+            transition_failpoint=transition_failpoint,
+        )
+        target = optional_current_transaction(output)
+        if target is None:
+            raise PendingTransactionError(
+                "successor-ready recovery owner is missing"
+            )
+        return target
     with pin_output(output) as capability, _locked(capability):
         current = _read_transaction(capability)
         pending = _read_pending_transition(capability)
@@ -11788,7 +13511,12 @@ def recover_transaction(
             if drainer is None:
                 raise PendingTransactionError("completed live drainer is missing")
             return _recover_completed_live_locked(
-                capability, current, protocol, drainer, now=now
+                capability,
+                current,
+                protocol,
+                drainer,
+                now=now,
+                failpoint=transition_failpoint,
             )
         if pending is not None:
             _validate_pending_transition_current(capability, pending)
@@ -12196,6 +13924,37 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
                 "generation": live.generation,
                 "workspace_name": str(prepared_marker["workspace_name"]),
             }
+        elif prepared_marker is not None and prepared_marker.get("state") == "successor-ready":
+            graph_name, _inventory, _deletions = _validate_successor_ready_marker(
+                prepared_marker,
+                capability=capability,
+                transaction=live,
+            )
+            if live is None:
+                if (
+                    protocol is None
+                    or drainer is None
+                    or protocol.get("state") != "COMPLETE"
+                    or prepared_marker.get("transaction_id")
+                    != protocol.get("transaction_id")
+                    or prepared_marker.get("generation")
+                    != protocol.get("generation")
+                    or prepared_marker.get("token_digest")
+                    != protocol.get("owner_capability_digest")
+                    or drainer[1] not in {"CLOSE_PENDING", "complete", "reserved"}
+                ):
+                    raise PendingTransactionError(
+                        "successor-ready status authority changed"
+                    )
+                receipt, _digest, _retained = _validate_receipt_locked(
+                    capability,
+                    require_closed=drainer[1] == "complete",
+                )
+                if graph_name != receipt.get("graph_name", "graph.json"):
+                    raise PendingTransactionError(
+                        "successor-ready status receipt changed"
+                    )
+            prepared_creation = {"state": "successor-ready"}
         inflight: dict[str, list[str]] = {}
         for name in sorted(_list_entries(capability)):
             if name.startswith(".graphify_rebuild_inflight.") and name.endswith(".jsonl"):
@@ -12365,7 +14124,7 @@ def transaction_status(output: Path | str = "graphify-out") -> dict[str, Any]:
 
 def _load_detached_merge_snapshot_with_identity(
     path: Path | str, *, role: str
-) -> tuple[dict[str, Any], tuple[int, int]]:
+) -> tuple[dict[str, Any], bytes, tuple[int, int]]:
     if role not in {"ancestor", "current", "other"}:
         raise PendingTransactionError("invalid detached merge snapshot role")
     target = Path(path).absolute()
@@ -12389,7 +14148,8 @@ def _load_detached_merge_snapshot_with_identity(
                 raise PendingTransactionError("detached merge snapshot identity changed")
         finally:
             os.close(fd)
-        data = json.loads(bytes(payload).decode("utf-8"))
+        raw_payload = bytes(payload)
+        data = json.loads(raw_payload.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("malformed detached merge snapshot") from exc
     if not isinstance(data, dict) or not isinstance(data.get("nodes"), list) or not isinstance(data.get("links", []), list):
@@ -12400,7 +14160,9 @@ def _load_detached_merge_snapshot_with_identity(
     watermark = metadata.get(GRAPH_WATERMARK_KEY) if isinstance(metadata, dict) else None
     if watermark is not None and (
         not isinstance(watermark, dict)
+        or type(watermark.get("schema")) is not int
         or watermark.get("schema") != 1
+        or type(watermark.get("protocol_epoch")) is not int
         or watermark.get("protocol_epoch") != 1
     ):
         raise PendingTransactionError("unsupported detached watermark schema")
@@ -12416,32 +14178,233 @@ def _load_detached_merge_snapshot_with_identity(
             supported = False
         if not supported:
             raise PendingTransactionError("unsupported detached watermark shape")
-    return data, (opened.st_dev, opened.st_ino)
+    return data, raw_payload, (opened.st_dev, opened.st_ino)
 
 
 def load_detached_merge_snapshot(path: Path | str, *, role: str) -> dict[str, Any]:
     return _load_detached_merge_snapshot_with_identity(path, role=role)[0]
 
 
+def _merge_pending_watermark_fields(
+    data: Mapping[str, Any],
+) -> tuple[tuple[str, str, str], str, str]:
+    metadata = data.get("graph")
+    watermark = (
+        metadata.get(GRAPH_WATERMARK_KEY) if isinstance(metadata, dict) else None
+    )
+    expected_fields = {
+        "schema",
+        "protocol_epoch",
+        "state",
+        "selector",
+        "input_digests",
+        "merged_content_digest",
+        "snapshot_generation",
+    }
+    if (
+        not isinstance(watermark, dict)
+        or set(watermark) != expected_fields
+        or type(watermark.get("schema")) is not int
+        or watermark.get("schema") != 1
+        or type(watermark.get("protocol_epoch")) is not int
+        or watermark.get("protocol_epoch") != 1
+        or watermark.get("state") != "merge_pending"
+        or watermark.get("selector") != _DETACHED_UNION_SELECTOR
+        or not isinstance(watermark.get("input_digests"), list)
+        or len(cast(list[object], watermark["input_digests"])) != 3
+        or not all(
+            _is_hex(value)
+            for value in cast(list[object], watermark["input_digests"])
+        )
+        or not _is_hex(watermark.get("merged_content_digest"))
+        or not _is_hex(watermark.get("snapshot_generation"))
+    ):
+        raise PendingTransactionError("malformed merge-pending watermark")
+    content = dict(data)
+    content_metadata = dict(cast(dict[str, Any], metadata))
+    content_metadata.pop(GRAPH_WATERMARK_KEY, None)
+    content["graph"] = content_metadata
+    merged_content_digest = hashlib.sha256(_json_bytes(content)).hexdigest()
+    inputs = cast(list[str], watermark["input_digests"])
+    input_digests = (inputs[0], inputs[1], inputs[2])
+    generation_payload = {
+        "schema": 1,
+        "selector": _DETACHED_UNION_SELECTOR,
+        "input_digests": list(input_digests),
+        "merged_content_digest": merged_content_digest,
+    }
+    snapshot_generation = hashlib.sha256(
+        _MERGE_PENDING_GENERATION_DOMAIN + _json_bytes(generation_payload)
+    ).hexdigest()
+    if (
+        watermark["merged_content_digest"] != merged_content_digest
+        or watermark["snapshot_generation"] != snapshot_generation
+    ):
+        raise PendingTransactionError("merge-pending watermark identity changed")
+    return input_digests, merged_content_digest, snapshot_generation
+
+
+def _validate_merge_pending_admission_locked(
+    capability: OutputCapability,
+    *,
+    expected: _MergePendingAdmission | None = None,
+) -> tuple[dict[str, Any], bytes, _MergePendingAdmission]:
+    try:
+        payload, graph_identity = _read_managed_bytes(
+            capability, "graph.json", _DETACHED_MAX_BYTES
+        )
+        data = json.loads(payload.decode("utf-8"))
+    except FileNotFoundError as exc:
+        raise PendingTransactionError("merge-pending graph is missing") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PendingTransactionError("malformed merge-pending graph") from exc
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("nodes"), list)
+        or not isinstance(data.get("links", []), list)
+    ):
+        raise PendingTransactionError("malformed merge-pending graph shape")
+    input_digests, merged_content_digest, snapshot_generation = (
+        _merge_pending_watermark_fields(data)
+    )
+    pending_payload_digest = hashlib.sha256(payload).hexdigest()
+    protocol_override = None
+    drainer_override = None
+    preserved = _read_predecessor_authority(capability)
+    if preserved is not None and "merge_admission" in preserved[3]:
+        preserved_admission = _merge_pending_admission_from_json(
+            capability, preserved[3]["merge_admission"]
+        )
+        if expected is not None and preserved_admission != expected:
+            raise PendingTransactionError(
+                "preserved merge-pending admission changed"
+            )
+        if preserved_admission.snapshot_generation == snapshot_generation:
+            protocol_override = preserved[0]
+            drainer_override = preserved[1]
+    receipt, receipt_digest, _inventory = _validate_receipt_locked(
+        capability,
+        merge_supersession=(input_digests[1], pending_payload_digest),
+        protocol_override=protocol_override,
+        drainer_override=drainer_override,
+    )
+    graph_name = receipt.get("graph_name", "graph.json")
+    predecessor_generation = receipt.get("generation")
+    receipt_watermark = receipt.get("watermark")
+    if (
+        graph_name != "graph.json"
+        or type(predecessor_generation) is not int
+        or cast(int, predecessor_generation) < 1
+        or receipt["artifact_digests"].get("graph.json") != input_digests[1]
+        or not isinstance(receipt_watermark, dict)
+        or receipt_watermark.get("state") != "active"
+        or receipt_watermark.get("generation") != predecessor_generation
+    ):
+        raise PendingTransactionError("merge-pending predecessor authority changed")
+    admission = _MergePendingAdmission(
+        snapshot_generation=snapshot_generation,
+        input_digests=input_digests,
+        merged_content_digest=merged_content_digest,
+        pending_payload_digest=pending_payload_digest,
+        predecessor_receipt_digest=receipt_digest,
+        predecessor_generation=cast(int, predecessor_generation),
+        graph_name="graph.json",
+        output_identity=capability.identity,
+        graph_identity=graph_identity,
+    )
+    if expected is not None and admission != expected:
+        raise PendingTransactionError("merge-pending admission identity changed")
+    return data, payload, admission
+
+
+def _open_merge_pending_rebuild_snapshot(
+    path: Path | str,
+) -> tuple[dict[str, Any], bytes, _MergePendingAdmission]:
+    target = Path(path).expanduser().absolute()
+    if target.name != "graph.json":
+        raise PendingTransactionError("merge-pending graph name is unsupported")
+    with pin_output(target.parent) as capability, _locked(capability):
+        return _validate_merge_pending_admission_locked(capability)
+
+
+def _open_merge_pending_watch_snapshot(
+    path: Path | str,
+) -> _MergePendingGraphSnapshot:
+    """Admit the one private merge-pending baseline used by rebuild routing."""
+    data, payload, admission = _open_merge_pending_rebuild_snapshot(path)
+    target = Path(path).expanduser().absolute()
+    with pin_output(target.parent, mutation=False) as capability, _locked(capability):
+        data, payload, admission = _validate_merge_pending_admission_locked(
+            capability, expected=admission
+        )
+        preserved = _read_predecessor_authority(capability)
+        preserved_matches = (
+            preserved is not None
+            and "merge_admission" in preserved[3]
+            and _merge_pending_admission_from_json(
+                capability, preserved[3]["merge_admission"]
+            )
+            == admission
+        )
+        receipt, receipt_digest, inventory = _validate_receipt_locked(
+            capability,
+            merge_supersession=(
+                admission.input_digests[1],
+                admission.pending_payload_digest,
+            ),
+            retain_artifacts=("*",),
+            protocol_override=(
+                preserved[0] if preserved_matches and preserved is not None else None
+            ),
+            drainer_override=(
+                preserved[1] if preserved_matches and preserved is not None else None
+            ),
+        )
+        receipt_stat = _entry_stat(capability, RECEIPT_FILE)
+        if receipt_stat is None:
+            raise PendingTransactionError("generation receipt identity is missing")
+        artifact_digests = cast(Mapping[str, object], receipt["artifact_digests"])
+        return _MergePendingGraphSnapshot(
+            data=data,
+            generation=admission.predecessor_generation,
+            graph_path=capability.path / admission.graph_name,
+            payload=payload,
+            digest=admission.pending_payload_digest,
+            manifest_payload=inventory.get("manifest.json"),
+            artifacts=inventory,
+            output_identity=capability.identity,
+            receipt_identity=OutputIdentity(receipt_stat.st_dev, receipt_stat.st_ino),
+            receipt_digest=receipt_digest,
+            inventory_selector=tuple(
+                sorted(
+                    (str(name), str(value))
+                    for name, value in artifact_digests.items()
+                )
+            ),
+            purpose="watch-prepare",
+            merge_admission=admission,
+        )
+
+
 def merge_detached_snapshots(
     ancestor: Path | str, current: Path | str, other: Path | str
 ) -> None:
-    ancestor_snapshot, _ancestor_identity = _load_detached_merge_snapshot_with_identity(
-        ancestor, role="ancestor"
+    _ancestor_snapshot, ancestor_payload, _ancestor_identity = (
+        _load_detached_merge_snapshot_with_identity(ancestor, role="ancestor")
     )
-    current_snapshot, current_identity = _load_detached_merge_snapshot_with_identity(
-        current, role="current"
+    current_snapshot, current_payload, current_identity = (
+        _load_detached_merge_snapshot_with_identity(current, role="current")
     )
-    other_snapshot, _other_identity = _load_detached_merge_snapshot_with_identity(
-        other, role="other"
+    other_snapshot, other_payload, _other_identity = (
+        _load_detached_merge_snapshot_with_identity(other, role="other")
     )
-    snapshots = [ancestor_snapshot, current_snapshot, other_snapshot]
     digests = [
-        hashlib.sha256(_json_bytes(snapshot)).hexdigest() for snapshot in snapshots
+        hashlib.sha256(payload).hexdigest()
+        for payload in (ancestor_payload, current_payload, other_payload)
     ]
     try:
-        current_graph = nx.node_link_graph(snapshots[1], edges="links")
-        other_graph = nx.node_link_graph(snapshots[2], edges="links")
+        current_graph = nx.node_link_graph(current_snapshot, edges="links")
+        other_graph = nx.node_link_graph(other_snapshot, edges="links")
         merged_graph = nx.compose(current_graph, other_graph)
         if merged_graph.number_of_nodes() > _DETACHED_MAX_NODES:
             raise PendingTransactionError(
@@ -12451,15 +14414,29 @@ def merge_detached_snapshots(
     except (KeyError, TypeError, nx.NetworkXError) as exc:
         raise PendingTransactionError("malformed detached merge graph") from exc
     graph_meta = dict(merged.get("graph") or {})
+    graph_meta.pop(GRAPH_WATERMARK_KEY, None)
+    merged["graph"] = graph_meta
+    merged_content_digest = hashlib.sha256(_json_bytes(merged)).hexdigest()
+    generation_payload = {
+        "schema": 1,
+        "selector": _DETACHED_UNION_SELECTOR,
+        "input_digests": digests,
+        "merged_content_digest": merged_content_digest,
+    }
+    snapshot_generation = hashlib.sha256(
+        _MERGE_PENDING_GENERATION_DOMAIN + _json_bytes(generation_payload)
+    ).hexdigest()
     graph_meta[GRAPH_WATERMARK_KEY] = {
         "schema": 1,
         "protocol_epoch": 1,
         "state": "merge_pending",
-        "snapshot_generation": hashlib.sha256("".join(digests).encode()).hexdigest(),
+        "selector": dict(_DETACHED_UNION_SELECTOR),
         "input_digests": digests,
+        "merged_content_digest": merged_content_digest,
+        "snapshot_generation": snapshot_generation,
     }
     merged["graph"] = graph_meta
-    merged_payload = json.dumps(merged, sort_keys=True).encode("utf-8")
+    merged_payload = _json_bytes(merged)
     if len(merged_payload) > _DETACHED_MAX_BYTES:
         raise PendingTransactionError("composed detached merge exceeds size limit")
     current_path = Path(current).absolute()
@@ -12478,7 +14455,11 @@ def merge_detached_snapshots(
         )
 
 
-def finish_transaction(transaction: Transaction) -> None:
+def _finish_transaction(
+    transaction: Transaction,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> None:
     """Close a direct transaction after a committed receipt."""
     lease_deadline = time.time() + 30.0
     with pin_output(transaction.output) as capability, _locked(capability):
@@ -12509,7 +14490,9 @@ def finish_transaction(transaction: Transaction) -> None:
                 receipt_digest=receipt_digest,
                 lease_deadline=lease_deadline,
             )
-    if not close_if_queue_empty(transaction, receipt_digest=receipt_digest):
+    if not close_if_queue_empty(
+        transaction, receipt_digest=receipt_digest, failpoint=failpoint
+    ):
         with pin_output(transaction.output) as capability, _locked(capability):
             _validate_authority(capability, transaction, allow_complete=True)
             if not _read_queue(capability):
@@ -12541,7 +14524,7 @@ def finish_transaction(transaction: Transaction) -> None:
                 ),
             }
             _replace_bytes(capability, DRAINER_FILE, _json_bytes(pending))
-            _finish_close_locked(capability, pending)
+            _finish_close_locked(capability, pending, failpoint=failpoint)
             complete_protocol = _read_protocol(capability)
             complete_drainer = _read_drainer(capability)
             if complete_protocol is None or complete_drainer is None:
@@ -12569,9 +14552,317 @@ def finish_transaction(transaction: Transaction) -> None:
         _AUTHORITY.set(None)
 
 
-def finalize_prepared_transaction() -> None:
+def finish_transaction(transaction: Transaction) -> None:
+    """Close a direct transaction after a committed receipt."""
+    _finish_transaction(transaction)
+
+
+def _successor_ready_publication_locked(
+    transaction: Transaction,
+    capability: OutputCapability,
+) -> _PreparedPublication:
+    marker = _load_json(capability, PREPARED_FILE)
+    if marker is None:
+        raise PendingTransactionError("successor-ready prepared binding is missing")
+    graph_name, inventory, deletions = _validate_successor_ready_marker(
+        marker, capability=capability, transaction=transaction
+    )
+    prepared = _pin_prepared_workspace(transaction, capability)
+    try:
+        plan = publication_plan_from_directory(
+            prepared.output.path,
+            prior_inventory=tuple(
+                cast(list[str], marker.get("prior_inventory", []))
+            ),
+        )
+        actual_inventory = tuple(_publication_inventory(plan))
+        if actual_inventory != inventory or tuple(plan.deletions) != deletions:
+            raise PendingTransactionError("successor-ready prepared inventory changed")
+        prepared.validate()
+        return _PreparedPublication(plan, graph_name)
+    finally:
+        prepared.close()
+
+
+def _publish_successor_ready_transaction(
+    transaction: Transaction | None = None,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> GenerationReceipt:
+    """Replay an exact immutable prepared publication, leaving owner close to the caller."""
+    transaction = current_transaction() if transaction is None else transaction
+    with pin_output(transaction.output) as capability, _locked(capability):
+        _validate_authority(capability, transaction)
+        publication = _successor_ready_publication_locked(transaction, capability)
+    if failpoint is not None:
+        failpoint("after_successor_ready_reopen")
+    generation = _commit_publication_plan(
+        transaction,
+        publication.plan,
+        graph_name=publication.graph_name,
+        failpoint=failpoint,
+    )
+    if failpoint is not None:
+        failpoint("after_successor_ready_publication")
+    return generation
+
+
+def _finalize_successor_ready_transaction(
+    transaction: Transaction | None = None,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> None:
+    """Replay an exact immutable prepared publication and close its owner."""
+    transaction = current_transaction() if transaction is None else transaction
+    _publish_successor_ready_transaction(transaction, failpoint=failpoint)
+    _finish_transaction(transaction, failpoint=failpoint)
+    with pin_output(transaction.output) as capability, _locked(capability):
+        retired = _retire_prepared_locked(capability)
+        if retired is None:
+            raise PendingTransactionError("prepared workspace binding is missing")
+
+
+def _retire_completed_successor_ready_locked(
+    capability: OutputCapability,
+    marker: Mapping[str, object],
+    *,
+    now: float | None = None,
+) -> None:
+    """Retire an exact successor-ready workspace after its owner was closed."""
+    graph_name, inventory, deletions = _validate_successor_ready_marker(
+        marker, capability=capability
+    )
+    if _read_transaction(capability) is not None:
+        raise PendingTransactionError("completed successor-ready owner reappeared")
+    protocol = _read_protocol(capability)
+    drainer = _read_drainer(capability)
+    if (
+        protocol is None
+        or drainer is None
+        or protocol.get("state") != "COMPLETE"
+        or marker.get("transaction_id") != protocol.get("transaction_id")
+        or marker.get("generation") != protocol.get("generation")
+        or marker.get("token_digest")
+        != protocol.get("owner_capability_digest")
+    ):
+        raise PendingTransactionError(
+            "completed successor-ready selector changed"
+        )
+    if drainer[1] == "CLOSE_PENDING":
+        _recover_close_pending_without_live_locked(
+            capability, protocol, drainer, now=now
+        )
+        drainer = _read_drainer(capability)
+    if drainer is None:
+        raise PendingTransactionError(
+            "completed successor-ready drainer disappeared"
+        )
+    if drainer[1] == "complete":
+        receipt, receipt_digest, _retained = _validate_receipt_locked(
+            capability, require_closed=True
+        )
+    elif drainer[1] == "reserved":
+        receipt, receipt_digest, _retained = _validate_receipt_locked(capability)
+        preserved = _read_predecessor_authority(capability)
+        if (
+            preserved is None
+            or preserved[0] != protocol
+            or preserved[1][0]
+            != _drainer_from_json(receipt.get("drainer"))
+            or preserved[2] != receipt_digest
+            or preserved[3]["state"] != "preserved-complete"
+        ):
+            raise PendingTransactionError(
+                "reserved successor predecessor authority changed"
+            )
+    else:
+        raise PendingTransactionError(
+            "completed successor-ready recovery requires terminal authority"
+        )
+    if (
+        marker.get("transaction_id") != receipt.get("transaction_id")
+        or marker.get("generation") != receipt.get("generation")
+        or marker.get("token_digest") != receipt.get("token_digest")
+        or graph_name != receipt.get("graph_name", "graph.json")
+    ):
+        raise PendingTransactionError(
+            "completed successor-ready selector changed"
+        )
+    artifact_digests = cast(dict[str, str], receipt["artifact_digests"])
+    aggregate_size = 0
+    completed_inventory: list[dict[str, object]] = []
+    for name in sorted(cast(list[str], receipt["required_artifacts"])):
+        _digest, size, _payload = _hash_relative_bytes(
+            capability,
+            name,
+            aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES - aggregate_size,
+        )
+        aggregate_size += size
+        completed_inventory.append(
+            {"name": name, "sha256": artifact_digests[name], "size": size}
+        )
+    if tuple(completed_inventory) != inventory:
+        raise PendingTransactionError(
+            "completed successor-ready inventory changed"
+        )
+    for name in deletions:
+        try:
+            _hash_relative_bytes(
+                capability,
+                name,
+                aggregate_remaining=_MAX_RECEIPT_AGGREGATE_BYTES,
+            )
+        except PendingTransactionError as exc:
+            if isinstance(exc.__cause__, (FileNotFoundError, NotADirectoryError)):
+                continue
+            raise
+        raise PendingTransactionError(
+            "completed successor-ready deletion reappeared"
+        )
+    if drainer[1] == "complete":
+        _unlink(capability, PREDECESSOR_FILE)
+    if _retire_prepared_locked(capability) is None:
+        raise PendingTransactionError("prepared workspace binding is missing")
+
+
+def _recover_successor_ready_transaction(
+    output: Path | str,
+    *,
+    now: float | None = None,
+    failpoint: Callable[[str], None] | None = None,
+) -> bool:
+    """Take over and finalize only an exact expired successor-ready owner."""
+    with pin_output(output) as capability, _locked(capability):
+        marker = _load_json(capability, PREPARED_FILE)
+        if marker is None or marker.get("state") != "successor-ready":
+            return False
+        live = _read_transaction(capability)
+        drainer = _read_drainer(capability)
+        if live is None:
+            _retire_completed_successor_ready_locked(
+                capability, marker, now=now
+            )
+            return True
+        if drainer is None:
+            raise PendingTransactionError(
+                "successor-ready recovery owner binding is incomplete"
+            )
+        protocol = _read_protocol(capability)
+        _validate_live_successor_ready_merge_binding_locked(
+            capability,
+            marker,
+            live,
+            protocol=protocol,
+            drainer=drainer,
+        )
+        current_time = time.time() if now is None else now
+        if current_time <= float(drainer[2].get("lease_deadline", 0.0)):
+            raise PendingTransactionError(
+                "successor-ready owner lease has not expired"
+            )
+    if protocol is not None and protocol.get("state") == "COMPLETE":
+        recover_transaction(
+            live.kind,
+            live.root,
+            output=output,
+            now=now,
+            expected_transaction_id=live.id,
+            expected_generation=live.generation,
+            expected_output_identity=live.output_identity,
+            transition_failpoint=failpoint,
+        )
+        if failpoint is not None:
+            failpoint("after_completed_live_recovery")
+        with pin_output(output) as capability, _locked(capability):
+            if _load_json(capability, PREPARED_FILE) != marker:
+                raise PendingTransactionError(
+                    "successor-ready prepared binding changed"
+                )
+            _validate_successor_ready_marker(
+                marker, capability=capability, transaction=live
+            )
+            _retire_completed_successor_ready_locked(
+                capability, marker, now=now
+            )
+        return True
+    takeover_drainer(output, now=now)
+    target = optional_current_transaction(output)
+    if target is None:
+        raise PendingTransactionError("successor-ready takeover owner is missing")
+    _finalize_successor_ready_transaction(target)
+    return True
+
+
+def _successor_ready_recovery_deferred(output: Path | str) -> bool:
+    """Report whether an exact successor-ready owner still holds a live lease."""
+    with pin_output(output, mutation=False) as capability, _locked(capability):
+        marker = _load_json(capability, PREPARED_FILE)
+        if marker is None or marker.get("state") != "successor-ready":
+            return False
+        live = _read_transaction(capability)
+        drainer = _read_drainer(capability)
+        if live is None or drainer is None or drainer[0] != live.drainer:
+            return False
+        _validate_successor_ready_marker(
+            marker, capability=capability, transaction=live
+        )
+        return time.time() <= float(drainer[2].get("lease_deadline", 0.0))
+
+
+def _successor_ready_merge_admission(
+    output: Path | str,
+) -> _MergePendingAdmission | None:
+    """Return exact preserved merge authority for one successor-ready marker."""
+    with pin_output(output, mutation=False) as capability, _locked(capability):
+        marker = _load_json(capability, PREPARED_FILE)
+        if marker is None or marker.get("state") != "successor-ready":
+            return None
+        live = _read_transaction(capability)
+        _validate_successor_ready_marker(
+            marker, capability=capability, transaction=live
+        )
+        admission = _preserved_merge_admission(capability)
+        protocol = _read_protocol(capability)
+        if (
+            live is not None
+            and protocol is not None
+            and protocol.get("state") == "INCOMPLETE"
+            and admission is None
+        ):
+            raise PendingTransactionError(
+                "successor-ready merge admission is missing"
+            )
+        if admission is not None and (
+            marker.get("merge_snapshot_generation")
+            != admission.snapshot_generation
+        ):
+            raise PendingTransactionError(
+                "successor-ready merge admission changed"
+            )
+        return admission
+
+
+def _successor_ready_recovery_pending(output: Path | str) -> bool:
+    """Validate and report one durable successor-ready recovery marker."""
+    with pin_output(output, mutation=False) as capability, _locked(capability):
+        marker = _load_json(capability, PREPARED_FILE)
+        if marker is None or marker.get("state") != "successor-ready":
+            return False
+        _validate_successor_ready_marker(
+            marker,
+            capability=capability,
+            transaction=_read_transaction(capability),
+        )
+        return True
+
+
+def _finalize_prepared_transaction(
+    transaction: Transaction,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+    close: bool = True,
+) -> GenerationReceipt | None:
     """Capability-commit an owner-prepared full-build generation and close it."""
-    transaction = current_transaction()
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         prepared_capability = _pin_prepared_workspace(transaction, capability)
@@ -12607,12 +14898,55 @@ def finalize_prepared_transaction() -> None:
             prior_inventory = tuple(
                 str(name) for name in prepared_marker.get("prior_inventory", [])
             )
+            _replace_relative_bytes(
+                prepared_capability.output, graph_name, graph_payload
+            )
             plan = publication_plan_from_directory(
                 prepared_capability.output.path, prior_inventory=prior_inventory
             )
+            merge_admission = _preserved_merge_admission(capability)
+            if merge_admission is not None:
+                inventory = _publication_inventory(plan)
+                deletions = tuple(sorted(plan.deletions))
+                plan_digest = _publication_plan_digest(
+                    generation=transaction.generation,
+                    graph_name=graph_name,
+                    inventory=inventory,
+                    deletions=deletions,
+                )
+                prepared_marker = {
+                    **prepared_marker,
+                    "state": "successor-ready",
+                    "merge_snapshot_generation": merge_admission.snapshot_generation,
+                    "graph_name": graph_name,
+                    "inventory": inventory,
+                    "deletions": list(deletions),
+                    "plan_digest": plan_digest,
+                }
+                _validate_successor_ready_marker(
+                    prepared_marker,
+                    capability=capability,
+                    transaction=transaction,
+                )
+                _replace_bytes(
+                    capability, PREPARED_FILE, _json_bytes(prepared_marker)
+                )
             prepared_capability.validate()
         finally:
             prepared_capability.close()
+    if merge_admission is not None:
+        if failpoint is not None:
+            failpoint("after_successor_ready")
+        generation = _publish_successor_ready_transaction(
+            transaction, failpoint=failpoint
+        )
+        if close:
+            finish_transaction(transaction)
+        with pin_output(transaction.output) as capability, _locked(capability):
+            retired = _retire_prepared_locked(capability)
+            if retired is None:
+                raise PendingTransactionError("prepared workspace binding is missing")
+        return generation
     payloads = dict(plan.payloads)
     payloads[graph_name] = graph_payload
     payloads["manifest.json"] = manifest_payload
@@ -12622,6 +14956,12 @@ def finalize_prepared_transaction() -> None:
         retired = _retire_prepared_locked(capability)
         if retired is None:
             raise PendingTransactionError("prepared workspace binding is missing")
+    return None
+
+
+def finalize_prepared_transaction() -> None:
+    """Capability-commit the current owner's prepared generation and close it."""
+    _finalize_prepared_transaction(current_transaction())
 
 
 def _validate_cancellation_predecessor(

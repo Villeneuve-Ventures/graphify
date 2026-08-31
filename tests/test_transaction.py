@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import ast
 import asyncio
+import contextlib
 import contextvars
 import hashlib
+import inspect
 import os
 import subprocess
 import sys
@@ -74,6 +76,14 @@ def _graph(generation: int, *, state: str = "active") -> bytes:
         },
         sort_keys=True,
     ).encode()
+
+
+def test_prepared_public_api_signatures_remain_legacy_compatible():
+    import graphify.transaction as transaction_module
+
+    assert str(inspect.signature(transaction_module.prepared_workspace_path)) == "() -> 'Path'"
+    assert str(inspect.signature(transaction_module.finalize_prepared_transaction)) == "() -> 'None'"
+    assert "merge_admission" not in transaction_module.GraphSnapshot.__dataclass_fields__
 
 
 def _owner(tmp_path: Path):
@@ -9016,6 +9026,1724 @@ def test_detached_merge_parser_is_private_data_only_and_marks_pending(tmp_path):
 
     with pytest.raises(PendingTransactionError, match="role"):
         load_detached_merge_snapshot(current, role="working-tree")
+
+
+def _merge_pending_owner(tmp_path: Path, *, include_other_artifact: bool = False):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token = _owner(tmp_path)
+    if include_other_artifact:
+        graph_payload = _graph(transaction.generation)
+        with owned_step(transaction):
+            commit_bytes(transaction, "graph.json", graph_payload)
+            commit_bytes(transaction, "manifest.json", b"{}")
+            commit_bytes(transaction, "other-managed.json", b'{"prior":true}')
+            commit_generation(
+                transaction,
+                graph_payload=graph_payload,
+                manifest_payload=b"{}",
+                required_artifacts=(
+                    "graph.json",
+                    "manifest.json",
+                    "other-managed.json",
+                ),
+            )
+    else:
+        _commit_owner_generation(output, transaction)
+    finish_transaction(transaction)
+    ancestor = tmp_path / "ancestor.json"
+    ancestor.write_bytes((output / "graph.json").read_bytes())
+    other = tmp_path / "other.json"
+    other_payload = json.loads(_graph(transaction.generation))
+    other_payload["nodes"] = [{"id": "other", "label": "other"}]
+    other.write_text(json.dumps(other_payload, indent=2), encoding="utf-8")
+    merge_detached_snapshots(ancestor, output / "graph.json", other)
+    data, payload, admission = (
+        transaction_module._open_merge_pending_rebuild_snapshot(
+            output / "graph.json"
+        )
+    )
+    return root, output, data, payload, admission
+
+
+def _merge_successor_ready(tmp_path: Path, *, include_other_artifact: bool = False):
+    import graphify.transaction as transaction_module
+
+    root, output, _data, _payload, admission = _merge_pending_owner(
+        tmp_path, include_other_artifact=include_other_artifact
+    )
+    queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["current.py"],
+        merge_admission=admission,
+    )
+    transaction = begin_transaction("update", root, output=output)
+    token = stage_transaction_handoff(transaction)
+    transaction = resume_transaction(transaction.id, root, output=output)
+    transaction_module._AUTHORITY.set(transaction_module._authority_for(transaction))
+    with pytest.raises(RuntimeError, match="after_successor_ready"):
+        transaction_module._finalize_prepared_transaction(
+            transaction,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_successor_ready"
+            else None
+        )
+    marker = json.loads(
+        (output / transaction_module.PREPARED_FILE).read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "successor-ready"
+    return root, output, transaction, token, admission, marker
+
+
+def test_merge_successor_ready_binds_exact_inventory_and_replays_publication(tmp_path):
+    import graphify.transaction as transaction_module
+
+    _root, output, transaction, _token, admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    assert marker["merge_snapshot_generation"] == admission.snapshot_generation
+    assert [item["name"] for item in marker["inventory"]] == sorted(
+        item["name"] for item in marker["inventory"]
+    )
+    plan_payload = json.dumps(
+        {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "graph_name": marker["graph_name"],
+            "inventory": marker["inventory"],
+            "deletions": marker["deletions"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert marker["plan_digest"] == hashlib.sha256(
+        b"graphify.publication-plan.v1\0" + plan_payload
+    ).hexdigest()
+
+    (output / "graph.json").write_bytes(b"public replacement is not recovery input")
+    transaction_module._finalize_successor_ready_transaction(transaction)
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert {node["id"] for node in graph["nodes"]} == {"other"}
+    assert graph["graph"][GRAPH_WATERMARK_KEY] == {
+        "schema": 1,
+        "protocol_epoch": 1,
+        "generation": transaction.generation,
+        "state": "active",
+    }
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_token_journal",
+        "after_token_created",
+        "after_prepared_owner_written",
+        "after_prepared_rebound",
+        "after_token_protocol",
+        "after_token_live",
+        "after_prepared_owner_bound",
+        "after_prepared_drainer_reserved",
+        "after_prepared_drainer_launching",
+        "after_prepared_drainer_claimed",
+        "after_prepared_predecessor_token_removed",
+        "after_prepared_transition_retired",
+    ],
+)
+def test_successor_ready_takeover_replays_every_durable_boundary(tmp_path, boundary):
+    import graphify.transaction as transaction_module
+
+    root, output, predecessor, predecessor_token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(
+                RuntimeError(name)
+            )
+            if name == boundary
+            else None,
+        )
+    journal = json.loads(
+        (output / transaction_module.TOKEN_TRANSITION_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert journal["prepared_transfer"]["predecessor_marker"] == marker
+    target_raw = journal["target_transaction"]
+    target = recover_transaction(
+        "update",
+        root,
+        output=output,
+        now=10**12,
+        expected_transaction_id=target_raw["id"],
+        expected_generation=target_raw["generation"],
+        expected_output_identity=predecessor.output_identity,
+    )
+    rebound = json.loads(
+        (output / transaction_module.PREPARED_FILE).read_text(encoding="utf-8")
+    )
+    assert target.phase == "building"
+    assert rebound["transaction_id"] == target.id
+    assert rebound["token_digest"] == target.token_digest
+    assert not predecessor_token.path.exists()
+    assert not (output / transaction_module.TRANSITION_FILE).exists()
+    assert not (output / transaction_module.TOKEN_TRANSITION_FILE).exists()
+    transaction_module._finalize_successor_ready_transaction(target)
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert {node["id"] for node in graph["nodes"]} == {"other"}
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_token_journal",
+        "after_token_created",
+        "after_prepared_owner_written",
+        "after_prepared_rebound",
+        "after_token_protocol",
+        "after_token_live",
+        "after_prepared_owner_bound",
+        "after_prepared_drainer_reserved",
+        "after_prepared_drainer_launching",
+        "after_prepared_drainer_claimed",
+        "after_prepared_predecessor_token_removed",
+        "after_prepared_transition_retired",
+    ],
+)
+def test_prepared_transfer_recovery_validates_admission_before_each_replay(
+    tmp_path, boundary
+):
+    import graphify.transaction as transaction_module
+
+    root, output, predecessor, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda phase: (_ for _ in ()).throw(
+                RuntimeError(phase)
+            )
+            if phase == boundary
+            else None,
+        )
+    journal = json.loads(
+        (output / transaction_module.TOKEN_TRANSITION_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    predecessor_path = output / transaction_module.PREDECESSOR_FILE
+    predecessor_authority = json.loads(
+        predecessor_path.read_text(encoding="utf-8")
+    )
+    predecessor_authority.pop("merge_admission")
+    predecessor_path.write_text(json.dumps(predecessor_authority), encoding="utf-8")
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+    target_raw = journal["target_transaction"]
+
+    with pytest.raises(PendingTransactionError):
+        recover_transaction(
+            "update",
+            root,
+            output=output,
+            now=10**12,
+            expected_transaction_id=target_raw["id"],
+            expected_generation=target_raw["generation"],
+            expected_output_identity=predecessor.output_identity,
+        )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+def test_prepared_transfer_terminal_substitution_blocks_recovery_without_mutation(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    root, output, predecessor, _token, _admission, _marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match="after_prepared_transition_retired"):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(
+                RuntimeError(name)
+            )
+            if name == "after_prepared_transition_retired"
+            else None,
+        )
+    journal = json.loads(
+        (output / transaction_module.TOKEN_TRANSITION_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert not (output / transaction_module.TRANSITION_FILE).exists()
+    live_path = output / transaction_module.TRANSACTION_FILE
+    substituted = json.loads(live_path.read_text(encoding="utf-8"))
+    substituted["token_digest"] = "0" * 64
+    live_path.write_text(
+        json.dumps(substituted, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    before = _file_bytes(output)
+    target_raw = journal["target_transaction"]
+
+    with pytest.raises(PendingTransactionError):
+        recover_transaction(
+            "update",
+            root,
+            output=output,
+            now=10**12,
+            expected_transaction_id=target_raw["id"],
+            expected_generation=target_raw["generation"],
+            expected_output_identity=predecessor.output_identity,
+        )
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("mutation", ["bound-identity", "null-identities"])
+def test_prepared_transfer_terminal_requires_predecessor_token_revocation(
+    tmp_path, mutation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, predecessor, predecessor_token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match="after_prepared_drainer_claimed"):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(
+                RuntimeError(name)
+            )
+            if name == "after_prepared_drainer_claimed"
+            else None,
+        )
+    assert predecessor_token.path.exists()
+    journal_path = output / transaction_module.TOKEN_TRANSITION_FILE
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["state"] == "drainer-claimed"
+    journal["state"] = "predecessor-token-removed"
+    if mutation == "null-identities":
+        for field in (
+            "predecessor_transaction",
+            "pending_predecessor_transaction",
+            "predecessor_protocol",
+            "pending_predecessor_protocol",
+        ):
+            journal[field]["token_identity"] = None
+        pending_path = output / transaction_module.TRANSITION_FILE
+        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        pending["predecessor_transaction"]["token_identity"] = None
+        pending["predecessor_protocol"]["token_identity"] = None
+        pending_path.write_text(
+            json.dumps(pending, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    journal_path.write_text(
+        json.dumps(journal, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    prepared_workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(prepared_workspace)
+    target_raw = journal["target_transaction"]
+
+    with pytest.raises(
+        PendingTransactionError,
+        match="predecessor token was not removed",
+    ):
+        recover_transaction(
+            "update",
+            root,
+            output=output,
+            now=10**12,
+            expected_transaction_id=target_raw["id"],
+            expected_generation=target_raw["generation"],
+            expected_output_identity=predecessor.output_identity,
+        )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(prepared_workspace) == prepared_before
+    assert predecessor_token.path.exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "marker",
+        "owner",
+        "identity",
+        "inventory",
+        "deletion",
+        "plan",
+    ],
+)
+def test_successor_ready_substitution_blocks_takeover_without_mutation(
+    tmp_path, mutation
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, _transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    workspace = output.parent / marker["workspace_name"] / "graphify-out"
+    marker_path = output / transaction_module.PREPARED_FILE
+    owner_path = workspace.parent / transaction_module._PREPARED_OWNER_FILE
+    if mutation == "marker":
+        marker["unexpected"] = True
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    elif mutation == "owner":
+        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        owner["token_digest"] = "0" * 64
+        owner_path.write_text(json.dumps(owner), encoding="utf-8")
+    elif mutation == "identity":
+        marker["identity"]["inode"] += 1
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    elif mutation == "inventory":
+        (workspace / "graph.json").write_bytes(b"substituted")
+    elif mutation == "deletion":
+        marker["deletions"] = ["unexpected.json"]
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    else:
+        marker["plan_digest"] = "0" * 64
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        takeover_drainer(output, now=10**12)
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("mutation", ["internal-owner", "inventory"])
+def test_claimed_inflight_successor_ready_substitution_is_failure_atomic(
+    tmp_path, mutation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["late.py"],
+        source="claimed-inflight-hostile-test",
+    )
+    claim = claim_rebuild_queue(transaction, transaction.drainer)
+    assert claim.inflight_path is not None
+    workspace = output.parent / marker["workspace_name"]
+    if mutation == "internal-owner":
+        path = workspace / transaction_module._PREPARED_OWNER_FILE
+        owner = json.loads(path.read_text(encoding="utf-8"))
+        owner["token_digest"] = "0" * 64
+        path.write_text(json.dumps(owner), encoding="utf-8")
+    else:
+        (workspace / "graphify-out" / "graph.json").write_bytes(b"substituted")
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        takeover_drainer(output, now=10**12)
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    [None, "graph.json", "manifest.json", "other-managed.json"],
+    ids=["valid", "graph", "manifest", "other"],
+)
+def test_recovery_revalidates_public_inventory_inside_takeover_lock(
+    tmp_path, monkeypatch, artifact_name
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path, include_other_artifact=True)
+    )
+    workspace = output.parent / marker["workspace_name"]
+    takeover_entered = threading.Event()
+    continue_takeover = threading.Event()
+    original_takeover = transaction_module.takeover_drainer
+
+    def synchronized_takeover(*args, **kwargs):
+        takeover_entered.set()
+        assert continue_takeover.wait(10)
+        return original_takeover(*args, **kwargs)
+
+    monkeypatch.setattr(
+        transaction_module, "takeover_drainer", synchronized_takeover
+    )
+    result: list[object] = []
+
+    def recover():
+        try:
+            result.append(
+                recover_transaction(
+                    "update",
+                    root,
+                    output=output,
+                    now=10**12,
+                    expected_transaction_id=transaction.id,
+                    expected_generation=transaction.generation,
+                    expected_output_identity=transaction.output_identity,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - asserted across thread boundary
+            result.append(exc)
+
+    worker = threading.Thread(target=recover, name="successor-ready-recovery")
+    worker.start()
+    assert takeover_entered.wait(10)
+    if artifact_name is not None:
+        (output / artifact_name).write_bytes(
+            f"substituted-{artifact_name}".encode()
+        )
+        before = _file_bytes(output)
+        prepared_before = _file_bytes(workspace)
+    continue_takeover.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert len(result) == 1
+    if artifact_name is not None:
+        assert isinstance(result[0], PendingTransactionError)
+        assert _file_bytes(output) == before
+        assert _file_bytes(workspace) == prepared_before
+    else:
+        assert not isinstance(result[0], Exception)
+        target = result[0]
+        rebound = json.loads(
+            (output / transaction_module.PREPARED_FILE).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert rebound["transaction_id"] == target.id
+        assert rebound["workspace_name"] == marker["workspace_name"]
+
+
+@pytest.mark.parametrize(
+    "artifact_name", ["graph.json", "manifest.json", "other-managed.json"]
+)
+def test_direct_takeover_rejects_substituted_public_inventory_without_mutation(
+    tmp_path, artifact_name
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, _transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path, include_other_artifact=True)
+    )
+    workspace = output.parent / marker["workspace_name"]
+    (output / artifact_name).write_bytes(f"substituted-{artifact_name}".encode())
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        takeover_drainer(output, now=10**12)
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize("entrypoint", ["takeover", "recovery"])
+@pytest.mark.parametrize(
+    "mutation", ["missing-admission", "merge-generation", "graph-name"]
+)
+def test_claimed_inflight_successor_ready_requires_exact_merge_binding(
+    tmp_path, entrypoint, mutation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["late.py"],
+        source="claimed-inflight-merge-binding-test",
+    )
+    claim = claim_rebuild_queue(transaction, transaction.drainer)
+    assert claim.inflight_path is not None
+    marker_path = output / transaction_module.PREPARED_FILE
+    if mutation == "missing-admission":
+        predecessor_path = output / transaction_module.PREDECESSOR_FILE
+        predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+        predecessor.pop("merge_admission")
+        predecessor_path.write_text(json.dumps(predecessor), encoding="utf-8")
+    else:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        if mutation == "merge-generation":
+            marker["merge_snapshot_generation"] = "0" * 64
+        else:
+            marker["graph_name"] = "manifest.json"
+            marker["plan_digest"] = transaction_module._publication_plan_digest(
+                generation=marker["generation"],
+                graph_name=marker["graph_name"],
+                inventory=marker["inventory"],
+                deletions=marker["deletions"],
+            )
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        if entrypoint == "takeover":
+            takeover_drainer(output, now=10**12)
+        else:
+            transaction_module._recover_successor_ready_transaction(
+                output, now=10**12
+            )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize("journal_kind", ["enqueue", "queue-transition"])
+@pytest.mark.parametrize("mutation", ["missing-admission", "merge-generation"])
+def test_successor_ready_binding_is_validated_before_journal_replay(
+    tmp_path, monkeypatch, journal_kind, mutation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    if journal_kind == "enqueue":
+        original = transaction_module._queue_successor_ready_rebuild_locked
+        monkeypatch.setattr(
+            transaction_module,
+            "_queue_successor_ready_rebuild_locked",
+            lambda *args, **kwargs: None,
+        )
+        with pytest.raises(RuntimeError, match="after_enqueue_journal"):
+            queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=["journal.py"],
+                failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                if phase == "after_enqueue_journal"
+                else None,
+            )
+        monkeypatch.setattr(
+            transaction_module,
+            "_queue_successor_ready_rebuild_locked",
+            original,
+        )
+        assert (output / transaction_module.ENQUEUE_FILE).exists()
+    else:
+        with pytest.raises(RuntimeError, match="after_queue_transition_journal"):
+            queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=["journal.py"],
+                failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                if phase == "after_queue_transition_journal"
+                else None,
+            )
+        assert list(output.glob(transaction_module._QUEUE_TRANSITION_PREFIX + "*"))
+    if mutation == "missing-admission":
+        predecessor_path = output / transaction_module.PREDECESSOR_FILE
+        predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+        predecessor.pop("merge_admission")
+        predecessor_path.write_text(json.dumps(predecessor), encoding="utf-8")
+    else:
+        marker_path = output / transaction_module.PREPARED_FILE
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["merge_snapshot_generation"] = "0" * 64
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        if journal_kind == "enqueue":
+            queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=["after-journal.py"],
+            )
+        else:
+            takeover_drainer(output, now=10**12)
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize("entrypoint", ["recover", "selected"])
+@pytest.mark.parametrize("journal_kind", ["enqueue", "queue-transition"])
+def test_public_recovery_validates_successor_ready_before_residual_journal_replay(
+    tmp_path, monkeypatch, entrypoint, journal_kind
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    if journal_kind == "enqueue":
+        original = transaction_module._queue_successor_ready_rebuild_locked
+        monkeypatch.setattr(
+            transaction_module,
+            "_queue_successor_ready_rebuild_locked",
+            lambda *args, **kwargs: None,
+        )
+        with pytest.raises(RuntimeError, match="after_enqueue_journal"):
+            queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=["journal.py"],
+                failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                if phase == "after_enqueue_journal"
+                else None,
+            )
+        monkeypatch.setattr(
+            transaction_module,
+            "_queue_successor_ready_rebuild_locked",
+            original,
+        )
+    else:
+        with pytest.raises(RuntimeError, match="after_queue_transition_journal"):
+            queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=["journal.py"],
+                failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                if phase == "after_queue_transition_journal"
+                else None,
+            )
+    predecessor_path = output / transaction_module.PREDECESSOR_FILE
+    predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+    predecessor.pop("merge_admission")
+    predecessor_path.write_text(json.dumps(predecessor), encoding="utf-8")
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        if entrypoint == "recover":
+            recover_transaction(
+                "update",
+                root,
+                output=output,
+                now=10**12,
+                expected_transaction_id=transaction.id,
+                expected_generation=transaction.generation,
+                expected_output_identity=transaction.output_identity,
+            )
+        else:
+            recover_selected_transaction(
+                None,
+                root,
+                output=output,
+                now=10**12,
+                expected_transaction_id=transaction.id,
+                expected_generation=transaction.generation,
+                expected_output_identity=transaction.output_identity,
+            )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize("entrypoint", ["recover", "selected"])
+@pytest.mark.parametrize(
+    "mutation", ["missing-admission", "merge-generation", "predecessor-graph"]
+)
+def test_public_recovery_rejects_invalid_successor_ready_authority_without_mutation(
+    tmp_path, entrypoint, mutation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    if mutation == "missing-admission":
+        predecessor_path = output / transaction_module.PREDECESSOR_FILE
+        predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+        predecessor.pop("merge_admission")
+        predecessor_path.write_text(json.dumps(predecessor), encoding="utf-8")
+    elif mutation == "merge-generation":
+        marker_path = output / transaction_module.PREPARED_FILE
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        marker["merge_snapshot_generation"] = "0" * 64
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    else:
+        (output / "graph.json").write_bytes((tmp_path / "ancestor.json").read_bytes())
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        if entrypoint == "recover":
+            recover_transaction(
+                "update",
+                root,
+                output=output,
+                now=10**12,
+                expected_transaction_id=transaction.id,
+                expected_generation=transaction.generation,
+                expected_output_identity=transaction.output_identity,
+            )
+        else:
+            recover_selected_transaction(
+                None,
+                root,
+                output=output,
+                now=10**12,
+                expected_transaction_id=transaction.id,
+                expected_generation=transaction.generation,
+                expected_output_identity=transaction.output_identity,
+            )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize("entrypoint", ["recover", "selected"])
+def test_public_recovery_routes_exact_successor_ready_transfer(tmp_path, entrypoint):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    if entrypoint == "recover":
+        target = recover_transaction(
+            "update",
+            root,
+            output=output,
+            now=10**12,
+            expected_transaction_id=transaction.id,
+            expected_generation=transaction.generation,
+            expected_output_identity=transaction.output_identity,
+        )
+    else:
+        target = recover_selected_transaction(
+            None,
+            root,
+            output=output,
+            now=10**12,
+            expected_transaction_id=transaction.id,
+            expected_generation=transaction.generation,
+            expected_output_identity=transaction.output_identity,
+        )
+    rebound = json.loads(
+        (output / transaction_module.PREPARED_FILE).read_text(encoding="utf-8")
+    )
+    assert rebound["workspace_name"] == marker["workspace_name"]
+    assert rebound["transaction_id"] == target.id
+    transaction_module._finalize_successor_ready_transaction(target)
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert {node["id"] for node in graph["nodes"]} == {"other"}
+
+
+@pytest.mark.parametrize(
+    ("interleave_after_lock", "residual_enqueue"),
+    [(1, True), (2, False)],
+)
+@pytest.mark.parametrize("authority", ["valid", "invalid"])
+def test_selected_recovery_revalidates_interleaved_successor_ready_under_lock(
+    tmp_path,
+    monkeypatch,
+    authority,
+    interleave_after_lock,
+    residual_enqueue,
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
+    first_lock_released = threading.Event()
+    publisher_done = threading.Event()
+    original_locked = transaction_module._locked
+    selected_lock_count = 0
+
+    @contextlib.contextmanager
+    def synchronized_locked(*args, **kwargs):
+        nonlocal selected_lock_count
+        with original_locked(*args, **kwargs):
+            yield
+        if threading.current_thread().name == "selected-recovery":
+            selected_lock_count += 1
+            if selected_lock_count == interleave_after_lock:
+                first_lock_released.set()
+                assert publisher_done.wait(10)
+
+    monkeypatch.setattr(transaction_module, "_locked", synchronized_locked)
+    result: list[object] = []
+
+    def selected_recovery():
+        try:
+            result.append(
+                recover_selected_transaction(
+                    None,
+                    root,
+                    output=output,
+                    now=10**12,
+                    expected_generation=admission.predecessor_generation + 1,
+                    expected_output_identity=admission.output_identity,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - asserted across thread boundary
+            result.append(exc)
+
+    worker = threading.Thread(target=selected_recovery, name="selected-recovery")
+    worker.start()
+    assert first_lock_released.wait(10)
+    queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["interleaved.py"],
+        merge_admission=admission,
+    )
+    transaction = begin_transaction("update", root, output=output)
+    stage_transaction_handoff(transaction)
+    transaction = resume_transaction(transaction.id, root, output=output)
+    transaction_module._AUTHORITY.set(
+        transaction_module._authority_for(transaction)
+    )
+    with pytest.raises(RuntimeError, match="after_successor_ready"):
+        transaction_module._finalize_prepared_transaction(
+            transaction,
+            failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+            if phase == "after_successor_ready"
+            else None,
+        )
+    marker = json.loads(
+        (output / transaction_module.PREPARED_FILE).read_text(encoding="utf-8")
+    )
+    workspace = output.parent / marker["workspace_name"]
+    if residual_enqueue:
+        original_queue_successor = (
+            transaction_module._queue_successor_ready_rebuild_locked
+        )
+        monkeypatch.setattr(
+            transaction_module,
+            "_queue_successor_ready_rebuild_locked",
+            lambda *args, **kwargs: None,
+        )
+        with pytest.raises(RuntimeError, match="after_enqueue_journal"):
+            queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=["residual.py"],
+                failpoint=lambda phase: (_ for _ in ()).throw(
+                    RuntimeError(phase)
+                )
+                if phase == "after_enqueue_journal"
+                else None,
+            )
+        monkeypatch.setattr(
+            transaction_module,
+            "_queue_successor_ready_rebuild_locked",
+            original_queue_successor,
+        )
+        assert (output / transaction_module.ENQUEUE_FILE).exists()
+    if authority == "invalid":
+        predecessor_path = output / transaction_module.PREDECESSOR_FILE
+        predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+        predecessor.pop("merge_admission")
+        predecessor_path.write_text(json.dumps(predecessor), encoding="utf-8")
+        before = _file_bytes(output)
+        prepared_before = _file_bytes(workspace)
+    publisher_done.set()
+    worker.join(10)
+    assert not worker.is_alive()
+    assert len(result) == 1
+    if authority == "invalid":
+        assert isinstance(result[0], PendingTransactionError)
+        assert _file_bytes(output) == before
+        assert _file_bytes(workspace) == prepared_before
+    else:
+        assert not isinstance(result[0], Exception)
+        target = result[0]
+        rebound = json.loads(
+            (output / transaction_module.PREPARED_FILE).read_text(encoding="utf-8")
+        )
+        assert rebound["transaction_id"] == target.id
+        assert rebound["workspace_name"] == marker["workspace_name"]
+
+
+def test_cli_recovery_rejects_missing_successor_ready_admission_without_mutation(
+    tmp_path, monkeypatch
+):
+    from graphify.cli import dispatch_command
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    predecessor_path = output / transaction_module.PREDECESSOR_FILE
+    predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+    predecessor.pop("merge_admission")
+    predecessor_path.write_text(json.dumps(predecessor), encoding="utf-8")
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "graphify",
+            "transaction",
+            "recover",
+            "--output",
+            str(output),
+            "--generation",
+            str(transaction.generation),
+            "--device",
+            str(transaction.output_identity.device),
+            "--inode",
+            str(transaction.output_identity.inode),
+            "--root",
+            str(root),
+            "--transaction-id",
+            transaction.id,
+        ],
+    )
+
+    with pytest.raises(PendingTransactionError):
+        dispatch_command("transaction")
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize("mutation", ["missing", "substituted"])
+def test_incomplete_successor_ready_enqueue_requires_preserved_merge_admission(
+    tmp_path, mutation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    predecessor_path = output / transaction_module.PREDECESSOR_FILE
+    predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+    if mutation == "missing":
+        predecessor.pop("merge_admission")
+    else:
+        predecessor["merge_admission"]["snapshot_generation"] = "0" * 64
+    predecessor_path.write_text(json.dumps(predecessor), encoding="utf-8")
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["late.py"],
+            source="missing-preserved-admission-test",
+        )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize(
+    "boundary", ["after_publication_plan", "after_receipt", "after_protocol"]
+)
+@pytest.mark.parametrize("authority", ["protocol", "receipt"])
+def test_live_partial_publication_enqueue_rejects_corrupt_authority_without_mutation(
+    tmp_path, boundary, authority
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        transaction_module._publish_successor_ready_transaction(
+            transaction,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+    path = output / (
+        transaction_module.PROTOCOL_FILE
+        if authority == "protocol"
+        else transaction_module.RECEIPT_FILE
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if authority == "protocol":
+        record["owner_capability_digest"] = "0" * 64
+    else:
+        record["token_digest"] = "0" * 64
+    path.write_text(json.dumps(record), encoding="utf-8")
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["late.py"],
+            source="partial-publication-authority-test",
+        )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+@pytest.mark.parametrize("boundary", ["pre-publication", "after_publication_plan"])
+@pytest.mark.parametrize(
+    ("artifact", "name"),
+    [
+        ("graph", "graph.json"),
+        ("manifest", "manifest.json"),
+        ("other", "other-managed.json"),
+    ],
+)
+def test_incomplete_successor_ready_enqueue_rejects_substituted_public_inventory(
+    tmp_path, boundary, artifact, name
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path, include_other_artifact=True)
+    )
+    if boundary == "after_publication_plan":
+        with pytest.raises(RuntimeError, match=boundary):
+            transaction_module._publish_successor_ready_transaction(
+                transaction,
+                failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                if phase == boundary
+                else None,
+            )
+    (output / name).write_bytes(f"substituted-{artifact}".encode())
+    workspace = output.parent / marker["workspace_name"]
+    before = _file_bytes(output)
+    prepared_before = _file_bytes(workspace)
+
+    with pytest.raises(PendingTransactionError):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["late.py"],
+            source="public-inventory-substitution-test",
+        )
+
+    assert _file_bytes(output) == before
+    assert _file_bytes(workspace) == prepared_before
+
+
+def test_transaction_status_exposes_only_bounded_successor_ready_phase(tmp_path):
+    _root, output, _transaction, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+
+    status = transaction_status(output)
+
+    assert status["prepared_creation"] == {"state": "successor-ready"}
+    encoded = json.dumps(status, sort_keys=True)
+    for private_value in (
+        marker["token_digest"],
+        marker["plan_digest"],
+        marker["workspace_name"],
+    ):
+        assert private_value not in encoded
+
+
+def test_transaction_status_rejects_corrupt_successor_ready_marker_without_mutation(
+    tmp_path,
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, _transaction, _token, _admission, _marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    marker_path = output / transaction_module.PREPARED_FILE
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["plan_digest"] = "0" * 64
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        transaction_status(output)
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("field", ["schema", "protocol_epoch"])
+def test_successor_ready_boolean_version_is_rejected_without_mutation(
+    tmp_path, field
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, _transaction, _token, _admission, _marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    marker_path = output / transaction_module.PREPARED_FILE
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker[field] = True
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        transaction_status(output)
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("authority", ["admission", "watermark"])
+@pytest.mark.parametrize("field", ["schema", "protocol_epoch"])
+def test_merge_authority_boolean_version_is_rejected_without_mutation(
+    tmp_path, authority, field
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
+    before = _file_bytes(output)
+    if authority == "admission":
+        raw = transaction_module._merge_pending_admission_json(admission)
+        raw[field] = True
+        with transaction_module.pin_output(output, mutation=False) as capability:
+            with pytest.raises(PendingTransactionError):
+                transaction_module._merge_pending_admission_from_json(
+                    capability, raw
+                )
+    else:
+        graph_path = output / "graph.json"
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["graph"][GRAPH_WATERMARK_KEY][field] = True
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        before = _file_bytes(output)
+        with pytest.raises(PendingTransactionError):
+            transaction_module._open_merge_pending_rebuild_snapshot(graph_path)
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    ("boundary", "mutation"),
+    [
+        ("after_prepared_rebound", "public-marker"),
+        ("after_token_live", "target-owner"),
+        ("after_prepared_owner_written", "internal-owner"),
+    ],
+)
+def test_prepared_transfer_target_substitution_blocks_recovery_without_mutation(
+    tmp_path, boundary, mutation
+):
+    import graphify.transaction as transaction_module
+
+    root, output, predecessor, _token, _admission, marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(
+                RuntimeError(name)
+            )
+            if name == boundary
+            else None,
+        )
+    journal = json.loads(
+        (output / transaction_module.TOKEN_TRANSITION_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    target_raw = journal["target_transaction"]
+    if mutation == "public-marker":
+        path = output / transaction_module.PREPARED_FILE
+    elif mutation == "target-owner":
+        path = output / transaction_module.TRANSACTION_FILE
+    else:
+        path = (
+            output.parent
+            / marker["workspace_name"]
+            / transaction_module._PREPARED_OWNER_FILE
+        )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["token_digest"] = "0" * 64
+    path.write_text(json.dumps(record), encoding="utf-8")
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError):
+        recover_transaction(
+            "update",
+            root,
+            output=output,
+            now=10**12,
+            expected_transaction_id=target_raw["id"],
+            expected_generation=target_raw["generation"],
+            expected_output_identity=predecessor.output_identity,
+        )
+
+    assert _file_bytes(output) == before
+
+
+def test_prepared_takeover_target_token_is_inert_until_transition_retires(tmp_path):
+    import graphify.transaction as transaction_module
+
+    root, output, predecessor, _token, _admission, _marker = (
+        _merge_successor_ready(tmp_path)
+    )
+    with pytest.raises(RuntimeError, match="after_token_created"):
+        takeover_drainer(
+            output,
+            now=10**12,
+            transition_failpoint=lambda name: (_ for _ in ()).throw(
+                RuntimeError(name)
+            )
+            if name == "after_token_created"
+            else None,
+        )
+    journal = json.loads(
+        (output / transaction_module.TOKEN_TRANSITION_FILE).read_text(
+            encoding="utf-8"
+        )
+    )
+    token_path = output / journal["token_name"]
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="transition"):
+        run_token(token_path, ["-c", "raise AssertionError('must stay inert')"])
+    assert _file_bytes(output) == before
+    target_raw = journal["target_transaction"]
+    recovered = recover_transaction(
+        "update",
+        root,
+        output=output,
+        now=10**12,
+        expected_transaction_id=target_raw["id"],
+        expected_generation=target_raw["generation"],
+        expected_output_identity=predecessor.output_identity,
+    )
+    transaction_module._finalize_successor_ready_transaction(recovered)
+
+
+def test_detached_merge_watermark_binds_exact_raw_inputs_and_union_content(tmp_path):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    snapshots = [json.loads(_graph(4)) for _ in range(3)]
+    snapshots[1]["nodes"] = [{"id": "current", "label": "current"}]
+    snapshots[2]["nodes"] = [{"id": "other", "label": "other"}]
+    raw_inputs = (
+        json.dumps(snapshots[0], indent=2).encode(),
+        (json.dumps(snapshots[1], separators=(",", ":")) + "\n").encode(),
+        json.dumps(snapshots[2], sort_keys=False).encode(),
+    )
+    for path, payload in zip((base, current, other), raw_inputs, strict=True):
+        path.write_bytes(payload)
+
+    merge_detached_snapshots(base, current, other)
+
+    merged = json.loads(current.read_text(encoding="utf-8"))
+    watermark = merged["graph"][GRAPH_WATERMARK_KEY]
+    assert set(watermark) == {
+        "schema",
+        "protocol_epoch",
+        "state",
+        "selector",
+        "input_digests",
+        "merged_content_digest",
+        "snapshot_generation",
+    }
+    assert watermark["selector"] == {
+        "kind": "graphify.detached-union",
+        "graph_name": "graph.json",
+        "roles": ["ancestor", "current", "other"],
+    }
+    assert watermark["input_digests"] == [
+        hashlib.sha256(payload).hexdigest() for payload in raw_inputs
+    ]
+    union_content = dict(merged)
+    union_metadata = dict(union_content["graph"])
+    union_metadata.pop(GRAPH_WATERMARK_KEY)
+    union_content["graph"] = union_metadata
+    canonical_union = json.dumps(
+        union_content, sort_keys=True, separators=(",", ":")
+    ).encode()
+    merged_content_digest = hashlib.sha256(canonical_union).hexdigest()
+    assert watermark["merged_content_digest"] == merged_content_digest
+    generation_payload = json.dumps(
+        {
+            "schema": 1,
+            "selector": watermark["selector"],
+            "input_digests": watermark["input_digests"],
+            "merged_content_digest": merged_content_digest,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    assert watermark["snapshot_generation"] == hashlib.sha256(
+        b"graphify.merge-pending.snapshot-generation.v1\0" + generation_payload
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_enqueue_journal",
+        "after_enqueue_queue",
+        "after_enqueue_predecessor_authority",
+        "after_enqueue_predecessor",
+        "after_enqueue_drainer",
+        "after_enqueue_retired",
+    ],
+)
+def test_merge_pending_enqueue_recovers_exact_admission_transfer(tmp_path, boundary):
+    import graphify.transaction as transaction_module
+
+    root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
+    with pytest.raises(RuntimeError, match=boundary):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["current.py"],
+            merge_admission=admission,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+
+    journal_path = output / transaction_module.ENQUEUE_FILE
+    if journal_path.exists():
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        assert journal["merge_admission"]["snapshot_generation"] == (
+            admission.snapshot_generation
+        )
+        assert journal["state"] in {
+            "planned",
+            "queued",
+            "predecessor-bound",
+            "reserved",
+        }
+
+    receipt = queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["current.py"],
+        merge_admission=admission,
+    )
+    predecessor = json.loads(
+        (output / transaction_module.PREDECESSOR_FILE).read_text(encoding="utf-8")
+    )
+    assert predecessor["state"] == "preserved-complete"
+    assert predecessor["merge_admission"]["snapshot_generation"] == (
+        admission.snapshot_generation
+    )
+    assert predecessor["merge_admission"]["graph_identity"] == (
+        admission.graph_identity.json()
+    )
+    assert receipt.drainer.generation == admission.predecessor_generation + 1
+    assert not journal_path.exists()
+    queued = [
+        json.loads(line)
+        for line in (output / transaction_module.QUEUE_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [item["id"] for item in queued] == [receipt.id]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_enqueue_queue",
+        "after_enqueue_predecessor",
+        "after_enqueue_drainer",
+    ],
+    ids=["queued", "predecessor-bound", "reserved"],
+)
+def test_merge_pending_enqueue_replay_preserves_late_second_intent(
+    tmp_path, boundary
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
+    first_path = root / "first.py"
+    late_path = root / "late.py"
+    first_path.write_text("first = 1\n", encoding="utf-8")
+    late_path.write_text("late = 1\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match=boundary):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=[first_path],
+            merge_admission=admission,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+
+    late = queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=[late_path],
+        merge_admission=admission,
+    )
+    queued = [
+        json.loads(line)
+        for line in (output / transaction_module.QUEUE_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [Path(item["changed_paths"][0]).name for item in queued] == [
+        "first.py",
+        "late.py",
+    ]
+    assert queued[-1]["id"] == late.id
+    assert not (output / transaction_module.ENQUEUE_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda watermark: watermark.update(unexpected=True),
+        lambda watermark: watermark.update(selector={"kind": "other"}),
+        lambda watermark: watermark.update(input_digests=["0" * 64] * 3),
+        lambda watermark: watermark.update(merged_content_digest="0" * 64),
+        lambda watermark: watermark.update(snapshot_generation="0" * 64),
+    ],
+    ids=["extra", "selector", "inputs", "content", "generation"],
+)
+def test_private_merge_pending_opener_rejects_watermark_drift_zero_mutation(
+    tmp_path, mutation
+):
+    import graphify.transaction as transaction_module
+
+    _root, output, data, _payload, _admission = _merge_pending_owner(tmp_path)
+    mutation(data["graph"][GRAPH_WATERMARK_KEY])
+    (output / "graph.json").write_text(
+        json.dumps(data, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="merge-pending"):
+        transaction_module._open_merge_pending_rebuild_snapshot(
+            output / "graph.json"
+        )
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("mutation", ["content", "identity"])
+def test_merge_pending_enqueue_revalidates_live_graph_zero_mutation(
+    tmp_path, mutation
+):
+    root, output, data, payload, admission = _merge_pending_owner(tmp_path)
+    graph_path = output / "graph.json"
+    if mutation == "content":
+        data["nodes"].append({"id": "substituted"})
+        graph_path.write_text(
+            json.dumps(data, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+    else:
+        graph_path.unlink()
+        graph_path.write_bytes(payload)
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="merge-pending"):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["current.py"],
+            merge_admission=admission,
+        )
+
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_enqueue_journal",
+        "after_enqueue_queue",
+        "after_enqueue_drainer",
+        "after_enqueue_retired",
+    ],
+)
+def test_legacy_enqueue_and_predecessor_records_omit_merge_admission(
+    tmp_path, boundary
+):
+    import graphify.transaction as transaction_module
+
+    root, output, transaction, _token = _owner(tmp_path)
+    _commit_owner_generation(output, transaction)
+    finish_transaction(transaction)
+    with pytest.raises(RuntimeError, match=boundary):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["legacy.py"],
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+    journal_path = output / transaction_module.ENQUEUE_FILE
+    if journal_path.exists():
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        assert "merge_admission" not in journal
+        assert set(journal) == {
+            "schema",
+            "protocol_epoch",
+            "state",
+            "output_identity",
+            "item",
+            "item_digest",
+            "operation",
+            "candidate",
+            "predecessor_queue",
+            "predecessor_queue_digest",
+            "predecessor_queue_record",
+            "successor_queue",
+            "successor_queue_digest",
+            "staged_queue_name",
+            "staged_queue_record",
+            "successor_queue_record",
+            "predecessor_mode",
+            "predecessor_protocol",
+            "predecessor_receipt_digest",
+            "predecessor_graph_digest",
+            "legacy_pending_name",
+            "expected_drainer",
+            "successor_drainer",
+            "mutate_drainer",
+        }
+
+    receipt = queue_rebuild(
+        "update", root, output=output, changed_paths=["legacy.py"]
+    )
+    predecessor = json.loads(
+        (output / transaction_module.PREDECESSOR_FILE).read_text(encoding="utf-8")
+    )
+    assert "merge_admission" not in predecessor
+    assert set(predecessor) == {
+        "schema",
+        "protocol_epoch",
+        "state",
+        "output_identity",
+        "successor_generation",
+        "receipt_digest",
+        "protocol",
+        "drainer",
+        "successor_transaction",
+        "prepared_workspace",
+    }
+    queued = [
+        json.loads(line)
+        for line in (output / transaction_module.QUEUE_FILE)
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [item["id"] for item in queued] == [receipt.id]
+    assert not journal_path.exists()
+
+
+@pytest.mark.parametrize("record_name", ["enqueue", "predecessor"])
+@pytest.mark.parametrize("corruption", ["null", "extra"])
+def test_merge_admission_records_reject_schema_drift_zero_mutation(
+    tmp_path, record_name, corruption
+):
+    import graphify.transaction as transaction_module
+
+    root, output, _data, _payload, admission = _merge_pending_owner(tmp_path)
+    boundary = (
+        "after_enqueue_journal"
+        if record_name == "enqueue"
+        else "after_enqueue_predecessor"
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["current.py"],
+            merge_admission=admission,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+    path = output / (
+        transaction_module.ENQUEUE_FILE
+        if record_name == "enqueue"
+        else transaction_module.PREDECESSOR_FILE
+    )
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if corruption == "null":
+        record["merge_admission"] = None
+    else:
+        record["merge_admission"]["unexpected"] = True
+    path.write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="merge-pending admission"):
+        transaction_status(output)
+
+    assert _file_bytes(output) == before
+
+
+def test_private_merge_pending_opener_requires_receipt_current_input_digest(tmp_path):
+    import graphify.transaction as transaction_module
+
+    _root, output, data, _payload, _admission = _merge_pending_owner(tmp_path)
+    watermark = data["graph"][GRAPH_WATERMARK_KEY]
+    watermark["input_digests"][1] = "0" * 64
+    generation_payload = json.dumps(
+        {
+            "schema": 1,
+            "selector": watermark["selector"],
+            "input_digests": watermark["input_digests"],
+            "merged_content_digest": watermark["merged_content_digest"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    watermark["snapshot_generation"] = hashlib.sha256(
+        b"graphify.merge-pending.snapshot-generation.v1\0" + generation_payload
+    ).hexdigest()
+    (output / "graph.json").write_text(
+        json.dumps(data, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    before = _file_bytes(output)
+
+    with pytest.raises(PendingTransactionError, match="predecessor graph"):
+        transaction_module._open_merge_pending_rebuild_snapshot(
+            output / "graph.json"
+        )
+
+    assert _file_bytes(output) == before
 
 
 def test_detached_merge_rejects_oversize_and_unsupported_watermark(tmp_path):

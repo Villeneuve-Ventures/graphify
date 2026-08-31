@@ -1,4 +1,5 @@
 """Tests for watch.py - file watcher helpers (no watchdog required)."""
+import hashlib
 import json
 import os
 import subprocess
@@ -1766,6 +1767,825 @@ def test_transactional_watch_accepts_legacy_baseline_before_creating_markers(
     assert _rebuild_code(tmp_path, changed_paths=[source]) is True
     graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
     assert graph["graph"]["_graphify_protocol"]["state"] == "active"
+
+
+def test_transactional_watch_finalizes_merge_pending_union(tmp_path):
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY,
+        PendingTransactionError,
+        merge_detached_snapshots,
+        open_graph_snapshot,
+    )
+    from graphify.watch import _rebuild_code
+
+    current_root = tmp_path / "current"
+    current_root.mkdir()
+    current_source = current_root / "current_branch.py"
+    current_source.write_text(
+        "def current_branch():\n    return 'current'\n", encoding="utf-8"
+    )
+    assert _rebuild_code(
+        current_root, no_cluster=True, block_on_lock=True
+    ) is True
+    current_output = current_root / "graphify-out"
+    current_graph = current_output / "graph.json"
+    predecessor_receipt = json.loads(
+        (current_output / ".graphify_generation.json").read_text(encoding="utf-8")
+    )
+    ancestor = tmp_path / "ancestor.json"
+    ancestor.write_bytes(current_graph.read_bytes())
+
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other_source = other_root / "other_branch.py"
+    other_source.write_text(
+        "def other_branch():\n    return 'other'\n", encoding="utf-8"
+    )
+    assert _rebuild_code(other_root, no_cluster=True, block_on_lock=True) is True
+    (current_root / other_source.name).write_bytes(other_source.read_bytes())
+
+    merge_detached_snapshots(
+        ancestor,
+        current_graph,
+        other_root / "graphify-out" / "graph.json",
+    )
+    pending = json.loads(current_graph.read_text(encoding="utf-8"))
+    assert pending["graph"][GRAPH_WATERMARK_KEY]["state"] == "merge_pending"
+    with pytest.raises(PendingTransactionError, match="merge_pending"):
+        open_graph_snapshot(current_graph, purpose="ordinary-union-recovery-test")
+
+    assert _rebuild_code(
+        current_root,
+        changed_paths=[current_source],
+        no_cluster=True,
+        block_on_lock=True,
+    ) is True
+
+    successor = open_graph_snapshot(current_graph, purpose="post-union-recovery-test")
+    successor_receipt = json.loads(
+        (current_output / ".graphify_generation.json").read_text(encoding="utf-8")
+    )
+    assert successor.data["graph"][GRAPH_WATERMARK_KEY]["state"] == "active"
+    assert successor_receipt["generation"] > predecessor_receipt["generation"]
+    assert successor_receipt["artifact_digests"]["graph.json"] == hashlib.sha256(
+        current_graph.read_bytes()
+    ).hexdigest()
+    node_ids = {node["id"] for node in successor.data["nodes"]}
+    assert {"current_branch_current_branch", "other_branch_other_branch"} <= node_ids
+
+
+def test_watch_preserves_ordinary_reader_error_when_private_merge_is_inapplicable(
+    tmp_path, monkeypatch, capsys
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_bytes(b"not-a-merge")
+
+    def ordinary(*args, **kwargs):
+        raise transaction_module.PendingTransactionError("ordinary admission sentinel")
+
+    def private(*args, **kwargs):
+        raise transaction_module.PendingTransactionError("private admission sentinel")
+
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", ordinary)
+    monkeypatch.setattr(
+        transaction_module, "_open_merge_pending_watch_snapshot", private
+    )
+    assert _rebuild_code(tmp_path, changed_paths=[tmp_path / "changed.py"]) is False
+    message = capsys.readouterr().out
+    assert "ordinary admission sentinel" in message
+    assert "private admission sentinel" not in message
+
+
+def _merge_pending_watch_fixture(tmp_path: Path):
+    from graphify.transaction import merge_detached_snapshots
+    from graphify.watch import _rebuild_code
+
+    current = tmp_path / "current"
+    other = tmp_path / "other"
+    current.mkdir()
+    other.mkdir()
+    current_source = current / "current.py"
+    other_source = other / "other.py"
+    current_source.write_text("def current():\n    return 1\n", encoding="utf-8")
+    other_source.write_text("def other():\n    return 2\n", encoding="utf-8")
+    assert _rebuild_code(current, no_cluster=True, block_on_lock=True)
+    assert _rebuild_code(other, no_cluster=True, block_on_lock=True)
+    output = current / "graphify-out"
+    graph = output / "graph.json"
+    ancestor = tmp_path / "ancestor.json"
+    ancestor.write_bytes(graph.read_bytes())
+    (current / other_source.name).write_bytes(other_source.read_bytes())
+    merge_detached_snapshots(
+        ancestor, graph, other / "graphify-out" / "graph.json"
+    )
+    return current, output, current_source
+
+
+def test_subprocess_update_recovers_merge_pending_union(tmp_path):
+    from graphify import transaction as transaction_module
+
+    root, output, _source = _merge_pending_watch_fixture(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "graphify", "update", str(root), "--no-cluster"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="subprocess-update-test"
+    )
+    assert {"current_current", "other_other"} <= {
+        node["id"] for node in snapshot.data["nodes"]
+    }
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+def test_watcher_dispatch_recovers_merge_pending_union(tmp_path):
+    import threading
+
+    from graphify import transaction as transaction_module
+    from graphify import watch as watch_module
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    thread = threading.Thread(
+        target=watch_module.watch,
+        args=(root,),
+        kwargs={"debounce": 0.1},
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(1.25)
+    source.write_text(
+        "def current():\n    return 4\n\ndef dispatched():\n    return current()\n",
+        encoding="utf-8",
+    )
+    deadline = time.monotonic() + 12.0
+    snapshot = None
+    while time.monotonic() < deadline:
+        try:
+            candidate = transaction_module.open_graph_snapshot(
+                output / "graph.json", purpose="watcher-dispatch-test"
+            )
+        except transaction_module.PendingTransactionError:
+            time.sleep(0.1)
+            continue
+        node_ids = {node["id"] for node in candidate.data["nodes"]}
+        if {"current_current", "current_dispatched", "other_other"} <= node_ids:
+            snapshot = candidate
+            break
+        time.sleep(0.1)
+    assert snapshot is not None, "watcher did not publish the recovered union"
+    assert thread.is_alive()
+
+
+@pytest.mark.parametrize("boundary", ["successor-ready", "publication"])
+def test_merge_pending_watch_drains_late_intent_at_successor_boundary(
+    tmp_path, monkeypatch, boundary
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_publish = transaction_module._publish_successor_ready_transaction
+    injected = False
+
+    def queue_late_intent():
+        nonlocal injected
+        if not injected:
+            injected = True
+            late = root / "late.py"
+            late.write_text("def late():\n    return 3\n", encoding="utf-8")
+            transaction_module.queue_rebuild(
+                "update",
+                root,
+                output=output,
+                changed_paths=[late],
+                source="late-merge-test",
+            )
+
+    def publish_then_queue(transaction, *, failpoint=None):
+        if boundary == "successor-ready":
+            queue_late_intent()
+        generation = real_publish(transaction, failpoint=failpoint)
+        if boundary == "publication":
+            queue_late_intent()
+        return generation
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_publish_successor_ready_transaction",
+        publish_then_queue,
+    )
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+    graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+    assert {"current_current", "other_other", "late_late"} <= {
+        node["id"] for node in graph["nodes"]
+    }
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+    assert not (output / transaction_module.QUEUE_FILE).read_text(encoding="utf-8")
+
+
+def test_merge_pending_watch_recovers_expired_successor_ready_owner(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_after_successor_ready(transaction, *, close=True, failpoint=None):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_successor_ready"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_after_successor_ready,
+    )
+    with pytest.raises(RuntimeError, match="after_successor_ready"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    marker = json.loads(
+        (output / transaction_module.PREPARED_FILE).read_text(encoding="utf-8")
+    )
+    assert marker["state"] == "successor-ready"
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        real_finalize,
+    )
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="owner-loss-terminal-test"
+    )
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+    assert {"current_current", "other_other"} <= {
+        node["id"] for node in snapshot.data["nodes"]
+    }
+
+
+def test_merge_pending_watch_retains_intent_while_successor_ready_owner_is_live(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_after_successor_ready(transaction, *, close=True, failpoint=None):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_successor_ready"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_after_successor_ready,
+    )
+    with pytest.raises(RuntimeError, match="after_successor_ready"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    late = root / "late.py"
+    late.write_text("def late():\n    return 3\n", encoding="utf-8")
+
+    assert _rebuild_code(
+        root,
+        changed_paths=[late],
+        no_cluster=True,
+        block_on_lock=True,
+    ) is False
+    assert str(late) in (
+        output / transaction_module.QUEUE_FILE
+    ).read_text(encoding="utf-8")
+
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        real_finalize,
+    )
+
+    assert _rebuild_code(
+        root,
+        changed_paths=[late],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="live-owner-late-intent-test"
+    )
+    assert {"current_current", "other_other", "late_late"} <= {
+        node["id"] for node in snapshot.data["nodes"]
+    }
+    assert not (output / transaction_module.QUEUE_FILE).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    ["after_publication_plan", "after_receipt", "after_protocol"],
+)
+def test_merge_pending_watch_recovers_expired_owner_after_successor_publication_crash(
+    tmp_path, monkeypatch, boundary
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_at_publication_boundary(transaction, *, close=True, failpoint=None):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == boundary
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_at_publication_boundary,
+    )
+    with pytest.raises(RuntimeError, match=boundary):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    crashed_graph = json.loads(
+        (output / "graph.json").read_text(encoding="utf-8")
+    )
+    assert crashed_graph["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "state"
+    ] == "active"
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        real_finalize,
+    )
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="successor-publication-crash-test"
+    )
+    receipt = json.loads(
+        (output / transaction_module.RECEIPT_FILE).read_text(encoding="utf-8")
+    )
+    protocol = json.loads(
+        (output / transaction_module.PROTOCOL_FILE).read_text(encoding="utf-8")
+    )
+    watermark = snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY]
+    assert watermark["state"] == "active"
+    assert watermark["generation"] == receipt["generation"]
+    assert protocol["state"] == "COMPLETE"
+    assert protocol["receipt_digest"] == hashlib.sha256(
+        (output / transaction_module.RECEIPT_FILE).read_bytes()
+    ).hexdigest()
+    assert {"current_current", "other_other"} <= {
+        node["id"] for node in snapshot.data["nodes"]
+    }
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+    assert not (output / transaction_module.TOKEN_TRANSITION_FILE).exists()
+    assert not list(output.glob(".graphify_transaction_token.*"))
+    status = transaction_module.transaction_status(output)
+    assert status["transaction"] is None
+    assert status["prepared_creation"] is None
+    assert status["token_transition"] is None
+    assert not (output / transaction_module.QUEUE_FILE).read_text(encoding="utf-8")
+
+
+def test_merge_pending_watch_replays_prepared_retirement_after_completed_live_crash(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_after_protocol(transaction, *, close=True, failpoint=None):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_protocol"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_after_protocol,
+    )
+    with pytest.raises(RuntimeError, match="after_protocol"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        real_finalize,
+    )
+
+    real_recover = transaction_module._recover_successor_ready_transaction
+
+    def crash_before_prepared_retirement(output_path, *, now=None):
+        return real_recover(
+            output_path,
+            now=now,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_completed_live_recovery"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_recover_successor_ready_transaction",
+        crash_before_prepared_retirement,
+    )
+    with pytest.raises(RuntimeError, match="after_completed_live_recovery"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    assert (output / transaction_module.PREPARED_FILE).exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_recover_successor_ready_transaction",
+        real_recover,
+    )
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="completed-live-retirement-replay-test"
+    )
+    receipt_path = output / transaction_module.RECEIPT_FILE
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    protocol = json.loads(
+        (output / transaction_module.PROTOCOL_FILE).read_text(encoding="utf-8")
+    )
+    watermark = snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY]
+    assert watermark["state"] == "active"
+    assert watermark["generation"] == receipt["generation"]
+    assert protocol["state"] == "COMPLETE"
+    assert protocol["receipt_digest"] == hashlib.sha256(
+        receipt_path.read_bytes()
+    ).hexdigest()
+    assert {"current_current", "other_other"} <= {
+        node["id"] for node in snapshot.data["nodes"]
+    }
+    for name in (
+        transaction_module.PREPARED_FILE,
+        transaction_module.TRANSACTION_FILE,
+        transaction_module.TRANSITION_FILE,
+        transaction_module.TOKEN_TRANSITION_FILE,
+    ):
+        assert not (output / name).exists()
+    assert not list(output.glob(".graphify_transaction_token.*"))
+    predecessor_path = output / transaction_module.PREDECESSOR_FILE
+    if predecessor_path.exists():
+        predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+        assert predecessor["state"] == "preserved-complete"
+        assert predecessor["receipt_digest"] == protocol["receipt_digest"]
+        assert predecessor["protocol"] == protocol
+
+
+def test_merge_pending_watch_recovers_no_live_close_pending_before_retirement(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_after_successor_publication(
+        transaction, *, close=True, failpoint=None
+    ):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_successor_ready_publication"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_after_successor_publication,
+    )
+    with pytest.raises(RuntimeError, match="after_successor_ready_publication"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        real_finalize,
+    )
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    real_recover = transaction_module._recover_successor_ready_transaction
+
+    def crash_recovery_after_live_remove(output_path, *, now=None):
+        return real_recover(
+            output_path,
+            now=now,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_live_remove"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_recover_successor_ready_transaction",
+        crash_recovery_after_live_remove,
+    )
+    with pytest.raises(RuntimeError, match="after_live_remove"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    assert (output / transaction_module.PREPARED_FILE).exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+    close_pending = json.loads(
+        (output / transaction_module.DRAINER_FILE).read_text(encoding="utf-8")
+    )
+    assert close_pending["state"] == "CLOSE_PENDING"
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_recover_successor_ready_transaction",
+        real_recover,
+    )
+    assert _rebuild_code(
+        root,
+        changed_paths=[source],
+        no_cluster=True,
+        block_on_lock=True,
+    )
+
+    snapshot = transaction_module.open_graph_snapshot(
+        output / "graph.json", purpose="no-live-close-pending-recovery-test"
+    )
+    receipt_path = output / transaction_module.RECEIPT_FILE
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    protocol = json.loads(
+        (output / transaction_module.PROTOCOL_FILE).read_text(encoding="utf-8")
+    )
+    assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
+        "generation"
+    ] == receipt["generation"]
+    assert protocol["receipt_digest"] == hashlib.sha256(
+        receipt_path.read_bytes()
+    ).hexdigest()
+    assert {"current_current", "other_other"} <= {
+        node["id"] for node in snapshot.data["nodes"]
+    }
+    assert not (output / transaction_module.PREPARED_FILE).exists()
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+    assert not (output / transaction_module.TRANSITION_FILE).exists()
+    assert not (output / transaction_module.TOKEN_TRANSITION_FILE).exists()
+    assert not list(output.glob(".graphify_transaction_token.*"))
+
+
+def test_no_live_claimed_drainer_cannot_retire_successor_ready_marker(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_after_protocol(transaction, *, close=True, failpoint=None):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_protocol"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_after_protocol,
+    )
+    with pytest.raises(RuntimeError, match="after_protocol"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    (output / transaction_module.TRANSACTION_FILE).unlink()
+    before = {
+        path.name: path.read_bytes()
+        for path in output.iterdir()
+        if path.is_file()
+    }
+
+    with pytest.raises(
+        transaction_module.PendingTransactionError,
+        match="requires terminal authority",
+    ):
+        transaction_module._recover_successor_ready_transaction(output)
+
+    after = {
+        path.name: path.read_bytes()
+        for path in output.iterdir()
+        if path.is_file()
+    }
+    assert after == before
+    assert (output / transaction_module.PREPARED_FILE).exists()
+
+
+def test_reserved_successor_rejects_substituted_predecessor_drainer_tuple(
+    tmp_path, monkeypatch
+):
+    from graphify import transaction as transaction_module
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    real_finalize = transaction_module._finalize_prepared_transaction
+
+    def crash_after_protocol(transaction, *, close=True, failpoint=None):
+        return real_finalize(
+            transaction,
+            close=close,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_protocol"
+            else None,
+        )
+
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        crash_after_protocol,
+    )
+    with pytest.raises(RuntimeError, match="after_protocol"):
+        _rebuild_code(
+            root,
+            changed_paths=[source],
+            no_cluster=True,
+            block_on_lock=True,
+        )
+    transaction_module.queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["late.py"],
+        source="reserved-predecessor-substitution-test",
+    )
+    drainer_path = output / transaction_module.DRAINER_FILE
+    drainer = json.loads(drainer_path.read_text(encoding="utf-8"))
+    drainer["lease_deadline"] = 0.0
+    drainer_path.write_text(
+        json.dumps(drainer, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        transaction_module,
+        "_finalize_prepared_transaction",
+        real_finalize,
+    )
+
+    with pytest.raises(RuntimeError, match="after_completed_live_recovery"):
+        transaction_module._recover_successor_ready_transaction(
+            output,
+            failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+            if name == "after_completed_live_recovery"
+            else None,
+        )
+    reserved = json.loads(drainer_path.read_text(encoding="utf-8"))
+    assert reserved["state"] == "reserved"
+    assert not (output / transaction_module.TRANSACTION_FILE).exists()
+    assert (output / transaction_module.PREPARED_FILE).exists()
+
+    predecessor_path = output / transaction_module.PREDECESSOR_FILE
+    predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+    predecessor["drainer"]["launch_nonce"] = "0" * 32
+    predecessor_path.write_text(
+        json.dumps(predecessor, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    before = {
+        path.name: path.read_bytes()
+        for path in output.iterdir()
+        if path.is_file()
+    }
+
+    with pytest.raises(
+        transaction_module.PendingTransactionError,
+        match="reserved successor predecessor authority changed",
+    ):
+        transaction_module._recover_successor_ready_transaction(output)
+
+    after = {
+        path.name: path.read_bytes()
+        for path in output.iterdir()
+        if path.is_file()
+    }
+    assert after == before
+    assert (output / transaction_module.PREPARED_FILE).exists()
 
 
 def test_transactional_watch_first_epoch_regenerates_historical_callflow(
