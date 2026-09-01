@@ -438,6 +438,18 @@ fi
 """
 
 
+_POST_COMMIT_OUTPUT_EXCLUSION = """\
+GRAPHIFY_REPO_OUTPUT=__GRAPHIFY_REPO_OUTPUT__
+export GRAPHIFY_REPO_OUTPUT
+if _GFY_PARENT=$(git rev-parse --verify HEAD^ 2>/dev/null); then
+    if git diff --quiet "$_GFY_PARENT" HEAD -- . \
+        ":(top,literal,exclude)$GRAPHIFY_REPO_OUTPUT" 2>/dev/null; then
+        exit 0
+    fi
+fi
+"""
+
+
 _HOOK_SCRIPT = """\
 # graphify-hook-start
 # Auto-rebuilds the knowledge graph after each commit (code files only, no LLM needed).
@@ -455,8 +467,9 @@ if [ -n "${WINDIR:-}" ] || [ -n "${MSYSTEM:-}" ]; then
     export GRAPHIFY_MAX_WORKERS="${GRAPHIFY_MAX_WORKERS:-1}"
 fi
 
-# Bind recovery to the same output path recorded in .gitattributes. This must
-# precede interpreter detection because its trust-root lookup reads GRAPHIFY_OUT.
+# Bind recovery to the exact output selected at install time. Absolute shared
+# outputs intentionally differ from the repo-relative .gitattributes selector.
+# This must precede interpreter detection because trust lookup reads GRAPHIFY_OUT.
 GRAPHIFY_OUT=__GRAPHIFY_OUTPUT__
 export GRAPHIFY_OUT
 
@@ -478,14 +491,9 @@ if [ -z "$CHANGED" ]; then
 fi
 
 # Ask Git whether any non-output path changed instead of parsing its quoted
-# --name-only display. The literal top-level exclusion keeps GRAPHIFY_OUT as
-# inert path data and handles non-ASCII names without regex or shell evaluation.
-if _GFY_PARENT=$(git rev-parse --verify HEAD^ 2>/dev/null); then
-    if git diff --quiet "$_GFY_PARENT" HEAD -- . \
-        ":(top,literal,exclude)$GRAPHIFY_OUT" 2>/dev/null; then
-        exit 0
-    fi
-fi
+# --name-only display. A relative output gets a literal top-level exclusion;
+# shared absolute outputs are outside the repository and omit this block.
+__GRAPHIFY_OUTPUT_EXCLUSION__
 
 """ + _PYTHON_DETECT + """
 export GRAPHIFY_CHANGED="$CHANGED"
@@ -566,7 +574,8 @@ if [ -n "${WINDIR:-}" ] || [ -n "${MSYSTEM:-}" ]; then
     export GRAPHIFY_MAX_WORKERS="${GRAPHIFY_MAX_WORKERS:-1}"
 fi
 
-# Bind recovery to the same output path recorded in .gitattributes.
+# Bind recovery to the exact output selected at install time; absolute shared
+# outputs intentionally differ from the repo-relative .gitattributes selector.
 GRAPHIFY_OUT=__GRAPHIFY_OUTPUT__
 export GRAPHIFY_OUT
 if [ ! -d "$GRAPHIFY_OUT" ]; then
@@ -846,6 +855,27 @@ def _merge_output_path() -> str:
     return out.rstrip("/")
 
 
+def _hook_output_path() -> str:
+    """Return the exact output path that installed hooks must reopen."""
+    from graphify.paths import GRAPHIFY_OUT
+
+    return GRAPHIFY_OUT or "graphify-out"
+
+
+def _hook_repo_output_path(root: Path) -> str:
+    """Return a repo-relative hook exclusion, or empty for shared outputs."""
+    out = _hook_output_path()
+    path = Path(out)
+    if path.is_absolute():
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            return ""
+    if _WINDOWS_DRIVE_RE.match(out) or "\\" in out:
+        return ""
+    return out.rstrip("/")
+
+
 def _merge_attr_line() -> str:
     """The .gitattributes line assigning the graphify merge driver to graph.json.
 
@@ -914,6 +944,7 @@ def _register_merge_driver(root: Path) -> str:
         for key, value in (
             ("merge.graphify.name", "graphify graph.json union merge"),
             ("merge.graphify.driver", driver),
+            ("merge.graphify.recursive", "binary"),
         ):
             _sp.run(
                 ["git", "-C", str(root), "config", key, value],
@@ -940,7 +971,11 @@ def _register_merge_driver(root: Path) -> str:
 def _unregister_merge_driver(root: Path) -> str:
     """Remove the merge-driver git config keys and the .gitattributes line."""
     import subprocess as _sp
-    for key in ("merge.graphify.name", "merge.graphify.driver"):
+    for key in (
+        "merge.graphify.name",
+        "merge.graphify.driver",
+        "merge.graphify.recursive",
+    ):
         try:
             # --unset exits nonzero if the key is absent; that is fine.
             _sp.run(
@@ -978,12 +1013,30 @@ def _merge_driver_status(root: Path) -> str:
         cfg_ok = res.returncode == 0 and bool(res.stdout.strip())
     except OSError:
         cfg_ok = False
+    try:
+        recursive = _sp.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "config",
+                "--get",
+                "merge.graphify.recursive",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        recursive_ok = recursive.returncode == 0 and recursive.stdout.strip() == "binary"
+    except OSError:
+        recursive_ok = False
     attrs = root / ".gitattributes"
     attr_ok = attrs.exists() and _has_exact_merge_attr(
         attrs.read_text(encoding="utf-8"), _merge_attr_line()
     )
-    if cfg_ok and attr_ok:
+    if cfg_ok and attr_ok and recursive_ok:
         return "registered"
+    if cfg_ok and attr_ok:
+        return "partially registered (recursive driver missing or not binary)"
     if cfg_ok:
         return "partially registered (git config set, .gitattributes line missing)"
     if attr_ok:
@@ -1021,10 +1074,18 @@ def install(path: Path = Path(".")) -> str:
     # pin so it safely falls through to dynamic detection.
     pinned = _pinned_python()
     quoted_pinned = shlex.quote(pinned)
-    output_path = _merge_output_path()
+    output_path = _hook_output_path()
+    repo_output_path = _hook_repo_output_path(root)
     quoted_output = shlex.quote(output_path)
+    output_exclusion = ""
+    if repo_output_path:
+        output_exclusion = _POST_COMMIT_OUTPUT_EXCLUSION.replace(
+            "__GRAPHIFY_REPO_OUTPUT__", shlex.quote(repo_output_path)
+        )
     hook = _HOOK_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned).replace(
         "__GRAPHIFY_OUTPUT__", quoted_output
+    ).replace(
+        "__GRAPHIFY_OUTPUT_EXCLUSION__", output_exclusion
     )
     checkout = _CHECKOUT_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
     post_merge = _POST_MERGE_SCRIPT.replace(
