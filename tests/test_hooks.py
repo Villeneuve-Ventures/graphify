@@ -1102,7 +1102,7 @@ def test_install_rebinds_merge_driver_when_output_changes(tmp_path, monkeypatch)
         text=True,
     ).stdout
     assert "--managed-current custom-out/graph.json %O %A %B" in driver
-    for hook_name in ("post-commit", "post-merge"):
+    for hook_name in ("post-commit", "post-checkout", "post-merge"):
         hook = (repo / ".git" / "hooks" / hook_name).read_text(encoding="utf-8")
         assert "GRAPHIFY_OUT=custom-out\nexport GRAPHIFY_OUT\n" in hook
         assert "__GRAPHIFY_OUTPUT__" not in hook
@@ -1122,7 +1122,7 @@ def test_install_preserves_absolute_output_in_recovery_hooks(tmp_path, monkeypat
     install(repo)
 
     expected = f"GRAPHIFY_OUT={shlex.quote(str(shared_output))}\nexport GRAPHIFY_OUT\n"
-    for hook_name in ("post-commit", "post-merge"):
+    for hook_name in ("post-commit", "post-checkout", "post-merge"):
         hook = repo / ".git" / "hooks" / hook_name
         content = hook.read_text(encoding="utf-8")
         assert expected in content
@@ -1371,6 +1371,31 @@ def test_install_rejects_non_regular_post_merge_before_mutation(tmp_path, kind):
     assert not (hooks_dir / "post-commit").exists()
     assert not (hooks_dir / "post-checkout").exists()
     assert not (repo / ".gitattributes").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook object contract")
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_uninstall_rejects_non_regular_post_merge_before_mutation(tmp_path, kind):
+    repo = _make_git_repo(tmp_path / "repo")
+    install(repo)
+    hooks_dir = repo / ".git" / "hooks"
+    post_merge = hooks_dir / "post-merge"
+    post_merge.unlink()
+    target = tmp_path / "external-post-merge"
+    target.write_bytes(b"external hook\n")
+    if kind == "symlink":
+        post_merge.symlink_to(target)
+    else:
+        os.mkfifo(post_merge)
+    commit_before = (hooks_dir / "post-commit").read_bytes()
+    checkout_before = (hooks_dir / "post-checkout").read_bytes()
+
+    with pytest.raises(RuntimeError, match="Unsafe non-regular post-merge hook"):
+        uninstall(repo)
+
+    assert target.read_bytes() == b"external hook\n"
+    assert (hooks_dir / "post-commit").read_bytes() == commit_before
+    assert (hooks_dir / "post-checkout").read_bytes() == checkout_before
 
 
 def test_install_preserves_existing_gitattributes(tmp_path):

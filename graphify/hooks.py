@@ -536,8 +536,13 @@ if [ "$BRANCH_SWITCH" != "1" ]; then
     exit 0
 fi
 
-# Only run if graphify-out/ exists (graph has been built before)
-if [ ! -d "graphify-out" ]; then
+# Bind checkout rebuilds to the output selected at install time. GUI clients
+# commonly invoke this hook without the environment used during installation.
+GRAPHIFY_OUT=__GRAPHIFY_OUTPUT__
+export GRAPHIFY_OUT
+
+# Only run if the configured output exists (the graph has been built before)
+if [ ! -d "$GRAPHIFY_OUT" ]; then
     exit 0
 fi
 
@@ -798,11 +803,15 @@ def _prepare_hook_uninstall(
 ) -> _HookUninstallPlan:
     """Prepare removal of one exact owned hook interval without mutating it."""
     hook_path = hooks_dir / name
-    if not hook_path.exists():
+    try:
+        metadata = hook_path.lstat()
+    except FileNotFoundError:
         return _HookUninstallPlan(
             hook_path,
             f"no {name} hook found - nothing to remove.",
         )
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"Unsafe non-regular {name} hook at {hook_path}")
 
     raw = hook_path.read_bytes()
     owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
@@ -1087,7 +1096,9 @@ def install(path: Path = Path(".")) -> str:
     ).replace(
         "__GRAPHIFY_OUTPUT_EXCLUSION__", output_exclusion
     )
-    checkout = _CHECKOUT_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned)
+    checkout = _CHECKOUT_SCRIPT.replace(
+        "__PINNED_PYTHON__", quoted_pinned
+    ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
     post_merge = _POST_MERGE_SCRIPT.replace(
         "__PINNED_PYTHON__", quoted_pinned
     ).replace("__GRAPHIFY_OUTPUT__", quoted_output)

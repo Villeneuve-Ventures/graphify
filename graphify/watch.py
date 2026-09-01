@@ -1652,6 +1652,8 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
     debounce: seconds to wait after the last change before triggering (avoids
     running on every keystroke when many files are saved at once).
     """
+    from graphify.transaction import PendingTransactionError
+
     try:
         from watchdog.observers import Observer
         from watchdog.observers.polling import PollingObserver
@@ -1721,9 +1723,15 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
                 has_non_code = _has_non_code(batch)
                 has_code = any(p.suffix.lower() in _CODE_EXTENSIONS for p in batch)
                 if has_code:
-                    _rebuild_code(watch_path)
+                    try:
+                        _rebuild_code(watch_path)
+                    except PendingTransactionError as exc:
+                        print(f"[graphify watch] Rebuild deferred: {exc}")
                 if has_non_code:
-                    _notify_only(watch_path, batch)
+                    try:
+                        _notify_only(watch_path, batch)
+                    except PendingTransactionError as exc:
+                        print(f"[graphify watch] Semantic rebuild deferred: {exc}")
     except KeyboardInterrupt:
         print("\n[graphify watch] Stopped.")
     finally:

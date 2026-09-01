@@ -2121,13 +2121,43 @@ def test_subprocess_update_recovers_merge_pending_union(tmp_path):
 
 
 @pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
-def test_watcher_dispatch_recovers_merge_pending_union(tmp_path):
+def test_watcher_dispatch_recovers_merge_pending_union(tmp_path, monkeypatch):
     import threading
 
     from graphify import transaction as transaction_module
     from graphify import watch as watch_module
+    from watchdog.observers import Observer
+    from watchdog.observers.polling import PollingObserver
 
     root, output, source = _merge_pending_watch_fixture(tmp_path)
+    started = threading.Event()
+    stop = threading.Event()
+    observer_type = PollingObserver if sys.platform == "darwin" else Observer
+    real_observer_start = observer_type.start
+    real_sleep = time.sleep
+
+    def start_and_signal(observer):
+        real_observer_start(observer)
+        started.set()
+
+    real_rebuild = watch_module._rebuild_code
+
+    def rebuild_and_stop(*args, **kwargs):
+        rebuilt = real_rebuild(*args, **kwargs)
+        if kwargs.get("acquire_lock", True) and rebuilt:
+            raise KeyboardInterrupt
+        return rebuilt
+
+    def interruptible_sleep(seconds):
+        if threading.current_thread() is thread:
+            if stop.wait(timeout=seconds):
+                raise KeyboardInterrupt
+            return
+        real_sleep(seconds)
+
+    monkeypatch.setattr(observer_type, "start", start_and_signal)
+    monkeypatch.setattr(watch_module, "_rebuild_code", rebuild_and_stop)
+    monkeypatch.setattr(watch_module.time, "sleep", interruptible_sleep)
     thread = threading.Thread(
         target=watch_module.watch,
         args=(root,),
@@ -2135,28 +2165,91 @@ def test_watcher_dispatch_recovers_merge_pending_union(tmp_path):
         daemon=True,
     )
     thread.start()
-    time.sleep(1.25)
-    source.write_text(
-        "def current():\n    return 4\n\ndef dispatched():\n    return current()\n",
-        encoding="utf-8",
-    )
-    deadline = time.monotonic() + 12.0
-    snapshot = None
-    while time.monotonic() < deadline:
-        try:
-            candidate = transaction_module.open_graph_snapshot(
-                output / "graph.json", purpose="watcher-dispatch-test"
-            )
-        except transaction_module.PendingTransactionError:
+    try:
+        assert started.wait(timeout=5.0), "watcher observer did not start"
+        source.write_text(
+            "def current():\n    return 4\n\ndef dispatched():\n    return current()\n",
+            encoding="utf-8",
+        )
+        deadline = time.monotonic() + 12.0
+        snapshot = None
+        while time.monotonic() < deadline:
+            try:
+                candidate = transaction_module.open_graph_snapshot(
+                    output / "graph.json", purpose="watcher-dispatch-test"
+                )
+            except transaction_module.PendingTransactionError:
+                time.sleep(0.1)
+                continue
+            node_ids = {node["id"] for node in candidate.data["nodes"]}
+            if {"current_current", "current_dispatched", "other_other"} <= node_ids:
+                snapshot = candidate
+                break
             time.sleep(0.1)
-            continue
-        node_ids = {node["id"] for node in candidate.data["nodes"]}
-        if {"current_current", "current_dispatched", "other_other"} <= node_ids:
-            snapshot = candidate
-            break
-        time.sleep(0.1)
-    assert snapshot is not None, "watcher did not publish the recovered union"
-    assert thread.is_alive()
+        assert snapshot is not None, "watcher did not publish the recovered union"
+    finally:
+        stop.set()
+        thread.join(timeout=5.0)
+    assert not thread.is_alive(), "watcher did not stop and join its observer"
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+@pytest.mark.parametrize(
+    ("suffix", "operation", "message"),
+    [
+        (".py", "_rebuild_code", "Rebuild deferred"),
+        (".md", "_notify_only", "Semantic rebuild deferred"),
+    ],
+)
+def test_watcher_defers_transaction_errors_without_terminating(
+    tmp_path, monkeypatch, capsys, suffix, operation, message
+):
+    from types import SimpleNamespace
+
+    from graphify import transaction as transaction_module
+    from graphify import watch as watch_module
+    import watchdog.observers
+    import watchdog.observers.polling
+
+    source = tmp_path / f"changed{suffix}"
+    source.write_text("value = 1\n", encoding="utf-8")
+
+    class FakeObserver:
+        def schedule(self, handler, _path, *, recursive):
+            assert recursive is True
+            self.handler = handler
+
+        def start(self):
+            self.handler.on_any_event(
+                SimpleNamespace(is_directory=False, src_path=str(source))
+            )
+
+        def stop(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(watchdog.observers, "Observer", FakeObserver)
+    monkeypatch.setattr(watchdog.observers.polling, "PollingObserver", FakeObserver)
+
+    def deferred(*_args, **_kwargs):
+        raise transaction_module.PendingTransactionError("recovery sentinel")
+
+    monkeypatch.setattr(watch_module, operation, deferred)
+    sleep_calls = 0
+
+    def stop_after_deferral(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(watch_module.time, "sleep", stop_after_deferral)
+
+    watch_module.watch(tmp_path, debounce=0)
+
+    assert f"{message}: recovery sentinel" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("boundary", ["successor-ready", "publication"])
@@ -2593,11 +2686,11 @@ def test_merge_pending_watch_replays_prepared_retirement_after_completed_live_cr
         assert not (output / name).exists()
     assert not list(output.glob(".graphify_transaction_token.*"))
     predecessor_path = output / transaction_module.PREDECESSOR_FILE
-    if predecessor_path.exists():
-        predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
-        assert predecessor["state"] == "preserved-complete"
-        assert predecessor["receipt_digest"] == protocol["receipt_digest"]
-        assert predecessor["protocol"] == protocol
+    assert predecessor_path.is_file()
+    predecessor = json.loads(predecessor_path.read_text(encoding="utf-8"))
+    assert predecessor["state"] == "preserved-complete"
+    assert predecessor["receipt_digest"] == protocol["receipt_digest"]
+    assert predecessor["protocol"] == protocol
 
 
 def test_merge_pending_watch_recovers_no_live_close_pending_before_retirement(
