@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import stat
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -476,10 +477,14 @@ if [ -z "$CHANGED" ]; then
     exit 0
 fi
 
-# Skip when only graphify-out/ artifacts changed (avoids rebuild loop when graph outputs are tracked in git)
-_NON_GRAPH=$(echo "$CHANGED" | grep -v '^graphify-out/' || true)
-if [ -z "$_NON_GRAPH" ]; then
-    exit 0
+# Ask Git whether any non-output path changed instead of parsing its quoted
+# --name-only display. The literal top-level exclusion keeps GRAPHIFY_OUT as
+# inert path data and handles non-ASCII names without regex or shell evaluation.
+if _GFY_PARENT=$(git rev-parse --verify HEAD^ 2>/dev/null); then
+    if git diff --quiet "$_GFY_PARENT" HEAD -- . \
+        ":(top,literal,exclude)$GRAPHIFY_OUT" 2>/dev/null; then
+        exit 0
+    fi
 fi
 
 """ + _PYTHON_DETECT + """
@@ -672,6 +677,7 @@ class _HookInstallPlan:
     text: str | None = None
     data: bytes | None = None
     create: bool = False
+    original_mode: int | None = None
 
 
 def _standalone_marker_spans(content: bytes, marker: str) -> list[tuple[int, int]]:
@@ -706,7 +712,14 @@ def _prepare_hook_install(
 ) -> _HookInstallPlan:
     """Prepare one hook installation without mutating the hook."""
     hook_path = hooks_dir / name
-    if hook_path.exists():
+    try:
+        metadata = hook_path.lstat()
+    except FileNotFoundError:
+        metadata = None
+    if metadata is not None:
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"Unsafe non-regular {name} hook at {hook_path}")
+        original_mode = stat.S_IMODE(metadata.st_mode)
         raw = hook_path.read_bytes()
         owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
         if owned is None:
@@ -717,6 +730,7 @@ def _prepare_hook_install(
                 hook_path,
                 f"appended to existing {name} hook at {hook_path}",
                 text=content.rstrip() + "\n\n" + script,
+                original_mode=original_mode,
             )
 
         owned_start, owned_end = owned
@@ -725,11 +739,13 @@ def _prepare_hook_install(
             return _HookInstallPlan(
                 hook_path,
                 f"already installed at {hook_path}",
+                original_mode=original_mode,
             )
         return _HookInstallPlan(
             hook_path,
             f"updated {name} hook at {hook_path}",
             data=raw[:owned_start] + rendered + raw[owned_end:],
+            original_mode=original_mode,
         )
 
     return _HookInstallPlan(
@@ -748,6 +764,10 @@ def _apply_hook_install(plan: _HookInstallPlan) -> str:
         plan.hook_path.write_text(plan.text, encoding="utf-8", newline="\n")
     if plan.create:
         plan.hook_path.chmod(0o755)
+    elif os.name != "nt":
+        if plan.original_mode is None:
+            raise RuntimeError(f"Missing original mode for hook at {plan.hook_path}")
+        plan.hook_path.chmod(plan.original_mode | 0o111)
     return plan.message
 
 

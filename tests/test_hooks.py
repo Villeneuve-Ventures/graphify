@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -119,7 +120,7 @@ def test_install_updates_existing_graphify_sections_and_preserves_other_content(
     assert checkout_bytes.count(_CHECKOUT_MARKER.encode()) == 1
     assert checkout_bytes.count(_CHECKOUT_MARKER_END.encode()) == 1
     assert commit_hook.stat().st_mode & 0o777 == 0o751
-    assert checkout_hook.stat().st_mode & 0o777 == 0o741
+    assert checkout_hook.stat().st_mode & 0o777 == 0o751
 
 
 @pytest.mark.parametrize(
@@ -1135,6 +1136,163 @@ def test_install_quotes_custom_output_in_recovery_hooks(tmp_path, monkeypatch):
         )
         assert probe.returncode == 0, probe.stderr
     assert not sentinel.exists()
+
+
+def _run_installed_post_commit_guard(repo: Path) -> subprocess.CompletedProcess[str]:
+    hook = (repo / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
+    guard, separator, _remainder = hook.partition(
+        "# Detect a trusted Python interpreter"
+    )
+    assert separator
+    return subprocess.run(
+        ["/bin/sh", "-c", guard + "printf 'REACHED_LAUNCH_BOUNDARY\\n'\n"],
+        cwd=repo,
+        env={
+            name: value
+            for name, value in os.environ.items()
+            if name not in {"GRAPHIFY_OUT", "GRAPHIFY_OUTPUT_ROOT", "GRAPHIFY_SKIP_HOOK"}
+        },
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX installed-hook guard contract")
+@pytest.mark.parametrize(
+    ("output_name", "changed_paths", "reaches_launch"),
+    [
+        (
+            "custom-out",
+            ("custom-out/graph.json", "custom-out/nested/manifest.json"),
+            False,
+        ),
+        ("custom-out", ("custom-outside/module.py",), True),
+        ("custom-out", ("src/custom-out/module.py",), True),
+        ("custom-out", ("custom-out/graph.json", "src/module.py"), True),
+        ("custom';touch-injected;#", ("custom';touch-injected;#/graph.json",), False),
+        ("gráph-out", ("gráph-out/graph.json",), False),
+    ],
+    ids=[
+        "output-only",
+        "similar-prefix",
+        "nested-source",
+        "mixed",
+        "shell-significant-output",
+        "non-ascii-output",
+    ],
+)
+def test_installed_post_commit_filters_only_configured_output_descendants(
+    tmp_path, monkeypatch, output_name, changed_paths, reaches_launch
+):
+    import graphify.paths as paths_module
+
+    repo = _make_git_repo(tmp_path / "repo")
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "hook-tests@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Graphify Hook Tests"],
+        check=True,
+    )
+    monkeypatch.setattr(paths_module, "GRAPHIFY_OUT", output_name)
+    install(repo)
+    hook = repo / ".git" / "hooks" / "post-commit"
+    syntax = subprocess.run(["/bin/sh", "-n", str(hook)], capture_output=True, text=True)
+    assert syntax.returncode == 0, syntax.stderr
+
+    (repo / "baseline.txt").write_text("base\n", encoding="utf-8")
+    setup_env = {**os.environ, "GRAPHIFY_SKIP_HOOK": "1"}
+    subprocess.run(
+        ["git", "-C", str(repo), "add", ".gitattributes", "baseline.txt"],
+        check=True,
+        env=setup_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "baseline"],
+        check=True,
+        capture_output=True,
+        env=setup_env,
+    )
+    for relative in changed_paths:
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("changed\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "--", *changed_paths],
+        check=True,
+        env=setup_env,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "scenario"],
+        check=True,
+        capture_output=True,
+        env=setup_env,
+    )
+
+    result = _run_installed_post_commit_guard(repo)
+
+    assert result.returncode == 0, result.stderr
+    assert ("REACHED_LAUNCH_BOUNDARY" in result.stdout) is reaches_launch
+    assert not (repo / "touch-injected").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook mode contract")
+def test_install_repairs_existing_post_merge_execute_bits_without_mode_loss(tmp_path):
+    repo = _make_git_repo(tmp_path)
+    hook = repo / ".git" / "hooks" / "post-merge"
+    user_content = b"#!/bin/sh\nprintf 'user hook\\n'\n"
+    original_mode = 0o2640
+    hook.write_bytes(user_content)
+    hook.chmod(original_mode)
+
+    first = install(repo)
+
+    installed = hook.read_bytes()
+    assert "appended to existing post-merge" in first
+    assert installed.startswith(user_content.rstrip() + b"\n\n")
+    assert installed.count(_POST_MERGE_MARKER.encode()) == 1
+    assert stat.S_IMODE(hook.stat().st_mode) == original_mode | 0o111
+
+    hook.chmod(original_mode)
+    second = install(repo)
+    assert "post-merge: already installed" in second
+    assert hook.read_bytes() == installed
+    assert stat.S_IMODE(hook.stat().st_mode) == original_mode | 0o111
+
+    rendered = _rendered_hook(hooks._POST_MERGE_SCRIPT)
+    stale = (
+        f"{_POST_MERGE_MARKER}\n# stale post-merge body\n"
+        f"{_POST_MERGE_MARKER_END}\n"
+    ).encode()
+    hook.write_bytes(installed.replace(rendered, stale))
+    hook.chmod(original_mode)
+    third = install(repo)
+    assert "updated post-merge hook" in third
+    assert hook.read_bytes() == installed
+    assert stat.S_IMODE(hook.stat().st_mode) == original_mode | 0o111
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook object contract")
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_install_rejects_non_regular_post_merge_before_mutation(tmp_path, kind):
+    repo = _make_git_repo(tmp_path / "repo")
+    hooks_dir = repo / ".git" / "hooks"
+    post_merge = hooks_dir / "post-merge"
+    target = tmp_path / "external-post-merge"
+    target.write_bytes(b"external hook\n")
+    if kind == "symlink":
+        post_merge.symlink_to(target)
+    else:
+        os.mkfifo(post_merge)
+
+    with pytest.raises(RuntimeError, match="Unsafe non-regular post-merge hook"):
+        install(repo)
+
+    assert target.read_bytes() == b"external hook\n"
+    assert not (hooks_dir / "post-commit").exists()
+    assert not (hooks_dir / "post-checkout").exists()
+    assert not (repo / ".gitattributes").exists()
 
 
 def test_install_preserves_existing_gitattributes(tmp_path):
