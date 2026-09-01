@@ -2805,7 +2805,7 @@ def _dispatch_command(cmd: str) -> None:
         # the union of current+other nodes/edges back to current. Exits 1 on
         # corrupt input so git surfaces the conflict instead of silently
         # accepting a poisoned merge (see F-005).
-        # Usage: graphify merge-driver --managed-current %O %A %B
+        # Usage: graphify merge-driver --managed-current <managed-graph> %O %A %B
         # (set in .git/config by `graphify hook install`). Without the private
         # managed-current flag, the command preserves generic detached-file use.
         managed_current = (
@@ -2816,7 +2816,8 @@ def _dispatch_command(cmd: str) -> None:
         paths = sys.argv[4:] if managed_current is not None else sys.argv[2:]
         if len(paths) != 3:
             print(
-                "Usage: graphify merge-driver [--managed-current] <base> <current> <other>",
+                "Usage: graphify merge-driver "
+                "[--managed-current <managed-graph>] <base> <current> <other>",
                 file=sys.stderr,
             )
             sys.exit(1)

@@ -13,6 +13,24 @@ from pathlib import Path
 import pytest
 
 
+def test_merge_driver_usage_documents_managed_graph_operand(monkeypatch, capsys):
+    import graphify.cli as cli_module
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["graphify", "merge-driver", "--managed-current", "base", "current", "other"],
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        cli_module.dispatch_command("merge-driver")
+
+    assert (
+        "[--managed-current <managed-graph>] <base> <current> <other>"
+        in capsys.readouterr().err
+    )
+
+
 def test_issue89_cli_destination_resolver_covers_graph_forms(tmp_path, monkeypatch):
     import graphify.cli as cli_module
 

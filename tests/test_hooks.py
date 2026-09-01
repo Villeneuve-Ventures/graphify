@@ -386,6 +386,37 @@ def test_status_shows_all_hooks(tmp_path):
     ]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook object contract")
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_status_rejects_non_regular_hook_without_blocking(tmp_path, kind):
+    repo = _make_git_repo(tmp_path / "repo")
+    install(repo)
+    hook = repo / ".git" / "hooks" / "post-merge"
+    hook.unlink()
+    target = tmp_path / "external-post-merge"
+    target.write_bytes(b"external hook\n")
+    if kind == "symlink":
+        hook.symlink_to(target)
+    else:
+        os.mkfifo(hook)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; from graphify.hooks import status; "
+            "print(status(Path.cwd()))",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "post-merge: not installed (unsafe non-regular hook)" in result.stdout
+    assert target.read_bytes() == b"external hook\n"
+
 
 def test_hooks_dir_resolves_relative_git_hooks_path(tmp_path, monkeypatch):
     repo = _make_git_repo(tmp_path)
@@ -836,6 +867,42 @@ def test_rebuild_bodies_with_graphify_root_are_valid_python():
     that crashes the moment git fires it (#1173)."""
     for body in (_REBUILD_BODY_COMMIT, _REBUILD_BODY_CHECKOUT):
         ast.parse(body)
+
+
+def test_post_merge_rebuild_uses_invoking_worktree_not_saved_absolute_root(
+    tmp_path, monkeypatch
+):
+    from graphify import hooks as hooks_module
+    from graphify import watch as watch_module
+
+    linked = tmp_path / "linked"
+    output = linked / "graphify-out"
+    output.mkdir(parents=True)
+    (output / ".graphify_root").write_text(
+        str(tmp_path / "primary"), encoding="utf-8"
+    )
+    rebuilt: list[Path] = []
+    monkeypatch.chdir(linked)
+    monkeypatch.setenv("_GFY_REBUILD_CURRENT_ROOT", "1")
+    monkeypatch.setenv("GRAPHIFY_REBUILD_TIMEOUT", "0")
+    monkeypatch.setattr(watch_module, "_apply_resource_limits", lambda: None)
+    monkeypatch.setattr(
+        watch_module,
+        "_rebuild_code",
+        lambda root, **_kwargs: rebuilt.append(root) or True,
+    )
+
+    exec(hooks_module._REBUILD_BODY_CHECKOUT, {})
+
+    assert rebuilt == [Path(".")]
+    assert (
+        "_GFY_REBUILD_CURRENT_ROOT=1\nexport _GFY_REBUILD_CURRENT_ROOT\n"
+        in hooks_module._POST_MERGE_SCRIPT
+    )
+    assert (
+        "_GFY_REBUILD_CURRENT_ROOT=0\nexport _GFY_REBUILD_CURRENT_ROOT\n"
+        in hooks_module._CHECKOUT_SCRIPT
+    )
 
 
 def test_detached_launch_targets_graphify_python():

@@ -334,7 +334,7 @@ try:
     _root = Path('.')
     _out = os.environ.get('GRAPHIFY_OUT', 'graphify-out')
     _saved = Path(_out) / '.graphify_root'
-    if _saved.exists():
+    if os.environ.get('_GFY_REBUILD_CURRENT_ROOT') != '1' and _saved.exists():
         _txt = _saved.read_text(encoding='utf-8').strip()
         if _txt:
             _root = Path(_txt)
@@ -559,6 +559,9 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 # suppressed commit-triggered rebuilds but not branch-switch ones (#1809).
 [ "${GRAPHIFY_SKIP_HOOK:-0}" = "1" ] && exit 0
 
+_GFY_REBUILD_CURRENT_ROOT=0
+export _GFY_REBUILD_CURRENT_ROOT
+
 """ + _WORKTREE_GUARD + _PYTHON_DETECT + """
 _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
@@ -593,6 +596,11 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0
 
 [ "${GRAPHIFY_SKIP_HOOK:-0}" = "1" ] && exit 0
+
+# A tracked absolute root can name the primary checkout or another developer's
+# clone. Merge recovery must finalize the worktree in which Git invoked us.
+_GFY_REBUILD_CURRENT_ROOT=1
+export _GFY_REBUILD_CURRENT_ROOT
 
 """ + _PYTHON_DETECT + _POST_MERGE_WORKTREE_GUARD + """
 _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
@@ -1179,8 +1187,12 @@ def status(path: Path = Path(".")) -> str:
 
     def _check(name: str, marker: str, marker_end: str) -> str:
         p = hooks_dir / name
-        if not p.exists():
+        try:
+            metadata = p.lstat()
+        except FileNotFoundError:
             return "not installed"
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            return "not installed (unsafe non-regular hook)"
         try:
             owned = _owned_hook_span(
                 p.read_bytes(), marker, marker_end, f"{name} hook at {p}"
