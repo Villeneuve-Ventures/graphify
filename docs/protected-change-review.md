@@ -1,6 +1,6 @@
 # Protected-change review policy
 
-Policy version: `graphify.protected-change-review.policy.v1`.
+Policy version: `graphify.protected-change-review.policy.v2`.
 
 This policy provides a bounded, invariant-gated workflow for protected changes without allowing review and repair to expand indefinitely.
 
@@ -41,10 +41,10 @@ Before implementation, the acceptance owner must freeze:
   evidence paths;
 - production and test churn budgets and their measurement rules.
 
-Encode the acceptance packet as UTF-8 JSON with sorted keys, compact separators,
-standard JSON escaping, no Unicode normalization, and no terminal newline. The
-packet must include its schema version. Record that schema's version and
-exact-byte SHA-256 plus the packet version and exact-byte SHA-256. A change to
+Encode the acceptance packet with the byte-unique JSON profile and conformance
+vector defined in section 5. The packet must include its schema version. Record
+that schema's version and exact-byte SHA-256 plus the packet version and
+exact-byte SHA-256. A change to
 the frozen base, any designation field, another path, a semantic decision, or
 the authority model requires acceptance-owner approval and a new freeze.
 Unresolved material semantics block work.
@@ -86,15 +86,15 @@ approval and a new acceptance digest.
 
 ## 5. Freeze candidate content and evidence
 
-The immutable candidate-content manifest path set is the union of every path
-that differs between the frozen base and HEAD and every staged, unstaged,
-deleted, renamed, mode-changed, type-changed, or untracked status path. A clean
-committed candidate therefore still inventories the complete base-to-HEAD
-change. Base-to-HEAD comparison and worktree status both disable rename and copy
-detection; every move is represented deterministically as one deletion plus one
-addition.
+The immutable candidate-content manifest path set is the union of every path in
+the frozen base tree, HEAD tree, index, and raw candidate-worktree inventory.
+The worktree inventory contains every tracked path plus every non-ignored
+untracked path, whether or not Git status reports a change. This deliberately
+binds raw tracked bytes that a clean filter, line-ending conversion, file-mode
+configuration, or another Git comparison rule could otherwise hide. Moves are
+represented deterministically as one deletion plus one addition.
 
-Manifest schema `graphify.protected-change-review.candidate.v1` has exactly
+Manifest schema `graphify.protected-change-review.candidate.v2` has exactly
 these top-level keys and value types:
 
 ```text
@@ -105,31 +105,57 @@ acceptance_packet: {
 base_oid: full_git_oid
 head_oid: full_git_oid
 paths: [path_record, ...]
-policy: {version: "graphify.protected-change-review.policy.v1", sha256: sha256}
-schema: "graphify.protected-change-review.candidate.v1"
+policy: {version: "graphify.protected-change-review.policy.v2", sha256: sha256}
+schema: "graphify.protected-change-review.candidate.v2"
 status_porcelain_v2_z_base64: base64_string
 tracked_binary_diff_sha256: sha256
 
 path_record: {
-  bytes: nonnegative_integer_or_null,
-  mode: six_digit_git_mode_or_null,
+  base: git_content_or_null,
+  head: git_content_or_null,
+  index: git_content_or_null,
   path: utf8_path,
-  sha256: sha256_or_null,
-  status: [status_token, ...],
-  type: "blob" | "symlink" | "absent"
+  worktree: raw_content_or_null
 }
 
-status_token: "added" | "deleted" | "modified" | "mode-changed" |
-              "type-changed" | "untracked"
+git_content: {
+  bytes: nonnegative_integer,
+  mode: six_digit_git_mode,
+  oid: full_git_oid,
+  sha256: sha256,
+  type: "blob" | "symlink"
+}
+
+raw_content: {
+  bytes: nonnegative_integer,
+  mode: six_digit_git_mode,
+  sha256: sha256,
+  type: "blob" | "symlink"
+}
 ```
 
-Use lowercase hexadecimal for Git OIDs and SHA-256 values. Present paths must
-record type, mode, byte length, and exact-byte SHA-256; hash symlink-target bytes
-for a symlink. An absent path uses type `absent` and null mode, byte length, and
-SHA-256. Sort status tokens in the order shown above. Sort path records by the
-raw UTF-8 bytes of `path`.
+Use lowercase hexadecimal for Git OIDs and SHA-256 values. A null layer means
+the path is absent from that layer. A present Git layer records the Git object
+mode and OID plus the object byte length and SHA-256. A present worktree layer
+comes from raw filesystem operations, never Git content conversion: use
+`lstat`, hash regular-file bytes read without a Git filter, and hash the raw
+symlink-target bytes returned by `readlink`. Normalize a regular worktree mode
+to `100755` when its owner-execute bit is set and `100644` otherwise; use
+`120000` for a symlink. Fail closed on another object or filesystem type. Sort
+path records by the raw UTF-8 bytes of `path`.
 
-Generate the status identity stream in the dedicated candidate worktree, not a
+Enumerate the base and HEAD trees with `git ls-tree -rz --full-tree <oid> --`,
+the index with `git ls-files --stage -z`, and candidate-worktree path names with
+`git ls-files -z --cached --others --exclude-standard`. Decode path bytes as
+strict UTF-8 and fail closed on duplicates, non-stage-zero index entries,
+unsupported objects, or undecodable paths. Read Git-layer content directly from
+the named objects, without filters. Run both `ls-files` commands under the same
+sanitized environment and configuration profile as the status command below.
+The separately recorded ignored-path inventory remains evidence, not candidate
+content. Isolate ignored content from validation, or bind any ignored input that
+validation must consume into its receipt and fail closed when that input drifts.
+
+Generate the status diagnostic stream in the dedicated candidate worktree, not a
 fresh clone, so staged, unstaged, and untracked candidate state remains
 observable. The candidate worktree must have no sparse checkout or
 `.git/info/attributes`. Its `$GIT_COMMON_DIR/info/exclude` must be absent or an
@@ -146,9 +172,14 @@ GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
 git -c core.attributesFile=<empty-config> \
-  -c core.excludesFile=<empty-config> -c status.renames=false status \
+  -c core.excludesFile=<empty-config> -c core.filemode=true \
+  -c status.renames=false status \
   --porcelain=v2 -z --untracked-files=all --no-renames
 ```
+
+The status stream is a diagnostic cross-check, not the path inventory or the
+source of any layer's content record. Compare the independently generated path
+records and status stream and fail closed on an unexplained disagreement.
 
 Generate the tracked binary-diff byte stream in a fresh isolated clone with no
 sparse checkout or `.git/info/attributes`, using the same kind of
@@ -175,10 +206,30 @@ A tracked binary-diff digest alone is incomplete because it omits untracked
 files. Fail closed if the complete path inventory or any supported object cannot
 be represented deterministically.
 
-Encode the manifest as UTF-8 JSON with exactly the schema above, sorted object
-keys, compact separators, standard JSON escaping, no Unicode normalization, and
-no terminal newline. Hash the exact encoded bytes with SHA-256; that value is
-the candidate-content digest reviewers approve.
+Encode the manifest as UTF-8 JSON with exactly the schema above. Sort object keys
+by their raw UTF-8 bytes and use `,` and `:` with no surrounding whitespace.
+Emit `true`, `false`, `null`, and nonnegative integers in their shortest JSON
+forms. In strings, escape quotation mark, reverse solidus, backspace, tab,
+newline, form feed, and carriage return as `\"`, `\\`, `\b`, `\t`, `\n`,
+`\f`, and `\r`; escape every other U+0000--U+001F code point as a lowercase
+six-byte `\u00xx` sequence; emit every other Unicode scalar value literally as
+UTF-8, including solidus and non-ASCII characters. Reject unpaired surrogates.
+Do not normalize Unicode, emit a BOM, or add a terminal newline. Encode binary
+status bytes with RFC 4648 Base64's standard
+alphabet, required `=` padding, and no whitespace or line breaks. Hash the exact
+encoded manifest bytes with SHA-256; that value is the candidate-content digest
+reviewers approve.
+
+Byte-level conformance vector: raw status bytes `fb00` encode as `+wA=`. The
+canonical JSON value containing path `a/é` and that status value is the exact
+UTF-8 byte sequence
+`7b2270617468223a22612fc3a9222c227374617475735f706f7263656c61696e5f76325f7a5f626173653634223a222b77413d227d`,
+whose SHA-256 is
+`2abd1782cb53952044e4239efb441e7f2c17c487ce1a9376aa433845070bf4cd`.
+An encoder presented with the same logical path through a literal `é` or a
+parsed `\u00e9` escape must produce those same canonical UTF-8 bytes. Every
+encoder must reproduce both the Base64 and JSON/digest vectors before its output
+is accepted.
 
 Keep an append-only evidence envelope separate from content identity and outside
 the candidate worktree and its Git status inventory. Evidence paths may be
