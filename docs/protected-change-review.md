@@ -129,20 +129,30 @@ for a symlink. An absent path uses type `absent` and null mode, byte length, and
 SHA-256. Sort status tokens in the order shown above. Sort path records by the
 raw UTF-8 bytes of `path`.
 
-Generate both identity streams in a fresh isolated clone with no sparse checkout
-or `.git/info/attributes`, using an existing zero-byte file for
-`<empty-config>`. Record base64 of the exact status bytes from:
+Generate the status identity stream in the dedicated candidate worktree, not a
+fresh clone, so staged, unstaged, and untracked candidate state remains
+observable. The candidate worktree must have no sparse checkout or
+`.git/info/attributes`. Its `$GIT_COMMON_DIR/info/exclude` must be absent or an
+existing regular zero-byte file, and `<empty-config>` must name an existing
+regular zero-byte file. Record the exclude file's presence, type, byte length,
+and SHA-256 when present. Do not truncate or replace shared Git metadata to
+satisfy this requirement; if the exclude file is non-regular or non-empty,
+re-establish the candidate in a standalone isolated clone and refreeze it.
+Record base64 of the exact status bytes from:
 
 ```sh
 GIT_CONFIG_NOSYSTEM=1 \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
-git -c core.attributesFile=<empty-config> -c status.renames=false status \
+git -c core.attributesFile=<empty-config> \
+  -c core.excludesFile=<empty-config> -c status.renames=false status \
   --porcelain=v2 -z --untracked-files=all --no-renames
 ```
 
-Generate the tracked binary-diff byte stream from:
+Generate the tracked binary-diff byte stream in a fresh isolated clone with no
+sparse checkout or `.git/info/attributes`, using the same kind of
+`<empty-config>` file, from:
 
 ```sh
 GIT_CONFIG_NOSYSTEM=1 \
