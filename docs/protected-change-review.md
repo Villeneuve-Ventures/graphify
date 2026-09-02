@@ -90,9 +90,9 @@ The immutable candidate-content manifest path set is the union of every path
 that differs between the frozen base and HEAD and every staged, unstaged,
 deleted, renamed, mode-changed, type-changed, or untracked status path. A clean
 committed candidate therefore still inventories the complete base-to-HEAD
-change. Base-to-HEAD comparison disables rename detection and represents a move
-as a deletion plus an addition; a worktree-status rename uses one record whose
-`base_path` is the old path and whose `path` is the new path.
+change. Base-to-HEAD comparison and worktree status both disable rename and copy
+detection; every move is represented deterministically as one deletion plus one
+addition.
 
 Manifest schema `graphify.protected-change-review.candidate.v1` has exactly
 these top-level keys and value types:
@@ -111,7 +111,6 @@ status_porcelain_v2_z_base64: base64_string
 tracked_binary_diff_sha256: sha256
 
 path_record: {
-  base_path: utf8_path_or_null,
   bytes: nonnegative_integer_or_null,
   mode: six_digit_git_mode_or_null,
   path: utf8_path,
@@ -121,26 +120,37 @@ path_record: {
 }
 
 status_token: "added" | "deleted" | "modified" | "mode-changed" |
-              "renamed" | "type-changed" | "untracked"
+              "type-changed" | "untracked"
 ```
 
 Use lowercase hexadecimal for Git OIDs and SHA-256 values. Present paths must
 record type, mode, byte length, and exact-byte SHA-256; hash symlink-target bytes
 for a symlink. An absent path uses type `absent` and null mode, byte length, and
 SHA-256. Sort status tokens in the order shown above. Sort path records by the
-raw UTF-8 bytes of `path`, then by `base_path` with null before non-null.
+raw UTF-8 bytes of `path`.
 
-Record base64 of the exact
-`git status --porcelain=v2 -z --untracked-files=all` bytes. Generate the tracked
-binary-diff byte stream in a fresh isolated clone with no sparse checkout or
-`.git/info/attributes`, using an existing zero-byte file for `<empty-config>`:
+Generate both identity streams in a fresh isolated clone with no sparse checkout
+or `.git/info/attributes`, using an existing zero-byte file for
+`<empty-config>`. Record base64 of the exact status bytes from:
 
 ```sh
 GIT_CONFIG_NOSYSTEM=1 \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
+GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
+git -c core.attributesFile=<empty-config> -c status.renames=false status \
+  --porcelain=v2 -z --untracked-files=all --no-renames
+```
+
+Generate the tracked binary-diff byte stream from:
+
+```sh
+GIT_CONFIG_NOSYSTEM=1 \
+GIT_CONFIG_SYSTEM=<empty-config> \
+GIT_CONFIG_GLOBAL=<empty-config> \
+GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
 GIT_EXTERNAL_DIFF= GIT_DIFF_OPTS= \
-git -c core.quotePath=true diff \
+git -c core.attributesFile=<empty-config> -c core.quotePath=true diff \
   --binary --full-index --no-color --no-ext-diff --no-textconv --no-renames \
   --diff-algorithm=myers --no-indent-heuristic --unified=3 \
   --src-prefix=a/ --dst-prefix=b/ --line-prefix= --ita-invisible-in-index \
