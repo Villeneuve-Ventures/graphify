@@ -212,7 +212,10 @@ terminates the attempt.
 Goal:
 - <externally observable result>
 Protected activation:
-- Source and protected surface: <user, issue, instruction, or acceptance owner>
+- Authoritative source designating protection and the acceptance owner: <user,
+  issue, or nearest repository instructions>
+- Designated acceptance owner:
+- Acceptance-owner protected-surface classification:
 - Isolated worktree path, root, branch/detached state, base, and HEAD:
 Acceptance freeze:
 - Behavior and non-goals:
