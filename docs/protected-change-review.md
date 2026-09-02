@@ -1,5 +1,7 @@
 # Protected-change review policy
 
+Policy version: `graphify.protected-change-review.policy.v1`.
+
 This policy provides a bounded, invariant-gated workflow for protected changes without allowing review and repair to expand indefinitely.
 
 ## Activation and authority
@@ -25,6 +27,11 @@ Use one dedicated isolated worktree. Record its absolute path, repository root, 
 
 Before implementation, the acceptance owner must freeze:
 
+- the full base OID;
+- the protection-designation source and exact reference;
+- the acceptance-owner designation source and exact reference;
+- the designated acceptance owner and that owner's protected-surface
+  classification;
 - exact behavior and non-goals;
 - supported platform, Git, and output matrix;
 - user-visible semantic decisions;
@@ -37,9 +44,10 @@ Before implementation, the acceptance owner must freeze:
 Encode the acceptance packet as UTF-8 JSON with sorted keys, compact separators,
 standard JSON escaping, no Unicode normalization, and no terminal newline. The
 packet must include its schema version. Record that schema's version and
-exact-byte SHA-256 plus the packet version and exact-byte SHA-256. Another path,
-semantic decision, or authority model requires acceptance-owner approval and a
-new freeze. Unresolved material semantics block work.
+exact-byte SHA-256 plus the packet version and exact-byte SHA-256. A change to
+the frozen base, any designation field, another path, a semantic decision, or
+the authority model requires acceptance-owner approval and a new freeze.
+Unresolved material semantics block work.
 
 ## 2. Establish feasibility
 
@@ -78,29 +86,79 @@ approval and a new acceptance digest.
 
 ## 5. Freeze candidate content and evidence
 
-The immutable candidate-content manifest must include:
+The immutable candidate-content manifest path set is the union of every path
+that differs between the frozen base and HEAD and every staged, unstaged,
+deleted, renamed, mode-changed, type-changed, or untracked status path. A clean
+committed candidate therefore still inventories the complete base-to-HEAD
+change. Base-to-HEAD comparison disables rename detection and represents a move
+as a deletion plus an addition; a worktree-status rename uses one record whose
+`base_path` is the old path and whose `path` is the new path.
 
-- base and HEAD OIDs;
-- base64 of exact `git status --porcelain=v2 -z --untracked-files=all` bytes;
-- every in-scope staged, unstaged, deleted, renamed, mode-changed, and untracked
-  path;
-- for each present path, status, type, mode, byte length, and exact-byte SHA-256;
-  for a symlink, hash its target bytes;
-- an explicit deletion marker for each absent path;
-- SHA-256 of the complete tracked binary diff against the frozen base;
-- policy version and exact-byte SHA-256;
-- acceptance-packet schema version and exact-byte SHA-256; and
-- acceptance-packet version and exact-byte SHA-256.
+Manifest schema `graphify.protected-change-review.candidate.v1` has exactly
+these top-level keys and value types:
+
+```text
+acceptance_packet: {
+  schema_version: string, schema_sha256: sha256,
+  version: string, sha256: sha256
+}
+base_oid: full_git_oid
+head_oid: full_git_oid
+paths: [path_record, ...]
+policy: {version: "graphify.protected-change-review.policy.v1", sha256: sha256}
+schema: "graphify.protected-change-review.candidate.v1"
+status_porcelain_v2_z_base64: base64_string
+tracked_binary_diff_sha256: sha256
+
+path_record: {
+  base_path: utf8_path_or_null,
+  bytes: nonnegative_integer_or_null,
+  mode: six_digit_git_mode_or_null,
+  path: utf8_path,
+  sha256: sha256_or_null,
+  status: [status_token, ...],
+  type: "blob" | "symlink" | "absent"
+}
+
+status_token: "added" | "deleted" | "modified" | "mode-changed" |
+              "renamed" | "type-changed" | "untracked"
+```
+
+Use lowercase hexadecimal for Git OIDs and SHA-256 values. Present paths must
+record type, mode, byte length, and exact-byte SHA-256; hash symlink-target bytes
+for a symlink. An absent path uses type `absent` and null mode, byte length, and
+SHA-256. Sort status tokens in the order shown above. Sort path records by the
+raw UTF-8 bytes of `path`, then by `base_path` with null before non-null.
+
+Record base64 of the exact
+`git status --porcelain=v2 -z --untracked-files=all` bytes. Generate the tracked
+binary-diff byte stream in a fresh isolated clone with no sparse checkout or
+`.git/info/attributes`, using an existing zero-byte file for `<empty-config>`:
+
+```sh
+GIT_CONFIG_NOSYSTEM=1 \
+GIT_CONFIG_SYSTEM=<empty-config> \
+GIT_CONFIG_GLOBAL=<empty-config> \
+GIT_EXTERNAL_DIFF= GIT_DIFF_OPTS= \
+git -c core.quotePath=true diff \
+  --binary --full-index --no-color --no-ext-diff --no-textconv --no-renames \
+  --diff-algorithm=myers --no-indent-heuristic --unified=3 \
+  --src-prefix=a/ --dst-prefix=b/ --line-prefix= --ita-invisible-in-index \
+  --ignore-submodules=none --no-relative -O <empty-config> \
+  <base-oid> <head-oid> --
+```
+
+Record the Git version and the empty file's SHA-256 in validation provenance,
+and record the binary stream's SHA-256 in the manifest.
 
 A tracked binary-diff digest alone is incomplete because it omits untracked
 files. Fail closed if the complete path inventory or any supported object cannot
 be represented deterministically.
 
-Encode the manifest as UTF-8 JSON with sorted keys, compact separators, standard
-JSON escaping, no Unicode normalization, and no terminal newline. Sort path
-records by the raw UTF-8 bytes of their repository-relative paths. Record this
-schema version and hash the exact encoded bytes with SHA-256; that value is the
-candidate-content digest reviewers approve.
+Encode the manifest as UTF-8 JSON with exactly the schema above, sorted object
+keys, compact separators, standard JSON escaping, no Unicode normalization, and
+no terminal newline. Hash the exact encoded bytes with SHA-256; that value is
+the candidate-content digest reviewers approve.
 
 Keep an append-only evidence envelope separate from content identity and outside
 the candidate worktree and its Git status inventory. Evidence paths may be
@@ -196,8 +254,8 @@ claiming delivery. Deliver only when:
 - every frozen criterion maps to evidence;
 - both independent reviewers approve the final candidate-content digest;
 - the final evidence envelope binds all required checks and approvals to it;
-- no reproduced P0 and no reproduced in-scope P1-P2 correctness or integrity
-  finding remains;
+- no reproduced P0 or reproduced in-scope P1 finding remains, and no reproduced
+  in-scope P2 correctness or integrity finding remains;
 - deferrals, watch items, and validation gaps are explicit;
 - no generated, temporary, ignored runtime, or local state is staged; and
 - complexity review confirms the core remains coherent and reviewable.
@@ -220,6 +278,8 @@ Protected activation:
 - Acceptance-owner protected-surface classification:
 - Isolated worktree path, root, branch/detached state, base, and HEAD:
 Acceptance freeze:
+- Frozen base OID:
+- Protected-activation fields above included in the canonical acceptance packet:
 - Behavior and non-goals:
 - Supported platform/Git/output matrix:
 - User-visible semantic decisions:
@@ -250,8 +310,8 @@ Evidence envelope:
 Done when:
 - Frozen criteria map to evidence.
 - Both reviewers approve the final exact candidate.
-- No reproduced P0 and no reproduced in-scope P1-P2 correctness or integrity
-  issue remains.
+- No reproduced P0 or reproduced in-scope P1 issue remains, and no reproduced
+  in-scope P2 correctness or integrity issue remains.
 - Deferrals, watch items, validation gaps, and tripwire status are explicit.
 - No reserved action occurred without separate authority.
 ```
