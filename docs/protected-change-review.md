@@ -144,13 +144,32 @@ to `100755` when its owner-execute bit is set and `100644` otherwise; use
 `120000` for a symlink. Fail closed on another object or filesystem type. Sort
 path records by the raw UTF-8 bytes of `path`.
 
-Enumerate the base and HEAD trees with `git ls-tree -rz --full-tree <oid> --`,
-the index with `git ls-files --stage -z`, and candidate-worktree path names with
-`git ls-files -z --cached --others --exclude-standard`. Decode path bytes as
+Define `<candidate-root>` as the canonical absolute path of the dedicated
+candidate worktree and `<diff-root>` as the canonical absolute path of the
+fresh isolated clone used for the tracked diff. Before and after manifest
+generation, use the isolated profile below to verify that `git -C <root>
+rev-parse --show-toplevel` resolves to the selected root and that its Git and
+common directories resolve to the frozen expected paths. Fail closed on drift.
+
+Run every Git command used to enumerate a tree or index, read an object,
+generate status, or generate the tracked diff in a new allowlisted environment,
+not the inherited process environment. Start it with `env -i`, pass only the
+required `PATH`, `LC_ALL=C`, the explicit configuration and attribute variables
+shown below, and `GIT_NO_REPLACE_OBJECTS=1`, then invoke Git with `-C` and the
+selected root. This clears every repository-local variable reported by `git
+rev-parse --local-env-vars`, including alternate index, worktree, object,
+namespace, graft, shallow, and repository selectors, as well as injected
+`GIT_CONFIG_COUNT` entries. Fail closed if the launcher cannot construct that
+environment or the selected root cannot be verified.
+
+Enumerate the base and HEAD trees with `git -C <candidate-root> ls-tree -rz
+--full-tree <oid> --`, the index with `git -C <candidate-root> ls-files --stage
+-z`, and candidate-worktree path names with `git -C <candidate-root> ls-files
+-z --cached --others --exclude-standard`. Decode path bytes as
 strict UTF-8 and fail closed on duplicates, non-stage-zero index entries,
 unsupported objects, or undecodable paths. Read Git-layer content directly from
-the named objects, without filters. Run both `ls-files` commands under the same
-sanitized environment and configuration profile as the status command below.
+the named objects, without filters, under the same isolated environment and
+configuration profile. Run both `ls-files` commands under that profile too.
 The separately recorded ignored-path inventory remains evidence, not candidate
 content. Isolate ignored content from validation, or bind any ignored input that
 validation must consume into its receipt and fail closed when that input drifts.
@@ -167,11 +186,12 @@ re-establish the candidate in a standalone isolated clone and refreeze it.
 Record base64 of the exact status bytes from:
 
 ```sh
+env -i PATH="$PATH" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
 GIT_CONFIG_NOSYSTEM=1 \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
-git -c core.attributesFile=<empty-config> \
+git -C <candidate-root> -c core.attributesFile=<empty-config> \
   -c core.excludesFile=<empty-config> -c core.filemode=true \
   -c status.renames=false status \
   --porcelain=v2 -z --untracked-files=all --no-renames
@@ -186,12 +206,14 @@ sparse checkout or `.git/info/attributes`, using the same kind of
 `<empty-config>` file, from:
 
 ```sh
+env -i PATH="$PATH" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
 GIT_CONFIG_NOSYSTEM=1 \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
 GIT_EXTERNAL_DIFF= GIT_DIFF_OPTS= \
-git -c core.attributesFile=<empty-config> -c core.quotePath=true diff \
+git -C <diff-root> -c core.attributesFile=<empty-config> \
+  -c core.quotePath=true diff \
   --binary --full-index --no-color --no-ext-diff --no-textconv --no-renames \
   --diff-algorithm=myers --no-indent-heuristic --unified=3 \
   --src-prefix=a/ --dst-prefix=b/ --line-prefix= --ita-invisible-in-index \
