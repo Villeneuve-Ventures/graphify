@@ -8,8 +8,9 @@ Use this workflow only when one of these sources designates a change as protecte
 
 - the user or issue;
 - the nearest repository instructions; or
-- the acceptance owner, before implementation, because it crosses a security or
-  trust boundary, authority decision, persistent-state or recovery path,
+- an acceptance owner explicitly designated by the user, issue, or nearest
+  repository instructions, before implementation, because it crosses a security
+  or trust boundary, authority decision, persistent-state or recovery path,
   installer or update path, Git lifecycle boundary, publication or release
   boundary, or supported CLI/output contract.
 
@@ -33,7 +34,10 @@ Before implementation, the acceptance owner must freeze:
   evidence paths;
 - production and test churn budgets and their measurement rules.
 
-Canonicalize the packet and record its version and SHA-256 digest. Another path,
+Encode the acceptance packet as UTF-8 JSON with sorted keys, compact separators,
+standard JSON escaping, no Unicode normalization, and no terminal newline. The
+packet must include its schema version. Record that schema's version and
+exact-byte SHA-256 plus the packet version and exact-byte SHA-256. Another path,
 semantic decision, or authority model requires acceptance-owner approval and a
 new freeze. Unresolved material semantics block work.
 
@@ -54,7 +58,9 @@ with a bounded rationale. Freeze the plan and invariant map by digest.
 ## 3. Preserve ownership
 
 - Keep one implementation writer for the attempt.
-- Keep stable, distinct, read-only correctness/security and architecture/invariant reviewers.
+- Keep stable, read-only correctness/security and architecture/invariant
+  reviewers. Each must be distinct from the other reviewer, implementation
+  writer, acceptance owner, and leader; self-approval is prohibited.
 - Initial reviews are feedback-blind to each other.
 - The leader adjudicates findings and sends one consolidated repair packet.
 - Re-reviewers may see that packet but must inspect the complete new candidate.
@@ -82,7 +88,9 @@ The immutable candidate-content manifest must include:
   for a symlink, hash its target bytes;
 - an explicit deletion marker for each absent path;
 - SHA-256 of the complete tracked binary diff against the frozen base;
-- policy and acceptance schema versions and digests.
+- policy version and exact-byte SHA-256;
+- acceptance-packet schema version and exact-byte SHA-256; and
+- acceptance-packet version and exact-byte SHA-256.
 
 A tracked binary-diff digest alone is incomplete because it omits untracked
 files. Fail closed if the complete path inventory or any supported object cannot
@@ -94,11 +102,14 @@ records by the raw UTF-8 bytes of their repository-relative paths. Record this
 schema version and hash the exact encoded bytes with SHA-256; that value is the
 candidate-content digest reviewers approve.
 
-Keep an append-only evidence envelope separate from content identity. Every
-validation receipt and reviewer approval binds to the candidate-content digest.
-The envelope also records pre/post ignored, generated, and local-state
-inventories. Canonicalize it with the same JSON rules and record its final digest;
-new evidence changes the envelope digest, not the candidate-content digest.
+Keep an append-only evidence envelope separate from content identity and outside
+the candidate worktree and its Git status inventory. Evidence paths may be
+allowlisted for collection, but envelope bytes and their path records are never
+candidate-content records. Every validation receipt and reviewer approval binds
+to the candidate-content digest. The envelope also records pre/post ignored,
+generated, and local-state inventories. Canonicalize it with the same JSON rules
+and record its final digest; new evidence changes the envelope digest, not the
+candidate-content digest.
 
 Re-pin content immediately before and after every review and validation. Any
 in-scope byte, mode, type, path, status, base, or HEAD change creates a new
@@ -110,10 +121,14 @@ reused only when its inputs and assumptions are proven unchanged.
 All blocking correctness or integrity findings require reproduction or
 mechanical proof tied to a frozen invariant.
 
-- P0/P1 blocks when reproduced or mechanically proven and in scope.
-- P2 correctness blocks only when tied to supported behavior, security,
-  authority integrity, or failure atomicity.
-- P2 maintainability and out-of-scope work are deferred in the final report.
+- Any P0 blocks delivery when reproduced or mechanically proven, whether or not
+  it is in scope. An out-of-scope P0 terminates the attempt unless the acceptance
+  owner approves a new freeze; it does not authorize an out-of-scope repair.
+- P1 blocks when reproduced or mechanically proven and in scope.
+- P2 correctness or integrity blocks only when tied to supported behavior,
+  security, authority integrity, or failure atomicity.
+- P2 maintainability and out-of-scope work other than P0 are deferred in the
+  final report.
 - Unreproduced concerns become watch items and do not authorize repair.
 - Create or mutate an external ticket only with separate GitHub authority.
 
@@ -172,12 +187,17 @@ refresh unless code bytes or repository instructions require it.
 ## 10. Deliver locally
 
 Delivery means a verified local candidate or handoff unless separate publication
-authority exists. Deliver only when:
+authority exists. Immediately before handoff or any separately authorized commit,
+regenerate the complete candidate manifest and compare its digest with the
+approved candidate-content digest; stop on drift. Because a commit changes HEAD
+and status, re-freeze and re-approve the resulting committed candidate before
+claiming delivery. Deliver only when:
 
 - every frozen criterion maps to evidence;
 - both independent reviewers approve the final candidate-content digest;
 - the final evidence envelope binds all required checks and approvals to it;
-- no reproduced in-scope P0-P2 correctness finding remains;
+- no reproduced P0 and no reproduced in-scope P1-P2 correctness or integrity
+  finding remains;
 - deferrals, watch items, and validation gaps are explicit;
 - no generated, temporary, ignored runtime, or local state is staged; and
 - complexity review confirms the core remains coherent and reviewable.
@@ -211,7 +231,11 @@ Pre-implementation evidence:
 - Experimentally verified Git facts:
 - Architecture and adjacent-scope review results:
 Candidate manifest:
-- Schema version, base/HEAD, status bytes, complete path records and hashes:
+- Candidate-manifest schema version, base/HEAD, status bytes, complete path
+  records and hashes:
+- Policy version and exact-byte SHA-256:
+- Acceptance-packet schema version and exact-byte SHA-256:
+- Acceptance-packet version and exact-byte SHA-256:
 - Tracked binary-diff SHA-256:
 - Candidate-content SHA-256:
 Evidence envelope:
@@ -221,7 +245,8 @@ Evidence envelope:
 Done when:
 - Frozen criteria map to evidence.
 - Both reviewers approve the final exact candidate.
-- No reproduced in-scope P0-P2 correctness issue remains.
+- No reproduced P0 and no reproduced in-scope P1-P2 correctness or integrity
+  issue remains.
 - Deferrals, watch items, validation gaps, and tripwire status are explicit.
 - No reserved action occurred without separate authority.
 ```
