@@ -156,11 +156,14 @@ generate status, or generate the tracked diff in a new allowlisted environment,
 not the inherited process environment. Start it with `env -i`, pass only the
 required `PATH`, `LC_ALL=C`, the explicit configuration and attribute variables
 shown below, and `GIT_NO_REPLACE_OBJECTS=1`, then invoke Git with `-C` and the
-selected root. This clears every repository-local variable reported by `git
-rev-parse --local-env-vars`, including alternate index, worktree, object,
-namespace, graft, shallow, and repository selectors, as well as injected
-`GIT_CONFIG_COUNT` entries. Fail closed if the launcher cannot construct that
-environment or the selected root cannot be verified.
+selected root. Set `GIT_CONFIG=<empty-config>` to suppress repository-local
+configuration as well as worktree configuration; pin every required Git
+semantic explicitly on the command line. The isolated environment clears every
+repository-local variable reported by `git rev-parse --local-env-vars`,
+including alternate index, worktree, object, namespace, graft, shallow, and
+repository selectors, as well as injected `GIT_CONFIG_COUNT` entries. Fail
+closed if the launcher cannot construct that environment or the selected root
+cannot be verified.
 
 Enumerate the base and HEAD trees with `git -C <candidate-root> ls-tree -rz
 --full-tree <oid> --`, the index with `git -C <candidate-root> ls-files --stage
@@ -188,6 +191,7 @@ Record base64 of the exact status bytes from:
 ```sh
 env -i PATH="$PATH" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
 GIT_CONFIG_NOSYSTEM=1 \
+GIT_CONFIG=<empty-config> \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
@@ -208,6 +212,7 @@ sparse checkout or `.git/info/attributes`, using the same kind of
 ```sh
 env -i PATH="$PATH" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
 GIT_CONFIG_NOSYSTEM=1 \
+GIT_CONFIG=<empty-config> \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
