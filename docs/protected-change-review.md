@@ -212,8 +212,8 @@ terminates the attempt.
 Goal:
 - <externally observable result>
 Protected activation:
-- Protection-designation source and exact reference: <user, issue, or nearest
-  repository instructions>
+- Protection-designation source and exact reference: <user, issue, nearest
+  repository instructions, or designated acceptance owner>
 - Acceptance-owner designation source and exact reference: <user, issue, or
   nearest repository instructions>
 - Designated acceptance owner:
