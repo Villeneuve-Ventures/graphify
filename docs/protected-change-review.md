@@ -165,14 +165,19 @@ identity or image SHA-256, and both read-only observations in validation
 provenance. Fail closed on drift or when an enforced read-only snapshot is not
 available.
 
-This empty repository-configuration profile supports only Git's `sha1` storage
-object format. Before creating the clones, record `git rev-parse
---show-object-format=storage` from the source and require exactly `sha1`; after
-configuration isolation, repeat that check inside each snapshot root and
-require every full object ID to be 40 lowercase hexadecimal digits. Record both
-observations. Fail closed before manifest generation for `sha256`, a compatible
-secondary object format, or any other result; a future supported format needs a
-separately specified, acceptance-bound repository-format configuration.
+This empty repository-configuration profile supports only Git's `sha1` object
+format without a compatibility algorithm. Before creating the clones, record
+`git rev-parse --show-object-format=storage`,
+`git rev-parse --show-object-format=input`,
+`git rev-parse --show-object-format=output`, and
+`git rev-parse --show-object-format=compat` from the source. Require the first
+three results to be exactly `sha1` and the compatibility result to be an empty
+line. After configuration isolation, repeat and record all four checks inside
+each snapshot root, and require every full object ID to be 40 lowercase
+hexadecimal digits. Fail closed before manifest generation for `sha256`, a
+compatible secondary object format, multiple accepted input formats, translated
+output, or any other result; a future supported format needs a separately
+specified, acceptance-bound repository-format configuration.
 
 Run every Git command used to enumerate a tree or index, read an object,
 generate status, or generate the tracked diff in a new allowlisted environment,
@@ -235,10 +240,26 @@ git -C <candidate-root> -c core.attributesFile=<empty-config> \
 
 Canonicalize the status stream before placing it in
 `status_porcelain_v2_z_base64`. With `--no-renames`, require every nonempty
-NUL-delimited record to be self-contained and reject a `2 ` rename/copy record
-or any malformed record. Sort complete record bytes lexicographically, append
-one NUL after every record, and Base64-encode that canonical byte stream. Record
-the raw stream SHA-256 in the evidence envelope. The status stream is a
+NUL-delimited record to be self-contained and accept only this complete byte
+grammar:
+
+- `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` has exactly nine fields;
+- `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>` has exactly
+  eleven fields; and
+- `? <path>` has a nonempty path.
+
+For a `1` record, `<XY>` is exactly one of `.M`, `.T`, `.A`, `.D`, `M.`, `MM`,
+`MT`, `MD`, `T.`, `TM`, `TT`, `TD`, `A.`, `AM`, `AT`, `AD`, or `D.`. For a
+`u` record, it is exactly one of `DD`, `AU`, `UD`, `UA`, `DU`, `AA`, or `UU`.
+For either tracked record, `<sub>` is exactly `N...` or `S<c><m><u>` with each
+state byte either its named uppercase value or `.`, every mode is six octal
+digits, every object ID is 40 lowercase hexadecimal digits, and `<path>` is
+nonempty. Reject headers, ignored records, `2 ` rename/copy records, missing or
+empty fixed fields, and every other malformed record. Paths may contain any
+non-NUL byte, including spaces. Sort complete validated record bytes
+lexicographically, append one NUL after every record, and Base64-encode that
+canonical byte stream.
+Record the raw stream SHA-256 in the evidence envelope. The status stream is a
 diagnostic cross-check, not the path inventory or the source of any layer's
 content record. Compare the independently generated path records and status
 stream and fail closed on an unexplained disagreement; ignored paths appearing
