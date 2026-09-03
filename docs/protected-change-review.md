@@ -88,11 +88,14 @@ approval and a new acceptance digest.
 
 The immutable candidate-content manifest path set is the union of every path in
 the frozen base tree, HEAD tree, index, and raw candidate-worktree inventory.
-The worktree inventory contains every tracked path plus every non-ignored
-untracked path, whether or not Git status reports a change. This deliberately
-binds raw tracked bytes that a clean filter, line-ending conversion, file-mode
-configuration, or another Git comparison rule could otherwise hide. Moves are
-represented deterministically as one deletion plus one addition.
+The worktree inventory recursively contains every regular file and symlink
+directory entry except the exact top-level `.git` directory, including ignored
+and untracked entries, whether or not Git status reports a change. This
+deliberately binds raw tracked bytes and exact path spellings that a clean
+filter, line-ending conversion, file-mode configuration, case- or
+normalization-insensitive lookup, ignore rule, or another Git comparison rule
+could otherwise hide. Moves are represented deterministically as one deletion
+plus one addition.
 
 Manifest schema `graphify.protected-change-review.candidate.v2` has exactly
 these top-level keys and value types:
@@ -138,11 +141,16 @@ Use lowercase hexadecimal for Git OIDs and SHA-256 values. A null layer means
 the path is absent from that layer. A present Git layer records the Git object
 mode and OID plus the object byte length and SHA-256. A present worktree layer
 comes from raw filesystem operations, never Git content conversion: use
-`lstat`, hash regular-file bytes read without a Git filter, and hash the raw
-symlink-target bytes returned by `readlink`. Normalize a regular worktree mode
-to `100755` when its owner-execute bit is set and `100644` otherwise; use
-`120000` for a symlink. Fail closed on another object or filesystem type. Sort
-path records by the raw UTF-8 bytes of `path`.
+raw byte-returning directory enumeration, then `lstat` only a spelling present
+in that exact inventory, hash regular-file bytes read without a Git filter, and
+hash the raw symlink-target bytes returned by `readlink`. Never determine
+presence by probing a Git-supplied spelling, because a case- or
+normalization-insensitive filesystem can resolve it to a different directory
+entry. Normalize a regular worktree mode to `100755` when its owner-execute bit
+is set and `100644` otherwise; use `120000` for a symlink. Fail closed on
+duplicate raw path bytes, undecodable paths, another object or filesystem type,
+or an exact top-level `.git` entry that is not the selected repository
+directory. Sort path records by the raw UTF-8 bytes of `path`.
 
 Create standalone candidate and diff clones without modifying shared Git
 metadata, then create a filesystem-level read-only snapshot containing both
@@ -180,15 +188,15 @@ or configuration state cannot be verified.
 
 Enumerate the base and HEAD trees with `git -C <candidate-root> ls-tree -rz
 --full-tree <oid> --`, the index with `git -C <candidate-root> ls-files --stage
--z`, and candidate-worktree path names with `git -C <candidate-root> ls-files
--z --cached --others --exclude-standard`. Decode path bytes as
-strict UTF-8 and fail closed on duplicates, non-stage-zero index entries,
-unsupported objects, or undecodable paths. Read Git-layer content directly from
-the named objects, without filters, under the same isolated environment and
-configuration profile. Run both `ls-files` commands under that profile too.
-The separately recorded ignored-path inventory remains evidence, not candidate
-content. Isolate ignored content from validation, or bind any ignored input that
-validation must consume into its receipt and fail closed when that input drifts.
+-z`. Independently enumerate raw worktree entries from the snapshot with a
+byte-returning `readdir`-equivalent, recursively descending real directories
+without following symlinks and excluding only the exact top-level `.git`
+directory. Decode path bytes as strict UTF-8 and fail closed on duplicates,
+non-stage-zero index entries, unsupported objects, or undecodable paths. Read
+Git-layer content directly from the named objects, without filters, under the
+same isolated environment and configuration profile. Ignored content is
+candidate content under this inventory; isolate validation artifacts from the
+snapshot or refreeze after any appear.
 
 Generate the status diagnostic stream in the dedicated candidate worktree, not a
 fresh clone, so staged, unstaged, and untracked candidate state remains
@@ -218,7 +226,8 @@ git -C <candidate-root> -c core.attributesFile=<empty-config> \
 
 The status stream is a diagnostic cross-check, not the path inventory or the
 source of any layer's content record. Compare the independently generated path
-records and status stream and fail closed on an unexplained disagreement.
+records and status stream and fail closed on an unexplained disagreement;
+ignored paths appearing only in the raw inventory are expected.
 
 Generate the tracked binary-diff byte stream in a fresh isolated clone with no
 sparse checkout or `.git/info/attributes`, using the same kind of
