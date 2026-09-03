@@ -166,18 +166,38 @@ provenance. Fail closed on drift or when an enforced read-only snapshot is not
 available.
 
 This empty repository-configuration profile supports only Git's `sha1` object
-format without a compatibility algorithm. Before creating the clones, record
+format without a compatibility algorithm. Canonicalize `<source-root>` before
+creating the clones. In a fresh `env -i` environment, pass only `PATH`,
+`LC_ALL=C`, `GIT_NO_REPLACE_OBJECTS=1`, `GIT_OPTIONAL_LOCKS=0`,
+`GIT_CONFIG_NOSYSTEM=1`, and explicit empty `GIT_CONFIG_SYSTEM` and
+`GIT_CONFIG_GLOBAL` files; do not set any repository selector or command-scope
+configuration. Using `git -C <source-root>`, require the canonical top-level to
+equal `<source-root>` and record the absolute Git and common directories, HEAD,
+base, and the SHA-256 of the raw `git config --local --show-origin --show-scope
+--null --list` byte stream. Record the presence, type, size, and SHA-256 of the
+source common and worktree configuration files. This source query intentionally
+retains only the selected repository's local configuration, including local
+includes, while the empty environment clears repository selectors and injected
+configuration.
+
+Under that same environment, record
 `git rev-parse --show-object-format=storage`,
 `git rev-parse --show-object-format=input`,
 `git rev-parse --show-object-format=output`, and
 `git rev-parse --show-object-format=compat` from the source. Require the first
 three results to be exactly `sha1` and the compatibility result to be an empty
-line. After configuration isolation, repeat and record all four checks inside
-each snapshot root, and require every full object ID to be 40 lowercase
-hexadecimal digits. Fail closed before manifest generation for `sha256`, a
-compatible secondary object format, multiple accepted input formats, translated
-output, or any other result; a future supported format needs a separately
-specified, acceptance-bound repository-format configuration.
+line. Clone with `git clone --no-local --no-checkout <source-root> <clone>` and
+record that exact command. Immediately after both clones exist, repeat the
+source identity, configuration, and format observations under the same isolated
+environment and require byte-for-byte equality with the pre-clone observations.
+Require both clones to contain the frozen base and HEAD objects and their HEADs
+to equal the frozen source HEAD before constructing the snapshot. After
+configuration isolation, repeat and record all four format checks inside each
+snapshot root, and require every full object ID to be 40 lowercase hexadecimal
+digits. Fail closed before manifest generation for source drift, uncertain clone
+lineage, `sha256`, a compatible secondary object format, multiple accepted input
+formats, translated output, or any other result; a future supported format needs
+a separately specified, acceptance-bound repository-format configuration.
 
 Run every Git command used to enumerate a tree or index, read an object,
 generate status, or generate the tracked diff in a new allowlisted environment,
@@ -239,8 +259,10 @@ git -C <candidate-root> -c core.attributesFile=<empty-config> \
 ```
 
 Canonicalize the status stream before placing it in
-`status_porcelain_v2_z_base64`. With `--no-renames`, require every nonempty
-NUL-delimited record to be self-contained and accept only this complete byte
+`status_porcelain_v2_z_base64`. Require the stream to be empty or to contain one
+or more nonempty records, each followed by exactly one NUL byte; reject an
+unterminated tail or an empty record between terminators. With `--no-renames`,
+require every record to be self-contained and accept only this complete byte
 grammar:
 
 - `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` has exactly nine fields;
@@ -323,9 +345,13 @@ the candidate worktree and its Git status inventory. Evidence paths may be
 allowlisted for collection, but envelope bytes and their path records are never
 candidate-content records. Every validation receipt and reviewer approval binds
 to the candidate-content digest. The envelope also records pre/post ignored,
-generated, and local-state inventories. Canonicalize it with the same JSON rules
-and record its final digest; new evidence changes the envelope digest, not the
-candidate-content digest.
+generated, and local-state inventories. Encode it as zero or more canonical JSON
+object records under the same JSON value rules. The first record begins at byte
+zero; append every later record as exactly one LF byte followed by its canonical
+JSON bytes. Records contain no literal LF, an empty record is forbidden, and the
+envelope never ends with LF. Hash the complete framed byte stream and record its
+final digest; new evidence changes the envelope digest, not the candidate-content
+digest.
 
 Re-pin content immediately before and after every review and validation. Any
 in-scope byte, mode, type, path, status, base, or HEAD change creates a new
