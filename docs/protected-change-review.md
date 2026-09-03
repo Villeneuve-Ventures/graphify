@@ -187,17 +187,25 @@ Under that same environment, record
 `git rev-parse --show-object-format=compat` from the source. Require the first
 three results to be exactly `sha1` and the compatibility result to be an empty
 line. Clone with `git clone --no-local --no-checkout <source-root> <clone>` and
-record that exact command. Immediately after both clones exist, repeat the
-source identity, configuration, and format observations under the same isolated
-environment and require byte-for-byte equality with the pre-clone observations.
-Require both clones to contain the frozen base and HEAD objects and their HEADs
-to equal the frozen source HEAD before constructing the snapshot. After
-configuration isolation, repeat and record all four format checks inside each
-snapshot root, and require every full object ID to be 40 lowercase hexadecimal
-digits. Fail closed before manifest generation for source drift, uncertain clone
-lineage, `sha256`, a compatible secondary object format, multiple accepted input
-formats, translated output, or any other result; a future supported format needs
-a separately specified, acceptance-bound repository-format configuration.
+record that exact command. Treat clones as object-transfer starts, not candidate state. Before
+cloning, capture exact NUL-delimited stage-zero mode/OID/stage/path index records and the complete
+raw source-worktree map; reject other stages or unsupported entries.
+Populate only the candidate clone before snapshotting. For each indexed blob, read
+source bytes without filters, write them with `git hash-object -w --stdin`, and
+require the returned full OID to match. Rebuild its index from the captured records
+with `git update-index -z --index-info`; recreate the raw worktree with no-follow
+byte-path operations, preserving file bytes, owner-execute state, symlink-target
+bytes, and required parents. Never check out HEAD or apply filters.
+Resolve and verify each clone's standalone top-level, Git, and common directories.
+Atomically zero each verified clone's common config and candidate `info/exclude`;
+require `config.worktree` and candidate `info/attributes` absent, record pre/post
+metadata/hashes, and never mutate source or shared paths. Require candidate
+index/raw maps to equal captured source maps; repeat source HEAD, base, config,
+format, index, and raw-map observations and require pre-clone equality. Require
+both clones to contain frozen base/HEAD objects and equal frozen source HEAD.
+After isolation, repeat all four format checks in each snapshot and require 40-digit
+lowercase hexadecimal full OIDs. Fail closed on drift, incomplete transfer,
+uncertain lineage, `sha256`, compatibility format, multiple input formats, translated output, or any result outside the acceptance-bound format.
 
 Run every Git command used to enumerate a tree or index, read an object,
 generate status, or generate the tracked diff in a new allowlisted environment,
@@ -385,10 +393,10 @@ One attempt permits:
 3. at most one second repair batch, limited to a reproduced regression introduced
    by the first repair or one narrowly missed frozen invariant.
 
-Every edit after review or approval consumes an available repair batch and
-requires both stable reviewers to approve the complete new exact candidate. A
-failure in final validation is a finding against that candidate; it cannot be
-patched outside the same remaining batch limit.
+Only edits after initial candidate-content review or a re-review consume a repair batch;
+pre-implementation review and pre-freeze implementation do not. One consolidated
+packet consumes one batch regardless of internal edits and requires both reviewers
+to approve the new exact candidate; final-validation failure cannot be patched outside the remaining batch limit.
 
 A central P1 invalidates the frozen authority/invariant model or requires a
 cross-cutting or out-of-packet repair. A new central P1 after the first re-review
