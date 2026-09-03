@@ -216,9 +216,11 @@ Only after raw acceptance, capture separate `git ls-files -t -z`, `-v -z`, and
 over the raw-parser path set. Clone with
 `git clone --no-local --no-checkout <source-root> <clone>` and record that exact
 command. Treat clones as object-transfer starts, not candidate state. Before
-cloning, capture exact NUL-delimited stage-zero mode/OID/stage/path index
-records and the complete raw source-worktree map; reject other stages or
-unsupported entries.
+cloning, derive exact NUL-delimited `mode SP full-OID SP 0 TAB raw-path NUL`
+records directly from the same validated in-memory raw-index byte buffer.
+Require supported modes, hash and freeze that byte stream, and reject other
+stages or unsupported entries. Use only that frozen stream for candidate index
+reconstruction; separately capture the complete raw source-worktree map.
 Populate only the candidate clone before snapshotting. For each indexed blob, read
 source bytes without filters, write them with `git hash-object -w --stdin`, and
 require the returned full OID to match. Rebuild its index from the captured records
