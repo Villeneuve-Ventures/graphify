@@ -193,10 +193,32 @@ Under that same environment, record
 `git rev-parse --show-object-format=output`, and
 `git rev-parse --show-object-format=compat` from the source. Require the first
 three results to be exactly `sha1` and the compatibility result to be an empty
-line. Clone with `git clone --no-local --no-checkout <source-root> <clone>` and
-record that exact command. Treat clones as object-transfer starts, not candidate state. Before
-cloning, capture exact NUL-delimited stage-zero mode/OID/stage/path index records and the complete
-raw source-worktree map; reject other stages or unsupported entries.
+line. Before any command that may read the source index, derive
+`<git-dir>/index` from the frozen Git-directory identity, open it with no-follow
+operations, and require exactly one regular file. Parse the raw bytes with
+session-local source whose SHA-256 is recorded. Require a valid trailing SHA-1
+checksum and a `DIRC` version 2 or 3 header. Parse exactly the declared entry
+count with checked bounds, the 62-byte SHA-1 prefix, NUL-terminated raw paths,
+matching name-length bits, strict byte order and uniqueness, and exact
+eight-byte padding. Require `(flags & 0xf000) == 0` for every entry and never
+accept an extended flag word. Parse all remaining bytes as bounded
+signature/size/payload extensions before the checksum; reject `FSMN`, every
+lowercase required extension including `link` and `sdir`, malformed framing,
+or trailing bytes. Version 4, split, sparse, skipped-checksum, and required
+extension indexes are unsupported. Canonicalize each accepted entry as
+`u64be(path length) || raw path || u32be(0)`, sorted by raw path, and record the
+version, entry and extension counts, extension signatures, computed SHA-1, raw
+index SHA-256, parser-source SHA-256, and inventory count/SHA-256 in validation
+provenance. Require the raw index bytes after parsing to equal the bytes before.
+Only after raw acceptance, capture separate `git ls-files -t -z`, `-v -z`, and
+`-f -z` diagnostics with command-line `core.fsmonitor=false` and
+`core.sparseCheckout=false`; each record must be exactly `H SP raw-path NUL`
+over the raw-parser path set. Clone with
+`git clone --no-local --no-checkout <source-root> <clone>` and record that exact
+command. Treat clones as object-transfer starts, not candidate state. Before
+cloning, capture exact NUL-delimited stage-zero mode/OID/stage/path index
+records and the complete raw source-worktree map; reject other stages or
+unsupported entries.
 Populate only the candidate clone before snapshotting. For each indexed blob, read
 source bytes without filters, write them with `git hash-object -w --stdin`, and
 require the returned full OID to match. Rebuild its index from the captured records
@@ -206,9 +228,12 @@ bytes, and required parents. Never check out HEAD or apply filters.
 Resolve and verify each clone's standalone top-level, Git, and common directories.
 Atomically zero each verified clone's common config and candidate `info/exclude`;
 require `config.worktree` and candidate `info/attributes` absent, record pre/post
-metadata/hashes, and never mutate source or shared paths. Require candidate
-index/raw maps to equal captured source maps; repeat source HEAD, base, config,
-format, index, and raw-map observations and require pre-clone equality. Require
+metadata/hashes, and never mutate source or shared paths. Immediately after
+candidate index reconstruction, repeat the authoritative raw-index proof and
+tag diagnostics. Require candidate index/raw maps and flag inventory to equal
+captured source maps; repeat source HEAD, base, config, format, raw-index,
+flag-inventory, tag, index, and raw-map observations and require pre-clone
+equality. Require
 both clones to contain frozen base/HEAD objects and equal frozen source HEAD.
 After isolation, repeat all four format checks in each snapshot and require 40-digit
 lowercase hexadecimal full OIDs. Fail closed on drift, incomplete transfer,
