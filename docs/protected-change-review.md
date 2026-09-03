@@ -166,8 +166,15 @@ provenance. Fail closed on drift or when an enforced read-only snapshot is not
 available.
 
 This empty repository-configuration profile supports only Git's `sha1` object
-format without a compatibility algorithm. Canonicalize `<source-root>` before
-creating the clones. In a fresh `env -i` environment, pass only `PATH`,
+format without a compatibility algorithm. Before the first source observation,
+create `<empty-config>` as a canonical regular zero-byte file inside a separately
+enforced read-only control snapshot outside every repository worktree and
+candidate inventory. Record its canonical path, snapshot mechanism and image or
+source identity, device and mount identity, read-only observations, and SHA-256.
+Keep that snapshot read-only through every source, clone, candidate-snapshot, and
+manifest command; every use must resolve to the same file. Fail closed on drift
+or a writable control. Canonicalize `<source-root>` before creating the clones.
+In a fresh `env -i` environment, pass only `PATH`,
 `LC_ALL=C`, `GIT_NO_REPLACE_OBJECTS=1`, `GIT_OPTIONAL_LOCKS=0`,
 `GIT_CONFIG_NOSYSTEM=1`, and explicit empty `GIT_CONFIG_SYSTEM` and
 `GIT_CONFIG_GLOBAL` files; do not set any repository selector or command-scope
@@ -218,8 +225,9 @@ do not use that variable as an isolation control. Inside the read-only snapshot,
 require both
 `$GIT_COMMON_DIR/config` and `$GIT_DIR/config.worktree` to be absent or existing
 regular zero-byte files and record their presence, type, byte length, and
-SHA-256 when present. This snapshot is the mutation barrier for the complete
-generation interval; endpoint metadata comparisons alone are insufficient. Pin
+SHA-256 when present. The candidate and control snapshots jointly form the
+mutation barrier for the complete generation interval; endpoint metadata
+comparisons alone are insufficient. Pin
 every required Git semantic explicitly on the command line. The isolated
 environment clears every repository-local variable reported by `git rev-parse
 --local-env-vars`,
@@ -398,6 +406,14 @@ pre-implementation review and pre-freeze implementation do not. One consolidated
 packet consumes one batch regardless of internal edits and requires both reviewers
 to approve the new exact candidate; final-validation failure cannot be patched outside the remaining batch limit.
 
+Before post-review editing, freeze and hash one canonical consolidated repair
+packet. After freezing the result and before re-review, append one canonical
+repair-link event to the evidence envelope containing the attempt ID, predecessor
+candidate digest, batch ordinal, repair-packet digest, and resulting-candidate
+digest. Require a unique attempt ID, ordinal `1` or `2`, chain continuity from the
+last reviewed candidate, and exact agreement with the candidate under review;
+missing, repeated, skipped, or mismatched linkage blocks re-review.
+
 A central P1 invalidates the frozen authority/invariant model or requires a
 cross-cutting or out-of-packet repair. A new central P1 after the first re-review
 terminates the attempt. A successor requires explicit acceptance-owner approval,
@@ -499,6 +515,7 @@ Candidate manifest:
 - Candidate-content SHA-256:
 Evidence envelope:
 - Validation and reviewer records bound to the candidate-content SHA-256:
+- Repair-link events, or initial-candidate `N/A`:
 - Pre/post ignored, generated, and local-state inventories:
 - Final evidence-envelope SHA-256:
 Done when:
