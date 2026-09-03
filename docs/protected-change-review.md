@@ -165,6 +165,15 @@ identity or image SHA-256, and both read-only observations in validation
 provenance. Fail closed on drift or when an enforced read-only snapshot is not
 available.
 
+This empty repository-configuration profile supports only Git's `sha1` storage
+object format. Before creating the clones, record `git rev-parse
+--show-object-format=storage` from the source and require exactly `sha1`; after
+configuration isolation, repeat that check inside each snapshot root and
+require every full object ID to be 40 lowercase hexadecimal digits. Record both
+observations. Fail closed before manifest generation for `sha256`, a compatible
+secondary object format, or any other result; a future supported format needs a
+separately specified, acceptance-bound repository-format configuration.
+
 Run every Git command used to enumerate a tree or index, read an object,
 generate status, or generate the tracked diff in a new allowlisted environment,
 not the inherited process environment. Start it with `env -i`, pass only the
@@ -207,7 +216,7 @@ regular zero-byte file. Record the exclude file's presence, type, byte length,
 and SHA-256 when present. Do not truncate or replace shared Git metadata to
 satisfy this requirement; if the exclude file is non-regular or non-empty,
 re-establish the candidate in a standalone isolated clone and refreeze it.
-Record base64 of the exact status bytes from:
+Capture the raw status bytes from:
 
 ```sh
 env -i PATH="$PATH" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
@@ -224,10 +233,16 @@ git -C <candidate-root> -c core.attributesFile=<empty-config> \
   --porcelain=v2 -z --untracked-files=all --no-renames
 ```
 
-The status stream is a diagnostic cross-check, not the path inventory or the
-source of any layer's content record. Compare the independently generated path
-records and status stream and fail closed on an unexplained disagreement;
-ignored paths appearing only in the raw inventory are expected.
+Canonicalize the status stream before placing it in
+`status_porcelain_v2_z_base64`. With `--no-renames`, require every nonempty
+NUL-delimited record to be self-contained and reject a `2 ` rename/copy record
+or any malformed record. Sort complete record bytes lexicographically, append
+one NUL after every record, and Base64-encode that canonical byte stream. Record
+the raw stream SHA-256 in the evidence envelope. The status stream is a
+diagnostic cross-check, not the path inventory or the source of any layer's
+content record. Compare the independently generated path records and status
+stream and fail closed on an unexplained disagreement; ignored paths appearing
+only in the raw inventory are expected.
 
 Generate the tracked binary-diff byte stream in a fresh isolated clone with no
 sparse checkout or `.git/info/attributes`, using the same kind of
@@ -271,7 +286,7 @@ alphabet, required `=` padding, and no whitespace or line breaks. Hash the exact
 encoded manifest bytes with SHA-256; that value is the candidate-content digest
 reviewers approve.
 
-Byte-level conformance vector: raw status bytes `fb00` encode as `+wA=`. The
+Byte-level conformance vector: binary bytes `fb00` encode as `+wA=`. The
 canonical JSON value containing path `a/é` and that status value is the exact
 UTF-8 byte sequence
 `7b2270617468223a22612fc3a9222c227374617475735f706f7263656c61696e5f76325f7a5f626173653634223a222b77413d227d`,
