@@ -173,12 +173,12 @@ creating the clones. In a fresh `env -i` environment, pass only `PATH`,
 `GIT_CONFIG_GLOBAL` files; do not set any repository selector or command-scope
 configuration. Using `git -C <source-root>`, require the canonical top-level to
 equal `<source-root>` and record the absolute Git and common directories, HEAD,
-base, and the SHA-256 of the raw `git config --local --show-origin --show-scope
---null --list` byte stream. Record the presence, type, size, and SHA-256 of the
-source common and worktree configuration files. This source query intentionally
-retains only the selected repository's local configuration, including local
-includes, while the empty environment clears repository selectors and injected
-configuration.
+base, and the SHA-256 of the raw `git config --local --includes --show-origin
+--show-scope --null --list` byte stream. Record the presence, type, size, and
+SHA-256 of the source common and worktree configuration files. This source query
+intentionally retains only the selected repository's local configuration,
+including local includes, while the empty environment clears repository
+selectors and injected configuration.
 
 Under that same environment, record
 `git rev-parse --show-object-format=storage`,
