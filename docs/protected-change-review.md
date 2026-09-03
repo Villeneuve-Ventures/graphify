@@ -144,27 +144,35 @@ to `100755` when its owner-execute bit is set and `100644` otherwise; use
 `120000` for a symlink. Fail closed on another object or filesystem type. Sort
 path records by the raw UTF-8 bytes of `path`.
 
-Define `<candidate-root>` as the canonical absolute path of the dedicated
-candidate worktree and `<diff-root>` as the canonical absolute path of the
-fresh isolated clone used for the tracked diff. Before and after manifest
-generation, use the isolated profile below to verify that `git -C <root>
-rev-parse --show-toplevel` resolves to the selected root and that its Git and
-common directories resolve to the frozen expected paths. Fail closed on drift.
+Create standalone candidate and diff clones without modifying shared Git
+metadata, then create a filesystem-level read-only snapshot containing both
+complete roots. Candidate identity is the content observed from that snapshot,
+not its mutable staging source. Define `<candidate-root>` and `<diff-root>` as
+the canonical absolute paths of those roots inside the snapshot. Before and
+after manifest generation, verify both that the snapshot remains mounted or
+otherwise enforced read-only and that `git -C <root> rev-parse
+--show-toplevel` resolves to the selected root with Git and common directories
+at the frozen snapshot paths. Record the snapshot mechanism, immutable source
+identity or image SHA-256, and both read-only observations in validation
+provenance. Fail closed on drift or when an enforced read-only snapshot is not
+available.
 
 Run every Git command used to enumerate a tree or index, read an object,
 generate status, or generate the tracked diff in a new allowlisted environment,
 not the inherited process environment. Start it with `env -i`, pass only the
 required `PATH`, `LC_ALL=C`, the explicit configuration and attribute variables
-shown below, and `GIT_NO_REPLACE_OBJECTS=1`, then invoke Git with `-C` and the
-selected root. Repository-local configuration is still active for ordinary Git
-commands even when `GIT_CONFIG` names another file, so do not use that variable
-as an isolation control. Before and after generation, require both
+shown below, `GIT_NO_REPLACE_OBJECTS=1`, and `GIT_OPTIONAL_LOCKS=0`, then invoke
+Git with `-C` and the selected root. Repository-local configuration is still
+active for ordinary Git commands even when `GIT_CONFIG` names another file, so
+do not use that variable as an isolation control. Inside the read-only snapshot,
+require both
 `$GIT_COMMON_DIR/config` and `$GIT_DIR/config.worktree` to be absent or existing
 regular zero-byte files and record their presence, type, byte length, and
-SHA-256 when present. Pin every required Git semantic explicitly on the command
-line. Do not truncate or replace shared Git metadata; re-establish the root as a
-standalone isolated clone before freezing it. The isolated environment clears
-every repository-local variable reported by `git rev-parse --local-env-vars`,
+SHA-256 when present. This snapshot is the mutation barrier for the complete
+generation interval; endpoint metadata comparisons alone are insufficient. Pin
+every required Git semantic explicitly on the command line. The isolated
+environment clears every repository-local variable reported by `git rev-parse
+--local-env-vars`,
 including alternate index, worktree, object, namespace, graft, shallow, and
 repository selectors, as well as injected `GIT_CONFIG_COUNT` entries. Fail
 closed if the launcher cannot construct that environment or the selected root
@@ -195,12 +203,15 @@ Record base64 of the exact status bytes from:
 
 ```sh
 env -i PATH="$PATH" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
+GIT_OPTIONAL_LOCKS=0 \
 GIT_CONFIG_NOSYSTEM=1 \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
 git -C <candidate-root> -c core.attributesFile=<empty-config> \
   -c core.excludesFile=<empty-config> -c core.filemode=true \
+  -c core.fsmonitor=false -c core.ignoreCase=false \
+  -c core.precomposeUnicode=false -c core.untrackedCache=false \
   -c status.renames=false status \
   --porcelain=v2 -z --untracked-files=all --no-renames
 ```
@@ -215,13 +226,14 @@ sparse checkout or `.git/info/attributes`, using the same kind of
 
 ```sh
 env -i PATH="$PATH" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
+GIT_OPTIONAL_LOCKS=0 \
 GIT_CONFIG_NOSYSTEM=1 \
 GIT_CONFIG_SYSTEM=<empty-config> \
 GIT_CONFIG_GLOBAL=<empty-config> \
 GIT_ATTR_NOSYSTEM=1 GIT_ATTR_SOURCE=<head-oid> \
 GIT_EXTERNAL_DIFF= GIT_DIFF_OPTS= \
 git -C <diff-root> -c core.attributesFile=<empty-config> \
-  -c core.quotePath=true diff \
+  -c core.quotePath=true -c diff.suppressBlankEmpty=false diff \
   --binary --full-index --no-color --no-ext-diff --no-textconv --no-renames \
   --diff-algorithm=myers --no-indent-heuristic --unified=3 \
   --src-prefix=a/ --dst-prefix=b/ --line-prefix= --ita-invisible-in-index \
