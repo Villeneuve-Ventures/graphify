@@ -276,10 +276,12 @@ For a `1` record, `<XY>` is exactly one of `.M`, `.T`, `.A`, `.D`, `M.`, `MM`,
 For either tracked record, `<sub>` is exactly `N...` or `S<c><m><u>` with each
 state byte either its named uppercase value or `.`, every mode is six octal
 digits, every object ID is 40 lowercase hexadecimal digits, and `<path>` is
-nonempty. Reject headers, ignored records, `2 ` rename/copy records, missing or
-empty fixed fields, and every other malformed record. Paths may contain any
-non-NUL byte, including spaces. Sort complete validated record bytes
-lexicographically, append one NUL after every record, and Base64-encode that
+nonempty. Reject headers, ignored records, `2` rename/copy records, missing or
+empty fixed fields, and every other malformed record. Parse `<path>` as every
+remaining byte after the fixed prefix delimiters without splitting that
+remainder on spaces. It may contain any non-NUL byte, including spaces. Sort
+complete validated record bytes lexicographically, append one NUL after every
+record, and Base64-encode that
 canonical byte stream.
 Record the raw stream SHA-256 in the evidence envelope. The status stream is a
 diagnostic cross-check, not the path inventory or the source of any layer's
@@ -329,8 +331,8 @@ alphabet, required `=` padding, and no whitespace or line breaks. Hash the exact
 encoded manifest bytes with SHA-256; that value is the candidate-content digest
 reviewers approve.
 
-Byte-level conformance vector: binary bytes `fb00` encode as `+wA=`. The
-canonical JSON value containing path `a/é` and that status value is the exact
+Byte-level conformance vector: hexadecimal bytes `0xfb 0x00` encode as `+wA=`.
+The canonical JSON value containing path `a/é` and that status value is the exact
 UTF-8 byte sequence
 `7b2270617468223a22612fc3a9222c227374617475735f706f7263656c61696e5f76325f7a5f626173653634223a222b77413d227d`,
 whose SHA-256 is
