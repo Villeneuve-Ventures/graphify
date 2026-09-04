@@ -221,6 +221,41 @@ records directly from the same validated in-memory raw-index byte buffer.
 Require supported modes, hash and freeze that byte stream, and reject other
 stages or unsupported entries. Use only that frozen stream for candidate index
 reconstruction; separately capture the complete raw source-worktree map.
+
+### Repository verifier reference
+
+The repository-tested reference implementation is
+`graphify.protected_change_verifier`, version
+`graphify.protected-change-verifier.v1`. Its embedded logical schema is
+`graphify.protected-change-verifier.manifest-schemas.v1`, SHA-256
+`59666f5cf42b4a8e37c0275194f955124a65a3502090502ec8d557e8c5e24c8d`.
+Resolve the selected index through Git so linked worktrees are handled; never
+assume that it is `.git/index`:
+
+```sh
+index_path="$(git rev-parse --git-path index)"
+uv run --frozen python -m graphify.protected_change_verifier \
+  --index "$index_path"
+```
+
+The verifier is read-only. It component-safely opens one regular index file,
+accepts only checksum-valid SHA-1 DIRC v2/v3 with stage zero modes `100644`,
+`100755`, or `120000`, and returns canonical source, candidate-index feeder,
+and evidence records. The feeder is derived from the accepted in-memory buffer;
+candidate reconstruction must consume only those returned bytes. Applying the
+feeder, creating clones or snapshots, and producing the exact `candidate.v2`
+manifest remain external policy orchestration responsibilities.
+
+The v1 maxima are 32 MiB for the complete raw index, 250,000 entries, 1 MiB per
+path, 128 extensions, 16 MiB per extension payload and in aggregate extension
+frames, 32 MiB for decoded reconstruction records, 48 MiB for the canonical
+success result, and 1 MiB per descriptor read. Unsupported flags, stages,
+modes, required lowercase extensions, `FSMN`, split/sparse indexes, and DIRC v4
+fail closed with stable path-redacted invariant identifiers. CI conformance is
+the exact 80-case matrix in `tests/test_protected_change_verifier.py`, run in
+normal and optimized Python modes; that matrix supplements rather than replaces
+the complete candidate and snapshot checks in this policy.
+
 Populate only the candidate clone before snapshotting. For each indexed blob, read
 source bytes without filters, write them with `git hash-object -w --stdin`, and
 require the returned full OID to match. Rebuild its index from the captured records
