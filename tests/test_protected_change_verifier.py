@@ -221,8 +221,11 @@ def _rejects(raw: bytes, invariant: str, *, limits: verifier.Limits = verifier.L
 
 
 def _cli(path: Path, *, optimized: bool = False, env: dict[str, str] | None = None):
-    effective_env = os.environ.copy() if env is None else dict(env)
-    effective_env.pop("PYTHONOPTIMIZE", None)
+    if env is None:
+        effective_env = os.environ.copy()
+        effective_env.pop("PYTHONOPTIMIZE", None)
+    else:
+        effective_env = dict(env)
     command = [sys.executable]
     if optimized:
         command.append("-O")
@@ -365,16 +368,28 @@ def test_frozen_normative_case(
         _expect('exec "$env_path" -i' in launcher)
         _expect(launcher.count('"$env_path" -i') == 2)
         _expect("env -i" not in launcher)
-        _expect('cd -- "$source_root" || exit' in launcher)
+        _expect("cd --" not in launcher)
         _expect(')" || exit' in launcher)
         _expect('[ -n "$index_path" ] || exit' in launcher)
-        _expect('"$verifier_python" -B -m graphify.protected_change_verifier' in launcher)
+        _expect(
+            '"$verifier_python" -I -B -m graphify.protected_change_verifier'
+            in launcher
+        )
         _expect("uv run --frozen python -m graphify.protected_change_verifier" not in docs)
 
         real_env = Path(shutil.which("env") or "")
         _expect(real_env.is_absolute())
         source_root = tmp_path / "source root"
         source_root.mkdir()
+        shadow_marker = tmp_path / "shadow-module-ran"
+        shadow_package = source_root / "graphify"
+        shadow_package.mkdir()
+        (shadow_package / "__init__.py").write_bytes(b"")
+        (shadow_package / "protected_change_verifier.py").write_text(
+            "from pathlib import Path\n"
+            f"Path({str(shadow_marker)!r}).write_text('shadow', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
         empty_config = tmp_path / "empty config"
         empty_config.write_bytes(b"")
         index_path = tmp_path / "resolved index"
@@ -386,10 +401,8 @@ def test_frozen_normative_case(
         hostile_env_marker = tmp_path / "ambient-env-ran"
         lookup_marker = tmp_path / "lookup-ran"
         git_arguments_marker = tmp_path / "git-arguments"
-        verifier_marker = tmp_path / "verifier-ran"
         fake_env = hostile_path / "env"
         pinned_git = tmp_path / "pinned git"
-        pinned_python = tmp_path / "pinned python"
         _write_executable(
             fake_env,
             f"printf hostile > {shlex.quote(str(hostile_env_marker))}\nexit 97\n",
@@ -402,16 +415,12 @@ def test_frozen_normative_case(
                 f"printf '%s\\n' {shlex.quote(str(index_path))}\n"
             ),
         )
-        _write_executable(
-            pinned_python,
-            f"printf '%s\\n' \"$@\" > {shlex.quote(str(verifier_marker))}\n",
-        )
         assignments = {
             "source_root": source_root,
             "empty_config": empty_config,
             "env_path": real_env,
             "git_path": pinned_git,
-            "verifier_python": pinned_python,
+            "verifier_python": Path(sys.executable),
             "isolated_path": isolated_path,
         }
         runnable = _launcher_with_assignments(launcher, assignments)
@@ -419,11 +428,13 @@ def test_frozen_normative_case(
             ["/bin/sh", "-c", runnable],
             check=False,
             capture_output=True,
+            cwd=source_root,
             env={"PATH": str(hostile_path)},
         )
         _expect(completed.returncode == 0)
         _expect(completed.stderr == b"")
         _expect(not hostile_env_marker.exists())
+        _expect(not shadow_marker.exists())
         _expect(lookup_marker.read_bytes() == b"lookup")
         _expect(git_arguments_marker.read_text(encoding="utf-8").splitlines() == [
             "-C",
@@ -433,73 +444,37 @@ def test_frozen_normative_case(
             "--git-path",
             "index",
         ])
-        _expect(verifier_marker.read_text(encoding="utf-8").splitlines() == [
-            "-B",
-            "-m",
-            "graphify.protected_change_verifier",
-            "--index",
-            str(index_path),
-        ])
+        accepted = json.loads(completed.stdout)
+        _expect(accepted["verifier"] == verifier.VERIFIER_VERSION)
+        _expect(accepted["source"]["raw_index_sha256"] == hashlib.sha256(
+            index_path.read_bytes()
+        ).hexdigest())
 
-        failed_source_root = tmp_path / "not a directory"
-        failed_source_root.write_bytes(b"")
-        failed_lookup_marker = tmp_path / "failed-cd-lookup-ran"
-        blocked_verifier_marker = tmp_path / "blocked-verifier-ran"
-        _write_executable(
-            pinned_git,
-            (
-                f"printf lookup > {shlex.quote(str(failed_lookup_marker))}\n"
-                f"printf '%s\\n' {shlex.quote(str(index_path))}\n"
-            ),
-        )
-        _write_executable(
-            pinned_python,
-            f"printf ran > {shlex.quote(str(blocked_verifier_marker))}\n",
-        )
-        assignments["source_root"] = failed_source_root
-        failed_cd = subprocess.run(
-            ["/bin/sh", "-c", _launcher_with_assignments(launcher, assignments)],
-            check=False,
-            capture_output=True,
-            env={"PATH": str(hostile_path)},
-        )
-        _expect(failed_cd.returncode != 0)
-        _expect(failed_lookup_marker.read_bytes() == b"lookup")
-        _expect(not blocked_verifier_marker.exists())
-        _expect(not hostile_env_marker.exists())
-
-        failed_lookup_verifier_marker = tmp_path / "failed-lookup-verifier-ran"
         _write_executable(pinned_git, "exit 42\n")
-        _write_executable(
-            pinned_python,
-            f"printf ran > {shlex.quote(str(failed_lookup_verifier_marker))}\n",
-        )
-        assignments["source_root"] = source_root
         failed_lookup = subprocess.run(
             ["/bin/sh", "-c", _launcher_with_assignments(launcher, assignments)],
             check=False,
             capture_output=True,
+            cwd=source_root,
             env={"PATH": str(hostile_path)},
         )
         _expect(failed_lookup.returncode == 42)
-        _expect(not failed_lookup_verifier_marker.exists())
+        _expect(failed_lookup.stdout == b"")
         _expect(not hostile_env_marker.exists())
+        _expect(not shadow_marker.exists())
 
-        empty_lookup_verifier_marker = tmp_path / "empty-lookup-verifier-ran"
         _write_executable(pinned_git, "exit 0\n")
-        _write_executable(
-            pinned_python,
-            f"printf ran > {shlex.quote(str(empty_lookup_verifier_marker))}\n",
-        )
         empty_lookup = subprocess.run(
             ["/bin/sh", "-c", _launcher_with_assignments(launcher, assignments)],
             check=False,
             capture_output=True,
+            cwd=source_root,
             env={"PATH": str(hostile_path)},
         )
         _expect(empty_lookup.returncode != 0)
-        _expect(not empty_lookup_verifier_marker.exists())
+        _expect(empty_lookup.stdout == b"")
         _expect(not hostile_env_marker.exists())
+        _expect(not shadow_marker.exists())
     elif case_number == 21:
         _repo, index_path, _raw, _record_bytes = _real_index(tmp_path)
         source = verifier.verify_index(index_path).result()["source"]
@@ -607,6 +582,15 @@ def test_frozen_normative_case(
         _expect(normal.returncode == 0)
         hostile_env = os.environ.copy()
         hostile_env["PYTHONOPTIMIZE"] = "2"
+        optimization_probe = subprocess.run(
+            [sys.executable, "-c", "import sys; print(sys.flags.optimize)"],
+            check=False,
+            capture_output=True,
+            env=hostile_env,
+        )
+        _expect(optimization_probe.returncode == 0)
+        _expect(optimization_probe.stdout == b"2\n")
+        _expect(optimization_probe.stderr == b"")
         ambient = _cli(index_path, env=hostile_env)
         ambient_optimized = _cli(index_path, optimized=True, env=hostile_env)
         _expect(

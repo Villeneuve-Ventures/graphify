@@ -243,7 +243,9 @@ isolated_path=/absolute/pinned/bin-path
 # Preconditions: every value above is absolute; empty_config is the frozen
 # zero-byte control file; env_path, git_path, and verifier_python are
 # pre-provisioned and outside every source, candidate, diff, control, and
-# evidence inventory.
+# evidence inventory. The interpreter-owned graphify module installation is
+# non-editable, read-only, identity-bound to verifier_python, available offline,
+# and outside those inventories too.
 index_path="$(
   "$env_path" -i PATH="$isolated_path" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
     GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 \
@@ -252,18 +254,17 @@ index_path="$(
     --git-path index
 )" || exit
 [ -n "$index_path" ] || exit
-(
-  cd -- "$source_root" || exit
-  exec "$env_path" -i PATH="$isolated_path" LC_ALL=C \
-    "$verifier_python" -B -m graphify.protected_change_verifier \
-    --index "$index_path"
-)
+exec "$env_path" -i PATH="$isolated_path" LC_ALL=C \
+  "$verifier_python" -I -B -m graphify.protected_change_verifier \
+  --index "$index_path"
 ```
 
-The pinned interpreter and module must already be available offline; this
-invocation performs no environment resolution, package installation, bytecode
-write, or network access. The verifier is read-only. It component-safely opens
-one regular index file,
+The pinned interpreter and its identity-bound module must already be available
+offline from the read-only installation described above; this invocation
+performs no environment resolution, package installation, bytecode write, or
+network access. Isolated mode prevents the source checkout or ambient Python
+configuration from selecting the verifier module. The verifier is read-only.
+It component-safely opens one regular index file,
 accepts only checksum-valid SHA-1 DIRC v2/v3 with stage zero modes `100644`,
 `100755`, or `120000`, and returns canonical source, candidate-index feeder,
 and evidence records. The feeder is derived from the accepted in-memory buffer;
