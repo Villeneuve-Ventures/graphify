@@ -73,6 +73,9 @@ jobs:
       - name: Run tests
         run: uv run --frozen pytest tests/ -q --tb=short
 
+      - name: Run protected verifier conformance with optimized Python
+        run: uv run --frozen python -O -m pytest tests/test_protected_change_verifier.py -q --tb=short
+
       - name: Verify install works end-to-end
         run: |
           uv run --frozen graphify --help

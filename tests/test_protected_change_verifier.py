@@ -372,8 +372,13 @@ def test_frozen_normative_case(
         _expect(')" || exit' in launcher)
         _expect('[ -n "$index_path" ] || exit' in launcher)
         _expect(
-            '"$verifier_python" -I -B -m graphify.protected_change_verifier'
+            '"$verifier_python" -I -S -B "$verifier_module"'
             in launcher
+        )
+        ci = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+        _expect(
+            "run: uv run --frozen python -O -m pytest "
+            "tests/test_protected_change_verifier.py -q --tb=short" in ci
         )
         _expect("uv run --frozen python -m graphify.protected_change_verifier" not in docs)
 
@@ -396,6 +401,29 @@ def test_frozen_normative_case(
         index_path.write_bytes(_index())
         isolated_path = tmp_path / "isolated bin"
         isolated_path.mkdir()
+        # Disposable interpreter-global site directory: prove both hooks run
+        # under -I alone, then prove the documented -S invocation excludes them.
+        runtime = tmp_path / "runtime"
+        subprocess.run(
+            [sys.executable, "-I", "-S", "-m", "venv", "--without-pip", "--symlinks",
+             str(runtime)], check=True, capture_output=True,
+        )
+        pinned_python = runtime / "bin" / "python"
+        site_directory = runtime / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        pth_marker = tmp_path / "pth-ran"
+        site_marker = tmp_path / "sitecustomize-ran"
+        for filename, marker in (("hostile.pth", pth_marker), ("sitecustomize.py", site_marker)):
+            (site_directory / filename).write_text(
+                f"import pathlib; p = pathlib.Path({str(marker)!r}); "
+                "p.write_bytes(p.read_bytes() + b'x' if p.exists() else b'x')\n",
+                encoding="utf-8",
+            )
+        subprocess.run([str(pinned_python), "-I", "-B", "-c", "pass"], check=True)
+        hook_baseline = (pth_marker.read_bytes(), site_marker.read_bytes())
+        pinned_module = tmp_path / "pinned-verifier" / "protected_change_verifier.py"
+        pinned_module.parent.mkdir()
+        pinned_module.write_bytes(Path(verifier.__file__).read_bytes())
+        expected_parser_hash = hashlib.sha256(pinned_module.read_bytes()).hexdigest()
         hostile_path = tmp_path / "hostile bin"
         hostile_path.mkdir()
         hostile_env_marker = tmp_path / "ambient-env-ran"
@@ -420,7 +448,8 @@ def test_frozen_normative_case(
             "empty_config": empty_config,
             "env_path": real_env,
             "git_path": pinned_git,
-            "verifier_python": Path(sys.executable),
+            "verifier_python": pinned_python,
+            "verifier_module": pinned_module,
             "isolated_path": isolated_path,
         }
         runnable = _launcher_with_assignments(launcher, assignments)
@@ -435,6 +464,7 @@ def test_frozen_normative_case(
         _expect(completed.stderr == b"")
         _expect(not hostile_env_marker.exists())
         _expect(not shadow_marker.exists())
+        _expect((pth_marker.read_bytes(), site_marker.read_bytes()) == hook_baseline)
         _expect(lookup_marker.read_bytes() == b"lookup")
         _expect(git_arguments_marker.read_text(encoding="utf-8").splitlines() == [
             "-C",
@@ -446,6 +476,7 @@ def test_frozen_normative_case(
         ])
         accepted = json.loads(completed.stdout)
         _expect(accepted["verifier"] == verifier.VERIFIER_VERSION)
+        _expect(accepted["source"]["parser_source_sha256"] == expected_parser_hash)
         _expect(accepted["source"]["raw_index_sha256"] == hashlib.sha256(
             index_path.read_bytes()
         ).hexdigest())
@@ -802,6 +833,47 @@ def test_frozen_normative_case(
         ):
             _expect(not verifier._is_reserved_git_admin_component(component))
             _assert_path_accepted(f"safe/{component}/file".encode())
+        # Subcases of the existing path-shape invariant, with stock Git as
+        # the independent losslessness oracle (including regular-file modes).
+        ignorables = [*range(0x200C, 0x2010), *range(0x202A, 0x202F),
+                      *range(0x206A, 0x2070), 0xFEFF]
+        aliases = [".gitmodules", ".GiTmOdUlEs"]
+        aliases += [".git" + chr(code) + "modules" for code in ignorables]
+        aliases += [chr(code) + ".gitmodules" + chr(code) for code in ignorables]
+        ntfs = [".gitmodules", *(f"gitmod~{i}" for i in range(1, 5))]
+        ntfs += ["gi7eba"[:length] + "~" + "1" + "0" * (6 - length)
+                 for length in range(7)]
+        ntfs += ["~9999999", "gi7eba~9", "gi7eb~99"]
+        aliases += [stem.upper() + suffix for stem in ntfs
+                    for suffix in ("", ". ", ":stream", " .:stream/é")]
+        aliases += [".gitmodules/file", ".git\u200dmodules/file",
+                    r"ordinary\gitmod~1", r"ordinary\.gitmodules"]
+        controls = [".gitmodulesx", "x.gitmodules", "gitmod~0", "gitmod~5",
+                    "gi7eba~0", "gi7eba~10", "gi7ebx~1", "gi7eb~01",
+                    ".gitmodules\u200b", ".gitmodules.\u200c", "gitmod~1x",
+                    "gitmod~1/file", ".gitmodules./file", r"ordinary\.gitmodulesx",
+                    "ordinary\\.git\u200dmodules", "gi7eb~1", "gi7eba~1x"]
+        repo, _source_index, _raw, _records = _real_index(tmp_path)
+        oid = _git(repo, "hash-object", "-w", "--stdin", input_bytes=b"target").strip()
+        for number, (name, rejected) in enumerate(
+            [(name, True) for name in aliases] + [(name, False) for name in controls]
+        ):
+            for prefix in ("", "nested/"):
+                for mode in (0o100644, 0o100755, 0o120000):
+                    path = (prefix + name).encode()
+                    records = _record(f"{mode:06o}".encode(), oid, path)
+                    destination = tmp_path / f"roundtrip-{number}-{len(prefix)}-{mode}"
+                    _git(repo, "-c", "core.protectHFS=true", "-c", "core.protectNTFS=true",
+                         "update-index", "-z", "--index-info", input_bytes=records,
+                         index_path=destination)
+                    actual = _git(repo, "ls-files", "--stage", "-z", index_path=destination)
+                    should_reject = rejected and mode == 0o120000
+                    _expect(actual == (b"" if should_reject else records))
+                    raw = _index([_entry(path, mode=mode, oid=bytes.fromhex(oid.decode()))])
+                    if should_reject:
+                        _rejects(raw, "entry.path.shape")
+                    else:
+                        _expect(verifier._parse_index_bytes(raw).reconstruction_records == records)
     elif case_number == 54:
         path = b"a" * (verifier.LIMITS.path_bytes + 1)
         _rejects(_index([_entry(path)]), "entry.path.length")

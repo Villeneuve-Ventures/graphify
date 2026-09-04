@@ -238,14 +238,14 @@ empty_config=/absolute/path/to/read-only/empty-config
 env_path=/absolute/path/to/pinned/env
 git_path=/absolute/path/to/pinned/git
 verifier_python=/absolute/path/to/pinned/python
+verifier_module=/absolute/path/to/pinned/protected_change_verifier.py
 isolated_path=/absolute/pinned/bin-path
 
 # Preconditions: every value above is absolute; empty_config is the frozen
 # zero-byte control file; env_path, git_path, and verifier_python are
 # pre-provisioned and outside every source, candidate, diff, control, and
-# evidence inventory. The interpreter-owned graphify module installation is
-# non-editable, read-only, identity-bound to verifier_python, available offline,
-# and outside those inventories too.
+# evidence inventory. verifier_module is the externally pinned regular file
+# described below, with a pre-invocation digest and enforced lifetime barrier.
 index_path="$(
   "$env_path" -i PATH="$isolated_path" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
     GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 \
@@ -255,18 +255,33 @@ index_path="$(
 )" || exit
 [ -n "$index_path" ] || exit
 exec "$env_path" -i PATH="$isolated_path" LC_ALL=C \
-  "$verifier_python" -I -B -m graphify.protected_change_verifier \
+  "$verifier_python" -I -S -B "$verifier_module" \
   --index "$index_path"
 ```
 
-The pinned interpreter and its identity-bound module must already be available
-offline from the read-only installation described above; this invocation
-performs no environment resolution, package installation, bytecode write, or
-network access. Isolated mode prevents the source checkout or ambient Python
-configuration from selecting the verifier module. The verifier is read-only.
+Before invocation, bind the absolute `verifier_module` path and exact-byte SHA-256
+to the approved verifier source. Require a regular file and component-wise
+non-symlinked path. Keep that file and every ancestor under an enforced read-only
+mutation barrier through process completion, outside every source, candidate,
+diff, control, and evidence inventory. Record the barrier mechanism, identity,
+and lifetime observations; mode bits or endpoint hashes alone are insufficient.
+The pre-provisioned pinned interpreter and its standard library are the trusted
+runtime root and must also be identity-bound, available offline, and protected
+outside those inventories. Fail closed when these prerequisites cannot be proven.
+
+The launcher executes the explicit file without package discovery. `-I -S -B`
+excludes ambient import paths, global `.pth` and `sitecustomize` startup hooks,
+and bytecode writes; no package installation or network access occurs. Require
+the returned `source.parser_source_sha256` to equal the pre-invocation file
+digest. That comparison supplements the lifetime barrier: a post-execution
+self-reported hash alone does not establish which code ran. The ordinary public
+`python -m graphify.protected_change_verifier --index <path>` CLI remains
+supported; the protected launcher above has the stricter trust boundary.
+The verifier is read-only.
 It component-safely opens one regular index file,
 accepts only checksum-valid SHA-1 DIRC v2/v3 with stage zero modes `100644`,
-`100755`, or `120000`, and returns canonical source, candidate-index feeder,
+`100755`, or `120000`, rejects Git 2.55 HFS/NTFS `.gitmodules` aliases for
+symlink entries to prevent dropped reconstruction records, and returns canonical source, candidate-index feeder,
 and evidence records. The feeder is derived from the accepted in-memory buffer;
 candidate reconstruction must consume only those returned bytes. Applying the
 feeder, creating clones or snapshots, and producing the exact `candidate.v2`

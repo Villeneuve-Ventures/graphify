@@ -503,6 +503,7 @@ def _parse_index_bytes(raw: bytes, limits: Limits = LIMITS) -> ParsedIndex:
                 or _is_reserved_git_admin_component(component)
                 for component in components
             )
+            or (mode_text == "120000" and _is_reserved_gitmodules_path(decoded_path))
         ):
             _reject("entry.path.shape")
         if previous_path is not None and raw_path <= previous_path:
@@ -650,6 +651,41 @@ def _is_reserved_git_admin_component(component: str) -> bool:
         if lowered.startswith(stem):
             suffix = lowered[len(stem) :].lstrip(". ")
             return not suffix or suffix.startswith(":")
+    return False
+
+
+def _is_reserved_gitmodules_path(path: str) -> bool:
+    """Mirror Git 2.55 read-cache.c, utf8.c and path.c symlink checks."""
+    for component in path.split("/"):
+        hfs_name = "".join(
+            character for character in component
+            if character not in _HFS_DOTGIT_IGNORABLES
+        )
+        if hfs_name.lower() == ".gitmodules":
+            return True
+    # Git tests NTFS names after both '/' and literal '\\', but its NTFS
+    # matcher consumes the remaining path, stopping only at NUL or an ADS ':'.
+    for start in range(len(path)):
+        if start and path[start - 1] not in "/\\":
+            continue
+        name = path[start : start + 11].lower()
+        short_name = name[:8]
+        prefix, tilde, digits = short_name.partition("~")
+        if name == ".gitmodules":
+            end = start + 11
+        elif short_name in {"gitmod~1", "gitmod~2", "gitmod~3", "gitmod~4"} or (
+            len(short_name) == 8 and tilde and len(prefix) <= 6
+            and "gi7eba".startswith(prefix) and digits
+            and digits[0] in "123456789"
+            and all(character in "0123456789" for character in digits)
+        ):
+            end = start + 8
+        else:
+            continue
+        while end < len(path) and path[end] in ". ":
+            end += 1
+        if end == len(path) or path[end] == ":":
+            return True
     return False
 
 
