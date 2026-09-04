@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,9 @@ import graphify.protected_change_verifier as verifier
 
 _OID = bytes.fromhex("11" * 20)
 _OTHER_OID = bytes.fromhex("22" * 20)
+_EXPECTED_SCHEMA_SHA256 = (
+    "59666f5cf42b4a8e37c0275194f955124a65a3502090502ec8d557e8c5e24c8d"
+)
 
 
 def _expect(condition: bool) -> None:
@@ -214,11 +218,13 @@ def _rejects(raw: bytes, invariant: str, *, limits: verifier.Limits = verifier.L
 
 
 def _cli(path: Path, *, optimized: bool = False, env: dict[str, str] | None = None):
+    effective_env = os.environ.copy() if env is None else dict(env)
+    effective_env.pop("PYTHONOPTIMIZE", None)
     command = [sys.executable]
     if optimized:
         command.append("-O")
     command.extend(["-m", "graphify.protected_change_verifier", "--index", str(path)])
-    return subprocess.run(command, check=False, capture_output=True, env=env)
+    return subprocess.run(command, check=False, capture_output=True, env=effective_env)
 
 
 def _assert_path_accepted(path: bytes) -> verifier.ParsedIndex:
@@ -681,8 +687,11 @@ def test_frozen_normative_case(
         )
         completed = _cli(path)
         _expect(completed.returncode == 1)
+        _expect(completed.stderr == b"")
         _expect(sentinel not in completed.stdout)
+        _expect(sentinel not in completed.stderr)
         _expect(b"HOSTILE-INPUT-PATH-SENTINEL" not in completed.stdout)
+        _expect(b"HOSTILE-INPUT-PATH-SENTINEL" not in completed.stderr)
         _expect(json.loads(completed.stdout)["invariant"] == "entry.path.shape")
     elif case_number == 80:
         path = _write_index(tmp_path, _rehash(b"NOPE" + _index()[4:]), "bad-index")
@@ -703,3 +712,151 @@ def test_frozen_normative_case(
         _expect(not completed.stdout.endswith(b"\n"))
     else:
         raise AssertionError("the frozen matrix contains exactly cases 1 through 80")
+
+
+def test_review_regression_rejects_nonadjacent_file_directory_conflict() -> None:
+    _rejects(
+        _index([_entry(b"a"), _entry(b"a-"), _entry(b"a/b")]),
+        "entry.path.order",
+    )
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        ".git",
+        ".GIT",
+        ".git.",
+        ".git ",
+        ".git:stream",
+        "git~1",
+        "GIT~1.",
+        "git~1 ",
+        "git~1:stream",
+        "\u200c.git",
+        ".g\u200di\u202at",
+        ".git\ufeff",
+    ],
+)
+def test_review_regression_rejects_git_admin_aliases(component: str) -> None:
+    _expect(verifier._is_reserved_git_admin_component(component))
+    _rejects(
+        _index([_entry(f"safe/{component}/file".encode())]),
+        "entry.path.shape",
+    )
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        ".git~1",
+        "git~2",
+        "git~1x",
+        ".gitx",
+        "x.git",
+        r"ordinary\.git\config",
+    ],
+)
+def test_review_regression_accepts_non_admin_components(component: str) -> None:
+    _expect(not verifier._is_reserved_git_admin_component(component))
+    _assert_path_accepted(f"safe/{component}/file".encode())
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "component_count",
+        "st_ctime_ns",
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_mtime_ns",
+        "st_size",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, True])
+def test_review_regression_rejects_invalid_acquisition_integer(
+    field: str,
+    value: int,
+) -> None:
+    component_count = 1
+    values = {
+        "st_ctime_ns": 1,
+        "st_dev": 1,
+        "st_ino": 1,
+        "st_mode": stat.S_IFREG,
+        "st_mtime_ns": 1,
+        "st_size": 1,
+    }
+    if field == "component_count":
+        component_count = value
+    else:
+        values[field] = value
+    with pytest.raises(verifier.VerificationError) as raised:
+        verifier.Acquisition.from_stat(SimpleNamespace(**values), component_count)  # type: ignore[arg-type]
+    _expect(raised.value.invariant == "acquisition.changed")
+
+
+def test_review_regression_negative_timestamp_api_cli_equivalence(tmp_path: Path) -> None:
+    path = _write_index(tmp_path, _index())
+    try:
+        os.utime(path, ns=(-1, -1))
+    except (OSError, OverflowError):
+        pytest.skip("filesystem does not support negative timestamps")
+    if path.stat().st_mtime_ns >= 0:
+        pytest.skip("filesystem normalized the negative timestamp")
+
+    with pytest.raises(verifier.VerificationError) as raised:
+        verifier.verify_index(path)
+    _expect(raised.value.invariant == "acquisition.changed")
+
+    normal = _cli(path)
+    optimized = _cli(path, optimized=True)
+    _expect(
+        (normal.returncode, normal.stdout, normal.stderr)
+        == (optimized.returncode, optimized.stdout, optimized.stderr)
+    )
+    _expect(normal.returncode == 1)
+    _expect(normal.stderr == b"")
+    _expect(json.loads(normal.stdout)["invariant"] == "acquisition.changed")
+
+
+def test_review_regression_cli_ignores_ambient_python_optimize(tmp_path: Path) -> None:
+    path = _write_index(tmp_path, _index())
+    hostile_env = os.environ.copy()
+    hostile_env["PYTHONOPTIMIZE"] = "2"
+
+    baseline = _cli(path)
+    ambient = _cli(path, env=hostile_env)
+    optimized = _cli(path, optimized=True, env=hostile_env)
+    _expect(
+        (baseline.returncode, baseline.stdout, baseline.stderr)
+        == (ambient.returncode, ambient.stdout, ambient.stderr)
+        == (optimized.returncode, optimized.stdout, optimized.stderr)
+    )
+    _expect(baseline.returncode == 0)
+    _expect(baseline.stderr == b"")
+
+
+def test_review_regression_docs_invocation_and_schema_digest_are_synchronized() -> None:
+    docs = (
+        Path(__file__).parents[1] / "docs" / "protected-change-review.md"
+    ).read_text(encoding="utf-8")
+
+    _expect(verifier.SCHEMA_SHA256 == _EXPECTED_SCHEMA_SHA256)
+    _expect(_EXPECTED_SCHEMA_SHA256 in docs)
+    _expect("rev-parse --path-format=absolute" in docs)
+    _expect("--git-path index" in docs)
+    _expect('"$verifier_python" -B -m graphify.protected_change_verifier' in docs)
+    _expect('cd -- "$source_root"' in docs)
+    _expect(docs.count("env -i") >= 2)
+    for variable in (
+        "source_root",
+        "empty_config",
+        "git_path",
+        "verifier_python",
+        "isolated_path",
+    ):
+        _expect(f"{variable}=" in docs)
+    _expect('index_path="$(git rev-parse --git-path index)"' not in docs)
+    _expect("uv run --frozen python -m graphify.protected_change_verifier" not in docs)

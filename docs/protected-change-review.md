@@ -233,12 +233,34 @@ Resolve the selected index through Git so linked worktrees are handled; never
 assume that it is `.git/index`:
 
 ```sh
-index_path="$(git rev-parse --git-path index)"
-uv run --frozen python -m graphify.protected_change_verifier \
-  --index "$index_path"
+source_root=/absolute/path/to/source-root
+empty_config=/absolute/path/to/read-only/empty-config
+git_path=/absolute/path/to/pinned/git
+verifier_python=/absolute/path/to/pinned/python
+isolated_path=/absolute/pinned/bin-path
+
+# Preconditions: every value above is absolute; empty_config is the frozen
+# zero-byte control file; verifier_python is pre-provisioned and outside every
+# source, candidate, diff, control, and evidence inventory.
+index_path="$(
+  env -i PATH="$isolated_path" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
+    GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_SYSTEM="$empty_config" GIT_CONFIG_GLOBAL="$empty_config" \
+    "$git_path" -C "$source_root" rev-parse --path-format=absolute \
+    --git-path index
+)"
+(
+  cd -- "$source_root"
+  env -i PATH="$isolated_path" LC_ALL=C \
+    "$verifier_python" -B -m graphify.protected_change_verifier \
+    --index "$index_path"
+)
 ```
 
-The verifier is read-only. It component-safely opens one regular index file,
+The pinned interpreter and module must already be available offline; this
+invocation performs no environment resolution, package installation, bytecode
+write, or network access. The verifier is read-only. It component-safely opens
+one regular index file,
 accepts only checksum-valid SHA-1 DIRC v2/v3 with stage zero modes `100644`,
 `100755`, or `120000`, and returns canonical source, candidate-index feeder,
 and evidence records. The feeder is derived from the accepted in-memory buffer;

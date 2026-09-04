@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from bisect import bisect_left
 import hashlib
 import json
 import os
@@ -185,14 +186,25 @@ class Acquisition:
 
     @classmethod
     def from_stat(cls, info: os.stat_result, component_count: int) -> Acquisition:
+        values = (
+            component_count,
+            info.st_ctime_ns,
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_mtime_ns,
+            info.st_size,
+        )
+        if any(type(value) is not int or value < 0 for value in values):
+            _reject("acquisition.changed")
         return cls(
-            component_count=component_count,
-            ctime_ns=info.st_ctime_ns,
-            device=info.st_dev,
-            inode=info.st_ino,
-            mode=info.st_mode,
-            mtime_ns=info.st_mtime_ns,
-            size=info.st_size,
+            component_count=values[0],
+            ctime_ns=values[1],
+            device=values[2],
+            inode=values[3],
+            mode=values[4],
+            mtime_ns=values[5],
+            size=values[6],
         )
 
     def as_dict(self) -> dict[str, int]:
@@ -449,6 +461,7 @@ def _parse_index_bytes(raw: bytes, limits: Limits = LIMITS) -> ParsedIndex:
     reconstruction_size = 0
     offset = 12
     previous_path: bytes | None = None
+    parsed_paths: list[bytes] = []
 
     for _ in range(entry_count):
         entry_start = offset
@@ -478,19 +491,24 @@ def _parse_index_bytes(raw: bytes, limits: Limits = LIMITS) -> ParsedIndex:
         if not raw_path:
             _reject("entry.path.shape")
         try:
-            raw_path.decode("utf-8", errors="strict")
+            decoded_path = raw_path.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
             _reject("entry.path.utf8")
-        components = raw_path.split(b"/")
+        components = decoded_path.split("/")
         if (
             raw_path.startswith(b"/")
             or raw_path.endswith(b"/")
-            or any(component in {b"", b".", b"..", b".git"} for component in components)
+            or any(
+                component in {"", ".", ".."}
+                or _is_reserved_git_admin_component(component)
+                for component in components
+            )
         ):
             _reject("entry.path.shape")
         if previous_path is not None and raw_path <= previous_path:
             _reject("entry.path.order")
         previous_path = raw_path
+        parsed_paths.append(raw_path)
 
         entry_size = 62 + len(raw_path) + 1
         padding_size = (-entry_size) % 8
@@ -513,6 +531,9 @@ def _parse_index_bytes(raw: bytes, limits: Limits = LIMITS) -> ParsedIndex:
         inventory_parts.append(inventory_record)
         reconstruction_parts.append(reconstruction_record)
         entries.append(IndexEntry(mode=mode_text, oid=oid, raw_path=raw_path))
+
+    if _has_file_directory_conflict(parsed_paths):
+        _reject("entry.path.order")
 
     extensions: list[IndexExtension] = []
     extension_total = 0
@@ -587,6 +608,60 @@ def _reconstruction_record(mode: str, oid: bytes, raw_path: bytes) -> bytes:
         + raw_path
         + b"\x00"
     )
+
+
+_HFS_DOTGIT_IGNORABLES = frozenset(
+    {
+        "\u200c",
+        "\u200d",
+        "\u200e",
+        "\u200f",
+        "\u202a",
+        "\u202b",
+        "\u202c",
+        "\u202d",
+        "\u202e",
+        "\u206a",
+        "\u206b",
+        "\u206c",
+        "\u206d",
+        "\u206e",
+        "\u206f",
+        "\ufeff",
+    }
+)
+
+
+def _is_reserved_git_admin_component(component: str) -> bool:
+    """Match the acceptance-frozen Git 2.55 HFS/NTFS `.git` aliases."""
+    # Mirrors the relevant is_hfs_dotgit/is_ntfs_dotgit component semantics;
+    # backslash remains an ordinary character in this verifier's path model.
+    hfs_name = "".join(
+        character
+        for character in component
+        if character not in _HFS_DOTGIT_IGNORABLES
+    )
+    if hfs_name.isascii() and hfs_name.lower() == ".git":
+        return True
+    if not component.isascii():
+        return False
+    lowered = component.lower()
+    for stem in (".git", "git~1"):
+        if lowered.startswith(stem):
+            suffix = lowered[len(stem) :].lstrip(". ")
+            return not suffix or suffix.startswith(":")
+    return False
+
+
+def _has_file_directory_conflict(parsed_paths: list[bytes]) -> bool:
+    for raw_path in parsed_paths:
+        descendant_prefix = raw_path + b"/"
+        position = bisect_left(parsed_paths, descendant_prefix)
+        if position < len(parsed_paths) and parsed_paths[position].startswith(
+            descendant_prefix
+        ):
+            return True
+    return False
 
 
 def _build_result(
@@ -699,7 +774,7 @@ def verify_index(path: os.PathLike[str] | str) -> VerifiedIndexSnapshot:
 
 
 def build_reconstruction_stream(snapshot: VerifiedIndexSnapshot) -> bytes:
-    """Return digest-revalidated records from an exact module-issued snapshot."""
+    """Revalidate a trusted same-process snapshot to resist accidental misuse."""
     if type(snapshot) is not VerifiedIndexSnapshot:
         _reject("attestation.invalid")
     if (
