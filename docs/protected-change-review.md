@@ -235,23 +235,26 @@ assume that it is `.git/index`:
 ```sh
 source_root=/absolute/path/to/source-root
 empty_config=/absolute/path/to/read-only/empty-config
+env_path=/absolute/path/to/pinned/env
 git_path=/absolute/path/to/pinned/git
 verifier_python=/absolute/path/to/pinned/python
 isolated_path=/absolute/pinned/bin-path
 
 # Preconditions: every value above is absolute; empty_config is the frozen
-# zero-byte control file; verifier_python is pre-provisioned and outside every
-# source, candidate, diff, control, and evidence inventory.
+# zero-byte control file; env_path, git_path, and verifier_python are
+# pre-provisioned and outside every source, candidate, diff, control, and
+# evidence inventory.
 index_path="$(
-  env -i PATH="$isolated_path" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
+  "$env_path" -i PATH="$isolated_path" LC_ALL=C GIT_NO_REPLACE_OBJECTS=1 \
     GIT_OPTIONAL_LOCKS=0 GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_SYSTEM="$empty_config" GIT_CONFIG_GLOBAL="$empty_config" \
     "$git_path" -C "$source_root" rev-parse --path-format=absolute \
     --git-path index
-)"
+)" || exit
+[ -n "$index_path" ] || exit
 (
-  cd -- "$source_root"
-  env -i PATH="$isolated_path" LC_ALL=C \
+  cd -- "$source_root" || exit
+  exec "$env_path" -i PATH="$isolated_path" LC_ALL=C \
     "$verifier_python" -B -m graphify.protected_change_verifier \
     --index "$index_path"
 )
