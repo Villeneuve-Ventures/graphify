@@ -504,6 +504,10 @@ def _parse_index_bytes(raw: bytes, limits: Limits = LIMITS) -> ParsedIndex:
                 for component in components
             )
             or (mode_text == "120000" and _is_reserved_gitmodules_path(decoded_path))
+            or any(
+                _is_reserved_ntfs_git_admin_component(component)
+                for component in decoded_path.replace("\\", "/").split("/")
+            )
         ):
             _reject("entry.path.shape")
         if previous_path is not None and raw_path <= previous_path:
@@ -635,8 +639,8 @@ _HFS_DOTGIT_IGNORABLES = frozenset(
 
 def _is_reserved_git_admin_component(component: str) -> bool:
     """Match the acceptance-frozen Git 2.55 HFS/NTFS `.git` aliases."""
-    # Mirrors the relevant is_hfs_dotgit/is_ntfs_dotgit component semantics;
-    # backslash remains an ordinary character in this verifier's path model.
+    # HFS normalization applies only to slash-delimited components. NTFS
+    # additionally recognizes backslashes; the parser checks those separately.
     hfs_name = "".join(
         character
         for character in component
@@ -644,8 +648,11 @@ def _is_reserved_git_admin_component(component: str) -> bool:
     )
     if hfs_name.isascii() and hfs_name.lower() == ".git":
         return True
-    if not component.isascii():
-        return False
+    return _is_reserved_ntfs_git_admin_component(component)
+
+
+def _is_reserved_ntfs_git_admin_component(component: str) -> bool:
+    """Match Git 2.55 is_ntfs_dotgit stems and trailing decorations/streams."""
     lowered = component.lower()
     for stem in (".git", "git~1"):
         if lowered.startswith(stem):

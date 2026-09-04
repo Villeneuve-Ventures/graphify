@@ -266,6 +266,32 @@ def _write_executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
+def _assert_git_admin_path_cases(tmp_path: Path, cases: list[tuple[bytes, bool]]) -> None:
+    _require_supported_git_version()
+    repo, _index_path, _raw, _record_bytes = _real_index(tmp_path)
+    oid = _git(repo, "hash-object", "-w", "--stdin", input_bytes=b"target").strip()
+    for number, (path, rejected) in enumerate(cases):
+        for mode in (0o100644, 0o100755, 0o120000):
+            records = _record(f"{mode:06o}".encode(), oid, path)
+            destination = tmp_path / f"admin-roundtrip-{number}-{mode}"
+            _git(repo, "-c", "core.protectHFS=true", "-c", "core.protectNTFS=true",
+                 "update-index", "-z", "--index-info", input_bytes=records,
+                 index_path=destination)
+            actual = _git(repo, "ls-files", "--stage", "-z", index_path=destination)
+            _expect(actual == (b"" if rejected else records))
+            raw = _index([_entry(path, mode=mode, oid=bytes.fromhex(oid.decode()))])
+            if rejected:
+                _rejects(raw, "entry.path.shape")
+            else:
+                _expect(verifier._parse_index_bytes(raw).reconstruction_records == records)
+
+
+def _require_supported_git_version() -> None:
+    version = subprocess.run(["git", "--version"], check=True, capture_output=True)
+    if version.stdout != b"git version 2.55.0\n" or version.stderr:
+        raise RuntimeError("real-Git oracle requires exactly Git 2.55.0")
+
+
 @pytest.mark.parametrize(
     "case_number",
     range(1, 81),
@@ -315,6 +341,14 @@ def test_frozen_normative_case(
         _assert_path_accepted("café/雪".encode())
     elif case_number == 9:
         _assert_path_accepted(b"back\\slash")
+        # NTFS recognizes only its aliases after backslashes; HFS does not
+        # reinterpret backslashes as separators on the supported platform.
+        _assert_git_admin_path_cases(tmp_path, [(path, False) for path in (
+            rb"back\slash", rb"safe\.gitx\config", rb"safe\git~2\config",
+            rb"safe\.git~1\config", rb"safe\git~1x/config", rb"safe\ordinary/file",
+            "safe\\.g\u200cit/config".encode(),
+            "safe/.g\u200cit\\config".encode(),
+        )])
     elif case_number == 10:
         _assert_path_accepted(b"a" * 4094)
     elif case_number == 11:
@@ -376,6 +410,8 @@ def test_frozen_normative_case(
             in launcher
         )
         ci = (Path(__file__).parents[1] / ".github/workflows/ci.yml").read_text()
+        _expect("https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz" in ci)
+        _expect("457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357" in ci)
         _expect(
             "run: uv run --frozen python -O -m pytest "
             "tests/test_protected_change_verifier.py -q --tb=short" in ci
@@ -803,6 +839,20 @@ def test_frozen_normative_case(
     elif case_number == 52:
         _rejects(_index([_entry(b"dot/../component")]), "entry.path.shape")
     elif case_number == 53:
+        # The oracle is version-sensitive; reject a different version before
+        # touching Git state. This subcase patches only the disposable context.
+        with monkeypatch.context() as unsupported:
+            unsupported.setattr(subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+                stdout=b"git version 2.54.0\n", stderr=b""))
+            with pytest.raises(RuntimeError, match="exactly Git 2.55.0"):
+                _require_supported_git_version()
+        _assert_git_admin_path_cases(tmp_path, [(path, True) for path in (
+            bytes.fromhex("736166655c2e6769745c636f6e666967"),
+            rb"safe/.git\config", rb"safe\.git/config", rb"safe\GIT~1\config",
+            rb"safe\git~1. \config", rb"safe\.GIT.:stream\config",
+            "safe/.g\u200cit/config".encode(),
+            ".git:é".encode(), "safe\\.git:é\\config".encode(),
+        )])
         _rejects(_index([_entry(b"nested/.git/config")]), "entry.path.shape")
         for component in (
             ".git",
@@ -829,7 +879,6 @@ def test_frozen_normative_case(
             "git~1x",
             ".gitx",
             "x.git",
-            r"ordinary\.git\config",
         ):
             _expect(not verifier._is_reserved_git_admin_component(component))
             _assert_path_accepted(f"safe/{component}/file".encode())

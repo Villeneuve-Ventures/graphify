@@ -70,6 +70,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --frozen
 
+      - name: Install acceptance-pinned Git 2.55.0
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev zlib1g-dev
+          git_build="$(mktemp -d "$RUNNER_TEMP/git-2.55.0.XXXXXX")"
+          curl -fL https://www.kernel.org/pub/software/scm/git/git-2.55.0.tar.xz -o "$git_build/git.tar.xz"
+          echo "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357  $git_build/git.tar.xz" | sha256sum -c -
+          tar -xJf "$git_build/git.tar.xz" -C "$git_build"
+          make -C "$git_build/git-2.55.0" -j2 prefix="$git_build/install" NO_GETTEXT=YesPlease NO_TCLTK=YesPlease install
+          echo "$git_build/install/bin" >> "$GITHUB_PATH"
+          test "$("$git_build/install/bin/git" --version)" = "git version 2.55.0"
+
       - name: Run tests
         run: uv run --frozen pytest tests/ -q --tb=short
 
