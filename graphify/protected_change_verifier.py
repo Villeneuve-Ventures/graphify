@@ -324,9 +324,10 @@ def _lstat_at(name: str, directory_fd: int, *, final: bool) -> os.stat_result:
 
 def _open_at(name: str, flags: int, directory_fd: int, *, final: bool) -> int:
     try:
-        return os.open(name, flags, dir_fd=directory_fd)
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
     except OSError:
         _reject("acquisition.open" if final else "acquisition.component")
+    return descriptor
 
 
 def _acquire_regular_file(
