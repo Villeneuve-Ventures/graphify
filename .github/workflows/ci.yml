@@ -95,12 +95,8 @@ jobs:
           uv run --frozen graphify install
 
   security-scan:
-    # The dev deps include bandit and pip-audit. Run them in CI so a new
-    # HIGH-severity finding or vulnerable dependency is caught on the PR that
-    # introduces it, rather than at the next manual audit.
-    # Non-blocking for now (continue-on-error) to avoid breaking CI on
-    # pre-existing findings; remove continue-on-error after the initial
-    # cleanup pass.
+    # Advisory policy: findings and scanner failures remain nonblocking, but
+    # completion and coverage are validated independently of the job conclusion.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -110,16 +106,50 @@ jobs:
         with:
           python-version: "3.14"
 
+      # Preserve the existing default-plus-dev environment, without extras.
       - name: Install dependencies
         run: uv sync --frozen
 
       - name: bandit (static security analysis)
+        id: bandit
         continue-on-error: true
-        run: uv run --frozen bandit -r graphify -ll
+        run: uv run --frozen python -m tools.security_receipts scan --scanner bandit --output "$RUNNER_TEMP/security-receipts"
 
       - name: pip-audit (dependency vulnerabilities)
+        id: pip_audit
         continue-on-error: true
-        run: uv run --frozen pip-audit --strict
+        run: uv run --frozen python -m tools.security_receipts scan --scanner pip-audit --output "$RUNNER_TEMP/security-receipts"
+
+      - name: Finalize security receipts
+        if: always()
+        continue-on-error: true
+        env:
+          BANDIT_OUTCOME: ${{ steps.bandit.outcome }}
+          BANDIT_CONCLUSION: ${{ steps.bandit.conclusion }}
+          PIP_AUDIT_OUTCOME: ${{ steps.pip_audit.outcome }}
+          PIP_AUDIT_CONCLUSION: ${{ steps.pip_audit.conclusion }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # No project sync/import dependencies: report even failed preparation.
+        run: uv run --no-project --no-sync --python 3.14 python tools/security_receipts.py finalize --output "$RUNNER_TEMP/security-receipts"
+
+      - name: Upload security receipts and raw output
+        id: security_artifact
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/security-receipts/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Publish security summary
+        if: always()
+        continue-on-error: true
+        env:
+          ARTIFACT_URL: ${{ steps.security_artifact.outputs.artifact-url }}
+        run: uv run --no-project --no-sync --python 3.14 python tools/security_receipts.py publish --output "$RUNNER_TEMP/security-receipts"
 
   leiden-binary-smoke:
     name: Leiden binary smoke (macOS)
