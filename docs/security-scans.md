@@ -49,7 +49,9 @@ final job status from the linked Actions run after it ends.
 - **Incomplete:** failed preparation, a missing/malformed result, skipped or
   missing packages/files, error diagnostics, launch/network/timeout failure,
   changed evidence, or inconsistent exit/result. Available raw evidence remains
-  in the artifact; an unknown finding count is not zero.
+  in the artifact. Every incomplete result has `finding_count: null`, rendered
+  as `unknown` in the summary; decoded finding records may still be retained
+  as observations, but they do not establish a complete total.
 
 Bandit retains `-r graphify -ll` (medium and high findings), with no new
 suppression. Its metrics include lower severities even though `results` is

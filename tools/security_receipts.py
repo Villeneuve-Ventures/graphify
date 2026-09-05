@@ -220,7 +220,7 @@ def audit_result(scanner, payload, exit_code, stderr, coverage):
         errors.append(f'invalid/incomplete scanner result: {exc}')
     return {'completion': 'incomplete' if errors else 'complete',
             'result': 'incomplete' if errors else ('findings' if findings else 'clean'),
-            'findings': findings, 'finding_count': len(findings) if findings is not None else None,
+            'findings': findings, 'finding_count': len(findings) if not errors else None,
             'errors': errors}
 
 
@@ -301,7 +301,7 @@ def scan(root, output, scanner):
     except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
         receipt['errors'].append(f'preparation/evidence failure: {exc}')
     if receipt['errors']:
-        receipt.update(completion='incomplete', result='incomplete')
+        receipt.update(completion='incomplete', result='incomplete', finding_count=None)
     write_json(directory / 'receipt.json', receipt)
     print(f'{scanner}: {receipt["completion"]}, {receipt["finding_count"]} finding records')
     return 0 if receipt['result'] == 'clean' else 1
@@ -345,8 +345,9 @@ def finalize(root, output, outcomes):
                         'requirements hash mismatch')
                 expected = ''.join(f'{n}=={v}\n' for n, v in sorted(pairs(coverage['third_party']).items()))
                 require(requirements == expected.encode(), 'requirements/coverage mismatch')
-                require(digest((directory / 'export.stdout').read_bytes()) ==
-                        receipt['export_process']['stdout_sha256'], 'export hash mismatch')
+                for stream in ('stdout', 'stderr'):
+                    require(digest((directory / f'export.{stream}').read_bytes()) ==
+                            receipt['export_process'][f'{stream}_sha256'], 'export hash mismatch')
             else:
                 require(source_files(root) == coverage, 'Bandit source identity mismatch')
             raw_path = result_path(directory, scanner)
@@ -358,7 +359,7 @@ def finalize(root, output, outcomes):
             if proc['error']:
                 result['errors'].append(proc['error'])
             if result['errors']:
-                result.update(completion='incomplete', result='incomplete')
+                result.update(completion='incomplete', result='incomplete', finding_count=None)
             receipt.update(result)
         except (ValueError, KeyError, TypeError, OSError, AttributeError, subprocess.SubprocessError) as exc:
             # The original scanner receipt/raw files remain available for inspection.

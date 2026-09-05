@@ -141,7 +141,9 @@ def test_dependency_result_requires_complete_valid_inventory(mutation):
         deps[0]['version'] = '2'
     else:
         deps[0]['vulns'] = [{}]
-    assert security.audit_result('pip-audit', payload, 0, '', COVERAGE)['result'] == 'incomplete'
+    result = security.audit_result('pip-audit', payload, 0, '', COVERAGE)
+    assert result['result'] == 'incomplete'
+    assert result['finding_count'] is None
 
 
 @pytest.mark.parametrize('payload,code,stderr', [
@@ -151,10 +153,9 @@ def test_dependency_result_requires_complete_valid_inventory(mutation):
 def test_missing_malformed_network_and_exit_failures_are_incomplete(payload, code, stderr):
     result = security.audit_result('pip-audit', payload, code, stderr, COVERAGE)
     assert result['completion'] == 'incomplete'
-    if payload is None:
-        assert result['finding_count'] is None
+    assert result['finding_count'] is None
     if payload == pip_payload(True):
-        assert result['finding_count'] == 1
+        assert len(result['findings']) == 1
 
 
 def test_bandit_errors_coverage_and_internal_failures_cannot_be_clean():
@@ -173,6 +174,7 @@ def test_bandit_errors_coverage_and_internal_failures_cannot_be_clean():
             stderr = '[tester] ERROR Bandit internal error running plugin'
         result = security.audit_result('bandit', payload, 0, stderr, {'graphify/a.py': 'sha'})
         assert result['result'] == 'incomplete', mutation
+        assert result['finding_count'] is None, mutation
 
 
 def test_execute_captures_nonzero_launch_and_timeout(tmp_path):
@@ -199,6 +201,7 @@ def receipt_dir(project, monkeypatch):
     (d / 'scanner.stderr').write_bytes(b'')
     (d / 'requirements.txt').write_bytes(b'example-pkg==1.0\n')
     (d / 'export.stdout').write_bytes(b'example-pkg==1.0\n')
+    (d / 'export.stderr').write_bytes(b'Export complete\n')
     security.write_json(output / 'pip-audit-attempt.json', {'attempt': 'a' * 32})
     receipt = {'schema': security.SCHEMA, 'scanner': 'pip-audit', 'attempt': 'a' * 32,
                'identity': security.identity(project), 'scanner_version': '2.10.0',
@@ -207,7 +210,8 @@ def receipt_dir(project, monkeypatch):
                'requirements_sha256': security.digest((d / 'requirements.txt').read_bytes()),
                'uv_version': 'uv 0.11.30',
                'export_process': {'command': security.EXPORT, 'exit_code': 0, 'error': None,
-                                  'stdout_sha256': security.digest((d / 'export.stdout').read_bytes())},
+                                  'stdout_sha256': security.digest((d / 'export.stdout').read_bytes()),
+                                  'stderr_sha256': security.digest((d / 'export.stderr').read_bytes())},
                'result_sha256': security.digest(raw),
                'process': {'command': security.scanner_command('pip-audit', d),
                            'exit_code': 1, 'error': None, 'stdout_sha256': security.digest(raw),
@@ -255,6 +259,63 @@ def test_finalizer_rejects_corruption_without_losing_raw_evidence(project, recei
         result = security.finalize(project, receipt_dir, outcomes())
         assert result['receipts'][1]['result'] == 'incomplete', change
         assert (d / 'scanner.stdout').read_bytes() == security.canonical(pip_payload(True))
+
+
+@pytest.mark.parametrize('mutation', ['deleted', 'altered', 'missing-hash'])
+def test_finalizer_requires_export_stderr_evidence(project, receipt_dir, mutation):
+    assert security.finalize(project, receipt_dir, outcomes())['receipts'][1]['completion'] == 'complete'
+    directory = receipt_dir / 'pip-audit'
+    stderr = directory / 'export.stderr'
+    if mutation == 'deleted':
+        stderr.unlink()
+    elif mutation == 'altered':
+        stderr.write_bytes(b'Changed evidence\n')
+    else:
+        receipt = security.load_json(directory / 'receipt.json')
+        del receipt['export_process']['stderr_sha256']
+        security.write_json(directory / 'receipt.json', receipt)
+    report = security.finalize(project, receipt_dir, outcomes())
+    assert report['receipts'][1]['completion'] == 'incomplete'
+    assert report['receipts'][1]['finding_count'] is None
+    assert '| pip-audit | incomplete | unknown |' in security.summary(report)
+    assert security.load_json(directory / 'scanner.stdout') == pip_payload(True)
+
+
+@pytest.mark.parametrize('error_source', ['preparation', 'process'])
+def test_finalizer_late_errors_withhold_total_and_keep_observations(project, receipt_dir, error_source):
+    path = receipt_dir / 'pip-audit' / 'receipt.json'
+    receipt = security.load_json(path)
+    if error_source == 'preparation':
+        receipt['errors'] = ['preparation/evidence failure: installed inventory changed during scan']
+    else:
+        receipt['process']['error'] = 'process interrupted'
+    security.write_json(path, receipt)
+    report = security.finalize(project, receipt_dir, outcomes())
+    result = report['receipts'][1]
+    assert result['completion'] == 'incomplete'
+    assert result['finding_count'] is None
+    assert len(result['findings']) == 1
+    assert '| pip-audit | incomplete | unknown |' in security.summary(report)
+
+
+def test_scan_late_identity_failure_withholds_total_and_keeps_observations(project, monkeypatch):
+    identities = iter([{'revision': 'before'}, {'revision': 'after'}])
+    monkeypatch.setattr(security, 'identity', lambda root: next(identities))
+    monkeypatch.setattr(security, 'installed_distributions', lambda: [{'name': 'bandit', 'version': '1.9.4'}])
+    monkeypatch.setattr(security, 'source_files', lambda root: {'graphify/a.py': 'sha'})
+
+    def execute(command, root, directory, stem):
+        security.write_json(directory / 'scanner.json', bandit_payload(True))
+        (directory / 'scanner.stderr').write_bytes(b'')
+        return {'exit_code': 1, 'error': None}
+
+    monkeypatch.setattr(security, 'execute', execute)
+    output = project / 'scan-output'
+    assert security.scan(project, output, 'bandit') == 1
+    receipt = security.load_json(output / 'bandit' / 'receipt.json')
+    assert receipt['completion'] == 'incomplete'
+    assert receipt['finding_count'] is None
+    assert receipt['findings'] == bandit_payload(True)['results']
 
 
 def test_failed_preparation_and_reused_output_cannot_pass(project, monkeypatch):
