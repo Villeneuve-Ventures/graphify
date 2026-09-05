@@ -818,6 +818,17 @@ uv run pytest tests/ -q -k "python"    # filter by name
 
 ### What to contribute
 
+**README documentation is English-only.** Do not add or restore translated READMEs
+or language-selector links, including when syncing upstream changes. CI checks
+this policy with `tests/test_readme_policy.py`; run
+`uv run --frozen pytest tests/test_readme_policy.py -q --tb=short` locally.
+Graphify continues to support multilingual input corpora and language extraction.
+Non-English locale codes are reserved as README parent-directory names, even for
+English text; use descriptive topic names such as `operating-systems` instead of
+ambiguous codes such as `os`. English locale directories remain allowed.
+Maintained worked-example documentation follows this rule; raw input corpora
+and test fixtures remain exempt.
+
 **Worked examples** are the most useful contribution. Run `/graphify` on a real corpus, save the output to `worked/{slug}/`, write an honest `review.md` covering what the graph got right and wrong, and open a PR.
 
 **Extraction bugs** — open an issue with the input file, the cache entry (`graphify-out/cache/`), and what was missed or wrong.
