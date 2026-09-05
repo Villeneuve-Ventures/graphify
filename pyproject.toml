@@ -90,6 +90,7 @@ graphify-mcp = "graphify.serve:_main"
 dev = [
     "bandit>=1.9.4",
     "build>=1.5.0",
+    "httpx2>=2.0.0",
     "hypothesis>=6.152.7",
     "nuitka>=4.1",
     "patchelf>=0.17.2.4 ; sys_platform != 'win32'",
@@ -129,7 +130,7 @@ testpaths = ["tests"]
 norecursedirs = [
     "graphify-benchmark", "graphify_eval", "graphify_test",
     "worked", "llm-stack-corpus", "llm-stack-demo", "product-site",
-    "scripts", "ebook", ".github", "dist", "build",
+    "scripts", "ebook", ".github", "dist", "build", ".hypothesis",
 ]
 
 [tool.bandit]
