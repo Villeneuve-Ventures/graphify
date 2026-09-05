@@ -9,9 +9,11 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt")
 # Cover the historical directories and locale-suffixed README naming schemes.
 TRANSLATION_REFERENCE = re.compile(
-    r"(?:\btranslations/|\breadme[._-][a-z]{2,3}(?:[-_][a-z0-9]{2,8})*\.md\b)",
+    r"(?:\btranslations/|\breadme[._-][a-z]{2,3}(?:[-_][a-z0-9]{2,8})*\.(?:"
+    + "|".join(DOCUMENTATION_EXTENSIONS) + r")\b)",
     re.IGNORECASE,
 )
 
@@ -21,7 +23,8 @@ def _translation_reference(text: str) -> bool:
 
 
 def _owned_documentation(path: Path) -> bool:
-    return len(path.parts) == 1 or path.parts[0].lower() in {"docs", "translations"}
+    # Only corpora and fixtures are exempt; maintained nested paths are owned.
+    return not (path.is_relative_to("worked") or path.is_relative_to("tests/fixtures"))
 
 
 def _repository_files() -> list[Path]:
@@ -47,12 +50,14 @@ def test_no_readme_translations_in_repository() -> None:
 
 
 def test_public_documentation_does_not_reference_readme_translations() -> None:
-    # Historical CHANGELOG entries and third-party worked corpora are not
-    # maintained Graphify documentation; keep their original content intact.
+    # Preserve historical CHANGELOG entries and the agent policy's examples
+    # of forbidden paths, as well as the corpus/fixture ownership exceptions.
     violations = []
     for path in _repository_files():
-        if path == Path("README.md") or (
-            path.parts[0] == "docs" and path.suffix.lower() == ".md"
+        if (
+            _owned_documentation(path)
+            and path.suffix.lower().lstrip(".") in DOCUMENTATION_EXTENSIONS
+            and path not in {Path("AGENTS.md"), Path("CHANGELOG.md")}
         ):
             for number, line in enumerate((ROOT / path).read_text(encoding="utf-8").splitlines(), 1):
                 if _translation_reference(line):
@@ -99,6 +104,16 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("worked/example/raw/translations/fr.json", '{"hello": "bonjour"}', False),
     ("worked/vendor/README.fr.md", "Third-party documentation", False),
     ("tests/fixtures/translations/README.fr.md", "Multilingual fixture", False),
+    ("graphify/README.fr.md", "French documentation", True),
+    ("tools/translations/README.md", "French documentation", True),
+    ("ARCHITECTURE.md", "[French](README.fr.md)", True),
+    ("BENCHMARKS.md", "[French](README.fr.md)", True),
+    ("SECURITY.md", "[French](README.fr.md)", True),
+    ("graphify/guide.md", "[French](README.fr.md)", True),
+    ("CHANGELOG.md", "Previously shipped README.fr.md", False),
+    ("AGENTS.md", "Do not restore README.fr.md", False),
+    ("worked/vendor/README.md", "[French](README.fr.md)", False),
+    ("tests/fixtures/guide.md", "[French](README.fr.md)", False),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,
@@ -118,3 +133,17 @@ def test_policy_checks_disposable_repository(
             check_policy()
     else:
         check_policy()
+
+
+@pytest.mark.parametrize("extension", ["mdx", "markdown", "rst", "qmd", "txt"])
+def test_policy_checks_other_documentation_formats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extension: str,
+) -> None:
+    test_policy_checks_disposable_repository(
+        tmp_path, monkeypatch, f"README.fr.{extension}", "French documentation", True,
+    )
+    (tmp_path / f"README.fr.{extension}").unlink()
+    test_policy_checks_disposable_repository(
+        tmp_path, monkeypatch, f"guide.{extension}", f"README.fr.{extension}", True,
+    )
+    assert not _translation_reference(f"README.{extension}")
