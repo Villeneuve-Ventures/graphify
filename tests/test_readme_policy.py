@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt")
 # Cover the historical directories and locale-suffixed README naming schemes.
 TRANSLATION_REFERENCE = re.compile(
-    r"(?:\btranslations/|\breadme[._-][a-z]{2,3}(?:[-_][a-z0-9]{2,8})*\.(?:"
+    r"(?:\btranslations/|\bdocs/translations(?=$|[?#\s)>\]\"'])|"
+    r"\breadme[._-][a-z]{2,3}(?:[-_][a-z0-9]{2,8})*\.(?:"
     + "|".join(DOCUMENTATION_EXTENSIONS) + r")\b)",
     re.IGNORECASE,
 )
@@ -59,11 +60,14 @@ def test_public_documentation_does_not_reference_readme_translations() -> None:
             and path.suffix.lower().lstrip(".") in DOCUMENTATION_EXTENSIONS
             and path not in {Path("AGENTS.md"), Path("CHANGELOG.md")}
         ):
+            if not (ROOT / path).is_file():
+                violations.append(f"{path.as_posix()}: non-regular documentation target")
+                continue
             for number, line in enumerate((ROOT / path).read_text(encoding="utf-8").splitlines(), 1):
                 if _translation_reference(line):
                     violations.append(f"{path.as_posix()}:{number}")
     assert not violations, (
-        "Remove references to README translations from maintained documentation: "
+        "README translation policy violations in maintained documentation: "
         + ", ".join(violations)
     )
 
@@ -80,6 +84,10 @@ def test_public_documentation_does_not_reference_readme_translations() -> None:
     '<a href="docs/translations/README.fr-FR.md">French</a>',
     "<DOCS/TRANSLATIONS/README.FR-FR.MD>",
     "docs%2Ftranslations%2FREADME.fr-FR.md",
+    "docs/translations",
+    "[Translations](docs/translations)",
+    '<a href="docs/translations#languages">Translations</a>',
+    "[Translations](docs%2Ftranslations?view=all)",
 ])
 def test_translation_guard_rejects_restored_paths_and_links(reference: str) -> None:
     assert _translation_reference(reference)
@@ -91,6 +99,8 @@ def test_translation_guard_rejects_restored_paths_and_links(reference: str) -> N
     "worked/example/README.md",
     "[Install](README.md#install)",
     "Graphify supports multilingual input corpora.",
+    "Graphify supports translations",
+    "docs/translations-guide.md",
 ])
 def test_translation_guard_preserves_english_readmes_and_corpus_support(reference: str) -> None:
     assert not _translation_reference(reference)
@@ -114,6 +124,7 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("AGENTS.md", "Do not restore README.fr.md", False),
     ("worked/vendor/README.md", "[French](README.fr.md)", False),
     ("tests/fixtures/guide.md", "[French](README.fr.md)", False),
+    ("README.md", "[Translations](docs/translations)", True),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,
@@ -147,3 +158,31 @@ def test_policy_checks_other_documentation_formats(
         tmp_path, monkeypatch, f"guide.{extension}", f"README.fr.{extension}", True,
     )
     assert not _translation_reference(f"README.{extension}")
+
+
+@pytest.mark.parametrize("target_kind", ["missing", "directory", "file", "translated_file"])
+def test_policy_checks_documentation_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_kind: str,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    monkeypatch.setattr(f"{__name__}.ROOT", tmp_path)
+    target = tmp_path / "target"
+    if target_kind == "directory":
+        target.mkdir()
+    elif target_kind in {"file", "translated_file"}:
+        target.write_text("README.fr.md" if target_kind == "translated_file" else "English guide")
+    try:
+        (tmp_path / "guide.md").symlink_to(target, target_is_directory=target_kind == "directory")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    if target_kind in {"missing", "directory"}:
+        with pytest.raises(AssertionError, match="guide.md: non-regular documentation target"):
+            test_public_documentation_does_not_reference_readme_translations()
+    elif target_kind == "translated_file":
+        with pytest.raises(AssertionError, match="guide.md:1"):
+            test_public_documentation_does_not_reference_readme_translations()
+    else:
+        test_public_documentation_does_not_reference_readme_translations()
+    (tmp_path / "README.fr.md").symlink_to(target, target_is_directory=target_kind == "directory")
+    with pytest.raises(AssertionError, match="README.fr.md"):
+        test_no_readme_translations_in_repository()
