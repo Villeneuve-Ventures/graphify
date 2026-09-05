@@ -388,7 +388,7 @@ def summary(result, artifact_url=''):
         count = r['finding_count'] if r['finding_count'] is not None else 'unknown'
         lines.append(f'| {r["scanner"]} | {r["completion"]} | {count} | {code} | '
                      f'{r["ci_step"]["outcome"]} | {r["ci_step"]["conclusion"]} |')
-    lines += ['', 'A tolerated failure is not a clean scan. Findings are rule/advisory records, '
+    lines += ['', 'A tolerated failure is not a clean scan. Findings are rule/advisory records, ' +
               'not demonstrated exploits. Duplicate advisory records may share an ID.',
               f'Job status observed at reporting: {result["job_status_at_reporting"]}. '
               'Final job conclusion must be read from Actions after completion.']
