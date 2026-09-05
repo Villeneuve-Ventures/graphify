@@ -12151,3 +12151,109 @@ def test_successor_post_callback_admission_contract_N5(tmp_path):
     assert sum(item["changed_paths"] == ["pending.py"] for item in items) == 1
     assert not any(item["changed_paths"] == ["late.py"] for item in items)
     assert tx.inspect_recovery(output).state == "malformed"
+
+
+@pytest.mark.parametrize("state", ["ready", "transfer"])
+@pytest.mark.parametrize("boundary", [None, "after_queue_exchange"])
+def test_recovery_admission_preserves_legacy_pending_paths(tmp_path, state, boundary):
+    from graphify import transaction as tx
+
+    fixture = _issue101_transfer if state == "transfer" else _merge_successor_ready
+    root, output, _owner, _token, _admission, _marker = fixture(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    legacy = output / ".pending_changes"
+    legacy.write_bytes(b"legacy.py\npartial")
+    identity = legacy.stat()
+    selected = tx.inspect_recovery(output, now=10**12)
+
+    def crash(phase):
+        if phase == boundary:
+            raise RuntimeError(phase)
+
+    if boundary is not None:
+        with pytest.raises(RuntimeError, match=boundary):
+            tx.queue_rebuild(
+                "update", root, output=output, changed_paths=["late.py"],
+                legacy_pending_name=legacy.name, now=10**12, failpoint=crash,
+            )
+        assert not (output / tx.LEGACY_PENDING_STATE_FILE).exists()
+
+    def stop_after_admission(phase):
+        if phase == "after_recovery_intent_admitted":
+            items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+            paths = {path for item in items for path in (item["changed_paths"] or [])}
+            assert {"late.py", "legacy.py"} <= paths
+            assert "partial" not in paths
+            checkpoint = json.loads((output / tx.LEGACY_PENDING_STATE_FILE).read_bytes())
+            assert checkpoint == {
+                "schema": 1, "name": legacy.name,
+                "identity": {"device": identity.st_dev, "inode": identity.st_ino},
+                "offset": len(b"legacy.py\n"),
+            }
+            assert tx.inspect_recovery(output, now=10**12) == selected
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match="after_recovery_intent_admitted"):
+        tx.recover_rebuild_intent(
+            "update", root, output=output, changed_paths=["late.py"],
+            legacy_pending_name=legacy.name, now=10**12,
+            failpoint=stop_after_admission,
+        )
+    result = tx.recover_rebuild_intent(
+        "update", root, output=output, changed_paths=["late.py"],
+        legacy_pending_name=legacy.name, now=10**13,
+    )
+    assert result.queued and result.recovered
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert {"late.py", "legacy.py"} <= {
+        path for item in items for path in (item["changed_paths"] or [])
+    }
+    assert legacy.read_bytes() == b"legacy.py\npartial"
+    assert (legacy.stat().st_dev, legacy.stat().st_ino) == (identity.st_dev, identity.st_ino)
+    assert not (output / tx.TOKEN_TRANSITION_FILE).exists()
+    assert not (output / tx.PREPARED_FILE).exists()
+
+
+@pytest.mark.parametrize("substitution", ["queue", "transfer"])
+def test_legacy_recovery_checkpoint_revalidates_returning_callback(
+    tmp_path, substitution
+):
+    from graphify import transaction as tx
+
+    root, output, _owner, _token, _admission, _marker = _issue101_transfer(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    legacy = output / ".pending_changes"
+    legacy.write_text("legacy.py\n")
+    after_callback = {}
+
+    def replace_after_transition(phase):
+        if phase != "after_queue_transition_journal_retired":
+            return
+        if substitution == "queue":
+            (output / tx.QUEUE_FILE).write_bytes(b"")
+        else:
+            with tx.pin_output(output) as capability, tx._locked(capability):
+                tx._resume_token_transition_locked(capability)
+            with pytest.raises(RuntimeError, match="after_token_journal"):
+                tx.takeover_drainer(
+                    output, now=10**13,
+                    transition_failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
+                    if name == "after_token_journal" else None,
+                )
+            assert tx.inspect_recovery(output).state == "transfer-replay"
+        after_callback.update(_file_bytes(output))
+
+    with pytest.raises(tx.PendingTransactionError):
+        tx.queue_rebuild(
+            "update", root, output=output, changed_paths=["late.py"],
+            legacy_pending_name=legacy.name, now=10**12,
+            failpoint=replace_after_transition,
+        )
+    assert after_callback
+    # The interrupted queue operation may retire only its own binding on return.
+    binding = tx._queue_transition_binding_name(tx.QUEUE_FILE)
+    assert _file_bytes(output) == {
+        name: payload for name, payload in after_callback.items() if name != binding
+    }
+    assert not (output / tx.LEGACY_PENDING_STATE_FILE).exists()
+    assert legacy.read_text() == "legacy.py\n"

@@ -11921,6 +11921,7 @@ def _queue_successor_ready_rebuild_locked(
     kind: TransactionKind,
     root: Path,
     durable_paths: Sequence[str],
+    legacy_pending_name: str | None,
     semantic: bool,
     source: str,
     intent: str | None,
@@ -12075,9 +12076,53 @@ def _queue_successor_ready_rebuild_locked(
             )
     return _append_recovery_intent_locked(
         capability, kind=kind, root=root, durable_paths=durable_paths,
+        legacy_pending_name=legacy_pending_name,
         semantic=semantic, source=source, intent=intent, now=now,
         failpoint=failpoint, live=live, drainer=drainer[0],
     )
+
+
+def _read_legacy_rebuild_paths_locked(
+    capability: OutputCapability,
+    durable_paths: Sequence[str],
+    legacy_pending_name: str | None,
+) -> tuple[list[str], dict[str, object] | None]:
+    """Read complete legacy lines without advancing their durable checkpoint."""
+    durable_paths = list(durable_paths)
+    legacy_checkpoint: dict[str, object] | None = None
+    legacy_info = (
+        None
+        if legacy_pending_name is None
+        else _entry_stat(capability, legacy_pending_name)
+    )
+    if legacy_pending_name is not None and legacy_info is not None:
+        bridge = _load_json(capability, LEGACY_PENDING_STATE_FILE) or {}
+        identity = {"device": legacy_info.st_dev, "inode": legacy_info.st_ino}
+        offset = 0
+        if bridge.get("identity") == identity:
+            raw_offset = bridge.get("offset", 0)
+            if isinstance(raw_offset, int) and 0 <= raw_offset <= legacy_info.st_size:
+                offset = raw_offset
+        try:
+            legacy_bytes = _read_managed_bytes(
+                capability, legacy_pending_name
+            )[0]
+            unread = legacy_bytes[offset:]
+            complete_length = unread.rfind(b"\n") + 1
+            legacy_payload = unread[:complete_length].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PendingTransactionError("legacy pending changes are malformed") from exc
+        durable_paths.extend(
+            line.strip() for line in legacy_payload.splitlines() if line.strip()
+        )
+        durable_paths = list(dict.fromkeys(durable_paths))
+        legacy_checkpoint = {
+            "schema": 1,
+            "name": legacy_pending_name,
+            "identity": identity,
+            "offset": offset + complete_length,
+        }
+    return durable_paths, legacy_checkpoint
 
 
 def _append_recovery_intent_locked(
@@ -12086,6 +12131,7 @@ def _append_recovery_intent_locked(
     kind: TransactionKind,
     root: Path,
     durable_paths: Sequence[str],
+    legacy_pending_name: str | None = None,
     semantic: bool,
     source: str,
     intent: str | None,
@@ -12095,6 +12141,17 @@ def _append_recovery_intent_locked(
     drainer: DrainerTuple,
 ) -> QueueReceipt:
     """Append to the queue without changing the validated recovery authority."""
+    durable_paths, legacy_checkpoint = _read_legacy_rebuild_paths_locked(
+        capability, durable_paths, legacy_pending_name
+    )
+    if legacy_checkpoint is not None:
+        now = time.time() if now is None else now
+        checkpoint_recovery = _inspect_recovery_locked(capability, now=now)
+        checkpoint_marker = _load_json(capability, PREPARED_FILE)
+        checkpoint_drainer = _read_drainer(capability)
+        selected_drainer = None if checkpoint_drainer is None else checkpoint_drainer[0]
+        if checkpoint_recovery.state == "malformed":
+            raise PendingTransactionError(checkpoint_recovery.reason)
     predecessor = _read_queue_record(capability)
     candidate_identity = {
         "schema": 1,
@@ -12136,12 +12193,24 @@ def _append_recovery_intent_locked(
         else "append"
     )
     queued, item = _canonical_enqueue_transform(list(predecessor.items), candidate, operation)
-    _transition_queue(
+    durable_queue = _transition_queue(
         capability,
         predecessor,
         queued,
         failpoint=failpoint,
     )
+    if legacy_checkpoint is not None:
+        current_drainer = _read_drainer(capability)
+        if (
+            (None if current_drainer is None else current_drainer[0]) != selected_drainer
+            or _load_json(capability, PREPARED_FILE) != checkpoint_marker
+            or _read_queue_record(capability) != durable_queue
+            or _inspect_recovery_locked(capability, now=now) != checkpoint_recovery
+        ):
+            raise PendingTransactionError("legacy recovery checkpoint authority changed")
+        _replace_bytes(
+            capability, LEGACY_PENDING_STATE_FILE, _json_bytes(legacy_checkpoint)
+        )
     return QueueReceipt(str(item["id"]), drainer)
 
 
@@ -12224,6 +12293,7 @@ def queue_rebuild(
                 raise PendingTransactionError("recovery admission changed after queue recovery")
             return _append_recovery_intent_locked(
                 capability, kind=kind, root=root_path, durable_paths=durable_paths,
+                legacy_pending_name=legacy_pending_name,
                 semantic=semantic, source=source, intent=intent, now=now,
                 failpoint=failpoint, live=_read_transaction(capability),
                 drainer=target.drainer,
@@ -12264,6 +12334,7 @@ def queue_rebuild(
             kind=kind,
             root=root_path,
             durable_paths=durable_paths,
+            legacy_pending_name=legacy_pending_name,
             semantic=semantic,
             source=source,
             intent=intent,
@@ -12372,39 +12443,9 @@ def queue_rebuild(
             if existing_drainer is None:
                 raise PendingTransactionError("live drainer disappeared")
             drainer = existing_drainer[0]
-        legacy_checkpoint: dict[str, object] | None = None
-        legacy_info = (
-            None
-            if legacy_pending_name is None
-            else _entry_stat(capability, legacy_pending_name)
+        durable_paths, legacy_checkpoint = _read_legacy_rebuild_paths_locked(
+            capability, durable_paths, legacy_pending_name
         )
-        if legacy_pending_name is not None and legacy_info is not None:
-            bridge = _load_json(capability, LEGACY_PENDING_STATE_FILE) or {}
-            identity = {"device": legacy_info.st_dev, "inode": legacy_info.st_ino}
-            offset = 0
-            if bridge.get("identity") == identity:
-                raw_offset = bridge.get("offset", 0)
-                if isinstance(raw_offset, int) and 0 <= raw_offset <= legacy_info.st_size:
-                    offset = raw_offset
-            try:
-                legacy_bytes = _read_managed_bytes(
-                    capability, legacy_pending_name
-                )[0]
-                unread = legacy_bytes[offset:]
-                complete_length = unread.rfind(b"\n") + 1
-                legacy_payload = unread[:complete_length].decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise PendingTransactionError("legacy pending changes are malformed") from exc
-            durable_paths.extend(
-                line.strip() for line in legacy_payload.splitlines() if line.strip()
-            )
-            durable_paths = list(dict.fromkeys(durable_paths))
-            legacy_checkpoint = {
-                "schema": 1,
-                "name": legacy_pending_name,
-                "identity": identity,
-                "offset": offset + complete_length,
-            }
         predecessor_queue_record = _read_queue_record(capability)
         predecessor_queue = list(predecessor_queue_record.items)
         candidate_identity = {

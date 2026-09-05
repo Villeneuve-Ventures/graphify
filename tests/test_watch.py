@@ -3473,7 +3473,12 @@ from graphify import transaction as tx
 output = Path("graphify-out")
 def stop_before_replay(capability, **kwargs):
     items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
-    assert any(item["kind"] == "full" or "late.py" in (item["changed_paths"] or []) for item in items)
+    if not any(
+        item["kind"] == "full" or "late.py" in (item["changed_paths"] or [])
+        for item in items
+    ):
+        print("INTENT-MISSING-BEFORE-REPLAY", flush=True)
+        os._exit(94)
     print("INTENT-DURABLE-BEFORE-REPLAY", flush=True)
     os._exit(93)
 tx._resume_token_transition_locked = stop_before_replay
