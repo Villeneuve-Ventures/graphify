@@ -17,16 +17,24 @@ LANGUAGE_CODES = sorted({
     if re.fullmatch(r"[a-z]{2,3}(?:_[a-z0-9]+)*", key)
     and key.split("_", 1)[0] not in {"en", "eng"}
 })
+# RFC 5646 sections 2.2.6-2.2.7: extension singleton plus payload,
+# followed optionally by private-use subtags (which may be one character).
+LOCALE_SUBTAGS = (
+    r"(?:[-_][a-z0-9]{2,8})*"
+    r"(?:[-_][0-9a-wy-z](?:[-_][a-z0-9]{2,8})+)*"
+    r"(?:[-_]x(?:[-_][a-z0-9]{1,8})+)?"
+)
 TRANSLATED_README = re.compile(
     r"(?:\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
-    + r")(?![\w.-]))[a-z]{2,3}(?:[-_][a-z0-9]{2,8})*|"
-    r"(?<![\w.-])(?:translations(?:/[^\s/<>\[\]()\"']+)*|(?:"
-    + "|".join(LANGUAGE_CODES) + r")(?:[-_][a-z0-9]{2,8})*)/readme)(?:\.(?:"
+    + r")(?![\w.-]))[a-z]{2,3}" + LOCALE_SUBTAGS
+    + r"|(?<![\w.-])(?:translations(?:/[^\s/<>\[\]()\"']+)*|(?:"
+    + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS + r")/readme)(?:\.(?:"
     + "|".join(DOCUMENTATION_EXTENSIONS) + r"))?(?![\w.-])",
     re.IGNORECASE,
 )
 HISTORICAL_DIRECTORY_REFERENCE = re.compile(
-    r"(?:\bdocs/translations|(?:^|(?<=[(\"']))(?:\./)?translations)"
+    r"(?:\bdocs/translations|(?:^|(?<=[(\"'<]))translations|"
+    r"(?<![\w/.-])(?:/|(?:\.\.?/)+)translations)"
     r"(?=$|[/?#\s)>\]\"'])", re.IGNORECASE,
 )
 # Preserve the exact pre-policy historical mentions, not arbitrary future links.
@@ -34,6 +42,10 @@ HISTORICAL_CHANGELOG_LINES = {
     "- Docs: Persian (فارسی) README translation added (`docs/translations/README.fa-IR.md`; historical path, removed in 0.10.0).",
     "- Fix: Trae link corrected from `trae.com` to `trae.ai` in README, README.zh-CN.md, README.ja-JP.md, README.ko-KR.md (#122)",
     "- Docs: Korean README added (README.ko-KR.md) (#112)",
+}
+POLICY_EXAMPLE_LINES = {
+    "`translations/` and `docs/translations/` directories absent and do not introduce",
+    "locale-suffixed README files (for example, `README.fr-FR.md`).",
 }
 
 
@@ -90,13 +102,15 @@ def test_public_documentation_does_not_reference_readme_translations() -> None:
             _owned_documentation(path)
             and (path.suffix.lower().lstrip(".") in DOCUMENTATION_EXTENSIONS
                  or path.name.lower() == "readme")
-            and path != Path("AGENTS.md")
         ):
             if not (ROOT / path).is_file():
                 violations.append(f"{path.as_posix()}: non-regular documentation target")
                 continue
             for number, line in enumerate((ROOT / path).read_text(encoding="utf-8").splitlines(), 1):
-                if path == Path("CHANGELOG.md") and line in HISTORICAL_CHANGELOG_LINES:
+                if (
+                    (path == Path("CHANGELOG.md") and line in HISTORICAL_CHANGELOG_LINES)
+                    or (path == Path("AGENTS.md") and line in POLICY_EXAMPLE_LINES)
+                ):
                     continue
                 if _translation_reference(line):
                     violations.append(f"{path.as_posix()}:{number}")
@@ -155,7 +169,7 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("SECURITY.md", "[French](README.fr.md)", True),
     ("graphify/guide.md", "[French](README.fr.md)", True),
     ("CHANGELOG.md", "- Docs: Korean README added (README.ko-KR.md) (#112)", False),
-    ("AGENTS.md", "Do not restore README.fr.md", False),
+    ("AGENTS.md", "locale-suffixed README files (for example, `README.fr-FR.md`).", False),
     ("worked/vendor/raw/README.md", "[French](README.fr.md)", False),
     ("tests/fixtures/guide.md", "[French](README.fr.md)", False),
     ("README.md", "[Translations](docs/translations)", True),
@@ -193,6 +207,24 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("CHANGELOG.md", '<a href="docs/translations">Translations</a>', True),
     ("CHANGELOG.md", "[French]: README.fr.md", True),
     ("CHANGELOG.md", "- Docs: Korean README added ([README.ko-KR.md](README.ko-KR.md)) (#112)", True),
+    ("README.md", "[Translations](/translations)", True),
+    ("docs/guide.md", "[Translations](../translations)", True),
+    ("docs/nested/guide.md", "[Translations](../../translations)", True),
+    ("README.md", '<a href="/translations?view=all">Translations</a>', True),
+    ("docs/guide.md", "[Translations](..%2Ftranslations#languages)", True),
+    ("docs/guide.md", "[Assets](../tools/translations)", False),
+    ("README.de-DE-u-co-phonebk.md", "German documentation", True),
+    ("README.zh-CN-x-private.md", "Chinese documentation", True),
+    ("docs/de-DE-u-co-phonebk/README.md", "German documentation", True),
+    ("docs/zh-CN-x-private/README.md", "Chinese documentation", True),
+    ("README.md", "[German](README.de-DE-u-co-phonebk.md)", True),
+    ("README.md", "[Chinese](docs/zh-CN-x-private/README.md)", True),
+    ("README.de-x-a.md", "German documentation", True),
+    ("docs/en-US-u-ca-gregory/README.md", "English documentation", False),
+    ("AGENTS.md", "[French](README.fr.md)", True),
+    ("AGENTS.md", '<a href="docs/translations">Translations</a>', True),
+    ("AGENTS.md", "[French]: README.fr.md", True),
+    ("AGENTS.md", "locale-suffixed README files (for example, [French](README.fr-FR.md)).", True),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,
