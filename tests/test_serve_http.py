@@ -58,6 +58,12 @@ def _client(app) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1")
 
 
+def test_testclient_uses_supported_httpx2_transport():
+    import httpx2
+
+    assert issubclass(TestClient, httpx2.Client)
+
+
 def test_app_builds_and_initialize_succeeds(tmp_path):
     app = serve_mod._build_http_app(_graph_file(tmp_path), json_response=True)
     with _client(app) as client:
