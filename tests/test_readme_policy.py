@@ -10,24 +10,31 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt")
-# Use non-English language codes so English and ordinary src/api/go paths remain allowed.
+DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc")
+# Non-English locale parent names are reserved by policy, regardless of content.
 LANGUAGE_CODES = sorted({
     key.split("_", 1)[0] for key in locale.locale_alias
     if re.fullmatch(r"[a-z]{2,3}(?:_[a-z0-9]+)*", key)
     and key.split("_", 1)[0] not in {"en", "eng"}
 })
 TRANSLATED_README = re.compile(
-    r"(?:\breadme[._-][a-z]{2,3}(?:[-_][a-z0-9]{2,8})*|"
+    r"(?:\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
+    + r")(?![\w.-]))[a-z]{2,3}(?:[-_][a-z0-9]{2,8})*|"
     r"(?<![\w.-])(?:translations(?:/[^\s/<>\[\]()\"']+)*|(?:"
-    + "|".join(LANGUAGE_CODES) + r")(?:[-_][a-z0-9]{2,8})*)/readme)\.(?:"
-    + "|".join(DOCUMENTATION_EXTENSIONS) + r")\b",
+    + "|".join(LANGUAGE_CODES) + r")(?:[-_][a-z0-9]{2,8})*)/readme)(?:\.(?:"
+    + "|".join(DOCUMENTATION_EXTENSIONS) + r"))?(?![\w.-])",
     re.IGNORECASE,
 )
 HISTORICAL_DIRECTORY_REFERENCE = re.compile(
     r"(?:\bdocs/translations|(?:^|(?<=[(\"']))(?:\./)?translations)"
     r"(?=$|[/?#\s)>\]\"'])", re.IGNORECASE,
 )
+# Preserve the exact pre-policy historical mentions, not arbitrary future links.
+HISTORICAL_CHANGELOG_LINES = {
+    "- Docs: Persian (فارسی) README translation added (`docs/translations/README.fa-IR.md`; historical path, removed in 0.10.0).",
+    "- Fix: Trae link corrected from `trae.com` to `trae.ai` in README, README.zh-CN.md, README.ja-JP.md, README.ko-KR.md (#122)",
+    "- Docs: Korean README added (README.ko-KR.md) (#112)",
+}
 
 
 def _translation_reference(text: str) -> bool:
@@ -47,7 +54,8 @@ def _translation_path(path: Path) -> bool:
 
 def _owned_documentation(path: Path) -> bool:
     # Only corpora and fixtures are exempt; maintained nested paths are owned.
-    return not (path.is_relative_to("worked") or path.is_relative_to("tests/fixtures"))
+    is_corpus = len(path.parts) >= 3 and path.parts[0] == "worked" and path.parts[2] == "raw"
+    return not (is_corpus or path.is_relative_to("tests/fixtures"))
 
 
 def _repository_files() -> list[Path]:
@@ -74,19 +82,22 @@ def test_no_readme_translations_in_repository() -> None:
 
 
 def test_public_documentation_does_not_reference_readme_translations() -> None:
-    # Preserve historical CHANGELOG entries and the agent policy's examples
-    # of forbidden paths, as well as the corpus/fixture ownership exceptions.
+    # The agent policy includes examples of forbidden paths. Historical changelog
+    # mentions are exempt individually so new links still pass through the guard.
     violations = []
     for path in _repository_files():
         if (
             _owned_documentation(path)
-            and path.suffix.lower().lstrip(".") in DOCUMENTATION_EXTENSIONS
-            and path not in {Path("AGENTS.md"), Path("CHANGELOG.md")}
+            and (path.suffix.lower().lstrip(".") in DOCUMENTATION_EXTENSIONS
+                 or path.name.lower() == "readme")
+            and path != Path("AGENTS.md")
         ):
             if not (ROOT / path).is_file():
                 violations.append(f"{path.as_posix()}: non-regular documentation target")
                 continue
             for number, line in enumerate((ROOT / path).read_text(encoding="utf-8").splitlines(), 1):
+                if path == Path("CHANGELOG.md") and line in HISTORICAL_CHANGELOG_LINES:
+                    continue
                 if _translation_reference(line):
                     violations.append(f"{path.as_posix()}:{number}")
     assert not violations, (
@@ -135,7 +146,7 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("README.md", "[French](docs/translations/README.fr-FR.md)", True),
     ("docs/guide.md", '<a href="README.fr-FR.md">French</a>', True),
     ("worked/example/raw/translations/fr.json", '{"hello": "bonjour"}', False),
-    ("worked/vendor/README.fr.md", "Third-party documentation", False),
+    ("worked/vendor/raw/README.fr.md", "Third-party documentation", False),
     ("tests/fixtures/translations/README.fr.md", "Multilingual fixture", False),
     ("graphify/README.fr.md", "French documentation", True),
     ("tools/translations/README.md", "French documentation", True),
@@ -143,9 +154,9 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("BENCHMARKS.md", "[French](README.fr.md)", True),
     ("SECURITY.md", "[French](README.fr.md)", True),
     ("graphify/guide.md", "[French](README.fr.md)", True),
-    ("CHANGELOG.md", "Previously shipped README.fr.md", False),
+    ("CHANGELOG.md", "- Docs: Korean README added (README.ko-KR.md) (#112)", False),
     ("AGENTS.md", "Do not restore README.fr.md", False),
-    ("worked/vendor/README.md", "[French](README.fr.md)", False),
+    ("worked/vendor/raw/README.md", "[French](README.fr.md)", False),
     ("tests/fixtures/guide.md", "[French](README.fr.md)", False),
     ("README.md", "[Translations](docs/translations)", True),
     ("docs/fr/README.md", "French documentation", True),
@@ -157,12 +168,31 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("README.md", "[Parser](tools/translations/parser.py)", False),
     ("docs/src/README.md", "Source guide", False),
     ("docs/api/README.md", "API guide", False),
+    ("docs/os/README.md", "English operating-system guide", True),
+    ("docs/as/README.md", "English guide", True),
+    ("docs/operating-systems/README.md", "English operating-system guide", False),
+    ("README.md", "[Operating systems](docs/operating-systems/README.md)", False),
     ("docs/en/README.md", "English documentation", False),
     ("docs/en-US/README.md", "English documentation", False),
     ("README.md", "[English](docs/en-US/README.md)", False),
     ("docs/translations/catalog.json", "{}", True),
     ("translations/catalog.json", "{}", True),
-    ("worked/vendor/docs/fr/README.md", "French corpus", False),
+    ("worked/vendor/raw/docs/fr/README.md", "French corpus", False),
+    ("worked/foo/README.fr.md", "French documentation", True),
+    ("worked/foo/README.md", "[French](README.fr.md)", True),
+    ("worked/foo/docs/guide.md", "[French](README.fr.md)", True),
+    ("worked/foo/README.md", "English benchmark guide", False),
+    ("README.fr.adoc", "French documentation", True),
+    ("docs/fr/README.adoc", "French documentation", True),
+    ("README.fr", "French documentation", True),
+    ("docs/fr/README", "French documentation", True),
+    ("README", "[French](README.fr)", True),
+    ("README", "English guide", False),
+    ("README.adoc", "English guide", False),
+    ("CHANGELOG.md", "[French](README.fr.md)", True),
+    ("CHANGELOG.md", '<a href="docs/translations">Translations</a>', True),
+    ("CHANGELOG.md", "[French]: README.fr.md", True),
+    ("CHANGELOG.md", "- Docs: Korean README added ([README.ko-KR.md](README.ko-KR.md)) (#112)", True),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,
@@ -184,7 +214,7 @@ def test_policy_checks_disposable_repository(
         check_policy()
 
 
-@pytest.mark.parametrize("extension", ["mdx", "markdown", "rst", "qmd", "txt"])
+@pytest.mark.parametrize("extension", ["mdx", "markdown", "rst", "qmd", "txt", "adoc", "asciidoc"])
 def test_policy_checks_other_documentation_formats(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extension: str,
 ) -> None:
