@@ -12,6 +12,20 @@ the policy does not authorize its own approval, commit, publication, merge, or
 cleanup. Keep the detailed policy, acceptance packet, and complete candidate
 manifest available to every independent reviewer.
 
+## README language policy
+
+Graphify's maintained README documentation is English-only. Do not create,
+restore, generate, or link translated README files, including during upstream
+syncs, merges, migrations, or documentation refreshes. Keep the historical
+`translations/` and `docs/translations/` directories absent and do not introduce
+locale-suffixed README files (for example, `README.fr-FR.md`).
+
+The existing CI pytest gate enforces this policy through
+`tests/test_readme_policy.py`. Run it locally with
+`uv run --frozen pytest tests/test_readme_policy.py -q --tb=short`.
+This rule does not restrict multilingual input corpora or language extraction
+support. Any change to this policy requires an explicit operator request.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
