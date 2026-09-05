@@ -355,9 +355,9 @@ def finalize(root, output, outcomes):
             result = audit_result(scanner, load_json(raw_path), proc['exit_code'],
                                   (directory / 'scanner.stderr').read_text(errors='replace'), coverage)
             # Recompute the verdict, preserving earlier preparation/process errors.
-            result['errors'] = list(dict.fromkeys(receipt['errors'] + result['errors']))
             if proc['error']:
                 result['errors'].append(proc['error'])
+            result['errors'] = list(dict.fromkeys(receipt['errors'] + result['errors']))
             if result['errors']:
                 result.update(completion='incomplete', result='incomplete', finding_count=None)
             receipt.update(result)

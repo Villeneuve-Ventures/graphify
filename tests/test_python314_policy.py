@@ -100,7 +100,7 @@ def test_workflows_run_executable_python_on_314_only():
     leiden_job = _workflow_job_body(ci, "leiden-binary-smoke")
     assert 'python-version: ["3.14"]' in ci
     ci_versions = re.findall(r'python-version: "([0-9.]+)"', ci)
-    assert len(ci_versions) == 3
+    assert len(ci_versions) == 4
     assert set(ci_versions) == {"3.14"}
     assert re.findall(r'python-version: "([0-9.]+)"', release) == ["3.14"]
     assert 'uv pip install --only-binary=graspologic-native ".[leiden]"' in leiden_job

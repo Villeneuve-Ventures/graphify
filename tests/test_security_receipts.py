@@ -281,7 +281,7 @@ def test_finalizer_requires_export_stderr_evidence(project, receipt_dir, mutatio
     assert security.load_json(directory / 'scanner.stdout') == pip_payload(True)
 
 
-@pytest.mark.parametrize('error_source', ['preparation', 'process'])
+@pytest.mark.parametrize('error_source', ['preparation', 'process', 'recorded-process'])
 def test_finalizer_late_errors_withhold_total_and_keep_observations(project, receipt_dir, error_source):
     path = receipt_dir / 'pip-audit' / 'receipt.json'
     receipt = security.load_json(path)
@@ -289,6 +289,8 @@ def test_finalizer_late_errors_withhold_total_and_keep_observations(project, rec
         receipt['errors'] = ['preparation/evidence failure: installed inventory changed during scan']
     else:
         receipt['process']['error'] = 'process interrupted'
+        if error_source == 'recorded-process':
+            receipt['errors'] = ['earlier preparation error', 'process interrupted', 'later evidence error']
     security.write_json(path, receipt)
     report = security.finalize(project, receipt_dir, outcomes())
     result = report['receipts'][1]
@@ -296,6 +298,10 @@ def test_finalizer_late_errors_withhold_total_and_keep_observations(project, rec
     assert result['finding_count'] is None
     assert len(result['findings']) == 1
     assert '| pip-audit | incomplete | unknown |' in security.summary(report)
+    expected = receipt['errors'] or [receipt['process']['error']]
+    assert result['errors'] == expected
+    for error in expected:
+        assert security.summary(report).count(f'<pre>pip-audit: {error}</pre>') == 1
 
 
 def test_scan_late_identity_failure_withholds_total_and_keeps_observations(project, monkeypatch):
@@ -347,9 +353,47 @@ def test_finalizer_runs_without_site_packages_or_successful_sync(project):
     assert all(r['completion'] == 'incomplete' for r in result['receipts'])
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='CI reporting commands run under Bash on Ubuntu')
+def test_reporting_workflow_runs_without_uv_site_packages_or_successful_sync(project):
+    helper = Path(security.__file__).resolve()
+    (project / 'tools').mkdir()
+    (project / 'tools/security_receipts.py').write_bytes(helper.read_bytes())
+    steps = yaml.safe_load((helper.parents[1] / '.github/workflows/ci.yml').read_text())[
+        'jobs']['security-scan']['steps']
+    final = next(s for s in steps if s.get('name') == 'Finalize security receipts')
+    publish = steps[-1]
+    step_summary = project / 'step-summary.md'
+    env = {'PATH': '', 'RUNNER_TEMP': str(project), 'GITHUB_STEP_SUMMARY': str(step_summary),
+           **{f'{s.upper().replace("-", "_")}_{k.upper()}': 'skipped'
+              for s in security.SCANNERS for k in ('outcome', 'conclusion')}}
+
+    def run(step):
+        command = step['run'].replace('${{ steps.reporting_python.outputs.python-path }}', sys.executable)
+        proc = subprocess.run(['/bin/bash', '-e', '-c', command], cwd=project, env=env,
+                              capture_output=True, text=True, timeout=10)
+        assert proc.returncode == 0, proc.stderr
+
+    run(publish)
+    assert 'INCOMPLETE: security reporting failed' in step_summary.read_text()
+    step_summary.write_text('')
+    run(final)
+    run(publish)
+    result = json.loads((project / 'security-receipts/summary.json').read_text())
+    assert all(r['completion'] == 'incomplete' for r in result['receipts'])
+    assert all(r['finding_count'] is None for r in result['receipts'])
+    assert all(r['ci_step'] == {'outcome': 'skipped', 'conclusion': 'skipped'} for r in result['receipts'])
+    assert '| pip-audit | incomplete | unknown | unavailable | skipped | skipped |' in step_summary.read_text()
+
+
 def test_workflow_preserves_scope_and_observes_actual_tolerated_results():
     workflow = Path(__file__).resolve().parents[1] / '.github/workflows/ci.yml'
-    steps = yaml.safe_load(workflow.read_text())['jobs']['security-scan']['steps']
+    job = yaml.safe_load(workflow.read_text())['jobs']['security-scan']
+    assert job['permissions'] == {'contents': 'read'}
+    steps = job['steps']
+    python = next(s for s in steps if s.get('id') == 'reporting_python')
+    uv = next(s for s in steps if s.get('name') == 'Install uv')
+    assert python['with']['python-version'] == '3.14'
+    assert steps.index(python) < steps.index(uv)
     install = next(s for s in steps if s.get('name') == 'Install dependencies')
     assert install['run'] == 'uv sync --frozen'
     scans = [s for s in steps if s.get('id') in ('bandit', 'pip_audit')]
@@ -358,12 +402,13 @@ def test_workflow_preserves_scope_and_observes_actual_tolerated_results():
     command = security.scanner_command('bandit', Path('/tmp/results'))
     assert command[-2:] == ['-o', '/tmp/results/scanner.json']
     final = next(s for s in steps if s.get('name') == 'Finalize security receipts')
-    assert final['if'] == 'always()' and '--no-project --no-sync' in final['run']
+    assert final['if'] == 'always()' and '-I -S' in final['run']
     assert final['env']['PIP_AUDIT_OUTCOME'] == '${{ steps.pip_audit.outcome }}'
     assert final['env']['PIP_AUDIT_CONCLUSION'] == '${{ steps.pip_audit.conclusion }}'
     upload = next(s for s in steps if s.get('id') == 'security_artifact')
     publish = steps[-1]
     assert upload['if'] == publish['if'] == 'always()'
+    assert '-I -S' in publish['run']
     assert steps.index(final) < steps.index(upload) < steps.index(publish)
     assert publish['env']['ARTIFACT_URL'] == '${{ steps.security_artifact.outputs.artifact-url }}'
 

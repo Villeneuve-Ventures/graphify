@@ -67,6 +67,12 @@ after 30 days. If reporting or upload fails, the logs remain evidence of an
 incomplete reporting pipeline. No new blocking security baseline is introduced.
 Existing dependency-install failures still fail the job.
 
+CI provisions reporting Python independently of uv and invokes it directly,
+without site-packages, so uv setup or dependency-install failures can still
+produce incomplete receipts and summaries. Reporting still requires a successful
+checkout and reporting-interpreter setup. The security job grants its repository
+token only `contents: read` access.
+
 ## Reproduce in an isolated checkout
 
 Use Python 3.14.2 through final 3.14.x, the committed lock, and Git 2.55.0.

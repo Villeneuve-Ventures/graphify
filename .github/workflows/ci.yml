@@ -97,9 +97,17 @@ jobs:
   security-scan:
     # Advisory policy: findings and scanner failures remain nonblocking, but
     # completion and coverage are validated independently of the job conclusion.
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install reporting Python
+        id: reporting_python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v8.1.0
@@ -130,8 +138,8 @@ jobs:
           PIP_AUDIT_CONCLUSION: ${{ steps.pip_audit.conclusion }}
           JOB_STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        # No project sync/import dependencies: report even failed preparation.
-        run: uv run --no-project --no-sync --python 3.14 python tools/security_receipts.py finalize --output "$RUNNER_TEMP/security-receipts"
+        # Independent of uv and project packages: report failed uv preparation.
+        run: '"${{ steps.reporting_python.outputs.python-path }}" -I -S tools/security_receipts.py finalize --output "$RUNNER_TEMP/security-receipts"'
 
       - name: Upload security receipts and raw output
         id: security_artifact
@@ -149,7 +157,7 @@ jobs:
         continue-on-error: true
         env:
           ARTIFACT_URL: ${{ steps.security_artifact.outputs.artifact-url }}
-        run: uv run --no-project --no-sync --python 3.14 python tools/security_receipts.py publish --output "$RUNNER_TEMP/security-receipts"
+        run: '"${{ steps.reporting_python.outputs.python-path }}" -I -S tools/security_receipts.py publish --output "$RUNNER_TEMP/security-receipts"'
 
   leiden-binary-smoke:
     name: Leiden binary smoke (macOS)
