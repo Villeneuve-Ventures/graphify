@@ -1,6 +1,7 @@
 """Keep Graphify's own README documentation English-only in the existing CI gate."""
 
 from pathlib import Path
+import locale
 import re
 import subprocess
 from urllib.parse import unquote
@@ -10,17 +11,38 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt")
-# Cover the historical directories and locale-suffixed README naming schemes.
-TRANSLATION_REFERENCE = re.compile(
-    r"(?:\btranslations/|\bdocs/translations(?=$|[?#\s)>\]\"'])|"
-    r"\breadme[._-][a-z]{2,3}(?:[-_][a-z0-9]{2,8})*\.(?:"
-    + "|".join(DOCUMENTATION_EXTENSIONS) + r")\b)",
+# Use non-English language codes so English and ordinary src/api/go paths remain allowed.
+LANGUAGE_CODES = sorted({
+    key.split("_", 1)[0] for key in locale.locale_alias
+    if re.fullmatch(r"[a-z]{2,3}(?:_[a-z0-9]+)*", key)
+    and key.split("_", 1)[0] not in {"en", "eng"}
+})
+TRANSLATED_README = re.compile(
+    r"(?:\breadme[._-][a-z]{2,3}(?:[-_][a-z0-9]{2,8})*|"
+    r"(?<![\w.-])(?:translations(?:/[^\s/<>\[\]()\"']+)*|(?:"
+    + "|".join(LANGUAGE_CODES) + r")(?:[-_][a-z0-9]{2,8})*)/readme)\.(?:"
+    + "|".join(DOCUMENTATION_EXTENSIONS) + r")\b",
     re.IGNORECASE,
+)
+HISTORICAL_DIRECTORY_REFERENCE = re.compile(
+    r"(?:\bdocs/translations|(?:^|(?<=[(\"']))(?:\./)?translations)"
+    r"(?=$|[/?#\s)>\]\"'])", re.IGNORECASE,
 )
 
 
 def _translation_reference(text: str) -> bool:
-    return TRANSLATION_REFERENCE.search(unquote(text).replace("\\", "/")) is not None
+    normalized = unquote(text).replace("\\", "/")
+    return bool(TRANSLATED_README.search(normalized)
+                or HISTORICAL_DIRECTORY_REFERENCE.search(normalized))
+
+
+def _translation_path(path: Path) -> bool:
+    normalized = Path(path.as_posix().lower())
+    return (
+        normalized.is_relative_to("translations")
+        or normalized.is_relative_to("docs/translations")
+        or TRANSLATED_README.search(normalized.as_posix()) is not None
+    )
 
 
 def _owned_documentation(path: Path) -> bool:
@@ -35,14 +57,15 @@ def _repository_files() -> list[Path]:
         check=True,
         capture_output=True,
     )
-    paths = [Path(name.decode("utf-8")) for name in result.stdout.split(b"\0") if name]
-    return [path for path in paths if (ROOT / path).is_file() or (ROOT / path).is_symlink()]
+    # Keep gitlinks and absent tracked entries for the path policy. File-type
+    # checks belong only to the documentation content scan below.
+    return [Path(name.decode("utf-8")) for name in result.stdout.split(b"\0") if name]
 
 
 def test_no_readme_translations_in_repository() -> None:
     violations = [
         path.as_posix() for path in _repository_files()
-        if _owned_documentation(path) and _translation_reference(path.as_posix())
+        if _owned_documentation(path) and _translation_path(path)
     ]
     assert not violations, (
         "README documentation is English-only. Remove restored translation files: "
@@ -125,6 +148,21 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("worked/vendor/README.md", "[French](README.fr.md)", False),
     ("tests/fixtures/guide.md", "[French](README.fr.md)", False),
     ("README.md", "[Translations](docs/translations)", True),
+    ("docs/fr/README.md", "French documentation", True),
+    ("docs/zh-CN/README.md", "Chinese documentation", True),
+    ("README.md", "[French](docs/fr/README.md)", True),
+    ("docs/guide.md", "[Chinese](docs/zh-CN/README.md)", True),
+    ("graphify/translations/catalog.json", "{}", False),
+    ("tools/translations/parser.py", "pass", False),
+    ("README.md", "[Parser](tools/translations/parser.py)", False),
+    ("docs/src/README.md", "Source guide", False),
+    ("docs/api/README.md", "API guide", False),
+    ("docs/en/README.md", "English documentation", False),
+    ("docs/en-US/README.md", "English documentation", False),
+    ("README.md", "[English](docs/en-US/README.md)", False),
+    ("docs/translations/catalog.json", "{}", True),
+    ("translations/catalog.json", "{}", True),
+    ("worked/vendor/docs/fr/README.md", "French corpus", False),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,
@@ -185,4 +223,20 @@ def test_policy_checks_documentation_symlinks(
         test_public_documentation_does_not_reference_readme_translations()
     (tmp_path / "README.fr.md").symlink_to(target, target_is_directory=target_kind == "directory")
     with pytest.raises(AssertionError, match="README.fr.md"):
+        test_no_readme_translations_in_repository()
+
+
+@pytest.mark.parametrize("relative", ["translations", "docs/translations"])
+def test_policy_rejects_historical_translation_gitlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    monkeypatch.setattr(f"{__name__}.ROOT", tmp_path)
+    # A gitlink needs no network or real submodule clone to exercise ls-files.
+    subprocess.run(
+        ["git", "update-index", "--add", "--cacheinfo", "160000", "1" * 40, relative],
+        cwd=tmp_path, check=True, capture_output=True,
+    )
+    (tmp_path / relative).mkdir(parents=True)
+    with pytest.raises(AssertionError, match="translations"):
         test_no_readme_translations_in_repository()
