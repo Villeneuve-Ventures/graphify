@@ -86,9 +86,10 @@ def test_prepared_public_api_signatures_remain_legacy_compatible():
     assert "merge_admission" not in transaction_module.GraphSnapshot.__dataclass_fields__
 
 
-def _owner(tmp_path: Path):
-    root = tmp_path / "corpus"
-    root.mkdir()
+def _owner(tmp_path: Path, *, root: Path | None = None):
+    if root is None:
+        root = tmp_path / "corpus"
+        root.mkdir()
     output = tmp_path / "graphify-out"
     tx = begin_transaction("runtime", root, output=output)
     token = stage_transaction_handoff(tx)
@@ -9028,10 +9029,12 @@ def test_detached_merge_parser_is_private_data_only_and_marks_pending(tmp_path):
         load_detached_merge_snapshot(current, role="working-tree")
 
 
-def _merge_pending_owner(tmp_path: Path, *, include_other_artifact: bool = False):
+def _merge_pending_owner(
+    tmp_path: Path, *, include_other_artifact: bool = False, root: Path | None = None
+):
     from graphify import transaction as transaction_module
 
-    root, output, transaction, _token = _owner(tmp_path)
+    root, output, transaction, _token = _owner(tmp_path, root=root)
     if include_other_artifact:
         graph_payload = _graph(transaction.generation)
         with owned_step(transaction):
@@ -9066,11 +9069,13 @@ def _merge_pending_owner(tmp_path: Path, *, include_other_artifact: bool = False
     return root, output, data, payload, admission
 
 
-def _merge_successor_ready(tmp_path: Path, *, include_other_artifact: bool = False):
+def _merge_successor_ready(
+    tmp_path: Path, *, include_other_artifact: bool = False, root: Path | None = None
+):
     from graphify import transaction as transaction_module
 
     root, output, _data, _payload, admission = _merge_pending_owner(
-        tmp_path, include_other_artifact=include_other_artifact
+        tmp_path, include_other_artifact=include_other_artifact, root=root
     )
     queue_rebuild(
         "update",
@@ -11341,3 +11346,808 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
         "open_prepared_graph",  # prepared/private identity-bound workspace
         "_load_detached_merge_snapshot_with_identity",  # unmanaged/detached input
     } <= transaction_functions
+
+
+def _issue101_transfer(tmp_path, boundary="after_token_journal"):
+    from graphify import transaction as tx
+
+    root, output, predecessor, token, admission, marker = _merge_successor_ready(tmp_path)
+
+    def crash(phase):
+        if phase == boundary:
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match=boundary):
+        tx.takeover_drainer(output, now=10**12, transition_failpoint=crash)
+    return root, output, predecessor, token, admission, marker
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_token_created",
+        "after_prepared_owner_written",
+        "after_prepared_rebound",
+        "after_token_protocol",
+        "after_token_live",
+        "after_prepared_owner_bound",
+        "after_prepared_drainer_reserved",
+        "after_prepared_drainer_launching",
+        "after_prepared_drainer_claimed",
+        "after_prepared_predecessor_token_removed",
+        "after_prepared_transition_retired",
+        "after_prepared_live_building",
+        "after_token_transition",
+    ],
+)
+def test_admitted_intent_survives_second_crash_at_transfer_boundary(tmp_path, boundary):
+    from graphify import transaction as tx
+
+    root, output, predecessor, _token, admission, _marker = _issue101_transfer(tmp_path)
+    before = _file_bytes(output)
+    inspection = tx.inspect_recovery(output)
+    assert inspection.state == "transfer-replay"
+    assert _file_bytes(output) == before
+    target = inspection.transaction
+    queued = tx.queue_rebuild(
+        "update",
+        root,
+        output=output,
+        changed_paths=["late.py"],
+        source="issue101",
+        merge_admission=admission,
+    )
+    # Admission changes queue bytes only, never preserved transfer authority.
+    after = _file_bytes(output)
+    assert {k: v for k, v in before.items() if k != tx.QUEUE_FILE} == {
+        k: v for k, v in after.items() if k != tx.QUEUE_FILE
+    }
+    assert tx.inspect_recovery(output).transaction == target
+
+    def crash(phase):
+        if phase == boundary:
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match=boundary):
+        tx.recover_transaction(
+            "update",
+            root,
+            output=output,
+            now=10**12,
+            expected_transaction_id=target.id,
+            expected_generation=target.generation,
+            expected_output_identity=predecessor.output_identity,
+            transition_failpoint=crash,
+        )
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert sum(item["id"] == queued.id for item in items) == 1
+    # A recovery-only call supplies no new intent and cannot discard this one.
+    assert tx._recover_successor_ready_transaction(output, now=10**13)
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert any(item["id"] == queued.id for item in items)
+    assert not (output / tx.TOKEN_TRANSITION_FILE).exists()
+    assert not (output / tx.PREPARED_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "after_queue_transition_journal",
+        "after_queue_successor_stage",
+        "after_queue_successor_binding",
+        "after_queue_exchange",
+        "after_queue_retirement_rename",
+        "after_queue_predecessor_retired",
+        "after_queue_transition_journal_retired",
+    ],
+)
+def test_transfer_recovers_interrupted_intent_admission_before_replay(tmp_path, boundary):
+    from graphify import transaction as tx
+
+    root, output, predecessor, _token, _admission, _marker = _issue101_transfer(tmp_path)
+    transfer_bytes = (output / tx.TOKEN_TRANSITION_FILE).read_bytes()
+    target = tx.inspect_recovery(output).transaction
+
+    def crash(phase):
+        if phase == boundary:
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match=boundary):
+        tx.queue_rebuild(
+            "update",
+            root,
+            output=output,
+            changed_paths=["late.py"],
+            source="issue101",
+            failpoint=crash,
+        )
+    assert (output / tx.TOKEN_TRANSITION_FILE).read_bytes() == transfer_bytes
+    recovered = tx.recover_selected_transaction(
+        "update",
+        root,
+        output=output,
+        now=10**12,
+        expected_transaction_id=target.id,
+        expected_generation=target.generation,
+        expected_output_identity=predecessor.output_identity,
+    )
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert sum(item["changed_paths"] == ["late.py"] for item in items) == 1
+    tx._finalize_successor_ready_transaction(recovered)
+    assert not (output / tx.TOKEN_TRANSITION_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "absent",
+        "live-deferred",
+        "transfer-replay",
+        "completed-retirement",
+        "malformed",
+        "ready-to-recover",
+    ],
+)
+def test_recovery_inspection_projects_six_states_without_mutation(tmp_path, state):
+    from graphify import transaction as tx
+
+    if state == "absent":
+        output = tmp_path / "absent"
+        assert tx.inspect_recovery(output).state == state
+        assert not output.exists()
+        return
+    if state == "transfer-replay":
+        _root, output, _owner, _token, _admission, _marker = _issue101_transfer(tmp_path)
+    else:
+        _root, output, owner, _token, _admission, _marker = _merge_successor_ready(tmp_path)
+        if state == "completed-retirement":
+            tx._publish_successor_ready_transaction(owner)
+            tx.finish_transaction(owner)
+        elif state == "malformed":
+            (output / tx.PREPARED_FILE).write_bytes(b"{malformed")
+    before = _file_bytes(output)
+    actual = tx.inspect_recovery(output, now=10**12 if state == "ready-to-recover" else 0)
+    assert actual.state == state
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    "substitution",
+    [
+        "journal",
+        "marker",
+        "admission",
+        "receipt",
+        "inventory",
+        "public-overlap",
+        "root",
+        "output",
+    ],
+)
+def test_transfer_intent_admission_rejects_hostile_state_before_mutation(tmp_path, substitution):
+    from graphify import transaction as tx
+
+    root, output, _owner, _token, admission, marker = _issue101_transfer(tmp_path)
+    selected_root = root
+    kwargs = {}
+    if substitution == "journal":
+        path = output / tx.TOKEN_TRANSITION_FILE
+        raw = json.loads(path.read_bytes())
+        raw["target_transaction"]["root"] = str(tmp_path / "other-root")
+        path.write_text(json.dumps(raw))
+    elif substitution == "marker":
+        (output / tx.PREPARED_FILE).write_bytes(b"{}")
+    elif substitution == "admission":
+        path = output / tx.PREDECESSOR_FILE
+        raw = json.loads(path.read_bytes())
+        raw.pop("merge_admission")
+        path.write_text(json.dumps(raw))
+    elif substitution == "receipt":
+        (output / tx.RECEIPT_FILE).write_bytes(b"{}")
+    elif substitution == "inventory":
+        workspace = output.parent / marker["workspace_name"] / "graphify-out"
+        (workspace / "manifest.json").write_bytes(b'{"substituted":true}')
+    elif substitution == "public-overlap":
+        (output / "graph.json").write_bytes(b"{}")
+    elif substitution == "root":
+        selected_root = tmp_path / "other-root"
+        selected_root.mkdir()
+    else:
+        kwargs["_expected_output_identity"] = tx.OutputIdentity(0, 0)
+    before = _file_bytes(output)
+    with pytest.raises(tx.PendingTransactionError):
+        tx.queue_rebuild(
+            "update",
+            selected_root,
+            output=output,
+            changed_paths=["late.py"],
+            merge_admission=admission,
+            **kwargs,
+        )
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("kind", ["update", "full", "runtime"])
+def test_transfer_duplicate_intent_keeps_existing_coalescing(tmp_path, kind):
+    from graphify import transaction as tx
+
+    root, output, _owner, _token, _admission, _marker = _issue101_transfer(tmp_path)
+    first = tx.queue_rebuild(kind, root, output=output, changed_paths=["late.py"], now=1)
+    second = tx.queue_rebuild(kind, root, output=output, changed_paths=["late.py"], now=2)
+    assert first == second
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert sum(item["id"] == first.id for item in items) == 1
+    assert tx.inspect_recovery(output).state == "transfer-replay"
+
+
+@pytest.mark.parametrize("boundary", ["before-enqueue", "before-enqueue-missing", "before-replay"])
+def test_recovery_orchestration_rejects_output_retarget(tmp_path, monkeypatch, boundary):
+    from graphify import transaction as tx
+
+    root, output, _owner, _token, _admission, _marker = _issue101_transfer(tmp_path)
+    original = output.with_name("original-output")
+
+    def retarget():
+        output.rename(original)
+        if boundary != "before-enqueue-missing":
+            output.mkdir()
+            (output / "sentinel").write_bytes(b"untouched replacement")
+
+    real_queue = tx.queue_rebuild
+    if boundary.startswith("before-enqueue"):
+
+        def substitute(*args, **kwargs):
+            retarget()
+            return real_queue(*args, **kwargs)
+
+        monkeypatch.setattr(tx, "queue_rebuild", substitute)
+
+    def failpoint(phase):
+        if boundary == "before-replay" and phase == "after_recovery_intent_admitted":
+            retarget()
+
+    with pytest.raises(tx.PendingTransactionError):
+        tx.recover_rebuild_intent(
+            "update",
+            root,
+            output=output,
+            changed_paths=["late.py"],
+            failpoint=failpoint,
+        )
+    if boundary == "before-enqueue-missing":
+        assert not output.exists()
+    else:
+        assert _file_bytes(output) == {"sentinel": b"untouched replacement"}
+    assert (original / tx.TOKEN_TRANSITION_FILE).exists()
+
+
+@pytest.mark.parametrize("corruption", ["queue-loss", "foreign-journal"])
+def test_transfer_replay_rejects_corrupted_admission_journal(tmp_path, corruption):
+    from graphify import transaction as tx
+
+    root, output, predecessor, _token, _admission, _marker = _issue101_transfer(tmp_path)
+    target = tx.inspect_recovery(output).transaction
+
+    def crash(phase):
+        if phase == "after_queue_exchange":
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match="after_queue_exchange"):
+        tx.queue_rebuild("update", root, output=output, changed_paths=["late.py"], failpoint=crash)
+    if corruption == "queue-loss":
+        (output / tx.QUEUE_FILE).unlink()
+    else:
+        journal_path = output / tx._queue_transition_journal_name(tx.QUEUE_FILE)
+        raw = json.loads(journal_path.read_bytes())
+        raw["predecessor"]["inode"] += 1
+        journal_path.write_text(json.dumps(raw))
+    before = _file_bytes(output)
+    with pytest.raises(tx.PendingTransactionError):
+        tx.recover_transaction(
+            "update",
+            root,
+            output=output,
+            expected_transaction_id=target.id,
+            expected_generation=target.generation,
+            expected_output_identity=predecessor.output_identity,
+        )
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("boundary", ["before-takeover", "after-takeover"])
+def test_ready_recovery_does_not_take_over_replacement(tmp_path, monkeypatch, boundary):
+    from graphify import transaction as tx
+
+    root, output, owner, _token, _admission, _marker = _merge_successor_ready(tmp_path)
+    original = output.with_name("original-output")
+    real_takeover = tx.takeover_drainer
+    before = {}
+
+    def retarget(path, **kwargs):
+        selected = real_takeover(path, **kwargs) if boundary == "after-takeover" else None
+        output.rename(original)
+        output.mkdir()
+        tx.queue_rebuild("update", root, output=output, changed_paths=["replacement.py"])
+        before.update(_file_bytes(output))
+        return real_takeover(path, **kwargs) if boundary == "before-takeover" else selected
+
+    monkeypatch.setattr(tx, "takeover_drainer", retarget)
+    with pytest.raises(tx.PendingTransactionError):
+        tx.recover_rebuild_intent(
+            "update", root, output=output, changed_paths=["late.py"], now=10**12
+        )
+    assert before
+    assert _file_bytes(output) == before, (
+        "recovery mutated replacement drainer before rejecting stale output"
+    )
+
+def test_final_retirement_does_not_retire_replacement(tmp_path, monkeypatch):
+    from graphify import transaction as tx
+
+    root, output, owner, _token, _admission, _marker = _merge_successor_ready(tmp_path)
+    original = output.with_name("original-output")
+    real_finish = tx._finish_transaction
+    before = {}
+
+    def retarget(transaction, **kwargs):
+        result = real_finish(transaction, **kwargs)
+        monkeypatch.setattr(tx, "_finish_transaction", real_finish)
+        output.rename(original)
+        root.rename(root.with_name("original-root"))
+        _root_b, output_b, _owner_b, _token_b, _admission_b, marker_b = _merge_successor_ready(
+            tmp_path
+        )
+        assert output_b == output
+        workspace = output.parent / marker_b["workspace_name"]
+        before["output"] = _file_bytes(output)
+        before["workspace_path"] = workspace
+        before["workspace"] = _file_bytes(workspace)
+        return result
+
+    monkeypatch.setattr(tx, "_finish_transaction", retarget)
+    try:
+        tx._finalize_successor_ready_transaction(owner)
+    except tx.PendingTransactionError:
+        pass
+    assert before
+    assert _file_bytes(output) == before["output"], "retired replacement prepared marker"
+    assert before["workspace_path"].exists()
+    assert _file_bytes(before["workspace_path"]) == before["workspace"]
+
+
+@pytest.mark.parametrize("state", ["live", "completed", "transfer"])
+def test_missing_receipt_is_malformed(tmp_path, state):
+    from graphify import transaction as tx
+    from graphify.watch import _rebuild_code
+
+    fixture = _issue101_transfer if state == "transfer" else _merge_successor_ready
+    root, output, owner, _token, _admission, _marker = fixture(tmp_path)
+    if state == "completed":
+        tx._publish_successor_ready_transaction(owner)
+        tx.finish_transaction(owner)
+    (output / tx.RECEIPT_FILE).unlink()
+    before = _file_bytes(output)
+    assert tx.inspect_recovery(output).state == "malformed"
+    with pytest.raises(tx.PendingTransactionError):
+        tx.recover_rebuild_intent("update", root, output=output, changed_paths=["late.py"])
+    assert (
+        _rebuild_code(
+            root, output_override=output, changed_paths=[root / "late.py"], no_cluster=True
+        )
+        is False
+    )
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize('entrypoint', ['direct', 'selected'])
+@pytest.mark.parametrize('boundary', ['before-takeover', 'after-takeover'])
+def test_direct_recovery_preserves_selected_output(tmp_path, monkeypatch, entrypoint, boundary):
+    from graphify import transaction as tx
+
+    root, output, owner, _token, _admission, _marker = _merge_successor_ready(tmp_path)
+    original = output.with_name('original-output')
+    real_takeover = tx.takeover_drainer
+    before = {}
+    # A reentrant recovery can change process authority as well as the path.
+    def retarget(path, **kwargs):
+        selected = real_takeover(path, **kwargs) if boundary == 'after-takeover' else None
+        output.rename(original)
+        output.mkdir()
+        tx.queue_rebuild('update', root, output=output, changed_paths=['replacement.py'])
+        if boundary == 'after-takeover':
+            replacement = tx.begin_transaction('update', root, output=output)
+            tx._AUTHORITY.set(tx._authority_for(replacement))
+            assert tx.optional_current_transaction(output) == replacement
+        before.update(_file_bytes(output))
+        return real_takeover(path, **kwargs) if boundary == 'before-takeover' else selected
+    monkeypatch.setattr(tx, 'takeover_drainer', retarget)
+    recover = tx.recover_transaction if entrypoint == 'direct' else tx.recover_selected_transaction
+    with pytest.raises(tx.PendingTransactionError):
+        recover('update', root, output=output, now=10**12, expected_transaction_id=owner.id,
+                expected_generation=owner.generation, expected_output_identity=owner.output_identity)
+    assert before
+    assert _file_bytes(output) == before, 'selected recovery mutated replacement output'
+
+
+def test_transfer_recovery_preserves_target_after_queue_recovery(tmp_path, monkeypatch):
+    from graphify import transaction as tx
+
+    root, output, _owner, _token, _admission, _marker = _issue101_transfer(tmp_path)
+    target = tx.inspect_recovery(output).transaction
+    assert target is not None
+    real_queue_recovery = tx._recover_queue_transitions_locked
+    before = {}
+
+    def replace_transfer(capability, **kwargs):
+        real_queue_recovery(capability, **kwargs)
+        monkeypatch.setattr(tx, "_recover_queue_transitions_locked", real_queue_recovery)
+        # A reentrant recovery completes this transfer and starts another valid one.
+        tx._resume_token_transition_locked(capability)
+
+        def crash(phase):
+            if phase == "after_token_journal":
+                raise RuntimeError(phase)
+
+        with pytest.raises(RuntimeError, match="after_token_journal"):
+            tx.takeover_drainer(output, now=10**13, transition_failpoint=crash)
+        replacement = tx._prepared_transfer_target_locked(capability)
+        assert replacement is not None and replacement.id != target.id
+        assert replacement.output_identity == target.output_identity
+        before.update(_file_bytes(output))
+
+    monkeypatch.setattr(tx, "_recover_queue_transitions_locked", replace_transfer)
+    with pytest.raises(tx.PendingTransactionError):
+        tx.recover_transaction(
+            "update", root, output=output, now=10**14,
+            expected_transaction_id=target.id,
+            expected_generation=target.generation,
+            expected_output_identity=target.output_identity,
+        )
+    assert before
+    assert _file_bytes(output) == before
+
+
+def test_completed_inspection_rejects_invalid_close_before_admission(tmp_path):
+    from graphify import transaction as tx
+
+    root, output, owner, _token, _admission, _marker = _merge_successor_ready(tmp_path)
+    tx._publish_successor_ready_transaction(owner)
+
+    def crash(phase):
+        if phase == "after_live_remove":
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match="after_live_remove"):
+        tx._finish_transaction(owner, failpoint=crash)
+    assert not (output / tx.TRANSACTION_FILE).exists()
+    pending_path = output / tx.DRAINER_FILE
+    pending = json.loads(pending_path.read_bytes())
+    assert pending["state"] == "CLOSE_PENDING"
+    pending["transaction_id"] = "f" * 64
+    pending_path.write_bytes(tx._json_bytes(pending))
+    before = _file_bytes(output)
+    assert tx.inspect_recovery(output).state == "malformed"
+    with pytest.raises(tx.PendingTransactionError):
+        tx.recover_rebuild_intent(
+            "update", root, output=output, changed_paths=["late.py"]
+        )
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("entrypoint", ["direct", "selected"])
+def test_recovery_reread_preserves_full_owner_validation(tmp_path, monkeypatch, entrypoint):
+    from graphify import transaction as tx
+
+    root, output, owner, _token, _admission, _marker = _merge_successor_ready(tmp_path)
+    foreign_root = tmp_path / "foreign-root"
+    foreign_root.mkdir()
+    real_takeover = tx.takeover_drainer
+    before = {}
+
+    def change_root(path, **kwargs):
+        selected = real_takeover(path, **kwargs)
+        live_path = output / tx.TRANSACTION_FILE
+        live = json.loads(live_path.read_bytes())
+        live["root"] = str(foreign_root)
+        live_path.write_bytes(tx._json_bytes(live))
+        before.update(_file_bytes(output))
+        return selected
+
+    monkeypatch.setattr(tx, "takeover_drainer", change_root)
+    recover = tx.recover_transaction if entrypoint == "direct" else tx.recover_selected_transaction
+    with pytest.raises(tx.PendingTransactionError):
+        recover(
+            "update", root, output=output, now=10**12,
+            expected_transaction_id=owner.id,
+            expected_generation=owner.generation,
+            expected_output_identity=owner.output_identity,
+        )
+    assert before
+    assert _file_bytes(output) == before
+
+
+def _issue101_inventory(root: Path):
+    return {
+        path.relative_to(root).as_posix(): (
+            path.lstat().st_mode, path.lstat().st_dev, path.lstat().st_ino,
+            os.readlink(path) if path.is_symlink()
+            else path.read_bytes() if path.is_file() else None,
+        )
+        for path in root.rglob("*")
+    }
+
+
+@pytest.mark.parametrize(
+    "case,boundary,expected",
+    [
+        ("C01", "after_close_pending", "malformed"),
+        ("C02", "after_close_pending", "completed-retirement"),
+        ("C03", "after_inflight_remove", "completed-retirement"),
+        ("C04", "after_token_unlink", "completed-retirement"),
+        ("C05", None, "live-deferred"),
+        ("C06", "after_complete", "completed-retirement"),
+        ("C07", "after_close_pending", "malformed"),
+        ("C08", "after_queue_transition_journal", "completed-retirement"),
+        ("C09", "after_queue_retirement_rename", "completed-retirement"),
+        ("C10", "after_queue_transition_journal", "malformed"),
+    ],
+    ids=lambda value: value,
+)
+def test_successor_close_admission_contract(tmp_path, case, boundary, expected):
+    from graphify import transaction as tx
+    from graphify.watch import _rebuild_code
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    root, output, owner, *_ = _merge_successor_ready(tmp_path, root=tmp_path)
+    claim = tx.claim_rebuild_queue(owner, owner.drainer)
+    assert claim.items
+    generation = tx._publish_successor_ready_transaction(owner)
+
+    def stop(phase):
+        if phase in {"after_claim_acknowledgement", boundary}:
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match="after_claim_acknowledgement"):
+        tx.complete_rebuild_claim(
+            owner, claim, receipt_digest=generation.digest, failpoint=stop
+        )
+    if boundary is not None:
+        with pytest.raises(RuntimeError, match=boundary):
+            tx.close_if_queue_empty(owner, receipt_digest=generation.digest, failpoint=stop)
+    pending_path = output / tx.DRAINER_FILE
+    pending = json.loads(pending_path.read_bytes())
+    now = pending["lease_deadline"] - 1 if case == "C05" else 10**12
+    if case == "C01":
+        pending["transaction_id"] = "f" * 64
+        pending_path.write_bytes(tx._json_bytes(pending))
+    elif case == "C07":
+        pending["state"] = "complete"
+        pending_path.write_bytes(tx._json_bytes(pending))
+    inflight = f".graphify_rebuild_inflight.{owner.id}.jsonl"
+    journal_path = output / tx._queue_transition_journal_name(inflight)
+    if case in {"C08", "C09", "C10"}:
+        journal = json.loads(journal_path.read_bytes())
+        assert journal["operation"] == "retire"
+        assert (output / inflight).exists() == (case != "C09")
+        if case == "C10":
+            journal["predecessor"]["digest"] = "0" * 64
+            journal_path.write_bytes(tx._json_bytes(journal))
+    assert (output / tx.TRANSACTION_FILE).exists() == (case != "C06")
+    assert (output / f".graphify_transaction_token.{owner.id}").exists() == (
+        case not in {"C04", "C06"}
+    )
+    tx._AUTHORITY.set(None)
+    before = _issue101_inventory(tmp_path)
+    inspection = tx.inspect_recovery(output, now=now)
+    assert _issue101_inventory(tmp_path) == before
+    assert inspection.state == expected, inspection.reason
+    admitted = []
+
+    def observe(phase):
+        if phase == "after_recovery_intent_admitted":
+            admitted.append(phase)
+
+    def recover():
+        return tx.recover_rebuild_intent(
+            "update", root, output=output, changed_paths=["late.py"],
+            now=now, failpoint=observe,
+        )
+
+    if expected == "malformed":
+        with pytest.raises(tx.PendingTransactionError):
+            recover()
+        assert not admitted
+        assert _issue101_inventory(tmp_path) == before
+        if case == "C01":
+            assert _rebuild_code(root, changed_paths=[root / "late.py"]) is False
+            assert _issue101_inventory(tmp_path) == before
+        return
+    if case == "C05":
+        with pytest.raises(tx.PendingTransactionError, match="lease has not expired"):
+            recover()
+        after = _issue101_inventory(tmp_path)
+        assert {k: v for k, v in after.items() if k != "graphify-out/" + tx.QUEUE_FILE} == {
+            k: v for k, v in before.items() if k != "graphify-out/" + tx.QUEUE_FILE
+        }
+    else:
+        result = recover()
+        assert result.queued and result.recovered
+        assert not (output / tx.TRANSACTION_FILE).exists()
+        assert not (output / tx.PREPARED_FILE).exists()
+        assert not journal_path.exists()
+    assert admitted == ["after_recovery_intent_admitted"]
+    queued = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert len(queued) == 1 and queued[0]["changed_paths"] == ["late.py"]
+
+
+_SUCCESSOR_RETURNING_PHASES = (
+    "after_token_created", "after_prepared_owner_written", "after_prepared_rebound",
+    "after_token_protocol", "after_token_live", "after_prepared_owner_bound",
+    "after_prepared_drainer_reserved", "after_prepared_drainer_launching",
+    "after_prepared_drainer_claimed", "after_prepared_predecessor_token_removed",
+    "after_prepared_transition_retired", "after_prepared_live_building",
+)
+
+
+@pytest.mark.parametrize(
+    "case,boundary",
+    [
+        ("N1", "after_queue_transition_journal_retired"),
+        ("N2", "after_queue_transition_journal_retired"),
+        ("N3", "after_token_journal"), ("N4", "after_token_transition"),
+        *((f"T{index:02d}", phase) for index, phase in enumerate(_SUCCESSOR_RETURNING_PHASES, 1)),
+        ("P1", None), ("P2", None),
+    ],
+    ids=lambda value: value,
+)
+def test_successor_returning_callback_contract(tmp_path, case, boundary):
+    from graphify import transaction as tx
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    claimed = case in {"N2", "P2"}
+    if claimed:
+        root, output, owner, _token = _owner(tmp_path, root=tmp_path)
+        queued = tx.queue_rebuild(
+            "update", root, output=output, changed_paths=["inflight.py"], now=0
+        )
+        claim = tx.claim_rebuild_queue(owner, queued.drainer, now=0)
+        assert claim.items and claim.inflight_path is not None
+    else:
+        root, output, owner, *_ = _merge_successor_ready(tmp_path, root=tmp_path)
+    if case in {"N1", "P1"}:
+        # One genuine interrupted primary queue replacement precedes this takeover.
+        with tx.pin_output(output) as cap, tx._locked(cap):
+            with pytest.raises(RuntimeError, match="after_queue_transition_journal"):
+                tx._append_recovery_intent_locked(
+                    cap, kind="update", root=root, durable_paths=["pending.py"],
+                    semantic=False, source="issue101", intent=None, now=0,
+                    live=owner, drainer=owner.drainer,
+                    failpoint=lambda phase: (_ for _ in ()).throw(RuntimeError(phase))
+                    if phase == "after_queue_transition_journal" else None,
+                )
+        assert (output / tx._queue_transition_journal_name(tx.QUEUE_FILE)).exists()
+    before = {}
+    observed = []
+    substituted = False
+
+    def stop_new_journal(phase):
+        if phase == "after_token_journal":
+            raise RuntimeError(phase)
+
+    def callback(phase):
+        nonlocal substituted
+        observed.append(phase)
+        if phase != boundary or substituted:
+            return
+        if claimed and claim.inflight_path.exists():
+            return
+        substituted = True
+        if case in {"N1", "N2"}:
+            # A returning callback installs a valid, different owner at the same output.
+            tx.takeover_drainer(output, now=10**10)
+            with tx.pin_output(output) as cap, tx._locked(cap):
+                replacement = tx._read_transaction(cap)
+                assert replacement is not None and replacement.id != owner.id
+                tx._validate_durable_live_binding(cap, replacement)
+        else:
+            # Finish the selected transfer, then leave a different valid target journal.
+            with tx.pin_output(output) as cap, tx._locked(cap):
+                if tx._read_token_transition(cap) is not None:
+                    tx._resume_token_transition_locked(cap)
+            with pytest.raises(RuntimeError, match="after_token_journal"):
+                tx.takeover_drainer(
+                    output, now=10**13, transition_failpoint=stop_new_journal
+                )
+            assert tx.inspect_recovery(output).state == "transfer-replay"
+        before.update(_issue101_inventory(tmp_path))
+
+    def takeover():
+        return tx.takeover_drainer(
+            output, now=10**12, transition_failpoint=callback,
+            _expected_transaction=owner,
+        )
+
+    try:
+        if case.startswith("P"):
+            selected = takeover()
+        else:
+            with pytest.raises(tx.PendingTransactionError):
+                takeover()
+    finally:
+        print(f"{case}: observed callbacks={observed}")
+    if not case.startswith("P"):
+        assert substituted and before
+        unchanged = _issue101_inventory(tmp_path) == before
+        assert unchanged, "continued effects after replacement"
+        return
+    with tx.pin_output(output) as cap, tx._locked(cap):
+        live = tx._read_transaction(cap)
+        assert live is not None and live.drainer == selected and live.id != owner.id
+        assert live.output_identity == owner.output_identity
+        tx._validate_durable_live_binding(cap, live)
+        items = tx._read_queue_record(cap).items
+    assert not (output / tx.TOKEN_TRANSITION_FILE).exists()
+    if case == "P1":
+        required = {*_SUCCESSOR_RETURNING_PHASES, "after_token_journal", "after_token_transition"}
+        assert required <= set(observed)
+        assert all(observed.count(phase) == 1 for phase in required)
+        assert "after_queue_exchange" in observed
+        assert sum(item["changed_paths"] == ["pending.py"] for item in items) == 1
+    else:
+        assert "after_queue_retirement_rename" in observed
+        assert not claim.inflight_path.exists()
+        assert sum(item["id"] == queued.id for item in items) == 1
+
+
+
+def test_successor_post_callback_admission_contract_N5(tmp_path):
+    from graphify import transaction as tx
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    root, output, owner, *_ = _merge_successor_ready(tmp_path, root=tmp_path)
+
+    def stop(phase):
+        if phase in {"after_token_journal", "after_queue_transition_journal"}:
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match="after_token_journal"):
+        tx.takeover_drainer(output, now=10**12, transition_failpoint=stop)
+    target = tx.inspect_recovery(output).transaction
+    assert target is not None and target.id != owner.id
+    with pytest.raises(RuntimeError, match="after_queue_transition_journal"):
+        tx.queue_rebuild(
+            "update", root, output=output, changed_paths=["pending.py"], failpoint=stop
+        )
+    assert (output / tx._queue_transition_journal_name(tx.QUEUE_FILE)).exists()
+    before = {}
+    observed = []
+
+    def invalidate(phase):
+        observed.append(phase)
+        if phase == "after_queue_transition_journal_retired":
+            receipt_path = output / tx.RECEIPT_FILE
+            receipt = json.loads(receipt_path.read_bytes())
+            receipt["artifact_digests"]["manifest.json"] = "0" * 64
+            receipt_path.write_bytes(tx._json_bytes(receipt))
+            before.update(_issue101_inventory(tmp_path))
+
+    try:
+        with pytest.raises(tx.PendingTransactionError):
+            tx.queue_rebuild(
+                "update", root, output=output, changed_paths=["late.py"],
+                failpoint=invalidate,
+            )
+    finally:
+        print(f"N5: observed callbacks={observed}")
+    assert before
+    # Queue replay may retire its own binding after the callback; new admission may not run.
+    binding = "graphify-out/" + tx._queue_transition_binding_name(tx.QUEUE_FILE)
+    after = _issue101_inventory(tmp_path)
+    unchanged = {k: v for k, v in after.items() if k != binding} == {
+        k: v for k, v in before.items() if k != binding
+    }
+    assert unchanged, "new intent or transfer effect after invalidation"
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert sum(item["changed_paths"] == ["pending.py"] for item in items) == 1
+    assert not any(item["changed_paths"] == ["late.py"] for item in items)
+    assert tx.inspect_recovery(output).state == "malformed"

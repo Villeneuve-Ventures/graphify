@@ -1893,42 +1893,23 @@ def _output_tree_bytes(output: Path) -> dict[str, bytes]:
     }
 
 
-@pytest.mark.parametrize(
-    "probe",
-    [
-        "_successor_ready_recovery_pending",
-        "_successor_ready_merge_admission",
-        "_successor_ready_recovery_deferred",
-    ],
-)
-def test_successor_ready_probe_errors_defer_without_mutation(
-    tmp_path, monkeypatch, capsys, probe
-):
+def test_recovery_inspection_errors_defer_without_mutation(tmp_path, monkeypatch, capsys):
     from graphify import transaction as transaction_module
     from graphify.watch import _rebuild_code
 
     output = tmp_path / "graphify-out"
     output.mkdir()
-    sentinel = output / "sentinel"
-    sentinel.write_bytes(b"unchanged")
-
-    if probe == "_successor_ready_merge_admission":
-        monkeypatch.setattr(
-            transaction_module, "_successor_ready_recovery_pending", lambda _out: True
-        )
-    elif probe == "_successor_ready_recovery_deferred":
-        monkeypatch.setattr(
-            transaction_module, "_successor_ready_recovery_pending", lambda _out: False
-        )
-
-    def malformed(_output):
-        raise transaction_module.PendingTransactionError(f"{probe} malformed")
-
-    monkeypatch.setattr(transaction_module, probe, malformed)
+    (output / "sentinel").write_bytes(b"unchanged")
+    monkeypatch.setattr(
+        transaction_module,
+        "_inspect_recovery_locked",
+        lambda *_args, **_kwargs: transaction_module.RecoveryInspection(
+            "malformed", reason="recovery inspection malformed"
+        ),
+    )
     before = _output_tree_bytes(output)
-
     assert _rebuild_code(tmp_path, changed_paths=[tmp_path / "changed.py"]) is False
-    assert f"Rebuild deferred: {probe} malformed" in capsys.readouterr().out
+    assert "Rebuild deferred: recovery inspection malformed" in capsys.readouterr().out
     assert _output_tree_bytes(output) == before
 
 
@@ -1946,7 +1927,7 @@ def test_merge_pending_watch_defers_post_finalization_recovery_errors(
     def recover_then_defer(*args, **kwargs):
         nonlocal recovery_calls
         recovery_calls += 1
-        if recovery_calls == 2:
+        if recovery_calls == 1:
             raise transaction_module.PendingTransactionError(
                 "post-finalization recovery sentinel"
             )
@@ -1985,7 +1966,7 @@ def test_merge_pending_watch_defers_post_finalization_recovery_errors(
         no_cluster=True,
         block_on_lock=True,
     ) is False
-    assert recovery_calls == 2
+    assert recovery_calls == 1
     assert (
         "Rebuild deferred: post-finalization recovery sentinel"
         in capsys.readouterr().out
@@ -2007,7 +1988,7 @@ def test_merge_pending_watch_defers_post_finalization_recovery_errors(
 @pytest.mark.parametrize(
     "boundary", ["after_prepared_rebound", "after_token_protocol"]
 )
-def test_merge_pending_watch_resumes_prepared_transfer_before_probes(
+def test_merge_pending_watch_inspects_prepared_transfer_before_recovery(
     tmp_path, monkeypatch, boundary
 ):
     from graphify import transaction as transaction_module
@@ -2072,9 +2053,9 @@ def test_merge_pending_watch_resumes_prepared_transfer_before_probes(
         )
     assert (output / transaction_module.TOKEN_TRANSITION_FILE).is_file()
     before_probes = _output_tree_bytes(output)
-    assert transaction_module._successor_ready_recovery_pending(output) is False
-    assert transaction_module._successor_ready_merge_admission(output) is None
-    assert transaction_module._successor_ready_recovery_deferred(output) is False
+    inspection = transaction_module.inspect_recovery(output)
+    assert inspection.state == "transfer-replay"
+    assert inspection.merge_admission is not None
     assert _output_tree_bytes(output) == before_probes
 
     monkeypatch.setattr(
@@ -2623,10 +2604,11 @@ def test_merge_pending_watch_replays_prepared_retirement_after_completed_live_cr
 
     real_recover = transaction_module._recover_successor_ready_transaction
 
-    def crash_before_prepared_retirement(output_path, *, now=None):
+    def crash_before_prepared_retirement(output_path, *, now=None, **kwargs):
         return real_recover(
             output_path,
             now=now,
+            expected_output_identity=kwargs.get("expected_output_identity"),
             failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
             if name == "after_completed_live_recovery"
             else None,
@@ -2739,10 +2721,11 @@ def test_merge_pending_watch_recovers_no_live_close_pending_before_retirement(
     )
     real_recover = transaction_module._recover_successor_ready_transaction
 
-    def crash_recovery_after_live_remove(output_path, *, now=None):
+    def crash_recovery_after_live_remove(output_path, *, now=None, **kwargs):
         return real_recover(
             output_path,
             now=now,
+            expected_output_identity=kwargs.get("expected_output_identity"),
             failpoint=lambda name: (_ for _ in ()).throw(RuntimeError(name))
             if name == "after_live_remove"
             else None,
@@ -3371,3 +3354,147 @@ def test_rebuild_code_polluted_graph_self_heals_on_full_rebuild(tmp_path):
         "stale AST heading nodes for a semantic-backed doc must self-heal away"
     )
     assert len(after["nodes"]) < nodes_before, "polluted graph should shrink"
+
+
+def test_current_intent_survives_second_transfer_crash(tmp_path, monkeypatch):
+    from graphify import transaction as tx
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "current.py", "other.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Issue101 Test",
+            "-c",
+            "user.email=issue101@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    finalize = tx._finalize_prepared_transaction
+
+    def crash(name):
+        if name == "after_successor_ready":
+            raise RuntimeError(name)
+
+    monkeypatch.setattr(
+        tx,
+        "_finalize_prepared_transaction",
+        lambda transaction, **kw: finalize(
+            transaction, close=kw.get("close", True), failpoint=crash
+        ),
+    )
+    with pytest.raises(RuntimeError, match="after_successor_ready"):
+        _rebuild_code(root, changed_paths=[source], no_cluster=True, block_on_lock=True)
+    monkeypatch.setattr(tx, "_finalize_prepared_transaction", finalize)
+
+    def transfer_crash(name):
+        if name == "after_prepared_rebound":
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="after_prepared_rebound"):
+        tx.takeover_drainer(output, now=10**12, transition_failpoint=transfer_crash)
+    late = root / "late.py"
+    late.write_text("def late():\n    return 101\n")
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "--", "late.py"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert status == b"?? late.py\n"
+    resume = tx._resume_token_transition_locked
+
+    def second_crash(name):
+        if name == "after_token_live":
+            raise RuntimeError("second-crash")
+
+    monkeypatch.setattr(
+        tx, "_resume_token_transition_locked", lambda cap, **kw: resume(cap, failpoint=second_crash)
+    )
+    with pytest.raises(RuntimeError, match="second-crash"):
+        _rebuild_code(root, changed_paths=[late], no_cluster=True, block_on_lock=True)
+    queue = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert any(str(late) in (item["changed_paths"] or []) for item in queue), (
+        "current invocation intent lost before prepared-transfer replay"
+    )
+    monkeypatch.setattr(tx, "_resume_token_transition_locked", resume)
+    assert tx._recover_successor_ready_transaction(output, now=10**12)
+    queue = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert any(str(late) in (item["changed_paths"] or []) for item in queue)
+    assert _rebuild_code(root, changed_paths=[], no_cluster=True, block_on_lock=True)
+    snapshot = tx.open_graph_snapshot(output / "graph.json", purpose="second-crash-intent")
+    assert "late_late" in {node["id"] for node in snapshot.data["nodes"]}
+    assert not (output / tx.PREPARED_FILE).exists()
+    assert not (output / tx.TOKEN_TRANSITION_FILE).exists()
+    assert not (output / tx.QUEUE_FILE).exists() or not (output / tx.QUEUE_FILE).read_bytes()
+
+
+@pytest.mark.parametrize("entrypoint", ["cli", "hook"])
+def test_subprocess_entrypoint_admits_intent_before_transfer_replay(
+    tmp_path, monkeypatch, entrypoint
+):
+    from graphify import transaction as tx
+    from graphify.watch import _rebuild_code
+
+    root, output, source = _merge_pending_watch_fixture(tmp_path)
+    finalize = tx._finalize_prepared_transaction
+
+    def ready_crash(transaction, **kwargs):
+        def crash(phase):
+            if phase == "after_successor_ready":
+                raise RuntimeError(phase)
+
+        return finalize(transaction, close=kwargs.get("close", True), failpoint=crash)
+
+    monkeypatch.setattr(tx, "_finalize_prepared_transaction", ready_crash)
+    with pytest.raises(RuntimeError, match="after_successor_ready"):
+        _rebuild_code(root, changed_paths=[source], no_cluster=True, block_on_lock=True)
+    monkeypatch.setattr(tx, "_finalize_prepared_transaction", finalize)
+
+    def transfer_crash(phase):
+        if phase == "after_prepared_rebound":
+            raise RuntimeError(phase)
+
+    with pytest.raises(RuntimeError, match="after_prepared_rebound"):
+        tx.takeover_drainer(output, now=10**12, transition_failpoint=transfer_crash)
+    late = root / "late.py"
+    late.write_text("def late():\n    return 101\n")
+    script = """
+import json, os, runpy, sys
+from pathlib import Path
+from graphify import transaction as tx
+output = Path("graphify-out")
+def stop_before_replay(capability, **kwargs):
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert any(item["kind"] == "full" or "late.py" in (item["changed_paths"] or []) for item in items)
+    print("INTENT-DURABLE-BEFORE-REPLAY", flush=True)
+    os._exit(93)
+tx._resume_token_transition_locked = stop_before_replay
+if sys.argv[1] == "cli":
+    sys.argv = ["graphify", "update", ".", "--no-cluster"]
+    runpy.run_module("graphify", run_name="__main__")
+else:
+    from graphify.hooks import _REBUILD_BODY_COMMIT
+    exec(compile(_REBUILD_BODY_COMMIT, "installed-hook-body", "exec"))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, entrypoint],
+        cwd=root,
+        env={**os.environ, "GRAPHIFY_CHANGED": "late.py", "GRAPHIFY_REBUILD_TIMEOUT": "0"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 93, result.stdout + result.stderr
+    assert "INTENT-DURABLE-BEFORE-REPLAY" in result.stdout
+    assert tx._recover_successor_ready_transaction(output, now=10**13)
+    assert _rebuild_code(root, changed_paths=[], no_cluster=True, block_on_lock=True)
+    snapshot = tx.open_graph_snapshot(output / "graph.json", purpose="entrypoint-replay")
+    assert "late_late" in {node["id"] for node in snapshot.data["nodes"]}

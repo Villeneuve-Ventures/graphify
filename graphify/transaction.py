@@ -431,6 +431,32 @@ class _MergePendingAdmission:
     graph_identity: ManagedEntryIdentity
 
 
+@dataclass(frozen=True)
+class RecoveryInspection:
+    """Read-only recovery projection; never a substitute for locked validation."""
+
+    state: Literal[
+        "absent",
+        "live-deferred",
+        "transfer-replay",
+        "completed-retirement",
+        "malformed",
+        "ready-to-recover",
+    ]
+    output_identity: OutputIdentity | None = None
+    transaction: Transaction | None = None
+    merge_admission: _MergePendingAdmission | None = None
+    root: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RebuildRecovery:
+    inspection: RecoveryInspection
+    queued: bool = False
+    recovered: bool = False
+
+
 @dataclass(frozen=True, kw_only=True)
 class _MergePendingGraphSnapshot(GraphSnapshot):
     merge_admission: _MergePendingAdmission
@@ -5433,12 +5459,18 @@ def _resume_prepared_token_transfer_locked(
     name = cast(str, record["token_name"])
     payload = _json_bytes(record["token_payload"])
 
+    def returning_callback(name: str) -> None:
+        if failpoint is not None:
+            failpoint(name)
+            if _read_token_transition(capability) != record:
+                raise PendingTransactionError("prepared transfer journal changed after callback")
+            _validate_successor_ready_recovery_locked(capability)
+
     def advance(state: str, failpoint_name: str) -> None:
         nonlocal record
         record = {**record, "state": state}
         _write_token_transition(capability, record)
-        if failpoint is not None:
-            failpoint(failpoint_name)
+        returning_callback(failpoint_name)
 
     if record["state"] == "planned":
         try:
@@ -5585,8 +5617,7 @@ def _resume_prepared_token_transfer_locked(
     if record["state"] != "predecessor-token-removed":
         raise PendingTransactionError("prepared transfer did not reach retirement")
     _unlink(capability, TRANSITION_FILE)
-    if failpoint is not None:
-        failpoint("after_prepared_transition_retired")
+    returning_callback("after_prepared_transition_retired")
     building_target = replace(target, phase="building")
     live = _read_transaction(capability)
     if live == target:
@@ -5595,8 +5626,7 @@ def _resume_prepared_token_transfer_locked(
         raise PendingTransactionError(
             "prepared transfer terminal live owner changed"
         )
-    if failpoint is not None:
-        failpoint("after_prepared_live_building")
+    returning_callback("after_prepared_live_building")
     protocol, drainer = _validate_durable_live_binding(
         capability, building_target, protocol=target_protocol
     )
@@ -5608,6 +5638,17 @@ def _resume_prepared_token_transfer_locked(
     _unlink(capability, TOKEN_TRANSITION_FILE)
     if failpoint is not None:
         failpoint("after_token_transition")
+    protocol, drainer = _validate_durable_live_binding(capability, building_target)
+    if (
+        _validate_successor_ready_recovery_locked(
+            capability, _retired_transfer=record
+        ) != target
+        or drainer[:2] != (target.drainer, "claimed")
+        or _read_token_transition(capability) is not None
+        or _read_pending_transition(capability) is not None
+        or _load_json(capability, PREPARED_FILE) != target_marker
+    ):
+        raise PendingTransactionError("prepared transfer terminal target changed")
     _AUTHORITY.set(_authority_for(building_target))
     return building_target, protocol
 
@@ -5668,6 +5709,12 @@ def _start_token_transition_locked(
     _read_token_transition(capability)
     if failpoint is not None:
         failpoint("after_token_journal")
+        if _read_token_transition(capability) != record:
+            raise PendingTransactionError("selected token journal changed after callback")
+        if prepared_transfer is not None:
+            _validate_successor_ready_recovery_locked(capability)
+        else:
+            _validate_token_transition_current(capability, record)
     return _resume_token_transition_locked(capability, failpoint=failpoint)
 
 
@@ -5955,6 +6002,7 @@ def _validate_durable_live_binding(
     protocol: Mapping[str, object] | None = None,
     drainer: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
     allowed_protocol_states: frozenset[str] = frozenset({"INCOMPLETE"}),
+    allow_close_pending: bool = False,
 ) -> tuple[dict[str, Any], tuple[DrainerTuple, str, dict[str, Any]]]:
     """Bind durable owner records without relying on process-local authority."""
     durable_protocol = (
@@ -5984,6 +6032,18 @@ def _validate_durable_live_binding(
         or durable_drainer[0].generation != live.generation
     ):
         raise PendingTransactionError("durable live transaction binding changed")
+    if allow_close_pending and durable_protocol["state"] == "COMPLETE":
+        _validate_queue_transitions_locked(capability)
+    closing = (
+        allow_close_pending
+        and durable_protocol["state"] == "COMPLETE"
+        and durable_drainer[1] == "CLOSE_PENDING"
+    )
+    if closing:
+        _validate_close_pending_protocol_locked(
+            capability, durable_protocol, durable_drainer
+        )
+        _validate_close_pending_locked(capability, durable_drainer[2])
     if live.token_identity is not None:
         token_name = f".graphify_transaction_token.{live.id}"
         try:
@@ -5991,6 +6051,8 @@ def _validate_durable_live_binding(
                 capability, token_name, _TOKEN_MAX_BYTES
             )
         except FileNotFoundError:
+            if closing:
+                return durable_protocol, durable_drainer
             token_payload = None
             token_identity = None
         if token_identity != live.token_identity:
@@ -9881,6 +9943,81 @@ def _read_queue_transition(
     return cast(dict[str, Any], raw)
 
 
+def _validate_pending_queue_predecessor(capability: OutputCapability) -> None:
+    drainer = _read_drainer(capability)
+    if drainer is None or drainer[1] != "CLOSE_PENDING":
+        return
+    pending = drainer[2]
+    expected = _queue_identity_binding(pending.get("inflight"))
+    if expected is None:
+        return
+    name = f".graphify_rebuild_inflight.{pending['transaction_id']}.jsonl"
+    raw = _read_queue_transition(capability, name)
+    if raw is not None and raw["predecessor"] != {
+        "name": name, **expected[0].json(), "digest": expected[1]
+    }:
+        raise PendingTransactionError("close-pending journal predecessor changed")
+
+
+def _validate_queue_transition_phase(capability: OutputCapability, name: str) -> None:
+    """Read the same phase predicates before inspection acceptance and replay."""
+    raw = _read_queue_transition(capability, name)
+    binding = _read_queue_transition_successor_binding(capability, name)
+    public = _read_queue_record(capability, name)
+    if raw is None:
+        if binding is not None and (public.identity, public.digest) != binding:
+            raise PendingTransactionError("queue transition successor binding changed")
+        return
+    predecessor = raw["predecessor"]
+    identity = ManagedEntryIdentity(
+        predecessor["device"], predecessor["inode"], predecessor["birthtime_ns"]
+    )
+    expected = (identity, predecessor["digest"])
+    retirement = _read_queue_record(capability, str(raw["retirement_name"]))
+    public_matches = (public.identity, public.digest) == expected
+    retirement_matches = (retirement.identity, retirement.digest) == expected
+    if raw.get("operation") == "retire":
+        if binding is not None:
+            raise PendingTransactionError("queue retirement has a successor binding")
+        state = raw["state"]
+        valid = (
+            state == "planned" and (
+                public_matches and retirement.identity is None
+                or public.identity is None and retirement_matches
+            )
+            or state == "quarantined" and public.identity is None and (
+                retirement.identity is None or retirement_matches
+            )
+            or state == "retired" and public.identity is None
+            and retirement.identity is None
+        )
+        if not valid:
+            raise PendingTransactionError("queue retirement predecessor changed")
+        return
+    stage = _read_queue_record(capability, str(raw["stage_name"]))
+    successor_items = tuple(raw["successor_queue"])
+    successor_digest = raw["successor_digest"]
+    if public_matches:
+        valid = retirement.identity is None and (
+            stage.identity is None and binding is None
+            or stage.identity is not None and stage.digest == successor_digest
+            and stage.items == successor_items
+            and (binding is None or (stage.identity, stage.digest) == binding)
+        )
+    else:
+        valid = (
+            binding is not None and (public.identity, public.digest) == binding
+            and public.digest == successor_digest and public.items == successor_items
+            and not (stage.identity is not None and retirement.identity is not None)
+            and (stage.identity is None or (stage.identity, stage.digest) == expected)
+            and (retirement.identity is None or retirement_matches)
+        )
+    if not valid:
+        if retirement.identity is not None and not retirement_matches:
+            raise PendingTransactionError("queue transition retirement identity changed")
+        raise PendingTransactionError("queue transition phase binding changed")
+
+
 def _recover_queue_retirement(
     capability: OutputCapability,
     name: str,
@@ -9982,6 +10119,8 @@ def _recover_queue_transition(
     *,
     failpoint: Callable[[str], None] | None = None,
 ) -> QueueFileRecord | None:
+    _validate_pending_queue_predecessor(capability)
+    _validate_queue_transition_phase(capability, name)
     raw = _read_queue_transition(capability, name)
     if raw is None:
         binding = _read_queue_transition_successor_binding(capability, name)
@@ -10137,11 +10276,7 @@ def _recover_queue_transition(
     return public
 
 
-def _recover_queue_transitions_locked(
-    capability: OutputCapability,
-    *,
-    failpoint: Callable[[str], None] | None = None,
-) -> None:
+def _queue_transition_names(capability: OutputCapability) -> Iterator[str]:
     controlled = [
         entry
         for entry in _list_entries(capability)
@@ -10170,9 +10305,7 @@ def _recover_queue_transitions_locked(
             raise PendingTransactionError("malformed queue transition journal")
         if journal_name != _queue_transition_journal_name(str(raw["public_name"])):
             raise PendingTransactionError("queue transition journal name changed")
-        _recover_queue_transition(
-            capability, str(raw["public_name"]), failpoint=failpoint
-        )
+        yield str(raw["public_name"])
     binding_names = [
         entry for entry in _list_entries(capability) if binding_pattern.fullmatch(entry)
     ]
@@ -10184,7 +10317,24 @@ def _recover_queue_transitions_locked(
             raise PendingTransactionError("malformed queue transition binding")
         if binding_name != _queue_transition_binding_name(str(raw["public_name"])):
             raise PendingTransactionError("queue transition binding name changed")
-        _recover_queue_transition(capability, str(raw["public_name"]), failpoint=failpoint)
+        yield str(raw["public_name"])
+
+
+
+def _validate_queue_transitions_locked(capability: OutputCapability) -> None:
+    _validate_pending_queue_predecessor(capability)
+    for name in _queue_transition_names(capability):
+        _validate_queue_transition_phase(capability, name)
+
+
+def _recover_queue_transitions_locked(
+    capability: OutputCapability,
+    *,
+    failpoint: Callable[[str], None] | None = None,
+) -> None:
+    _validate_queue_transitions_locked(capability)
+    for name in _queue_transition_names(capability):
+        _recover_queue_transition(capability, name, failpoint=failpoint)
 
 
 def _transition_queue(
@@ -11342,14 +11492,19 @@ def _validate_live_successor_ready_merge_binding_locked(
 ) -> _MergePendingAdmission | None:
     """Cross-bind an INCOMPLETE successor-ready owner to preserved merge input."""
     _validate_successor_ready_marker(marker, capability=capability, transaction=live)
-    durable_protocol, _durable_drainer = _validate_durable_live_binding(
+    durable_protocol, durable_drainer = _validate_durable_live_binding(
         capability,
         live,
         protocol=protocol,
         drainer=drainer,
         allowed_protocol_states=frozenset({"INCOMPLETE", "COMPLETE"}),
+        allow_close_pending=True,
     )
     if durable_protocol["state"] != "INCOMPLETE":
+        if durable_drainer[1] not in {"claimed", "CLOSE_PENDING"}:
+            raise PendingTransactionError(
+                "completed live recovery requires claimed or close-pending authority"
+            )
         return None
     preserved = _read_predecessor_authority(capability)
     if preserved is None or "merge_admission" not in preserved[3]:
@@ -11523,8 +11678,9 @@ def _validate_successor_ready_public_overlap_locked(
     successor_inventory: Sequence[Mapping[str, object]],
     successor_deletions: Sequence[str],
     admission: _MergePendingAdmission,
+    exact_publication: bool = False,
 ) -> None:
-    """Accept only exact predecessor, pending-merge, or successor artifact bytes."""
+    """Validate overlap, or require the exact prepared publication."""
     required = predecessor_receipt.get("required_artifacts")
     raw_predecessor_digests = predecessor_receipt.get("artifact_digests")
     if (
@@ -11549,6 +11705,11 @@ def _validate_successor_ready_public_overlap_locked(
         cast(str, item["name"]): (cast(str, item["sha256"]), cast(int, item["size"]))
         for item in successor_inventory
     }
+    if exact_publication and (
+        predecessor_receipt.get("graph_name", "graph.json") != graph_name
+        or set(predecessor_names) != set(successor)
+    ):
+        raise PendingTransactionError("prepared publication inventory changed")
     deletions = set(successor_deletions)
     all_names = set(predecessor_names).union(successor, deletions)
     _reject_casefold_collisions(tuple(sorted(all_names)))
@@ -11562,18 +11723,21 @@ def _validate_successor_ready_public_overlap_locked(
             )
         except PendingTransactionError as exc:
             missing = isinstance(exc.__cause__, (FileNotFoundError, NotADirectoryError))
-            if missing and (name in deletions or name not in raw_predecessor_digests):
+            if missing and (
+                name in deletions
+                or not exact_publication and name not in raw_predecessor_digests
+            ):
                 continue
             raise
         aggregate_size += size
         predecessor_digest = raw_predecessor_digests.get(name)
         successor_entry = successor.get(name)
-        if (name != graph_name and digest == predecessor_digest) or (
+        if (not exact_publication and name != graph_name and digest == predecessor_digest) or (
             successor_entry is not None
             and (digest, size) == successor_entry
         ):
             continue
-        if name == graph_name and digest == admission.pending_payload_digest:
+        if not exact_publication and name == graph_name and digest == admission.pending_payload_digest:
             if _managed_entry_identity(capability, name) != admission.graph_identity:
                 raise PendingTransactionError(
                     "successor-ready enqueue merge-pending graph identity changed"
@@ -11586,9 +11750,19 @@ def _validate_successor_ready_public_overlap_locked(
 
 def _validate_successor_ready_recovery_locked(
     capability: OutputCapability,
+    *,
+    _retired_transfer: Mapping[str, Any] | None = None,
 ) -> Transaction | None:
     """Recognize exact live successor-ready work without mutating recovery state."""
     token_transition = _read_token_transition(capability)
+    if _retired_transfer is not None:
+        if (
+            token_transition is not None
+            or _retired_transfer.get("state") != "predecessor-token-removed"
+            or "prepared_transfer" not in _retired_transfer
+        ):
+            raise PendingTransactionError("retired prepared transfer binding changed")
+        token_transition = dict(_retired_transfer)
     if token_transition is not None and "prepared_transfer" in token_transition:
         target = _validate_token_transition_current(capability, token_transition)
         predecessor = _transaction_from_json(
@@ -11611,10 +11785,26 @@ def _validate_successor_ready_recovery_locked(
             admission,
             preserved=preserved,
         )
-        receipt_payload = _read_bytes(capability, RECEIPT_FILE)
-        if hashlib.sha256(receipt_payload).hexdigest() != preserved[2]:
+        try:
+            receipt_payload = _read_bytes(capability, RECEIPT_FILE)
+        except FileNotFoundError as exc:
             raise PendingTransactionError(
-                "successor-ready predecessor receipt changed during transfer"
+                "successor-ready predecessor receipt is missing during transfer"
+            ) from exc
+        if hashlib.sha256(receipt_payload).hexdigest() != preserved[2]:
+            publishing_drainer = token_transition["pending_predecessor_drainer"]
+            _validate_receipt_locked(
+                capability,
+                transaction=predecessor,
+                protocol_override={
+                    **token_transition["predecessor_protocol"],
+                    "state": "COMPLETE",
+                    "receipt_digest": hashlib.sha256(receipt_payload).hexdigest(),
+                },
+                drainer_override=(
+                    _drainer_from_json(publishing_drainer["drainer"]),
+                    publishing_drainer["state"], {},
+                ),
             )
         try:
             predecessor_receipt = json.loads(receipt_payload.decode("utf-8"))
@@ -11636,6 +11826,7 @@ def _validate_successor_ready_recovery_locked(
             successor_inventory=inventory,
             successor_deletions=deletions,
             admission=admission,
+            exact_publication=hashlib.sha256(receipt_payload).hexdigest() != preserved[2],
         )
         return target
     marker = _load_json(capability, PREPARED_FILE)
@@ -11668,7 +11859,12 @@ def _validate_successor_ready_recovery_locked(
         raise PendingTransactionError(
             "successor-ready preserved predecessor is missing"
         )
-    receipt_payload = _read_bytes(capability, RECEIPT_FILE)
+    try:
+        receipt_payload = _read_bytes(capability, RECEIPT_FILE)
+    except FileNotFoundError as exc:
+        raise PendingTransactionError(
+            "successor-ready recovery receipt is missing"
+        ) from exc
     try:
         receipt = json.loads(receipt_payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -11703,6 +11899,18 @@ def _validate_successor_ready_recovery_locked(
             transaction=live,
             protocol_override=partial_protocol,
             drainer_override=drainer,
+        )
+        graph_name, inventory, deletions = _validate_successor_ready_marker(
+            marker, capability=capability, transaction=live
+        )
+        _validate_successor_ready_public_overlap_locked(
+            capability,
+            graph_name=graph_name,
+            predecessor_receipt=receipt,
+            successor_inventory=inventory,
+            successor_deletions=deletions,
+            admission=admission,
+            exact_publication=True,
         )
     return live
 
@@ -11865,6 +12073,28 @@ def _queue_successor_ready_rebuild_locked(
             raise PendingTransactionError(
                 "successor-ready enqueue merge selector changed"
             )
+    return _append_recovery_intent_locked(
+        capability, kind=kind, root=root, durable_paths=durable_paths,
+        semantic=semantic, source=source, intent=intent, now=now,
+        failpoint=failpoint, live=live, drainer=drainer[0],
+    )
+
+
+def _append_recovery_intent_locked(
+    capability: OutputCapability,
+    *,
+    kind: TransactionKind,
+    root: Path,
+    durable_paths: Sequence[str],
+    semantic: bool,
+    source: str,
+    intent: str | None,
+    now: float | None,
+    failpoint: Callable[[str], None] | None,
+    live: Transaction | None,
+    drainer: DrainerTuple,
+) -> QueueReceipt:
+    """Append to the queue without changing the validated recovery authority."""
     predecessor = _read_queue_record(capability)
     candidate_identity = {
         "schema": 1,
@@ -11872,12 +12102,10 @@ def _queue_successor_ready_rebuild_locked(
         "intent": intent or kind,
         "root": str(root),
         "changed_paths": None if not durable_paths else list(durable_paths),
-        "semantic": bool(semantic) or (
+        "semantic": bool(semantic)
+        or (
             kind == "full"
-            and any(
-                value["root"] == str(root) and value["semantic"]
-                for value in predecessor.items
-            )
+            and any(value["root"] == str(root) and value["semantic"] for value in predecessor.items)
         ),
         "source": source,
     }
@@ -11907,16 +12135,14 @@ def _queue_successor_ready_rebuild_locked(
         )
         else "append"
     )
-    queued, item = _canonical_enqueue_transform(
-        list(predecessor.items), candidate, operation
-    )
+    queued, item = _canonical_enqueue_transform(list(predecessor.items), candidate, operation)
     _transition_queue(
         capability,
         predecessor,
         queued,
         failpoint=failpoint,
     )
-    return QueueReceipt(str(item["id"]), drainer[0])
+    return QueueReceipt(str(item["id"]), drainer)
 
 
 def queue_rebuild(
@@ -11933,6 +12159,7 @@ def queue_rebuild(
     failpoint: Callable[[str], None] | None = None,
     expected_snapshot: GraphSnapshot | None = None,
     merge_admission: _MergePendingAdmission | None = None,
+    _expected_output_identity: OutputIdentity | None = None,
 ) -> QueueReceipt:
     if type(kind) is not str or kind not in {"full", "update", "runtime"}:
         raise PendingTransactionError("malformed rebuild kind")
@@ -11966,12 +12193,41 @@ def queue_rebuild(
         raise PendingTransactionError("malformed rebuild root")
     root_path = _canonical_directory(Path(root_value))
     output_path = Path(output).expanduser().absolute()
-    _materialize_absent_snapshot_output(
-        output_path, expected_snapshot, failpoint=failpoint
-    )
-    with pin_output(output_path, create=True) as capability, _locked(capability):
+    if _expected_output_identity is None:
+        _materialize_absent_snapshot_output(
+            output_path, expected_snapshot, failpoint=failpoint
+        )
+    with pin_output(
+        output_path, create=_expected_output_identity is None
+    ) as capability, _locked(capability):
+        if (
+            _expected_output_identity is not None
+            and capability.identity != _expected_output_identity
+        ):
+            raise PendingTransactionError("stale output identity selector")
         if expected_snapshot is not None:
             _validate_expected_snapshot_locked(capability, expected_snapshot)
+        recovery = _inspect_recovery_locked(capability, now=now)
+        if recovery.state == "malformed":
+            raise PendingTransactionError(recovery.reason)
+        if recovery.state == "transfer-replay":
+            target = recovery.transaction
+            assert target is not None
+            if target.root != str(root_path):
+                raise PendingTransactionError("stale recovery intent root")
+            if merge_admission is not None and merge_admission != recovery.merge_admission:
+                raise PendingTransactionError("enqueue merge-pending admission changed")
+            if _read_enqueue_journal(capability) is not None:
+                raise PendingTransactionError("prepared transfer has conflicting enqueue authority")
+            _recover_queue_transitions_locked(capability, failpoint=failpoint)
+            if _inspect_recovery_locked(capability, now=now) != recovery:
+                raise PendingTransactionError("recovery admission changed after queue recovery")
+            return _append_recovery_intent_locked(
+                capability, kind=kind, root=root_path, durable_paths=durable_paths,
+                semantic=semantic, source=source, intent=intent, now=now,
+                failpoint=failpoint, live=_read_transaction(capability),
+                drainer=target.drainer,
+            )
         successor_ready_marker = _load_json(capability, PREPARED_FILE)
         successor_ready_live = _read_transaction(capability)
         if (
@@ -12365,6 +12621,7 @@ def takeover_drainer(
     now: float | None = None,
     lease_seconds: float = 30.0,
     transition_failpoint: Callable[[str], None] | None = None,
+    _expected_transaction: Transaction | None = None,
 ) -> DrainerTuple:
     def token_failpoint(name: str) -> None:
         if transition_failpoint is None:
@@ -12379,7 +12636,21 @@ def takeover_drainer(
             transition_failpoint(alias)
 
     with pin_output(output) as capability, _locked(capability):
+        if _expected_transaction is not None and (
+            capability.identity != _expected_transaction.output_identity
+            or _read_transaction(capability) != _expected_transaction
+        ):
+            raise PendingTransactionError("stale successor-ready takeover selector")
         _validate_successor_ready_recovery_locked(capability)
+        selected_live = _read_transaction(capability)
+
+        def validate_selected() -> None:
+            if _read_transaction(capability) != selected_live:
+                raise PendingTransactionError("selected takeover owner changed")
+            if selected_live is not None:
+                _validate_durable_live_binding(capability, selected_live)
+            _validate_successor_ready_recovery_locked(capability)
+
         _recover_queue_transitions_locked(
             capability, failpoint=transition_failpoint
         )
@@ -12406,6 +12677,7 @@ def takeover_drainer(
         deadline = float(raw.get("lease_deadline", 0.0))
         if current_time <= deadline:
             raise PendingTransactionError("drainer lease has not expired")
+        validate_selected()
         live = _read_transaction(capability)
         if live is None:
             protocol = _read_protocol(capability)
@@ -12519,9 +12791,11 @@ def takeover_drainer(
                     _merge_intents(queue_predecessor.items, inflight),
                     failpoint=transition_failpoint,
                 )
+                validate_selected()
             _retire_queue_record(
                 capability, inflight_record, failpoint=transition_failpoint
             )
+            validate_selected()
             token_name = f".graphify_transaction_token.{successor_id}"
             target, successor_protocol = _start_token_transition_locked(
                 capability,
@@ -12969,14 +13243,12 @@ def _finish_completed_recovery_locked(
     return CompletedRecovery(**{**live.__dict__, "phase": "complete"})
 
 
-def _recover_close_pending_without_live_locked(
+def _validate_close_pending_protocol_locked(
     capability: OutputCapability,
     protocol: Mapping[str, object],
     drainer: tuple[DrainerTuple, str, dict[str, Any]],
-    *,
-    now: float | None = None,
-) -> CompletedRecovery:
-    """Resume an exact close after its token and live owner were already retired."""
+) -> None:
+    """Validate no-live close protocol bindings without advancing recovery."""
     if drainer[1] != "CLOSE_PENDING":
         raise PendingTransactionError("exact close-pending authority is required")
     pending = drainer[2]
@@ -12990,6 +13262,18 @@ def _recover_close_pending_without_live_locked(
         or not _is_hex(protocol.get("owner_capability_digest"))
     ):
         raise PendingTransactionError("completed close protocol binding changed")
+
+
+def _recover_close_pending_without_live_locked(
+    capability: OutputCapability,
+    protocol: Mapping[str, object],
+    drainer: tuple[DrainerTuple, str, dict[str, Any]],
+    *,
+    now: float | None = None,
+) -> CompletedRecovery:
+    """Resume an exact close after its token and live owner were already retired."""
+    _validate_close_pending_protocol_locked(capability, protocol, drainer)
+    pending = drainer[2]
     _finish_close_locked(capability, pending)
     completed = _read_drainer(capability)
     if completed is None or completed[1] != "complete":
@@ -13109,6 +13393,7 @@ def recover_selected_transaction(
         raise RecoverableTransactionError("recovery attempt bound exhausted")
     root_path = _canonical_directory(Path(root))
     with pin_output(output) as capability, _locked(capability):
+        _validate_pending_queue_predecessor(capability)
         successor_ready = _validate_selected_successor_ready_locked(
             capability,
             kind=kind,
@@ -13130,6 +13415,7 @@ def recover_selected_transaction(
         )
     cancellation_successor: Transaction | None = None
     with pin_output(output) as capability, _locked(capability):
+        _validate_pending_queue_predecessor(capability)
         successor_ready = _validate_selected_successor_ready_locked(
             capability,
             kind=kind,
@@ -13209,6 +13495,7 @@ def recover_selected_transaction(
         return _cancellation_recovery(cancellation_successor)
     try:
         with pin_output(output) as capability, _locked(capability):
+            _validate_pending_queue_predecessor(capability)
             successor_ready = _validate_selected_successor_ready_locked(
                 capability,
                 kind=kind,
@@ -13396,6 +13683,7 @@ def recover_transaction(
     recovered_enqueue_generation: int | None = None
     successor_ready_recovery: Transaction | None = None
     with pin_output(output) as capability, _locked(capability):
+        _validate_pending_queue_predecessor(capability)
         if (
             expected_output_identity is not None
             and capability.identity != expected_output_identity
@@ -13416,6 +13704,12 @@ def recover_transaction(
                 )
             ):
                 raise PendingTransactionError("stale token recovery selector")
+            _recover_queue_transitions_locked(
+                capability, failpoint=transition_failpoint
+            )
+            # Queue recovery cannot replace the original transfer authority.
+            if _prepared_transfer_target_locked(capability) != prepared_transfer_target:
+                raise PendingTransactionError("prepared transfer recovery target changed")
             resumed_target, _resumed_protocol = _resume_token_transition_locked(
                 capability, failpoint=transition_failpoint
             )
@@ -13511,18 +13805,23 @@ def recover_transaction(
         cancel_unpublished_transaction(cancellation_successor)
         return _cancellation_recovery(cancellation_successor)
     if successor_ready_recovery is not None:
-        takeover_drainer(
+        selected_drainer = takeover_drainer(
             output,
             now=now,
             transition_failpoint=transition_failpoint,
+            _expected_transaction=successor_ready_recovery,
         )
-        target = optional_current_transaction(output)
-        if target is None:
-            raise PendingTransactionError(
-                "successor-ready recovery owner is missing"
-            )
+        with pin_output(output) as capability, _locked(capability):
+            _validate_pending_queue_predecessor(capability)
+            if capability.identity != successor_ready_recovery.output_identity:
+                raise PendingTransactionError("stale output identity selector")
+            target = _read_transaction(capability)
+            if target is None or target.drainer != selected_drainer:
+                raise PendingTransactionError("successor-ready takeover owner changed")
+            _validate_authority(capability, target)
         return target
     with pin_output(output) as capability, _locked(capability):
+        _validate_pending_queue_predecessor(capability)
         current = _read_transaction(capability)
         pending = _read_pending_transition(capability)
         selected = current if pending is None else pending[3]
@@ -14749,21 +15048,32 @@ def _finalize_successor_ready_transaction(
 ) -> None:
     """Replay an exact immutable prepared publication and close its owner."""
     transaction = current_transaction() if transaction is None else transaction
+    with pin_output(transaction.output) as capability, _locked(capability):
+        _validate_authority(capability, transaction)
+        marker = _load_json(capability, PREPARED_FILE)
+        if marker is None:
+            raise PendingTransactionError("prepared workspace binding is missing")
+        _validate_successor_ready_marker(
+            marker, capability=capability, transaction=transaction
+        )
     _publish_successor_ready_transaction(transaction, failpoint=failpoint)
     _finish_transaction(transaction, failpoint=failpoint)
     with pin_output(transaction.output) as capability, _locked(capability):
-        retired = _retire_prepared_locked(capability)
-        if retired is None:
-            raise PendingTransactionError("prepared workspace binding is missing")
+        if capability.identity != transaction.output_identity:
+            raise PendingTransactionError("stale output identity selector")
+        if _load_json(capability, PREPARED_FILE) != marker:
+            raise PendingTransactionError("successor-ready prepared binding changed")
+        _validate_successor_ready_marker(
+            marker, capability=capability, transaction=transaction
+        )
+        _retire_completed_successor_ready_locked(capability, marker)
 
 
-def _retire_completed_successor_ready_locked(
+def _validate_completed_successor_ready_locked(
     capability: OutputCapability,
     marker: Mapping[str, object],
-    *,
-    now: float | None = None,
-) -> None:
-    """Retire an exact successor-ready workspace after its owner was closed."""
+) -> tuple[DrainerTuple, str, dict[str, Any]]:
+    """Validate completed retirement without changing closure or marker state."""
     graph_name, inventory, deletions = _validate_successor_ready_marker(
         marker, capability=capability
     )
@@ -14783,19 +15093,15 @@ def _retire_completed_successor_ready_locked(
         raise PendingTransactionError(
             "completed successor-ready selector changed"
         )
-    if drainer[1] == "CLOSE_PENDING":
-        _recover_close_pending_without_live_locked(
-            capability, protocol, drainer, now=now
-        )
-        drainer = _read_drainer(capability)
-    if drainer is None:
-        raise PendingTransactionError(
-            "completed successor-ready drainer disappeared"
-        )
+    _validate_queue_transitions_locked(capability)
     if drainer[1] == "complete":
         receipt, receipt_digest, _retained = _validate_receipt_locked(
             capability, require_closed=True
         )
+    elif drainer[1] == "CLOSE_PENDING":
+        _validate_close_pending_protocol_locked(capability, protocol, drainer)
+        _validate_close_pending_locked(capability, drainer[2])
+        receipt, receipt_digest, _retained = _validate_receipt_locked(capability)
     elif drainer[1] == "reserved":
         receipt, receipt_digest, _retained = _validate_receipt_locked(capability)
         preserved = _read_predecessor_authority(capability)
@@ -14854,6 +15160,22 @@ def _retire_completed_successor_ready_locked(
         raise PendingTransactionError(
             "completed successor-ready deletion reappeared"
         )
+    return drainer
+
+
+def _retire_completed_successor_ready_locked(
+    capability: OutputCapability,
+    marker: Mapping[str, object],
+    *,
+    now: float | None = None,
+) -> None:
+    """Retire only after exact publication, closure and inventory validation."""
+    drainer = _validate_completed_successor_ready_locked(capability, marker)
+    if drainer[1] == "CLOSE_PENDING":
+        _recover_close_pending_without_live_locked(
+            capability, cast(dict[str, Any], _read_protocol(capability)), drainer, now=now
+        )
+        drainer = _validate_completed_successor_ready_locked(capability, marker)
     if drainer[1] == "complete":
         _unlink(capability, PREDECESSOR_FILE)
     if _retire_prepared_locked(capability) is None:
@@ -14865,15 +15187,24 @@ def _recover_successor_ready_transaction(
     *,
     now: float | None = None,
     failpoint: Callable[[str], None] | None = None,
+    expected_output_identity: OutputIdentity | None = None,
 ) -> bool:
     """Take over and finalize only an exact expired successor-ready owner."""
     prepared_transfer_target: Transaction | None = None
     output_identity: OutputIdentity | None = None
     with pin_output(output) as capability, _locked(capability):
-        marker = _load_json(capability, PREPARED_FILE)
-        if marker is None or marker.get("state") != "successor-ready":
+        if expected_output_identity is not None and capability.identity != expected_output_identity:
+            raise PendingTransactionError("stale output identity selector")
+        inspection = _inspect_recovery_locked(capability, now=now)
+        if inspection.state == "malformed":
+            raise PendingTransactionError(inspection.reason)
+        if inspection.state == "absent":
             return False
-        prepared_transfer_target = _prepared_transfer_target_locked(capability)
+        marker = _load_json(capability, PREPARED_FILE)
+        assert marker is not None
+        prepared_transfer_target = (
+            inspection.transaction if inspection.state == "transfer-replay" else None
+        )
         if prepared_transfer_target is not None:
             output_identity = capability.identity
         live = _read_transaction(capability)
@@ -14941,81 +15272,129 @@ def _recover_successor_ready_transaction(
                 capability, marker, now=now
             )
         return True
-    takeover_drainer(output, now=now)
-    target = optional_current_transaction(output)
-    if target is None:
-        raise PendingTransactionError("successor-ready takeover owner is missing")
-    _finalize_successor_ready_transaction(target)
+    selected_drainer = takeover_drainer(output, now=now, _expected_transaction=live)
+    with pin_output(output) as capability, _locked(capability):
+        if capability.identity != live.output_identity:
+            raise PendingTransactionError("stale output identity selector")
+        target = _read_transaction(capability)
+        if target is None or target.drainer != selected_drainer:
+            raise PendingTransactionError("successor-ready takeover owner changed")
+    _finalize_successor_ready_transaction(target, failpoint=failpoint)
     return True
 
 
-def _successor_ready_recovery_deferred(output: Path | str) -> bool:
-    """Report whether an exact successor-ready owner still holds a live lease."""
-    with pin_output(output, mutation=False) as capability, _locked(capability):
+def _inspect_recovery_locked(
+    capability: OutputCapability,
+    *,
+    now: float | None = None,
+) -> RecoveryInspection:
+    try:
+        transfer = _prepared_transfer_target_locked(capability)
+        if transfer is not None:
+            return RecoveryInspection(
+                "transfer-replay",
+                capability.identity,
+                transfer,
+                _preserved_merge_admission(capability),
+                transfer.root,
+            )
         marker = _load_json(capability, PREPARED_FILE)
         if marker is None or marker.get("state") != "successor-ready":
-            return False
-        if _prepared_transfer_target_locked(capability) is not None:
-            return False
+            return RecoveryInspection("absent", capability.identity)
         live = _read_transaction(capability)
-        drainer = _read_drainer(capability)
-        if live is None or drainer is None or drainer[0] != live.drainer:
-            return False
-        _validate_successor_ready_marker(
-            marker, capability=capability, transaction=live
-        )
-        return time.time() <= float(drainer[2].get("lease_deadline", 0.0))
-
-
-def _successor_ready_merge_admission(
-    output: Path | str,
-) -> _MergePendingAdmission | None:
-    """Return exact preserved merge authority for one successor-ready marker."""
-    with pin_output(output, mutation=False) as capability, _locked(capability):
-        marker = _load_json(capability, PREPARED_FILE)
-        if marker is None or marker.get("state") != "successor-ready":
-            return None
-        if _prepared_transfer_target_locked(capability) is not None:
-            return None
-        live = _read_transaction(capability)
-        _validate_successor_ready_marker(
-            marker, capability=capability, transaction=live
-        )
-        admission = _preserved_merge_admission(capability)
+        _validate_successor_ready_marker(marker, capability=capability, transaction=live)
         protocol = _read_protocol(capability)
-        if (
-            live is not None
-            and protocol is not None
-            and protocol.get("state") == "INCOMPLETE"
-            and admission is None
-        ):
-            raise PendingTransactionError(
-                "successor-ready merge admission is missing"
+        drainer = _read_drainer(capability)
+        if live is None:
+            _validate_completed_successor_ready_locked(capability, marker)
+            return RecoveryInspection(
+                "completed-retirement",
+                capability.identity,
+                root=cast(dict[str, Any], protocol)["root"],
             )
-        if admission is not None and (
-            marker.get("merge_snapshot_generation")
-            != admission.snapshot_generation
-        ):
-            raise PendingTransactionError(
-                "successor-ready merge admission changed"
-            )
-        return admission
-
-
-def _successor_ready_recovery_pending(output: Path | str) -> bool:
-    """Validate and report one durable successor-ready recovery marker."""
-    with pin_output(output, mutation=False) as capability, _locked(capability):
-        marker = _load_json(capability, PREPARED_FILE)
-        if marker is None or marker.get("state") != "successor-ready":
-            return False
-        if _prepared_transfer_target_locked(capability) is not None:
-            return False
-        _validate_successor_ready_marker(
-            marker,
-            capability=capability,
-            transaction=_read_transaction(capability),
+        _validate_successor_ready_recovery_locked(capability)
+        if drainer is None or drainer[0] != live.drainer:
+            raise PendingTransactionError("successor-ready recovery owner binding is incomplete")
+        admission = _preserved_merge_admission(capability)
+        current_time = time.time() if now is None else now
+        state = (
+            "live-deferred"
+            if current_time <= float(drainer[2].get("lease_deadline", 0.0))
+            else "completed-retirement"
+            if protocol is not None and protocol["state"] == "COMPLETE"
+            else "ready-to-recover"
         )
-        return True
+        return RecoveryInspection(state, capability.identity, live, admission, live.root)
+    except PendingTransactionError as exc:
+        return RecoveryInspection("malformed", capability.identity, reason=str(exc)[:1024])
+
+
+def inspect_recovery(
+    output: Path | str,
+    *,
+    now: float | None = None,
+) -> RecoveryInspection:
+    """Inspect successor recovery without replay, enqueue, closure or retirement."""
+    try:
+        with pin_output(output, mutation=False) as capability, _locked(capability):
+            return _inspect_recovery_locked(capability, now=now)
+    except PendingTransactionError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError) and not Path(output).is_symlink():
+            return RecoveryInspection("absent")
+        return RecoveryInspection("malformed", reason=str(exc)[:1024])
+
+
+def recover_rebuild_intent(
+    kind: TransactionKind,
+    root: Path | str,
+    *,
+    output: Path | str,
+    changed_paths: Sequence[Path | str] | None = None,
+    source: str = "watch",
+    legacy_pending_name: str | None = None,
+    now: float | None = None,
+    failpoint: Callable[[str], None] | None = None,
+) -> RebuildRecovery:
+    """Durably admit this invocation before any existing successor replay.
+
+    Absent recovery leaves normal snapshot admission/enqueue to the caller.
+    All applicable recovery is inspected again within one pinned output lock.
+    """
+    with pin_output(output) as capability, _locked(capability):
+        inspection = _inspect_recovery_locked(capability, now=now)
+        if inspection.state == "malformed":
+            raise PendingTransactionError(inspection.reason)
+        if inspection.state == "absent":
+            return RebuildRecovery(inspection)
+        if inspection.root != str(_canonical_directory(Path(root))):
+            raise PendingTransactionError("stale recovery intent root")
+        queue_rebuild(
+            kind,
+            root,
+            output=output,
+            changed_paths=changed_paths,
+            source=source,
+            legacy_pending_name=legacy_pending_name,
+            merge_admission=inspection.merge_admission,
+            now=now,
+            failpoint=failpoint,
+            _expected_output_identity=capability.identity,
+        )
+        capability.validate()
+        if failpoint is not None:
+            failpoint("after_recovery_intent_admitted")
+        if (
+            inspection.state == "transfer-replay"
+            and _inspect_recovery_locked(capability, now=now) != inspection
+        ):
+            raise PendingTransactionError("selected recovery transfer changed after admission")
+        recovered = _recover_successor_ready_transaction(
+            output,
+            now=now,
+            failpoint=failpoint,
+            expected_output_identity=capability.identity,
+        )
+        return RebuildRecovery(inspection, queued=True, recovered=recovered)
 
 
 def _finalize_prepared_transaction(
