@@ -25,10 +25,14 @@ all project requirements are current with that lock.
 
 ## Receipts and failure semantics
 
-Each scanner directory contains `receipt.json`, raw `scanner.stdout` and
-`scanner.stderr`. Bandit writes JSON to `scanner.json` separately from its
-stdout progress display; pip-audit JSON is in `scanner.stdout`. Dependency audits also retain the frozen export, its stderr,
-and the exact `requirements.txt`. Receipts bind revision and dirty-state
+Evidence files depend on how far preparation and scanning progress. An early
+preparation failure may leave only an incomplete `receipt.json`; a skipped
+scanner step may create no scanner directory. Raw `scanner.stdout` and
+`scanner.stderr` are written when the scanner subprocess is attempted. Bandit
+JSON, when produced, is in `scanner.json` separately from stdout progress;
+pip-audit JSON is in `scanner.stdout`. Dependency audits retain `export.stdout`
+and `export.stderr` after export is attempted, and the exact `requirements.txt`
+after inventory validation succeeds. Receipts bind revision and dirty-state
 information, lock/project/helper hashes, coverage and raw-output hashes, Python
 and scanner versions, command arguments, duration, and raw process exit code.
 Dependency receipts include uv version, installed and selected inventories,
