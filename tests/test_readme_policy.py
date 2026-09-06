@@ -33,9 +33,11 @@ TRANSLATED_README = re.compile(
     re.IGNORECASE,
 )
 HISTORICAL_DIRECTORY_REFERENCE = re.compile(
-    r"(?:\bdocs/translations|(?:^|(?<=[(\"'<]))translations|"
-    r"(?<![\w/.-])(?:/|(?:\.\.?/)+)translations)"
-    r"(?=$|[/?#\s)>\]\"'])", re.IGNORECASE,
+    r"(?:\bdocs/translations|(?<![\w/.-])"
+    r"(?:(?:https?:)?//[^/\s<>()\"']+/|/|(?:\.\.?/)+)translations)"
+    r"(?=$|[/?#\s)>\]\"'])|"
+    r"(?:^|(?<=[(\"'<]))translations(?=$|[/?#)>\]\"']|\s+[\"'])",
+    re.IGNORECASE,
 )
 # Preserve the exact pre-policy historical mentions, not arbitrary future links.
 HISTORICAL_CHANGELOG_LINES = {
@@ -225,6 +227,18 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("AGENTS.md", '<a href="docs/translations">Translations</a>', True),
     ("AGENTS.md", "[French]: README.fr.md", True),
     ("AGENTS.md", "locale-suffixed README files (for example, [French](README.fr-FR.md)).", True),
+    ("README.md", "[Translations](https://example.com/translations)", True),
+    ("docs/guide.md", '<a href="https://example.com/translations#languages">Translations</a>', True),
+    ("README.md", "[Translations](http://example.com:8080/translations?view=all)", True),
+    ("README.md", "[Translations](https://example.com%2Ftranslations)", True),
+    ("README.md", "[Translations](//example.com/translations)", True),
+    ("README.md", "[Assets](https://example.com/tools/translations)", False),
+    ("README.md", "[Guide](https://example.com/translations-guide)", False),
+    ("README.md", "Translations remain supported", False),
+    ("README.md", '"Translations remain supported"', False),
+    ("README.md", "(Translations remain supported)", False),
+    ("README.md", "[Translations](translations)", True),
+    ("README.md", '[Translations](translations "Languages")', True),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,

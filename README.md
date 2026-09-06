@@ -828,6 +828,7 @@ English text; use descriptive topic names such as `operating-systems` instead of
 ambiguous codes such as `os`. English locale directories remain allowed.
 Maintained worked-example documentation follows this rule; raw input corpora
 and test fixtures remain exempt.
+Any change to this policy requires an explicit operator request.
 
 **Worked examples** are the most useful contribution. Run `/graphify` on a real corpus, save the output to `worked/{slug}/`, write an honest `review.md` covering what the graph got right and wrong, and open a PR.
 
