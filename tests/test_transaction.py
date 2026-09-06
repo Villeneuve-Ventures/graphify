@@ -12257,3 +12257,164 @@ def test_legacy_recovery_checkpoint_revalidates_returning_callback(
     }
     assert not (output / tx.LEGACY_PENDING_STATE_FILE).exists()
     assert legacy.read_text() == "legacy.py\n"
+
+
+@pytest.mark.parametrize(
+    "state,field",
+    [("transfer", "schema"), ("ready", "name"),
+     ("transfer", "offset"), ("ready", "device")],
+    ids=["L01", "L02", "L03", "L04"],
+)
+def test_legacy_reader_rejects_malformed_checkpoint(tmp_path, state, field):
+    from graphify import transaction as tx
+
+    fixture = _issue101_transfer if state == "transfer" else _merge_successor_ready
+    root, output, *_ = fixture(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    legacy = output / ".pending_changes"
+    legacy.write_bytes(b"legacy.py\npartial")
+    info = legacy.stat()
+    bridge = {
+        "schema": 1, "name": legacy.name,
+        "identity": {"device": info.st_dev, "inode": info.st_ino},
+        "offset": len(b"legacy.py\n"),
+    }
+    if field == "device":
+        assert float(info.st_dev) == info.st_dev
+        bridge["identity"]["device"] = float(info.st_dev)
+    else:
+        bridge[field] = {"schema": 2, "name": "other.pending", "offset": True}[field]
+    (output / tx.LEGACY_PENDING_STATE_FILE).write_bytes(tx._json_bytes(bridge))
+    before = _issue101_inventory(tmp_path)
+    try:
+        with pytest.raises(tx.PendingTransactionError, match="legacy pending bridge"):
+            tx.queue_rebuild(
+                "update", root, output=output, changed_paths=["late.py"],
+                legacy_pending_name=legacy.name, now=10**12,
+            )
+    finally:
+        queue = output / tx.QUEUE_FILE
+        print(f"legacy checkpoint {field}: {queue.read_bytes() if queue.exists() else None!r}")
+    assert _issue101_inventory(tmp_path) == before
+
+
+@pytest.mark.parametrize("state", ["transfer", "ready"], ids=["L05", "L06"])
+def test_legacy_reader_rejects_replacement_before_open(tmp_path, monkeypatch, state):
+    from graphify import transaction as tx
+
+    fixture = _issue101_transfer if state == "transfer" else _merge_successor_ready
+    root, output, *_ = fixture(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    legacy = output / ".pending_changes"
+    legacy.write_bytes(b"seen.py\n")
+    info = legacy.stat()
+    if state == "transfer":
+        (output / tx.LEGACY_PENDING_STATE_FILE).write_bytes(tx._json_bytes({
+            "schema": 1, "name": legacy.name,
+            "identity": {"device": info.st_dev, "inode": info.st_ino},
+            "offset": len(b"seen.py\n"),
+        }))
+    replacement = tmp_path / "replacement.pending"
+    replacement.write_bytes(b"lost.py\nkept.py\npartial")
+    assert replacement.stat().st_ino != info.st_ino
+    real_read = tx._read_managed_bytes
+    injected = {}
+
+    def replace_before_open(capability, name, *args, **kwargs):
+        if name == legacy.name and not injected:
+            replacement.replace(legacy)
+            injected.update(_issue101_inventory(tmp_path))
+        return real_read(capability, name, *args, **kwargs)
+
+    monkeypatch.setattr(tx, "_read_managed_bytes", replace_before_open)
+    try:
+        with pytest.raises(tx.PendingTransactionError, match="legacy pending.*replaced"):
+            tx.queue_rebuild(
+                "update", root, output=output, changed_paths=["late.py"],
+                legacy_pending_name=legacy.name, now=10**12,
+            )
+    finally:
+        queue = output / tx.QUEUE_FILE
+        print(f"legacy replacement {state}: {queue.read_bytes() if queue.exists() else None!r}")
+    assert injected
+    assert _issue101_inventory(tmp_path) == injected
+
+
+@pytest.mark.parametrize("rotated", [False, True], ids=["L07", "L08"])
+def test_legacy_reader_preserves_checkpoint_compatibility(tmp_path, rotated):
+    from graphify import transaction as tx
+
+    fixture = _merge_successor_ready if rotated else _issue101_transfer
+    root, output, *_ = fixture(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    legacy = output / ".pending_changes"
+    legacy.write_bytes(b"seen.py\n" * 4 if rotated else b"seen.py\nlegacy.py\npartial")
+    old = legacy.stat()
+    offset = old.st_size if rotated else len(b"seen.py\n")
+    bridge = {
+        "schema": 1, "identity": {"device": old.st_dev, "inode": old.st_ino},
+        "offset": offset,
+    }
+    if rotated:
+        bridge["name"] = legacy.name
+        replacement = tmp_path / "replacement.pending"
+        replacement.write_bytes(b"legacy.py\npartial")
+        assert replacement.stat().st_ino != old.st_ino
+        replacement.replace(legacy)
+        assert offset > legacy.stat().st_size
+    (output / tx.LEGACY_PENDING_STATE_FILE).write_bytes(tx._json_bytes(bridge))
+    payload = legacy.read_bytes()
+    selected = legacy.stat()
+    tx.queue_rebuild(
+        "update", root, output=output, changed_paths=["late.py"],
+        legacy_pending_name=legacy.name, now=10**12,
+    )
+    items = [json.loads(line) for line in (output / tx.QUEUE_FILE).read_text().splitlines()]
+    assert {path for item in items for path in (item["changed_paths"] or [])} == {
+        "current.py", "late.py", "legacy.py",
+    }
+    checkpoint = json.loads((output / tx.LEGACY_PENDING_STATE_FILE).read_bytes())
+    assert checkpoint == {
+        "schema": 1, "name": legacy.name,
+        "identity": {"device": selected.st_dev, "inode": selected.st_ino},
+        "offset": payload.rfind(b"\n") + 1,
+    }
+    assert legacy.read_bytes() == payload
+    assert legacy.stat().st_ino == selected.st_ino
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires a POSIX FIFO")
+def test_legacy_reader_rejects_existing_fifo_without_blocking(tmp_path):
+    root, output, *_ = _issue101_transfer(tmp_path)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    os.mkfifo(output / ".pending_changes")
+    before = _issue101_inventory(tmp_path)
+    script = """
+import sys
+from pathlib import Path
+from graphify import transaction as tx
+print("LR-FIFO-ENTER", flush=True)
+try:
+    tx.queue_rebuild(
+        "update", Path(sys.argv[1]), output=Path(sys.argv[2]),
+        changed_paths=["late.py"], legacy_pending_name=".pending_changes", now=10**12,
+    )
+except tx.PendingTransactionError as error:
+    if "unsafe non-regular managed entry" not in str(error):
+        raise
+    print("LR-FIFO-REJECTED", flush=True)
+else:
+    raise SystemExit("FIFO was admitted")
+"""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script, str(root), str(output)],
+            capture_output=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired as error:
+        assert b"LR-FIFO-ENTER" in (error.stdout or b"")
+        print(f"public FIFO operation timed out: {error.stdout!r}")
+        raise
+    assert result.returncode == 0, result.stderr.decode()
+    assert b"LR-FIFO-REJECTED" in result.stdout
+    assert _issue101_inventory(tmp_path) == before

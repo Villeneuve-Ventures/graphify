@@ -12090,23 +12090,43 @@ def _read_legacy_rebuild_paths_locked(
     """Read complete legacy lines without advancing their durable checkpoint."""
     durable_paths = list(durable_paths)
     legacy_checkpoint: dict[str, object] | None = None
-    legacy_info = (
+    legacy_identity = (
         None
-        if legacy_pending_name is None
-        else _entry_stat(capability, legacy_pending_name)
+        if (
+            legacy_pending_name is None
+            or _entry_stat(capability, legacy_pending_name) is None
+        )
+        else _managed_entry_identity(capability, legacy_pending_name)
     )
-    if legacy_pending_name is not None and legacy_info is not None:
-        bridge = _load_json(capability, LEGACY_PENDING_STATE_FILE) or {}
-        identity = {"device": legacy_info.st_dev, "inode": legacy_info.st_ino}
-        offset = 0
-        if bridge.get("identity") == identity:
-            raw_offset = bridge.get("offset", 0)
-            if isinstance(raw_offset, int) and 0 <= raw_offset <= legacy_info.st_size:
-                offset = raw_offset
+    if legacy_pending_name is not None and legacy_identity is not None:
+        bridge = _load_json(capability, LEGACY_PENDING_STATE_FILE)
+        if bridge is not None:
+            bridge_identity = bridge.get("identity")
+            raw_offset = bridge.get("offset")
+            if (
+                type(bridge.get("schema")) is not int
+                or bridge["schema"] != 1
+                or bridge.get("name", legacy_pending_name) != legacy_pending_name
+                or not isinstance(bridge_identity, dict)
+                or any(
+                    type(bridge_identity.get(key)) is not int or bridge_identity[key] < 0
+                    for key in ("device", "inode")
+                )
+                or type(raw_offset) is not int
+                or raw_offset < 0
+            ):
+                raise PendingTransactionError("legacy pending bridge is malformed")
         try:
-            legacy_bytes = _read_managed_bytes(
+            legacy_bytes, opened_identity = _read_managed_bytes(
                 capability, legacy_pending_name
-            )[0]
+            )
+            if opened_identity != legacy_identity:
+                raise PendingTransactionError("legacy pending file replaced before read")
+            identity = {"device": opened_identity.device, "inode": opened_identity.inode}
+            offset = 0
+            if bridge is not None and bridge["identity"] == identity:
+                if bridge["offset"] <= len(legacy_bytes):
+                    offset = bridge["offset"]
             unread = legacy_bytes[offset:]
             complete_length = unread.rfind(b"\n") + 1
             legacy_payload = unread[:complete_length].decode("utf-8")
