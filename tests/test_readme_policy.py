@@ -9,7 +9,9 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc", "html", "htm")
+DOCUMENTATION_EXTENSIONS = (
+    "md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc", "html", "htm", "org", "rdoc",
+)
 # Non-English locale parent names are reserved by policy, regardless of content.
 LANGUAGE_CODES = sorted({
     key.split("_", 1)[0] for key in locale.locale_alias
@@ -35,8 +37,8 @@ TRANSLATED_README = re.compile(
     + r")[._-]" + README_LOCALE
     + r"|\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
     + r")(?![\w.-]))" + README_LOCALE
-    + r"|(?<![\w.-])(?:translations(?:/[^\s/<>\[\]()\"']+)*|(?:"
-    + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS + r")/readme)(?:\.(?:"
+    + r"|(?<![\w.-])(?:"
+    + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS + r"/readme)(?:\.(?:"
     + "|".join(DOCUMENTATION_EXTENSIONS) + r"))?(?![\w.-])",
     re.IGNORECASE,
 )
@@ -106,7 +108,12 @@ def test_no_readme_translations_in_repository() -> None:
     ("docs/de-DE-u-co-phonebk/README.md", True),
     ("docs/zh-CN-x-private/README.md", True),
     ("graphify/README.fr.md", True),
-    ("tools/translations/README.md", True),
+    ("tools/translations/README.md", False),
+    ("tools/translations/French docs/README.md", False),
+    ("tools/translations/fr/README.md", True),
+    ("tools/translations/French docs/README.fr.md", True),
+    ("docs/translations/French docs/README.md", True),
+    ("translations/French docs/README.md", True),
     ("docs/translations/catalog.json", True),
     ("translations/catalog.json", True),
     ("DOCS/TRANSLATIONS/README.FR-FR.MD", True),
@@ -133,6 +140,8 @@ def test_no_readme_translations_in_repository() -> None:
     ("README.x--a.md", False),
     ("docs/x-private/README.md", False),
     ("docs/i-klingon/README.md", False),
+    ("README.org.fr", True),
+    ("README.rdoc.fr", True),
 ])
 def test_readme_path_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, rejected: bool,
