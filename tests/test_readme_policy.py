@@ -10,7 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCUMENTATION_EXTENSIONS = (
-    "md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc", "html", "htm", "org", "rdoc",
+    "md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc", "html", "htm", "org", "rdoc", "pdf",
 )
 # Non-English locale parent names are reserved by policy, regardless of content.
 LANGUAGE_CODES = sorted({
@@ -37,7 +37,7 @@ TRANSLATED_README = re.compile(
     + r")[._-]" + README_LOCALE
     + r"|\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
     + r")(?![\w.-]))" + README_LOCALE
-    + r"|(?<![\w.-])(?:"
+    + r"|(?:^|/)(?:"
     + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS + r"/readme)(?:\.(?:"
     + "|".join(DOCUMENTATION_EXTENSIONS) + r"))?(?![\w.-])",
     re.IGNORECASE,
@@ -93,6 +93,10 @@ def test_no_readme_translations_in_repository() -> None:
     ("docs/src/README.md", False),
     ("docs/api/README.md", False),
     ("docs/operating-systems/README.md", False),
+    ("docs/my fr/README.md", False),
+    ("docs/my+fr/README.md", False),
+    ("my fr/README.md", False),
+    ("fr/README.md", True),
     ("README.fr.md", True),
     ("README.md.fr", True),
     ("README.md.zh-CN", True),
@@ -142,6 +146,7 @@ def test_no_readme_translations_in_repository() -> None:
     ("docs/i-klingon/README.md", False),
     ("README.org.fr", True),
     ("README.rdoc.fr", True),
+    ("README.pdf.fr", True),
 ])
 def test_readme_path_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, rejected: bool,
