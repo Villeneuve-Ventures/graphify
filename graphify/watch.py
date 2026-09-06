@@ -787,9 +787,7 @@ def _rebuild_code(
             _open_merge_pending_watch_snapshot,
             _prepared_output_path,
             _recover_successor_ready_transaction,
-            _successor_ready_merge_admission,
-            _successor_ready_recovery_pending,
-            _successor_ready_recovery_deferred,
+            recover_rebuild_intent,
             admit_report_auxiliaries,
             begin_transaction,
             cancel_unpublished_transaction,
@@ -812,42 +810,17 @@ def _rebuild_code(
         report_auxiliaries: dict[str, bytes] = {}
         merge_admission = None
         intent_queued = False
-        try:
-            successor_pending = (
-                actual_out.is_dir()
-                and _successor_ready_recovery_pending(actual_out)
-            )
-            successor_admission = (
-                _successor_ready_merge_admission(actual_out)
-                if successor_pending
-                else None
-            )
-        except PendingTransactionError as exc:
-            print(f"[graphify watch] Rebuild deferred: {exc}")
-            return False
-        if successor_pending:
-            queue_rebuild(
-                "update" if changed_paths is not None else "full",
-                watch_path,
-                output=actual_out,
-                changed_paths=changed_paths,
-                source="watch",
-                legacy_pending_name=_PENDING_FILENAME,
-                merge_admission=successor_admission,
-            )
-            intent_queued = True
+        if actual_out.is_dir():
             try:
-                recovered = _recover_successor_ready_transaction(actual_out)
+                recovery = recover_rebuild_intent(
+                    "update" if changed_paths is not None else "full",
+                    watch_path, output=actual_out, changed_paths=changed_paths,
+                    source="watch", legacy_pending_name=_PENDING_FILENAME,
+                )
+                intent_queued = recovery.queued
             except PendingTransactionError as exc:
                 print(f"[graphify watch] Rebuild deferred: {exc}")
                 return False
-            if recovered:
-                baseline_snapshot = open_graph_snapshot(
-                    actual_out / "graph.json", purpose="watch-prepare"
-                )
-                baseline_graph = baseline_snapshot.data
-                baseline_artifacts = dict(baseline_snapshot.artifacts)
-                report_auxiliaries = admit_report_auxiliaries(baseline_snapshot)
         if baseline_snapshot is None and (actual_out / "graph.json").is_file():
             try:
                 baseline_snapshot = open_graph_snapshot(
@@ -872,40 +845,7 @@ def _rebuild_code(
                 except PendingTransactionError:
                     print(f"[graphify watch] Rebuild deferred: {exc}")
                     return False
-        try:
-            recovery_deferred = (
-                actual_out.is_dir()
-                and _successor_ready_recovery_deferred(actual_out)
-            )
-        except PendingTransactionError as exc:
-            print(f"[graphify watch] Rebuild deferred: {exc}")
-            return False
-        if recovery_deferred and not intent_queued:
-            queue_rebuild(
-                "update" if changed_paths is not None else "full",
-                watch_path,
-                output=actual_out,
-                changed_paths=changed_paths,
-                source="watch",
-                legacy_pending_name=_PENDING_FILENAME,
-                merge_admission=merge_admission,
-            )
-        recovered = False
-        if actual_out.is_dir():
-            try:
-                recovered = _recover_successor_ready_transaction(actual_out)
-            except PendingTransactionError as exc:
-                print(f"[graphify watch] Rebuild deferred: {exc}")
-                return False
-        if recovered:
-            baseline_snapshot = open_graph_snapshot(
-                actual_out / "graph.json", purpose="watch-prepare"
-            )
-            baseline_graph = baseline_snapshot.data
-            baseline_artifacts = dict(baseline_snapshot.artifacts)
-            report_auxiliaries = admit_report_auxiliaries(baseline_snapshot)
-            merge_admission = None
-        if not recovery_deferred and not intent_queued:
+        if not intent_queued:
             queue_rebuild(
                 "update" if changed_paths is not None else "full",
                 watch_path,
