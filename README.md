@@ -818,10 +818,12 @@ uv run pytest tests/ -q -k "python"    # filter by name
 
 ### What to contribute
 
-**README documentation is English-only.** Do not add or restore translated READMEs
-or language-selector links, including when syncing upstream changes. CI checks
-this policy with `tests/test_readme_policy.py`; run
+**README documentation is English-only.** Do not add or restore translated READMEs,
+including when syncing upstream changes. CI checks README filenames and directory
+paths with `tests/test_readme_policy.py`; run
 `uv run --frozen pytest tests/test_readme_policy.py -q --tb=short` locally.
+These checks do not determine text language or inspect documentation links;
+English README text remains a contribution requirement.
 Graphify continues to support multilingual input corpora and language extraction.
 Non-English locale codes recognized by the policy guard are reserved as README
 parent-directory names, even for English text; use descriptive topic names such
