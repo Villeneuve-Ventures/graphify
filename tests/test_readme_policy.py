@@ -3,9 +3,11 @@
 from pathlib import Path
 from html.parser import HTMLParser
 import locale
+import posixpath
 import re
 import subprocess
-from urllib.parse import unquote
+from string import punctuation
+from urllib.parse import unquote, urlsplit
 
 import pytest
 from markdown_it import MarkdownIt  # Already locked through Bandit/Rich in the dev environment.
@@ -44,31 +46,160 @@ HISTORICAL_DIRECTORY_REFERENCE = re.compile(
     re.IGNORECASE,
 )
 BARE_URL = re.compile(r"(?:https?://|//)[^\s<>\"']+", re.IGNORECASE)
+MAX_ATTRIBUTE_EXPANSION_CHARS = 1 << 20
 
 
-def _translation_reference(text: str) -> bool:
-    normalized = unquote(text).replace("\\", "/").strip()
+def _translated_link(target: str, source: Path) -> bool:
+    # Split before decoding: encoded '?' and '#' belong to the filename.
+    url = urlsplit(target.strip().replace("\\", "/"))
+    path = unquote(url.path).replace("\\", "/")
+    # Retain the guard's conservative handling of encoded authority separators.
+    authority = unquote(url.netloc).replace("\\", "/")
+    if "/" in authority:
+        path = "/" + authority.split("/", 1)[1] + path
+    if not path:
+        return False
+    if not (url.scheme or url.netloc or path.startswith("/")):
+        path = posixpath.join(source.parent.as_posix(), path)
+    normalized = posixpath.normpath(path)
     return bool(TRANSLATED_README.search(normalized)
                 or HISTORICAL_DIRECTORY_REFERENCE.search(normalized))
 
 
 class _HTMLLinks(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, *, mdx: bool = False) -> None:
         super().__init__()
+        self.mdx = mdx
         self.links: list[tuple[int, str]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # HTMLParser decodes character references in attributes exactly once.
         for name, value in attrs:
-            if name in {"href", "xlink:href"} and value is not None:
+            if (name in {"href", "xlink:href"}
+                or (self.mdx and tag in {"link", "navlink"} and name == "to")) and value is not None:
                 self.links.append((self.getpos()[0], value))
+
+
+def _rst_source(text: str) -> str:
+    """Mask literal examples while retaining source line numbers and parsed literals."""
+    lines = text.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        code = re.match(r"\.\. (?:code-block|sourcecode|code)::(?:\s|$)", stripped)
+        literal = stripped.endswith("::") and not stripped.startswith(".. ")
+        if code or literal:
+            indent = len(line) - len(line.lstrip())
+            following = index + 1
+            # Ordinary literal blocks require separation from their paragraph.
+            if code or (following < len(lines) and not lines[following].strip()):
+                start = following
+                while start < len(lines) and not lines[start].strip():
+                    start += 1
+                if literal and start < len(lines):
+                    content = lines[start]
+                    if (len(content) - len(content.lstrip()) == indent
+                            and content.lstrip()[0] in punctuation):
+                        prefix = content.lstrip()[0]
+                        while start < len(lines) and lines[start].lstrip().startswith(prefix):
+                            lines[start] = "\n" if lines[start].endswith("\n") else ""
+                            start += 1
+                        index = start
+                        continue
+                while following < len(lines):
+                    content = lines[following]
+                    if content.strip() and len(content) - len(content.lstrip()) <= indent:
+                        break
+                    lines[following] = "\n" if content.endswith("\n") else ""
+                    following += 1
+                index = following
+                continue
+        index += 1
+    return re.sub(r"``.*?``", lambda match: "\n" * match.group().count("\n"),
+                  "".join(lines), flags=re.DOTALL)
+
+
+def _asciidoc_source(text: str) -> str:
+    """Handle local attributes and default verbatim blocks without running includes."""
+    attributes: dict[str, str] = {}
+    remaining = MAX_ATTRIBUTE_EXPANSION_CHARS
+
+    def expand(line: str) -> str:
+        # One document budget covers assignments and rendered lines before joining.
+        # One substitution pass matches AsciiDoc's assignment-order semantics.
+        nonlocal remaining
+        parts = []
+        cursor = 0
+        for match in re.finditer(r"(?<!\\)\{([\w-]+)\}", line):
+            prefix = line[cursor:match.start()]
+            value = attributes.get(match[1].lower(), match.group())
+            remaining -= len(value)
+            if remaining < 0:
+                raise AssertionError("translation policy: AsciiDoc attribute expansion is too large")
+            parts.extend((prefix, value))
+            cursor = match.end()
+        parts.append(line[cursor:])
+        return "".join(parts)
+
+    lines = []
+    delimiter: str | None = None
+    literal_paragraph = False
+    literal_style = False
+    paragraph_start = True
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        blank = "\n" if line.endswith("\n") else ""
+        if delimiter is not None:
+            if stripped == delimiter:
+                delimiter = None
+                paragraph_start = True
+            lines.append(blank)
+            continue
+        if re.fullmatch(r"-{4,}|\.{4,}|/{4,}", stripped):
+            delimiter = stripped
+            literal_style = False
+            lines.append(blank)
+            continue
+        if not stripped:
+            literal_paragraph = False
+            paragraph_start = True
+            lines.append(line)
+            continue
+        if re.fullmatch(r"\[(?:source|literal|listing)(?:,[^\]]*)?\]", stripped):
+            literal_style = True
+            lines.append(blank)
+            continue
+        if literal_style or (paragraph_start and line[0].isspace()):
+            literal_paragraph = True
+            literal_style = False
+        paragraph_start = False
+        if literal_paragraph:
+            lines.append(blank)
+            continue
+        entry = re.fullmatch(r":(!?)([\w-]+)(!?):(?:[ \t]+(.*))?", stripped)
+        if entry:
+            name = entry[2].lower()
+            if entry[1] or entry[3]:
+                attributes.pop(name, None)
+            else:
+                attributes[name] = expand(entry[4] or "")
+            lines.append(blank)
+            paragraph_start = True
+        else:
+            lines.append(expand(line))
+    return "".join(lines)
 
 
 def _documentation_links(text: str, suffix: str) -> list[tuple[int, str]]:
     links: list[tuple[int, str]] = []
+    if suffix == ".rst":
+        text = _rst_source(text)
+    elif suffix in {".adoc", ".asciidoc"}:
+        text = _asciidoc_source(text)
 
     def add_html(fragment: str, line: int) -> None:
-        parser = _HTMLLinks()
+        parser = _HTMLLinks(mdx=suffix == ".mdx")
         parser.feed(fragment)
         parser.close()
         links.extend((line + offset - 1, target) for offset, target in parser.links)
@@ -103,6 +234,13 @@ def _documentation_links(text: str, suffix: str) -> list[tuple[int, str]]:
             r"(?m)^\s*\.\.\s+_[^:\n]+:\s*([^\s]+)",
             r"(?m)^\s*__\s+([^\s]+)",
         )
+        for match in re.finditer(r":(?:doc|download):`([^`\n]+)`", text):
+            content = match[1]
+            if content.startswith("!"):
+                continue  # Sphinx's explicit no-link form.
+            caption = re.search(r"<([^<>]+)>$", content)
+            target = caption[1] if caption else content.lstrip("~")
+            links.append((text.count("\n", 0, match.start()) + 1, target))
     elif suffix in {".adoc", ".asciidoc"}:
         patterns = (r"(?:link:|xref:)([^\s\[]+)\[", r"<<([^,\s>]+)(?:,[^>]*)?>>")
     for pattern in patterns:
@@ -163,7 +301,7 @@ def test_public_documentation_does_not_reference_readme_translations() -> None:
                 continue
             text = (ROOT / path).read_text(encoding="utf-8")
             for number, target in _documentation_links(text, path.suffix.lower()):
-                if _translation_reference(target):
+                if _translated_link(target, path):
                     violations.append(f"{path.as_posix()}:{number}")
     assert not violations, (
         "README translation policy violations in maintained documentation: "
@@ -178,31 +316,26 @@ def test_public_documentation_does_not_reference_readme_translations() -> None:
     "README.pt-BR.md",
     "docs/README_zh_Hant.md",
     "README-fil-PH.md",
-    "[French](docs/translations/README.fr-FR.md)",
-    '[fr]: https://github.com/Graphify-Labs/graphify/blob/v8/docs/translations/README.fr-FR.md',
-    '<a href="docs/translations/README.fr-FR.md">French</a>',
-    "<DOCS/TRANSLATIONS/README.FR-FR.MD>",
+    "https://github.com/Graphify-Labs/graphify/blob/v8/docs/translations/README.fr-FR.md",
+    "DOCS/TRANSLATIONS/README.FR-FR.MD",
     "docs%2Ftranslations%2FREADME.fr-FR.md",
     "docs/translations",
-    "[Translations](docs/translations)",
-    '<a href="docs/translations#languages">Translations</a>',
-    "[Translations](docs%2Ftranslations?view=all)",
+    "docs/translations#languages",
+    "docs%2Ftranslations?view=all",
 ])
-def test_translation_guard_rejects_restored_paths_and_links(reference: str) -> None:
-    assert _translation_reference(reference)
+def test_translation_guard_rejects_translated_destinations(reference: str) -> None:
+    assert _translated_link(reference, Path("README.md"))
 
 
 @pytest.mark.parametrize("reference", [
     "README.md",
     "docs/README.md",
     "worked/example/README.md",
-    "[Install](README.md#install)",
-    "Graphify supports multilingual input corpora.",
-    "Graphify supports translations",
+    "README.md#install",
     "docs/translations-guide.md",
 ])
-def test_translation_guard_preserves_english_readmes_and_corpus_support(reference: str) -> None:
-    assert not _translation_reference(reference)
+def test_translation_guard_preserves_english_destinations(reference: str) -> None:
+    assert not _translated_link(reference, Path("README.md"))
 
 
 @pytest.mark.parametrize("relative, content, rejected", [
@@ -314,6 +447,58 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("docs/guide.adoc", "link:README.fr.adoc[French]", True),
     ("docs/guide.adoc", "<<README.fr.adoc,French>>", True),
     ("README.md", '<a href="translations ">Translations</a>', True),
+    ("docs/fr/guide.md", "[French](README.md)", True),
+    ("docs/fr/nested/guide.md", "[French](../README.md)", True),
+    ("docs/fr/guide.md", "[English](../en/README.md)", False),
+    ("docs/fr/guide.md", "[English](/README.md)", False),
+    ("docs/fr/guide.md", "[English](https://example.com/README.md)", False),
+    ("README.md", "[Policy](#README.fr.md)", False),
+    ("README.md", "[Search](https://example.com/?q=README.fr.md)", False),
+    ("README.md", "[Guide](README.md?file=README.fr.md#README.de.md)", False),
+    ("README.md", "[French](README.fr.md?download=1#intro)", True),
+    ("README.md", "[French](docs/fr/../fr/README.md)", True),
+    ("docs/guide.rst", "Example::\n\n   `French <README.fr.rst>`_\n", False),
+    ("docs/guide.rst", ".. code-block:: rst\n\n   `French <README.fr.rst>`_\n", False),
+    ("docs/guide.rst", ".. code:: rst\n\n   `French <README.fr.rst>`_\n", False),
+    ("docs/guide.rst", ".. sourcecode:: rst\n\n   `French <README.fr.rst>`_\n", False),
+    ("docs/guide.rst", "Example::\n\n   `English <README.md>`_\n\n`French <README.fr.rst>`_", True),
+    ("docs/guide.adoc", "[source,asciidoc]\n----\nlink:README.fr.adoc[French]\n----", False),
+    ("docs/guide.adoc", "....\nlink:README.fr.adoc[French]\n....", False),
+    ("docs/guide.adoc", "----\nlink:README.md[English]\n----\n\nlink:README.fr.adoc[French]", True),
+    ("docs/guide.adoc", ":lang: fr\n\nlink:README.{lang}.adoc[French]", True),
+    ("docs/guide.adoc", ":guide: README.adoc\n\nlink:{guide}[English]", False),
+    ("docs/guide.adoc", ":guide: README.fr.adoc\n\nxref:{guide}[French]", True),
+    ("docs/guide.adoc", ":lang: fr\n\n----\nlink:README.{lang}.adoc[French]\n----", False),
+    ("docs/guide.rst", ":doc:`French <README.fr>`", True),
+    ("docs/guide.rst", ":doc:`README.fr`", True),
+    ("docs/guide.rst", ":download:`French <README.fr.rst>`", True),
+    ("docs/guide.rst", ":doc:`English <README>`", False),
+    ("docs/guide.rst", "Example::\n\n   :doc:`French <README.fr>`", False),
+    ("docs/guide.mdx", '<Link to="README.fr.md">French</Link>', True),
+    ("docs/guide.mdx", '<Link to="README.md">English</Link>', False),
+    ("docs/guide.mdx", '```mdx\n<Link to="README.fr.md">French</Link>\n```', False),
+    ("docs/guide.md", '<span to="README.fr.md">Example</span>', False),
+    ("docs/guide.rst", ".. parsed-literal::\n\n   `French <README.fr.rst>`_", True),
+    ("docs/guide.rst", "``:doc:`French <README.fr>` ``", False),
+    ("docs/guide.rst", ":doc:`!README.fr`", False),
+    ("docs/guide.adoc", "[literal]\nlink:README.fr.adoc[French]", False),
+    ("docs/guide.adoc", "[source,asciidoc]\nlink:README.fr.adoc[French]", False),
+    ("docs/guide.adoc", " link:README.fr.adoc[French]", False),
+    ("docs/guide.adoc", "-----\nlink:README.fr.adoc[French]\n-----", False),
+    ("docs/guide.adoc", ":lang: fr\n:guide: README.{lang}.adoc\n:lang: en\n\nlink:{guide}[French]", True),
+    ("docs/guide.adoc", ":guide: README.fr.adoc\n:guide: README.adoc\n\nlink:{guide}[English]", False),
+    ("docs/guide.adoc", ":guide: README.adoc\n\nlink:{guide}[English]\n\n:guide: README.fr.adoc", False),
+    ("docs/guide.adoc", ":guide: README.fr.adoc\n:!guide:\n\nlink:{guide}[Unknown]", False),
+    ("docs/guide.adoc", ":guide: README.fr.adoc\n:guide!:\n\nlink:{guide}[Unknown]", False),
+    ("docs/guide.mdx", '<NavLink to="README.fr.md">French</NavLink>', True),
+    ("README.md", "[Search](https://README.fr.md/?q=docs/fr/README.md)", False),
+    ("docs/fr/guide.md", "[Policy](?q=README.fr.md#README.de.md)", False),
+    ("README.md", "[French](ftp://example.com/README.fr.md)", True),
+    ("README.md", "[English](ftp://example.com/README.md)", False),
+    ("README.md", "[Search](ftp://example.com/?q=README.fr.md)", False),
+    ("docs/guide.rst", "Example::\n\n> `French <README.fr.rst>`_\n\nAfter example.", False),
+    ("docs/guide.rst", "Example::\n\n> `English <README.rst>`_\n\n`French <README.fr.rst>`_", True),
+    ("docs/guide.rst", "Example::\n\n| :doc:`French <README.fr>`\n", False),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,
@@ -335,6 +520,13 @@ def test_policy_checks_disposable_repository(
         check_policy()
 
 
+def test_asciidoc_attribute_expansion_has_an_aggregate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(f"{__name__}.MAX_ATTRIBUTE_EXPANSION_CHARS", 64)
+    text = ":word: abcdefgh\n\n" + "{word}\n" * 9
+    with pytest.raises(AssertionError, match="translation policy: AsciiDoc attribute expansion"):
+        _documentation_links(text, ".adoc")
+
+
 @pytest.mark.parametrize("extension", ["mdx", "markdown", "rst", "qmd", "txt", "adoc", "asciidoc"])
 def test_policy_checks_other_documentation_formats(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extension: str,
@@ -346,7 +538,7 @@ def test_policy_checks_other_documentation_formats(
     test_policy_checks_disposable_repository(
         tmp_path, monkeypatch, f"guide.{extension}", f"[French](README.fr.{extension})", True,
     )
-    assert not _translation_reference(f"README.{extension}")
+    assert not _translated_link(f"README.{extension}", Path(f"guide.{extension}"))
 
 
 @pytest.mark.parametrize("target_kind", ["missing", "directory", "file", "translated_file"])
