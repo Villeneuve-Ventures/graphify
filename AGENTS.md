@@ -28,9 +28,16 @@ keeps enforcement deterministic without attempting to infer a document's languag
 Maintained documentation under `worked/` follows this policy; corpus artifacts
 under `worked/*/raw/` and test fixtures under `tests/fixtures/` are exempt.
 
-The existing CI pytest gate checks README filenames and directory paths through
-`tests/test_readme_policy.py`. It does not determine text language or inspect
-documentation links; English README text remains a contribution requirement.
+The existing CI pytest gate checks complete README filenames and their immediate
+parent names in Git's file inventory through `tests/test_readme_policy.py`.
+It checks symlink names without following their targets. Filename locale markers
+remain prohibited before or after dotted format suffixes, including formats not
+listed by the guard. Known format tokens (such as `md`, `org`, and `tex`) take
+precedence over locale syntax, so `README.tex` and `README.md.org` are allowed.
+Other two- or three-letter tokens can still match the naming rule; the guard does
+not claim exhaustive language or format recognition. It does not determine text
+language or inspect documentation links; English README text remains a contribution
+requirement.
 Run the path checks locally with
 `uv run --frozen pytest tests/test_readme_policy.py -q --tb=short`.
 This rule does not restrict multilingual input corpora or language extraction

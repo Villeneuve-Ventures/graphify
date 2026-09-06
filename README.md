@@ -819,11 +819,16 @@ uv run pytest tests/ -q -k "python"    # filter by name
 ### What to contribute
 
 **README documentation is English-only.** Do not add or restore translated READMEs,
-including when syncing upstream changes. CI checks README filenames and directory
-paths with `tests/test_readme_policy.py`; run
+including when syncing upstream changes. CI checks complete README filenames and
+their immediate parent names in Git's file inventory with `tests/test_readme_policy.py`; run
 `uv run --frozen pytest tests/test_readme_policy.py -q --tb=short` locally.
-These checks do not determine text language or inspect documentation links;
-English README text remains a contribution requirement.
+The check uses symlink names without following their targets. Locale markers
+remain prohibited before or after dotted format suffixes, including unlisted
+formats. Known format tokens such as `md`, `org`, and `tex` take precedence over
+locale syntax: `README.tex` and `README.md.org` are allowed. Other two- or
+three-letter tokens can still match the naming rule; this is not exhaustive
+language or format recognition. These checks do not determine text language or
+inspect documentation links; English README text remains a contribution requirement.
 Graphify continues to support multilingual input corpora and language extraction.
 Non-English locale codes recognized by the policy guard are reserved as README
 parent-directory names, even for English text; use descriptive topic names such

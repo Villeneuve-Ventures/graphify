@@ -9,8 +9,9 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# These tokens take precedence over locale syntax; outer formats are not enumerated.
 DOCUMENTATION_EXTENSIONS = (
-    "md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc", "html", "htm", "org", "rdoc", "pdf",
+    "md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc", "html", "htm", "org", "rdoc", "pdf", "tex",
 )
 # Non-English locale parent names are reserved by policy, regardless of content.
 LANGUAGE_CODES = sorted({
@@ -32,16 +33,28 @@ README_LOCALE = (
     + r"|x(?:[-_][a-z0-9]{1,8})+"
     + r"|i[-_](?:ami|bnn|default|enochian|hak|klingon|lux|mingo|navajo|pwn|tao|tay|tsu))"
 )
-TRANSLATED_README = re.compile(
-    r"(?:\breadme\.(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
-    + r")[._-]" + README_LOCALE
-    + r"|\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
-    + r")(?![\w.-]))" + README_LOCALE
-    + r"|(?:^|/)(?:"
-    + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS + r"/readme)(?:\.(?:"
-    + "|".join(DOCUMENTATION_EXTENSIONS) + r"))?(?![\w.-])",
-    re.IGNORECASE,
-)
+LOCALE_DIRECTORY = re.compile(r"(?:" + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS)
+FORMAT_ATOM = re.compile(r"[a-z0-9]+")
+
+
+def _translated_readme_name(name: str) -> bool:
+    match = re.fullmatch(r"readme[._-](.+)", name)
+    if match is None:
+        return False
+    fields = match[1].split(".")
+    for index, field in enumerate(fields):
+        # All surrounding fields must be complete format atoms.
+        if any(not FORMAT_ATOM.fullmatch(atom)
+               for offset, atom in enumerate(fields) if offset != index):
+            continue
+        candidates = [field]
+        prefix = re.fullmatch(r"[a-z0-9]+[-_](.+)", field)
+        if prefix is not None:
+            candidates.append(prefix[1])
+        if any(candidate not in DOCUMENTATION_EXTENSIONS
+               and re.fullmatch(README_LOCALE, candidate) for candidate in candidates):
+            return True
+    return False
 
 
 def _translation_path(path: Path) -> bool:
@@ -49,7 +62,11 @@ def _translation_path(path: Path) -> bool:
     return (
         normalized.is_relative_to("translations")
         or normalized.is_relative_to("docs/translations")
-        or TRANSLATED_README.search(normalized.as_posix()) is not None
+        or (
+            LOCALE_DIRECTORY.fullmatch(normalized.parent.name) is not None
+            and re.fullmatch(r"readme(?:\.[a-z0-9]+)*", normalized.name) is not None
+        )
+        or _translated_readme_name(normalized.name)
     )
 
 
@@ -147,6 +164,9 @@ def test_no_readme_translations_in_repository() -> None:
     ("README.org.fr", True),
     ("README.rdoc.fr", True),
     ("README.pdf.fr", True),
+    ("README.fr.tex", True),
+    ("README.tex", False),
+    ("fr/readme.md/notes.txt", False),
 ])
 def test_readme_path_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, rejected: bool,
@@ -172,6 +192,53 @@ def test_readme_path_policy_supports_documentation_formats(
     test_readme_path_policy(tmp_path, monkeypatch, translated, True)
     (tmp_path / translated).unlink()
     test_readme_path_policy(tmp_path, monkeypatch, f"README{suffix}", False)
+
+
+@pytest.mark.parametrize("relative, rejected", [
+    ("README.fr.docx", True),
+    ("README.docx.fr", True),
+    ("README.tex.fr", True),
+    ("README.fr.longformat", True),
+    ("README.longformat.fr", True),
+    ("README.docx-fr", True),
+    ("README.docx_fr", True),
+    ("README.md.org.fr", True),
+    ("README.FR.TEX", True),
+    ("README", False),
+    ("README.docx", False),
+    ("README.longformat", False),
+    ("README.md.docx", False),
+    ("README.md.org", False),
+    ("README.tex.md", False),
+    ("README.fr.md/notes.txt", False),
+    ("docs/fr/README.md/notes.txt", False),
+    ("my-README.fr.md", False),
+    ("my README.fr.md", False),
+    ("fr/README", True),
+    ("fr/README.md.org", True),
+    ("docs/fr/README.tex", True),
+    ("docs/fr/README.docx", True),
+    ("docs/fr/README.longformat", True),
+    ("DOCS/FR/README.DOCX", True),
+    ("README..fr.md", False),
+    ("README.fr..md", False),
+    ("README.i-klingon-extra.md.gz", False),
+    ("README.x--a.md.gz", False),
+    ("worked/example/raw/README.fr.docx", False),
+    ("tests/fixtures/fr/README.tex", False),
+    ("worked/example/README.fr.docx", True),
+])
+def test_complete_readme_path_components(relative: str, rejected: bool) -> None:
+    path = Path(relative)
+    assert (_owned_documentation(path) and _translation_path(path)) is rejected
+
+
+@pytest.mark.parametrize("basename", [
+    "README.fr", "README.fr.md", "README.md.fr", "README.x-private", "README.md.i-klingon",
+])
+@pytest.mark.parametrize("suffix", [".md", ".docx", ".longformat.notes"])
+def test_format_chain_cannot_hide_readme_locale(basename: str, suffix: str) -> None:
+    assert _translation_path(Path(basename + suffix))
 
 
 def test_path_checks_ignore_document_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
