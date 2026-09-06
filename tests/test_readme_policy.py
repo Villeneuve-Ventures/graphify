@@ -1,16 +1,18 @@
 """Keep Graphify's own README documentation English-only in the existing CI gate."""
 
 from pathlib import Path
+from html.parser import HTMLParser
 import locale
 import re
 import subprocess
 from urllib.parse import unquote
 
 import pytest
+from markdown_it import MarkdownIt  # Already locked through Bandit/Rich in the dev environment.
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc")
+DOCUMENTATION_EXTENSIONS = ("md", "mdx", "qmd", "markdown", "rst", "txt", "adoc", "asciidoc", "html", "htm")
 # Non-English locale parent names are reserved by policy, regardless of content.
 LANGUAGE_CODES = sorted({
     key.split("_", 1)[0] for key in locale.locale_alias
@@ -25,7 +27,9 @@ LOCALE_SUBTAGS = (
     r"(?:[-_]x(?:[-_][a-z0-9]{1,8})+)?"
 )
 TRANSLATED_README = re.compile(
-    r"(?:\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
+    r"(?:\breadme\.(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
+    + r")[._-][a-z]{2,3}" + LOCALE_SUBTAGS
+    + r"|\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
     + r")(?![\w.-]))[a-z]{2,3}" + LOCALE_SUBTAGS
     + r"|(?<![\w.-])(?:translations(?:/[^\s/<>\[\]()\"']+)*|(?:"
     + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS + r")/readme)(?:\.(?:"
@@ -39,22 +43,72 @@ HISTORICAL_DIRECTORY_REFERENCE = re.compile(
     r"(?:^|(?<=[(\"'<]))translations(?=$|[/?#)>\]\"']|\s+[\"'])",
     re.IGNORECASE,
 )
-# Preserve the exact pre-policy historical mentions, not arbitrary future links.
-HISTORICAL_CHANGELOG_LINES = {
-    "- Docs: Persian (فارسی) README translation added (`docs/translations/README.fa-IR.md`; historical path, removed in 0.10.0).",
-    "- Fix: Trae link corrected from `trae.com` to `trae.ai` in README, README.zh-CN.md, README.ja-JP.md, README.ko-KR.md (#122)",
-    "- Docs: Korean README added (README.ko-KR.md) (#112)",
-}
-POLICY_EXAMPLE_LINES = {
-    "`translations/` and `docs/translations/` directories absent and do not introduce",
-    "locale-suffixed README files (for example, `README.fr-FR.md`).",
-}
+BARE_URL = re.compile(r"(?:https?://|//)[^\s<>\"']+", re.IGNORECASE)
 
 
 def _translation_reference(text: str) -> bool:
-    normalized = unquote(text).replace("\\", "/")
+    normalized = unquote(text).replace("\\", "/").strip()
     return bool(TRANSLATED_README.search(normalized)
                 or HISTORICAL_DIRECTORY_REFERENCE.search(normalized))
+
+
+class _HTMLLinks(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[int, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # HTMLParser decodes character references in attributes exactly once.
+        for name, value in attrs:
+            if name in {"href", "xlink:href"} and value is not None:
+                self.links.append((self.getpos()[0], value))
+
+
+def _documentation_links(text: str, suffix: str) -> list[tuple[int, str]]:
+    links: list[tuple[int, str]] = []
+
+    def add_html(fragment: str, line: int) -> None:
+        parser = _HTMLLinks()
+        parser.feed(fragment)
+        parser.close()
+        links.extend((line + offset - 1, target) for offset, target in parser.links)
+
+    if suffix in {".html", ".htm"}:
+        add_html(text, 1)
+        return links
+
+    env = {}
+    for block in MarkdownIt("commonmark").parse(text, env):
+        line = (block.map or [0])[0] + 1
+        if block.type == "html_block":
+            add_html(block.content, line)
+        for token in block.children or []:
+            if token.type == "link_open":
+                target = token.attrGet("href")
+                if isinstance(target, str):
+                    links.append((line, target))
+            elif token.type == "html_inline":
+                add_html(token.content, line)
+            elif token.type == "text":
+                links.extend((line, match.group()) for match in BARE_URL.finditer(token.content))
+            line += token.content.count("\n") + (token.type in {"softbreak", "hardbreak"})
+    for reference in env.get("references", {}).values():
+        links.append((reference["map"][0] + 1, reference["href"]))
+
+    # Explicit link syntax used by the other maintained text formats.
+    patterns: tuple[str, ...] = ()
+    if suffix == ".rst":
+        patterns = (
+            r"`[^`]*<([^<>\n]+)>`_+",
+            r"(?m)^\s*\.\.\s+_[^:\n]+:\s*([^\s]+)",
+            r"(?m)^\s*__\s+([^\s]+)",
+        )
+    elif suffix in {".adoc", ".asciidoc"}:
+        patterns = (r"(?:link:|xref:)([^\s\[]+)\[", r"<<([^,\s>]+)(?:,[^>]*)?>>")
+    for pattern in patterns:
+        links.extend((text.count("\n", 0, match.start()) + 1, match.group(1))
+                     for match in re.finditer(pattern, text))
+    return links
 
 
 def _translation_path(path: Path) -> bool:
@@ -96,8 +150,7 @@ def test_no_readme_translations_in_repository() -> None:
 
 
 def test_public_documentation_does_not_reference_readme_translations() -> None:
-    # The agent policy includes examples of forbidden paths. Historical changelog
-    # mentions are exempt individually so new links still pass through the guard.
+    # Inspect link destinations, preserving ordinary prose and code examples.
     violations = []
     for path in _repository_files():
         if (
@@ -108,13 +161,9 @@ def test_public_documentation_does_not_reference_readme_translations() -> None:
             if not (ROOT / path).is_file():
                 violations.append(f"{path.as_posix()}: non-regular documentation target")
                 continue
-            for number, line in enumerate((ROOT / path).read_text(encoding="utf-8").splitlines(), 1):
-                if (
-                    (path == Path("CHANGELOG.md") and line in HISTORICAL_CHANGELOG_LINES)
-                    or (path == Path("AGENTS.md") and line in POLICY_EXAMPLE_LINES)
-                ):
-                    continue
-                if _translation_reference(line):
+            text = (ROOT / path).read_text(encoding="utf-8")
+            for number, target in _documentation_links(text, path.suffix.lower()):
+                if _translation_reference(target):
                     violations.append(f"{path.as_posix()}:{number}")
     assert not violations, (
         "README translation policy violations in maintained documentation: "
@@ -239,6 +288,32 @@ def test_translation_guard_preserves_english_readmes_and_corpus_support(referenc
     ("README.md", "(Translations remain supported)", False),
     ("README.md", "[Translations](translations)", True),
     ("README.md", '[Translations](translations "Languages")', True),
+    ("README.md", '<a href="README&#46;fr&#46;md">French</a>', True),
+    ("README.md", '<a href="docs&#x2f;translations">Translations</a>', True),
+    ("README.md", '[French](README&#37;2Efr&#37;2Emd)', True),
+    ("CHANGELOG.md", "Removed the old README.de.md translation", False),
+    ("AGENTS.md", "Do not restore README.fr.md", False),
+    ("README.md", "`[French](README.fr.md)` is a forbidden link example.", False),
+    ("README.md", "```markdown\n[French](README.fr.md)\n```", False),
+    ("README.md", '&lt;a href="README.fr.md"&gt;French&lt;/a&gt;', False),
+    ("docs/index.html", '<a href="README.fr.md">French</a>', True),
+    ("docs/index.htm", '<a href="README&#46;fr&#46;md">French</a>', True),
+    ("docs/index.html", '<a\n href="README.fr.md">French</a>', True),
+    ("docs/index.html", '<p>Removed README.fr.md</p>', False),
+    ("README.md.fr", "French documentation", True),
+    ("README.md.zh-CN", "Chinese documentation", True),
+    ("README.md", "[French](README.md.fr)", True),
+    ("README.md", "[Chinese](README.md.zh-CN)", True),
+    ("README.adoc.de-DE-u-co-phonebk", "German documentation", True),
+    ("README.md", "[French](\nREADME.fr.md)", True),
+    ("README.md", "[French][fr]\n\n[fr]:\n  README.fr.md", True),
+    ("docs/guide.rst", "`French <README.fr.rst>`_", True),
+    ("docs/guide.rst", "French_\n\n.. _French: README.fr.rst", True),
+    ("docs/guide.rst", "French_\n\n.. _French:\n  README.fr.rst", True),
+    ("docs/guide.rst", "French__\n\n__ README.fr.rst", True),
+    ("docs/guide.adoc", "link:README.fr.adoc[French]", True),
+    ("docs/guide.adoc", "<<README.fr.adoc,French>>", True),
+    ("README.md", '<a href="translations ">Translations</a>', True),
 ])
 def test_policy_checks_disposable_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, content: str, rejected: bool,
@@ -269,7 +344,7 @@ def test_policy_checks_other_documentation_formats(
     )
     (tmp_path / f"README.fr.{extension}").unlink()
     test_policy_checks_disposable_repository(
-        tmp_path, monkeypatch, f"guide.{extension}", f"README.fr.{extension}", True,
+        tmp_path, monkeypatch, f"guide.{extension}", f"[French](README.fr.{extension})", True,
     )
     assert not _translation_reference(f"README.{extension}")
 
@@ -284,7 +359,7 @@ def test_policy_checks_documentation_symlinks(
     if target_kind == "directory":
         target.mkdir()
     elif target_kind in {"file", "translated_file"}:
-        target.write_text("README.fr.md" if target_kind == "translated_file" else "English guide")
+        target.write_text("[French](README.fr.md)" if target_kind == "translated_file" else "English guide")
     try:
         (tmp_path / "guide.md").symlink_to(target, target_is_directory=target_kind == "directory")
     except (OSError, NotImplementedError):
