@@ -23,11 +23,18 @@ LOCALE_SUBTAGS = (
     r"(?:[-_][0-9a-wy-z](?:[-_][a-z0-9]{2,8})+)*"
     r"(?:[-_]x(?:[-_][a-z0-9]{1,8})+)?"
 )
+# RFC 5646 section 2.1 also permits private-use-only and fixed grandfathered tags.
+# This extends README suffixes only; reserved parent-directory codes stay separate.
+README_LOCALE = (
+    r"(?:[a-z]{2,3}" + LOCALE_SUBTAGS
+    + r"|x(?:[-_][a-z0-9]{1,8})+"
+    + r"|i[-_](?:ami|bnn|default|enochian|hak|klingon|lux|mingo|navajo|pwn|tao|tay|tsu))"
+)
 TRANSLATED_README = re.compile(
     r"(?:\breadme\.(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
-    + r")[._-][a-z]{2,3}" + LOCALE_SUBTAGS
+    + r")[._-]" + README_LOCALE
     + r"|\breadme[._-](?!(?:" + "|".join(DOCUMENTATION_EXTENSIONS)
-    + r")(?![\w.-]))[a-z]{2,3}" + LOCALE_SUBTAGS
+    + r")(?![\w.-]))" + README_LOCALE
     + r"|(?<![\w.-])(?:translations(?:/[^\s/<>\[\]()\"']+)*|(?:"
     + "|".join(LANGUAGE_CODES) + r")" + LOCALE_SUBTAGS + r")/readme)(?:\.(?:"
     + "|".join(DOCUMENTATION_EXTENSIONS) + r"))?(?![\w.-])",
@@ -59,7 +66,9 @@ def _repository_files() -> list[Path]:
     )
     # Keep gitlinks, symlinks, and absent tracked entries for the naming policy.
     # No file content or symlink target needs to be read.
-    return [Path(name.decode("utf-8")) for name in result.stdout.split(b"\0") if name]
+    # Git index names may contain arbitrary bytes, including on Windows hosts.
+    return [Path(name.decode("utf-8", "surrogateescape"))
+            for name in result.stdout.split(b"\0") if name]
 
 
 def test_no_readme_translations_in_repository() -> None:
@@ -108,6 +117,22 @@ def test_no_readme_translations_in_repository() -> None:
     ("worked/example/raw/README.fr.md", False),
     ("worked/example/raw/translations/fr.json", False),
     ("tests/fixtures/translations/README.fr.md", False),
+    ("README.x-private.md", True),
+    ("README.x-a.md", True),
+    ("README.md.x-private", True),
+    ("README.i-klingon.md", True),
+    ("README.md.i-klingon", True),
+    ("README.en-GB-oed.md", True),
+    ("README.x-.md", False),
+    ("README.x-abcdefghi.md", False),
+    ("README.i-other.md", False),
+    ("README.i-klingon-extra.md", False),
+    ("README.I-AMI.md", True),
+    ("README.i-enochian.md", True),
+    ("README.x-abcdefgh-a.md", True),
+    ("README.x--a.md", False),
+    ("docs/x-private/README.md", False),
+    ("docs/i-klingon/README.md", False),
 ])
 def test_readme_path_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str, rejected: bool,
@@ -173,6 +198,31 @@ def test_readme_path_policy_checks_absent_tracked_entries(
     subprocess.run(["git", "add", "README.fr.md"], cwd=tmp_path, check=True, capture_output=True)
     path.unlink()
     with pytest.raises(AssertionError, match="README.fr.md"):
+        test_no_readme_translations_in_repository()
+
+
+@pytest.mark.parametrize("relative, rejected", [
+    (b"worked/example/raw/caf\xe9.txt", False),
+    (b"docs/caf\xe9/README.fr.md", True),
+])
+def test_readme_path_policy_preserves_non_utf8_git_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: bytes, rejected: bool,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+    monkeypatch.setattr(f"{__name__}.ROOT", tmp_path)
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"], cwd=tmp_path,
+        input=b"Example", check=True, capture_output=True,
+    ).stdout.strip()
+    # Index bytes exercise Git's path protocol even on UTF-8-only filesystems.
+    subprocess.run(
+        ["git", "update-index", "--index-info"], cwd=tmp_path,
+        input=b"100644 " + blob + b"\t" + relative + b"\n", check=True, capture_output=True,
+    )
+    if rejected:
+        with pytest.raises(AssertionError, match="translation"):
+            test_no_readme_translations_in_repository()
+    else:
         test_no_readme_translations_in_repository()
 
 
