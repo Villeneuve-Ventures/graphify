@@ -9295,10 +9295,8 @@ def _query_graph_data(
         alias_before = alias.lstat()
         if stat.S_ISLNK(alias_before.st_mode):
             target = alias.resolve(strict=True)
-            selected_graph = selected_path / "graph.json"
-            if local_coordination and (
-                detached.path != selected_path or target != selected_graph
-            ):
+            selected_graph = (detached.path if local_coordination else selected_path) / "graph.json"
+            if local_coordination and target != selected_graph:
                 raise PendingTransactionError("graph alias cannot bypass local coordination")
             target_before = target.lstat()
             if not stat.S_ISREG(target_before.st_mode):

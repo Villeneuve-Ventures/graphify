@@ -323,3 +323,100 @@ def test_query_alias_preserves_admission(native_query_copy, monkeypatch, invalid
     with pytest.raises(tx.PendingTransactionError):
         tx._query_graph_data(alias, managed_output=output)
     assert injected
+
+
+@pytest.fixture
+def other_native_query_output(native_query_copy, tmp_path, monkeypatch):
+    import subprocess
+    from tests.test_detect import _native_detection_fixture
+
+    output, _ = native_query_copy
+    subprocess.run(["git", "init", "-q", str(output.parent)], check=True)
+    other_root = tmp_path / "other-corpus"
+    other_root.mkdir()
+    other_output, _ = _native_detection_fixture(other_root, finalize=True)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(other_output))
+    return other_output
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_query_cli_local_managed_alias_overrides_output(
+    native_query_copy, other_native_query_output, monkeypatch, capsys, absolute,
+):
+    from graphify import transaction as tx
+
+    output, _ = native_query_copy
+    alias = output / "alias.json"
+    alias.symlink_to(output / "graph.json" if absolute else "graph.json")
+    before = {
+        directory / name: (directory / name).read_bytes()
+        for directory in (output, other_native_query_output)
+        for name in ("graph.json", "manifest.json", tx.RECEIPT_FILE)
+    }
+    for graph in (output / "graph.json", alias):
+        monkeypatch.setattr(mainmod.sys, "argv", [
+            "graphify", "query", "extract", "--graph", str(graph),
+        ])
+        mainmod.main()
+        assert "extract" in capsys.readouterr().out
+    assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize("invalid", ["foreign", "legacy", "detached", "receipt", "pending"])
+def test_query_local_managed_alias_preserves_local_admission(
+    native_query_copy, other_native_query_output, invalid,
+):
+    from graphify import transaction as tx
+
+    output, graph = native_query_copy
+    target = output / "graph.json"
+    if invalid == "foreign":
+        target = other_native_query_output / "graph.json"
+    elif invalid == "legacy":
+        target = _write_graph(graph.parent)
+    elif invalid == "detached":
+        target = graph
+    elif invalid == "receipt":
+        (output / tx.RECEIPT_FILE).write_bytes(b"{}")
+    else:
+        tx.begin_transaction("full", output.parent, output=output)
+    alias = output / "alias.json"
+    alias.symlink_to(target)
+    with pytest.raises(tx.PendingTransactionError):
+        tx._query_graph_data(alias, managed_output=other_native_query_output)
+
+
+@pytest.mark.parametrize("invalid", ["alias-replaced", "target-replaced", "receipt", "pending"])
+def test_query_local_managed_alias_rechecks_admission(
+    native_query_copy, other_native_query_output, monkeypatch, invalid,
+):
+    from graphify import transaction as tx
+
+    output, graph = native_query_copy
+    target = output / "graph.json"
+    alias = output / "alias.json"
+    alias.symlink_to("graph.json")
+    original = tx.open_graph_snapshot
+    injected = False
+
+    def snapshot(*args, **kwargs):
+        nonlocal injected
+        result = original(*args, **kwargs)
+        if invalid == "alias-replaced":
+            alias.unlink()
+            alias.symlink_to(_write_graph(graph.parent))
+        elif invalid == "target-replaced":
+            payload = target.read_bytes()
+            target.unlink()
+            target.write_bytes(payload)
+        elif invalid == "receipt":
+            (output / tx.RECEIPT_FILE).write_bytes(b"{}")
+        else:
+            tx.begin_transaction("full", output.parent, output=output)
+        injected = True
+        return result
+
+    monkeypatch.setattr(tx, "open_graph_snapshot", snapshot)
+    with pytest.raises(tx.PendingTransactionError):
+        tx._query_graph_data(alias, managed_output=other_native_query_output)
+    assert injected
