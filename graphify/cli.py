@@ -3591,6 +3591,9 @@ def _dispatch_command(cmd: str) -> None:
                 google_workspace=google_workspace or None,
                 extra_excludes=cli_excludes or None,
             )
+            if detection.get("walk_errors"):
+                print("error: source scan incomplete; refusing graph publication", file=sys.stderr)
+                sys.exit(1)
             files_by_type = detection.get("files", {})
             new_by_type = detection.get("new_files", {})
             code_files = [Path(p) for p in new_by_type.get("code", [])]
@@ -3613,6 +3616,9 @@ def _dispatch_command(cmd: str) -> None:
         else:
             print(f"[graphify extract] scanning {target}")
             detection = _detect(target, google_workspace=google_workspace or None, extra_excludes=cli_excludes or None, cache_root=out_root)
+            if detection.get("walk_errors"):
+                print("error: source scan incomplete; refusing graph publication", file=sys.stderr)
+                sys.exit(1)
             files_by_type = detection.get("files", {})
             code_files = [Path(p) for p in files_by_type.get("code", [])]
             doc_files = [Path(p) for p in files_by_type.get("document", [])]

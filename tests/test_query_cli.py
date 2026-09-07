@@ -129,7 +129,7 @@ def test_query_cli_detached_native_requires_explicit_output(native_query_copy, m
     assert "generation receipt is missing" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("unsafe", ["different-bytes", "symlink", "fifo", "oversize"])
+@pytest.mark.parametrize("unsafe", ["different-bytes", "symlink", "fifo"])
 def test_query_cli_detached_input_rejections(native_query_copy, monkeypatch, capsys, unsafe):
     _output, graph = native_query_copy
     if unsafe == "different-bytes":
@@ -141,8 +141,6 @@ def test_query_cli_detached_input_rejections(native_query_copy, monkeypatch, cap
     elif unsafe == "fifo":
         graph.unlink()
         os.mkfifo(graph)
-    else:
-        monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", "16")
     with pytest.raises(SystemExit) as stopped:
         mainmod.main()
     assert stopped.value.code == 1
@@ -236,16 +234,92 @@ def test_query_cli_preserves_legacy_with_explicit_output(native_query_copy, caps
 
 
 @pytest.mark.parametrize("kind", ["legacy", "managed"])
+@pytest.mark.parametrize("override", [False, True])
 def test_query_cli_preserves_ordinary_graph_symlink(
-    native_query_copy, monkeypatch, capsys, kind,
+    native_query_copy, monkeypatch, capsys, kind, override,
 ):
     output, graph = native_query_copy
     target = _write_graph(graph.parent) if kind == "legacy" else output / "graph.json"
     alias = graph.parent / "alias.json"
     alias.symlink_to(target)
-    monkeypatch.delenv("GRAPHIFY_OUT")
+    if not override:
+        monkeypatch.delenv("GRAPHIFY_OUT")
     monkeypatch.setattr(mainmod.sys, "argv", [
         "graphify", "query", "extract", "--graph", str(alias),
     ])
     mainmod.main()
     assert "extract" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fits", [False, True])
+def test_detached_reader_enforces_own_size_cap(native_query_copy, monkeypatch, fits):
+    from graphify import transaction as tx
+
+    output, graph = native_query_copy
+    limit = graph.stat().st_size - (not fits)
+    monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", str(limit))
+    original = tx._read_open_regular
+    calls = []
+
+    def read(fd, *, limit, label):
+        calls.append((limit, label))
+        return original(fd, limit=limit, label=label)
+
+    monkeypatch.setattr(tx, "_read_open_regular", read)
+    if fits:
+        assert tx._query_graph_data(graph, managed_output=output)["nodes"]
+    else:
+        with pytest.raises(tx.PendingTransactionError, match="unsafe legacy artifact: graph.json"):
+            tx._query_graph_data(graph, managed_output=output)
+    assert (limit, "graph.json") in calls
+
+
+@pytest.mark.parametrize("escape", [False, True])
+def test_query_alias_inside_selected_output(native_query_copy, escape):
+    from graphify import transaction as tx
+
+    output, graph = native_query_copy
+    target = _write_graph(graph.parent) if escape else output / "graph.json"
+    alias = output / "alias.json"
+    alias.symlink_to(target)
+    if escape:
+        with pytest.raises(tx.PendingTransactionError):
+            tx._query_graph_data(alias, managed_output=output)
+    else:
+        assert tx._query_graph_data(alias, managed_output=output)["nodes"]
+
+
+@pytest.mark.parametrize("invalid", ["alias-replaced", "target-replaced", "local-coordination", "receipt", "pending"])
+def test_query_alias_preserves_admission(native_query_copy, monkeypatch, invalid):
+    from graphify import transaction as tx
+
+    output, graph = native_query_copy
+    target = output / "graph.json"
+    alias = graph.parent / "alias.json"
+    alias.symlink_to(target)
+    original = tx.open_graph_snapshot
+    injected = False
+
+    def snapshot(*args, **kwargs):
+        nonlocal injected
+        result = original(*args, **kwargs)
+        injected = True
+        if invalid == "alias-replaced":
+            alias.unlink()
+            alias.symlink_to(_write_graph(graph.parent))
+        elif invalid == "target-replaced":
+            payload = target.read_bytes()
+            target.unlink()
+            target.write_bytes(payload)
+        elif invalid == "local-coordination":
+            shutil.copyfile(output / tx.RECEIPT_FILE, graph.parent / tx.RECEIPT_FILE)
+        elif invalid == "receipt":
+            (output / tx.RECEIPT_FILE).write_bytes(b"{}")
+        else:
+            tx.begin_transaction("full", output.parent, output=output)
+        return result
+
+    monkeypatch.setattr(tx, "open_graph_snapshot", snapshot)
+    with pytest.raises(tx.PendingTransactionError):
+        tx._query_graph_data(alias, managed_output=output)
+    assert injected

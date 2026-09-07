@@ -2102,6 +2102,34 @@ def _native_detection_fixture(root, *, output=None, finalize=False):
     return output, token
 
 
+@pytest.mark.parametrize("locator", ["absent", "matching", "foreign", "replacement"])
+def test_active_native_output_selects_corpus_metadata(tmp_path, monkeypatch, locator):
+    from graphify import transaction as tx
+
+    if tx._PLATFORM == "windows":
+        pytest.skip("native Windows publication remains unsupported")
+    (tmp_path / "source.py").write_text("def source(): return 1\n")
+    output = tmp_path / "nested" / "graphify-out"
+    _native_detection_fixture(tmp_path, output=output, finalize=True)
+    tx._AUTHORITY.set(None)
+    tx.begin_transaction("full", tmp_path, output=output)
+    if locator == "matching":
+        monkeypatch.setenv("GRAPHIFY_TRANSACTION_OUTPUT", str(output))
+    elif locator == "foreign":
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        monkeypatch.setenv("GRAPHIFY_TRANSACTION_OUTPUT", str(foreign))
+    elif locator == "replacement":
+        output.rename(output.with_name("retained-output"))
+        output.mkdir()
+    observed = detect(tmp_path)
+    if locator in {"foreign", "replacement"}:
+        assert observed["walk_errors"]
+    else:
+        assert observed["walk_errors"] == []
+        assert observed["files"]["code"] == [str(tmp_path / "source.py")]
+
+
 def test_detect_native_operational_corpus_separation(tmp_path):
     import json
     import subprocess

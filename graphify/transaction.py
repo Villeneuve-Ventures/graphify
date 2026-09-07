@@ -490,6 +490,7 @@ class _Authority:
     root: str
     kind: TransactionKind
     phase: str
+    output: Path
 
 
 _AUTHORITY = contextvars.ContextVar[_Authority | None](
@@ -3080,6 +3081,7 @@ def _authority_for(tx: Transaction, drainer: DrainerTuple | None = None) -> _Aut
         tx.root,
         tx.kind,
         tx.phase,
+        tx.output,
     )
 
 
@@ -3509,8 +3511,7 @@ class _OperationalCorpusScan:
         self.root = root
         self.context = self._context()
         self.authority = self.context[0]
-        locator = os.environ.get("GRAPHIFY_TRANSACTION_OUTPUT")
-        self.output = Path(locator) if self.authority is not None and locator else Path(output)
+        self.output = self.authority.output if self.authority is not None else Path(output)
         self.output = self.output.expanduser()
         if not self.output.is_absolute():
             self.output = root / self.output
@@ -3632,6 +3633,13 @@ class _OperationalCorpusScan:
             raise _IncompleteCorpusRecognition("output selection context changed")
         if self.authority is None:
             return None
+        locator = os.environ.get("GRAPHIFY_TRANSACTION_OUTPUT")
+        if locator is not None:
+            selected = Path(locator).expanduser()
+            if not selected.is_absolute():
+                selected = self.root / selected
+            if selected.resolve(strict=True) != self.output:
+                raise _IncompleteCorpusRecognition("runner output locator contradicts its owner")
         raw = self._read(managed, TRANSACTION_FILE, fingerprints)
         try:
             if raw is None or raw.get("root") != str(self.root):
@@ -9281,7 +9289,46 @@ def _query_graph_data(
         return open_graph_snapshot(requested.resolve(), purpose="query").data
     selected = Path(managed_output).expanduser().absolute()
     with pin_output(requested.parent.resolve(strict=True), mutation=False) as detached:
-        if detached.path == selected.resolve() or _coordination_present(detached):
+        selected_path = selected.resolve()
+        local_coordination = _coordination_present(detached)
+        alias = detached.path / requested.name
+        alias_before = alias.lstat()
+        if stat.S_ISLNK(alias_before.st_mode):
+            target = alias.resolve(strict=True)
+            selected_graph = selected_path / "graph.json"
+            if local_coordination and (
+                detached.path != selected_path or target != selected_graph
+            ):
+                raise PendingTransactionError("graph alias cannot bypass local coordination")
+            target_before = target.lstat()
+            if not stat.S_ISREG(target_before.st_mode):
+                raise PendingTransactionError("graph alias target is not a regular file")
+            snapshot = open_graph_snapshot(target, purpose="query")
+            if snapshot.generation is not None and target != selected_graph:
+                raise PendingTransactionError("graph alias does not select the managed graph")
+            if local_coordination and snapshot.generation is None:
+                raise PendingTransactionError("graph alias requires native local admission")
+            # An ordinary alias never enters detached-copy admission. Reuse
+            # snapshot validation and bind both names across that observation.
+            with pin_output(target.parent, mutation=False) as source, _locked(source):
+                _validate_expected_snapshot_locked(source, snapshot)
+                if snapshot.generation is not None:
+                    _validate_receipt_locked(
+                        source, graph_payload=snapshot.payload, require_closed=True,
+                    )
+                if (
+                    _stat_signature(alias.lstat()) != _stat_signature(alias_before)
+                    or alias.resolve(strict=True) != target
+                    or _stat_signature(target.lstat()) != _stat_signature(target_before)
+                    or requested.parent.resolve(strict=True) != detached.path
+                    or selected.resolve() != selected_path
+                    or _coordination_present(detached) != local_coordination
+                ):
+                    raise PendingTransactionError("graph alias binding changed during admission")
+                source.validate()
+                detached.validate()
+            return snapshot.data
+        if detached.path == selected_path or local_coordination:
             return open_graph_snapshot(requested, purpose="query").data
         if _PLATFORM == "windows":
             # Preserve ordinary local/legacy reads without enabling an unproven
