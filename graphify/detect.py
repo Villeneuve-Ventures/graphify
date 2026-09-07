@@ -1183,6 +1183,8 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
     # silently partial graph.json. Record and surface every skipped directory
     # so an incomplete enumeration is visible rather than silent.
     walk_errors: list[str] = []
+    from graphify.transaction import _OperationalCorpusScan
+    operational_scan = _OperationalCorpusScan(root, GRAPHIFY_OUT)
 
     def _on_walk_error(err: OSError) -> None:
         import sys as _sys
@@ -1233,6 +1235,8 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                         continue
                     if _is_ignored(dp / d, root, ignore_patterns, _cache=ignore_cache):
                         ignored.append(str(dp / d) + os.sep)
+                        continue
+                    if operational_scan.prune(dp / d, follow_symlinks=follow_symlinks):
                         continue
                     kept_dirs.append(d)
                 dirnames[:] = kept_dirs
@@ -1339,6 +1343,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             f"Consider running on a subfolder."
         )
 
+    walk_errors.extend(operational_scan.finish())
     return {
         "files": {k.value: v for k, v in files.items()},
         "total_files": total_files,

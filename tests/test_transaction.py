@@ -11280,7 +11280,7 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
         ("cli.py", "_transactional_extract", "extract-baseline"),
         ("cli.py", "_transactional_cluster_only", "publication-prepare"),
         ("cli.py", "_transactional_export", "export-admission"),
-        ("cli.py", "_dispatch_command", "query"),
+        ("transaction.py", "_query_graph_data", "query"),
         ("cli.py", "_dispatch_command", "path"),
         ("cli.py", "_dispatch_command", "explain"),
         ("cli.py", "_dispatch_command", "cluster-only"),
@@ -11344,6 +11344,7 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
     }
     assert {
         "open_prepared_graph",  # prepared/private identity-bound workspace
+        "_query_graph_data",  # detached query with independently selected native receipt
         "_load_detached_merge_snapshot_with_identity",  # unmanaged/detached input
     } <= transaction_functions
 
