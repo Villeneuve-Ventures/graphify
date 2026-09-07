@@ -1074,6 +1074,8 @@ def _rebuild_code(
             watch_path, follow_symlinks=follow_symlinks,
             extra_excludes=_persisted_excludes or None,
         )
+        if detected.get("walk_errors"):
+            raise RuntimeError("source scan incomplete; refusing graph publication")
         code_files = [Path(f) for f in detected['files']['code']]
 
         # Include document files that have AST extractors (e.g. .md, .mdx, .qmd)

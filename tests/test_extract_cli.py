@@ -6,6 +6,144 @@ import pytest
 import graphify.__main__ as mainmod
 
 
+def _incomplete_scan_fixture(tmp_path, monkeypatch, failure):
+    """Index real source, then make native metadata observation incomplete."""
+    import json
+    import os
+    import subprocess
+    from graphify import transaction as tx
+    from tests.test_detect import _native_detection_fixture
+
+    if tx._PLATFORM == "windows":
+        pytest.skip("native Windows publication remains unsupported")
+    root = tmp_path / "corpus"
+    root.mkdir()
+    source = root / (".graphify-prepare-" + "a" * 64)
+    source.mkdir()
+    marker = source / ".graphify_prepared_owner.json"
+    marker.write_text("{}")
+    (source / "legitimate.py").write_text("def precious_source(): return 1\n")
+    kept = root / "kept.py"
+    kept.write_text("".join(f"def kept_{i}(): return {i}\n" for i in range(40)))
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    subprocess.run([
+        "git", "-C", str(root), "-c", "user.name=Fixture",
+        "-c", "user.email=fixture@example.invalid", "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgsign=false", "commit", "-qm", "Source fixture",
+    ], check=True)
+    if failure == "race":
+        _native_detection_fixture(root, finalize=True)
+        tx._AUTHORITY.set(None)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(mainmod.sys, "argv", [
+        "graphify", "extract", str(root), "--code-only", "--no-viz",
+    ])
+    mainmod.main()
+    output = root / "graphify-out"
+    before = {name: (output / name).read_bytes() for name in (
+        "graph.json", "manifest.json", tx.RECEIPT_FILE,
+    )}
+    assert any("precious_source" in n.get("label", "")
+               for n in json.loads(before["graph.json"])["nodes"])
+    kept.write_text(kept.read_text() + "\ndef changed_source(): return 99\n")
+    if failure == "fifo":
+        marker.unlink()
+        os.mkfifo(marker)
+    else:
+        marker = next(root.glob(".graphify-retired-*")) / ".graphify_retired.json"
+    errors = []
+    original_finish = tx._OperationalCorpusScan.finish
+
+    def finish(scan):
+        if failure == "race":
+            assert marker.parent in scan.excluded
+            marker.write_bytes(marker.read_bytes() + b"\n")
+        result = original_finish(scan)
+        errors.extend(result)
+        return result
+
+    monkeypatch.setattr(tx._OperationalCorpusScan, "finish", finish)
+    return root, output, before, errors
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+@pytest.mark.parametrize("failure", ["fifo", "race"])
+def test_extract_incomplete_scan_preserves_publication(
+    tmp_path, monkeypatch, capsys, incremental, failure,
+):
+    root, output, before, errors = _incomplete_scan_fixture(tmp_path, monkeypatch, failure)
+    monkeypatch.setattr(mainmod.sys, "argv", [
+        "graphify", "extract", str(root), "--code-only", "--no-viz",
+        *([] if incremental else ["--force"]),
+    ])
+    with pytest.raises(SystemExit) as stopped:
+        mainmod.main()
+    assert stopped.value.code == 1 and errors
+    assert "incomplete" in capsys.readouterr().err.lower()
+    assert {name: (output / name).read_bytes() for name in before} == before
+    assert (root / (".graphify-prepare-" + "a" * 64) / "legitimate.py").is_file()
+
+
+def test_extract_fresh_incomplete_scan_publishes_no_artifacts(tmp_path, monkeypatch):
+    import os
+    from graphify import transaction as tx
+
+    if tx._PLATFORM == "windows":
+        pytest.skip("native Windows publication remains unsupported")
+    workspace = tmp_path / (".graphify-prepare-" + "b" * 64)
+    workspace.mkdir()
+    os.mkfifo(workspace / ".graphify_prepared_owner.json")
+    (tmp_path / "kept.py").write_text("def kept(): return 1\n")
+    monkeypatch.setattr(mainmod.sys, "argv", [
+        "graphify", "extract", str(tmp_path), "--code-only", "--no-viz",
+    ])
+    with pytest.raises(SystemExit) as stopped:
+        mainmod.main()
+    assert stopped.value.code == 1
+    assert all(not (tmp_path / "graphify-out" / name).exists()
+               for name in ("graph.json", "manifest.json", tx.RECEIPT_FILE))
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+def test_extract_nested_out_excludes_native_artifacts(tmp_path, monkeypatch, incremental):
+    import json
+    from graphify import transaction as tx
+    from tests.test_detect import _native_detection_fixture
+
+    if tx._PLATFORM == "windows":
+        pytest.skip("native Windows publication remains unsupported")
+    (tmp_path / "source.py").write_text("def useful_source(): return 1\n")
+    neighbor = tmp_path / "nested" / (".graphify-prepare-" + "c" * 64)
+    neighbor.mkdir(parents=True)
+    (neighbor / "neighbor.py").write_text("def legitimate_neighbor(): return 2\n")
+    output = tmp_path / "nested" / "graphify-out"
+    _native_detection_fixture(tmp_path, output=output, finalize=True)
+    tx._AUTHORITY.set(None)
+    scans = []
+    original_finish = tx._OperationalCorpusScan.finish
+
+    def finish(scan):
+        errors = original_finish(scan)
+        scans.append((scan.output, list(scan.excluded), errors))
+        return errors
+
+    monkeypatch.setattr(tx._OperationalCorpusScan, "finish", finish)
+    monkeypatch.setattr(mainmod.sys, "argv", [
+        "graphify", "extract", str(tmp_path), "--out", str(output.parent),
+        "--code-only", "--no-viz", *([] if incremental else ["--force"]),
+    ])
+    mainmod.main()
+    assert scans and all(selected == output and excluded and not errors
+                         for selected, excluded, errors in scans)
+    graph = json.loads((output / "graph.json").read_text())
+    assert any("useful_source" in n.get("label", "") for n in graph["nodes"])
+    assert any("legitimate_neighbor" in n.get("label", "") for n in graph["nodes"])
+    manifest = (output / "manifest.json").read_text()
+    assert ".graphify_retired.json" not in manifest
+    assert ".graphify_prepared_owner.json" not in manifest
+
+
 def _make_receiptless_legacy_fixture(graphify_out):
     """Remove transaction metadata before tests intentionally edit old state."""
     import json

@@ -9,6 +9,32 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("public_update", [False, True])
+@pytest.mark.parametrize("failure", ["fifo", "race"])
+def test_rebuild_incomplete_scan_preserves_publication(
+    tmp_path, monkeypatch, capsys, public_update, failure,
+):
+    import graphify.__main__ as mainmod
+    import graphify.watch as watch
+    from tests.test_extract_cli import _incomplete_scan_fixture
+
+    root, output, before, errors = _incomplete_scan_fixture(tmp_path, monkeypatch, failure)
+    if public_update:
+        monkeypatch.setattr(mainmod.sys, "argv", [
+            "graphify", "update", str(root), "--no-cluster", "--force",
+        ])
+        with pytest.raises(SystemExit) as stopped:
+            mainmod.main()
+        assert stopped.value.code == 1
+    else:
+        assert watch._rebuild_code(
+            root, changed_paths=[root / "kept.py"], no_cluster=True,
+            force=True, block_on_lock=True,
+        ) is False
+    assert errors and "incomplete" in capsys.readouterr().out.lower()
+    assert {name: (output / name).read_bytes() for name in before} == before
+
+
 def test_issue89_manifest_failure_is_not_success(monkeypatch, tmp_path, capsys):
     import graphify.watch as watch
 

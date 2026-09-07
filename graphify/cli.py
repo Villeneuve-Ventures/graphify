@@ -1797,6 +1797,7 @@ def _dispatch_command(cmd: str) -> None:
         use_dfs = "--dfs" in sys.argv
         budget = 2000
         graph_path = _default_graph_path()
+        explicit_query_graph = False
         context_filters: list[str] = []
         args = sys.argv[3:]
         i = 0
@@ -1823,6 +1824,7 @@ def _dispatch_command(cmd: str) -> None:
                 i += 1
             elif args[i] == "--graph" and i + 1 < len(args):
                 graph_path = args[i + 1]
+                explicit_query_graph = True
                 i += 2
             else:
                 i += 1
@@ -1838,8 +1840,11 @@ def _dispatch_command(cmd: str) -> None:
             import json as _json
             import networkx as _nx
 
-            from graphify.transaction import open_graph_snapshot
-            _raw = open_graph_snapshot(gp, purpose="query").data
+            from graphify.transaction import _query_graph_data
+            _raw = _query_graph_data(
+                graph_path,
+                managed_output=os.environ.get("GRAPHIFY_OUT") if explicit_query_graph else None,
+            )
             if "links" not in _raw and "edges" in _raw:
                 _raw = dict(_raw, links=_raw["edges"])
             try:
@@ -3586,6 +3591,9 @@ def _dispatch_command(cmd: str) -> None:
                 google_workspace=google_workspace or None,
                 extra_excludes=cli_excludes or None,
             )
+            if detection.get("walk_errors"):
+                print("error: source scan incomplete; refusing graph publication", file=sys.stderr)
+                sys.exit(1)
             files_by_type = detection.get("files", {})
             new_by_type = detection.get("new_files", {})
             code_files = [Path(p) for p in new_by_type.get("code", [])]
@@ -3608,6 +3616,9 @@ def _dispatch_command(cmd: str) -> None:
         else:
             print(f"[graphify extract] scanning {target}")
             detection = _detect(target, google_workspace=google_workspace or None, extra_excludes=cli_excludes or None, cache_root=out_root)
+            if detection.get("walk_errors"):
+                print("error: source scan incomplete; refusing graph publication", file=sys.stderr)
+                sys.exit(1)
             files_by_type = detection.get("files", {})
             code_files = [Path(p) for p in files_by_type.get("code", [])]
             doc_files = [Path(p) for p in files_by_type.get("document", [])]

@@ -490,6 +490,7 @@ class _Authority:
     root: str
     kind: TransactionKind
     phase: str
+    output: Path
 
 
 _AUTHORITY = contextvars.ContextVar[_Authority | None](
@@ -3080,6 +3081,7 @@ def _authority_for(tx: Transaction, drainer: DrainerTuple | None = None) -> _Aut
         tx.root,
         tx.kind,
         tx.phase,
+        tx.output,
     )
 
 
@@ -3476,6 +3478,323 @@ def _validated_retired_marker(
         raise PendingTransactionError("retired workspace binding is malformed")
     return marker
 
+
+class _IncompleteCorpusRecognition(Exception):
+    """Operational metadata could not be safely observed."""
+
+
+_CORPUS_MARKER_BYTES = 1024 * 1024
+_CORPUS_TOTAL_BYTES = 16 * 1024 * 1024
+_CORPUS_WORKSPACES = 4096
+_CORPUS_WORKSPACE_NAME = re.compile(
+    r"(?:\.graphify-prepare-[0-9a-f]{64}"
+    r"|\.graphify-prepare-stage-[0-9a-f]{64}-[0-9a-f]{32}"
+    r"|\.graphify-retired-[0-9a-f]{64}-[0-9a-f]{16}"
+    r"|\.graphify-gc-root-[0-9a-f]{32})"
+)
+
+
+def _stat_signature(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+class _OperationalCorpusScan:
+    """Bound native workspace exclusions to one selected output and scan.
+
+    Matching markers establish identity consistency, not authentication against
+    a principal who can rewrite the selected output and all native metadata.
+    This observer never enters transaction authority validation or recovery.
+    """
+
+    def __init__(self, root: Path, output: Path | str):
+        self.root = root
+        self.context = self._context()
+        self.authority = self.context[0]
+        self.output = self.authority.output if self.authority is not None else Path(output)
+        self.output = self.output.expanduser()
+        if not self.output.is_absolute():
+            self.output = root / self.output
+        self.output_identity: OutputIdentity | None = None
+        self.remaining = _CORPUS_TOTAL_BYTES
+        self.considered = 0
+        self.excluded: dict[Path, tuple[object, ...]] = {}
+        self.errors: list[str] = []
+        self.unavailable = False
+        try:
+            if _PLATFORM == "windows":
+                info = self.output.stat(follow_symlinks=False)
+                if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_reparse_tag", 0):
+                    raise _IncompleteCorpusRecognition("unsafe selected output")
+                self.output_identity = OutputIdentity(info.st_dev, info.st_ino)
+                if self.authority is not None:
+                    raise _IncompleteCorpusRecognition("nonblocking runner admission unavailable")
+            else:
+                with self._directory(self.output) as managed:
+                    self.output_identity = managed.identity
+                    self._runner_binding(managed, {})
+        except (OSError, PendingTransactionError) as exc:
+            if not isinstance(exc, FileNotFoundError) or self.authority is not None:
+                self._error(self.output, exc)
+                self.unavailable = True
+        except _IncompleteCorpusRecognition as exc:
+            self._error(self.output, exc)
+            self.unavailable = True
+        if self.authority is None and any(value is not None for value in self.context[1]):
+            self._error(self.output, "transaction environment has no in-process owner")
+            self.unavailable = True
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _directory(path: Path, parent: OutputCapability | None = None) -> Iterator[OutputCapability]:
+        # Close even when fstat, canonicalization, or initial validation fails.
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(path if parent is None else path.name, flags,
+                     dir_fd=None if parent is None else parent.fd)
+        capability = None
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISDIR(info.st_mode):
+                raise _IncompleteCorpusRecognition("workspace is not a directory")
+            capability = OutputCapability(path.resolve(strict=True),
+                                          OutputIdentity(info.st_dev, info.st_ino), fd)
+            def validate_name() -> None:
+                named = path.stat(follow_symlinks=False)
+                if (not stat.S_ISDIR(named.st_mode)
+                        or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)):
+                    raise _IncompleteCorpusRecognition("directory name changed during admission")
+            capability.validate()
+            validate_name()
+            yield capability
+            capability.validate()
+            validate_name()
+        finally:
+            if capability is None:
+                os.close(fd)
+            else:
+                capability.close()
+
+    @staticmethod
+    def _context() -> tuple[_Authority | None, tuple[str | None, ...]]:
+        return _AUTHORITY.get(), tuple(os.environ.get(key) for key in _TRANSACTION_ENV_SIGNALS)
+
+    def _error(self, path: Path, error: object) -> None:
+        self.errors.append(f"{path}: incomplete operational workspace observation ({error})")
+
+    def _read(self, directory: OutputCapability, name: str,
+              fingerprints: dict[str, str]) -> dict[str, Any] | None:
+        if _PLATFORM == "windows":
+            raise _IncompleteCorpusRecognition("nonblocking marker admission unavailable")
+        if self.remaining <= 0:
+            raise _IncompleteCorpusRecognition("metadata byte budget exhausted")
+        try:
+            before = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(before.st_mode):
+            raise _IncompleteCorpusRecognition("marker is not a regular non-symlink file")
+        if before.st_size >= _CORPUS_MARKER_BYTES:
+            raise _IncompleteCorpusRecognition("marker byte limit exceeded")
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory.fd)
+        try:
+            opened = os.fstat(fd)
+            if _stat_signature(opened) != _stat_signature(before):
+                raise _IncompleteCorpusRecognition("marker changed during open")
+            payload = bytearray()
+            while True:
+                allowance = min(65536, _CORPUS_MARKER_BYTES - len(payload), self.remaining)
+                if allowance <= 0:
+                    raise _IncompleteCorpusRecognition("metadata byte budget exhausted")
+                chunk = os.read(fd, allowance)
+                self.remaining -= len(chunk)
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+            if (_stat_signature(before) != _stat_signature(os.fstat(fd))
+                    or _stat_signature(before) != _stat_signature(after)
+                    or len(payload) != before.st_size):
+                raise _IncompleteCorpusRecognition("marker changed during read")
+        finally:
+            os.close(fd)
+        directory.validate()
+        fingerprints[str(directory.path / name)] = hashlib.sha256(payload).hexdigest()
+        try:
+            value = json.loads(payload)
+        except RecursionError as exc:
+            raise _IncompleteCorpusRecognition("marker JSON depth exceeded") from exc
+        except (ValueError, UnicodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _runner_binding(self, managed: OutputCapability,
+                        fingerprints: dict[str, str]) -> Transaction | None:
+        if self._context() != self.context:
+            raise _IncompleteCorpusRecognition("output selection context changed")
+        if self.authority is None:
+            return None
+        locator = os.environ.get("GRAPHIFY_TRANSACTION_OUTPUT")
+        if locator is not None:
+            selected = Path(locator).expanduser()
+            if not selected.is_absolute():
+                selected = self.root / selected
+            if selected.resolve(strict=True) != self.output:
+                raise _IncompleteCorpusRecognition("runner output locator contradicts its owner")
+        raw = self._read(managed, TRANSACTION_FILE, fingerprints)
+        try:
+            if raw is None or raw.get("root") != str(self.root):
+                raise PendingTransactionError("runner root differs from the scan root")
+            live = _transaction_from_json(managed, raw)
+        except (PendingTransactionError, TypeError, ValueError) as exc:
+            raise _IncompleteCorpusRecognition("live runner binding is unavailable") from exc
+        if (live.root != str(self.root) or _authority_for(live) != self.authority
+                or any(value is not None and value != expected for value, expected in (
+                    (os.environ.get("GRAPHIFY_TRANSACTION_ID"), live.id),
+                    (os.environ.get("GRAPHIFY_TRANSACTION_ROOT"), live.root),
+                ))):
+            raise _IncompleteCorpusRecognition("runner does not match the selected corpus/output")
+        return live
+
+    @staticmethod
+    def _identity_matches(value: object, expected: OutputIdentity) -> bool:
+        try:
+            return _identity_from_json(value) == expected
+        except PendingTransactionError:
+            return False
+
+    @classmethod
+    def _owner_valid(cls, owner: dict[str, Any] | None, workspace: OutputCapability) -> bool:
+        fields = {"schema", "protocol_epoch", "state", "transaction_id", "generation",
+                  "token_digest", "ownership_nonce", "child_nonce", "workspace_name",
+                  "identity", "output_identity"}
+        return bool(owner is not None and set(owner) == fields
+                    and type(owner.get("schema")) is int and owner["schema"] == 1
+                    and type(owner.get("protocol_epoch")) is int and owner["protocol_epoch"] == 1
+                    and owner.get("state") == "child-created"
+                    and _is_hex(owner.get("transaction_id"))
+                    and type(owner.get("generation")) is int and owner["generation"] > 0
+                    and _is_hex(owner.get("token_digest"))
+                    and _is_hex(owner.get("ownership_nonce"), 32)
+                    and _is_hex(owner.get("child_nonce"), 32)
+                    and owner.get("workspace_name") == f".graphify-prepare-{owner['transaction_id']}"
+                    and cls._identity_matches(owner.get("identity"), workspace.identity))
+
+    def _observe(self, candidate: Path) -> tuple[object, ...] | None:
+        if _PLATFORM == "windows":
+            raise _IncompleteCorpusRecognition("nonblocking workspace admission unavailable")
+        fingerprints: dict[str, str] = {}
+        with self._directory(self.output) as managed:
+            if managed.identity != self.output_identity:
+                raise _IncompleteCorpusRecognition("selected output identity changed")
+            live = self._runner_binding(managed, fingerprints)
+            # Pin the sibling parent and open only its immediate non-symlink child.
+            with self._directory(managed.path.parent) as parent:
+                if candidate.parent != parent.path:
+                    return None
+                with self._directory(candidate, parent) as workspace:
+                    workspace.validate()
+                    owner = self._read(workspace, _PREPARED_OWNER_FILE, fingerprints)
+                    is_retired = candidate.name.startswith((".graphify-retired-", ".graphify-gc-root-"))
+                    retired = self._read(workspace, ".graphify_retired.json", fingerprints) if is_retired else None
+                    if not self._owner_valid(owner, workspace):
+                        return None
+                    assert owner is not None
+                    child_name = "graphify-out"
+                    child = _directory_entry_identity(workspace, child_name)
+                    if child is None and candidate.name.startswith(".graphify-prepare-stage-"):
+                        child_name = f".graphify-output-stage-{owner['child_nonce']}"
+                        child = _directory_entry_identity(workspace, child_name)
+                    if child is None or not self._identity_matches(owner.get("output_identity"), child):
+                        return None
+                    if is_retired:
+                        if (retired is None
+                                or type(retired.get("schema")) is not int
+                                or type(retired.get("protocol_epoch")) is not int
+                                or not self._identity_matches(
+                                    retired.get("managed_output_identity"), managed.identity)):
+                            return None
+                        try:
+                            bound = _validated_retired_marker(retired,
+                                candidate_name=candidate.name, candidate_identity=workspace.identity,
+                                managed_output_identity=managed.identity)
+                        except (PendingTransactionError, TypeError, ValueError):
+                            return None
+                        if (bound is None or bound.get("transaction_id") != owner["transaction_id"]
+                                or bound.get("output_identity") != child.json()):
+                            return None
+                    else:
+                        if live is None:
+                            raw = self._read(managed, TRANSACTION_FILE, fingerprints)
+                            try:
+                                if raw is None or raw.get("root") != str(self.root):
+                                    return None
+                                live = _transaction_from_json(managed, raw)
+                            except (PendingTransactionError, TypeError, ValueError):
+                                return None
+                        prepared = self._read(managed, PREPARED_FILE, fingerprints)
+                        if (prepared is None or set(prepared) not in (
+                                _PREPARED_MARKER_FIELDS, _PREPARED_SUCCESSOR_FIELDS)
+                                or type(prepared.get("schema")) is not int or prepared["schema"] != 1
+                                or type(prepared.get("protocol_epoch")) is not int or prepared["protocol_epoch"] != 1
+                                or type(prepared.get("generation")) is not int
+                                or prepared.get("state") not in ("planned", "workspace-created", "ready", "successor-ready")
+                                or live.root != str(self.root)
+                                or prepared.get("transaction_id") != live.id
+                                or prepared.get("generation") != live.generation
+                                or prepared.get("token_digest") != live.token_digest
+                                or not self._identity_matches(prepared.get("identity"), workspace.identity)
+                                or not self._identity_matches(prepared.get("output_identity"), child)
+                                or any(prepared.get(key) != owner[key] for key in (
+                                    "transaction_id", "generation", "token_digest", "ownership_nonce",
+                                    "child_nonce", "workspace_name"))
+                                or candidate.name not in {owner["workspace_name"],
+                                    f".graphify-prepare-stage-{live.id}-{owner['ownership_nonce']}"}):
+                            return None
+                    workspace.validate()
+                    parent.validate()
+                    managed.validate()
+                    return (managed.identity, parent.identity, workspace.identity, child_name,
+                            child, tuple(sorted(fingerprints.items())))
+
+    def prune(self, path: Path, *, follow_symlinks: bool) -> bool:
+        # Aliases are recognized only when the caller already permits following.
+        try:
+            if path.is_symlink() and not follow_symlinks:
+                return False
+            candidate = path.resolve(strict=True)
+            if not candidate.is_relative_to(self.root) or not _CORPUS_WORKSPACE_NAME.fullmatch(candidate.name):
+                return False
+            if candidate.parent != self.output.parent.resolve():
+                return False
+            self.considered += 1
+            if self.unavailable or self.considered > _CORPUS_WORKSPACES or self.remaining <= 0:
+                if not self.unavailable:
+                    self._error(path, "recognition resource budget exhausted")
+                self.unavailable = True
+                return True
+            if self.output_identity is None:
+                return False
+            fingerprint = self._observe(candidate)
+            if fingerprint is None:
+                return False
+            self.excluded[path] = (candidate, *fingerprint)
+            return True
+        except (OSError, PendingTransactionError, _IncompleteCorpusRecognition) as exc:
+            self._error(path, exc)
+            return True
+
+    def finish(self) -> list[str]:
+        if self._context() != self.context:
+            self._error(self.output, "output selection context changed")
+        for path, before in self.excluded.items():
+            try:
+                candidate = path.resolve(strict=True)
+                observed = self._observe(candidate)
+                if observed is None or (candidate, *observed) != before:
+                    raise _IncompleteCorpusRecognition("excluded workspace binding changed")
+            except (OSError, PendingTransactionError, _IncompleteCorpusRecognition) as exc:
+                self._error(path, exc)
+        return self.errors
 
 def _is_single_component(value: object) -> bool:
     return type(value) is str and Path(value).name == value and value not in {"", ".", ".."}
@@ -8955,6 +9274,125 @@ def _validate_expected_snapshot_locked(
         raise PendingTransactionError(
             "admitted legacy inventory changed before begin"
         )
+
+
+def _query_graph_data(
+    path: Path | str, *, managed_output: Path | str | None = None,
+) -> dict[str, Any]:
+    """Admit an exact detached query copy against an explicitly selected output.
+
+    Local coordination takes precedence. Detached native bytes must match a
+    closed, receipt-validated generation; this returns no publication snapshot.
+    """
+    requested = Path(path).expanduser().absolute()
+    if managed_output is None:
+        return open_graph_snapshot(requested.resolve(), purpose="query").data
+    selected = Path(managed_output).expanduser().absolute()
+    with pin_output(requested.parent.resolve(strict=True), mutation=False) as detached:
+        selected_path = selected.resolve()
+        local_coordination = _coordination_present(detached)
+        alias = detached.path / requested.name
+        alias_before = alias.lstat()
+        if stat.S_ISLNK(alias_before.st_mode):
+            target = alias.resolve(strict=True)
+            selected_graph = (detached.path if local_coordination else selected_path) / "graph.json"
+            if local_coordination and target != selected_graph:
+                raise PendingTransactionError("graph alias cannot bypass local coordination")
+            target_before = target.lstat()
+            if not stat.S_ISREG(target_before.st_mode):
+                raise PendingTransactionError("graph alias target is not a regular file")
+            snapshot = open_graph_snapshot(target, purpose="query")
+            if snapshot.generation is not None and target != selected_graph:
+                raise PendingTransactionError("graph alias does not select the managed graph")
+            if local_coordination and snapshot.generation is None:
+                raise PendingTransactionError("graph alias requires native local admission")
+            # An ordinary alias never enters detached-copy admission. Reuse
+            # snapshot validation and bind both names across that observation.
+            with pin_output(target.parent, mutation=False) as source, _locked(source):
+                _validate_expected_snapshot_locked(source, snapshot)
+                if snapshot.generation is not None:
+                    _validate_receipt_locked(
+                        source, graph_payload=snapshot.payload, require_closed=True,
+                    )
+                if (
+                    _stat_signature(alias.lstat()) != _stat_signature(alias_before)
+                    or alias.resolve(strict=True) != target
+                    or _stat_signature(target.lstat()) != _stat_signature(target_before)
+                    or requested.parent.resolve(strict=True) != detached.path
+                    or selected.resolve() != selected_path
+                    or _coordination_present(detached) != local_coordination
+                ):
+                    raise PendingTransactionError("graph alias binding changed during admission")
+                source.validate()
+                detached.validate()
+            return snapshot.data
+        if detached.path == selected_path or local_coordination:
+            return open_graph_snapshot(requested, purpose="query").data
+        if _PLATFORM == "windows":
+            # Preserve ordinary local/legacy reads without enabling an unproven
+            # detached native reader on this platform.
+            try:
+                return open_graph_snapshot(requested, purpose="query").data
+            except PendingTransactionError as exc:
+                raise PendingTransactionError("detached query admission unavailable on Windows") from exc
+        from graphify.security import _max_graph_file_bytes
+
+        def read_copy() -> tuple[bytes, tuple[int, ...]]:
+            before = os.stat(requested.name, dir_fd=detached.fd, follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode):
+                raise PendingTransactionError("detached graph is not a regular non-symlink file")
+            fd = os.open(requested.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=detached.fd)
+            try:
+                if _stat_signature(os.fstat(fd)) != _stat_signature(before):
+                    raise PendingTransactionError("detached graph changed during open")
+                payload = _read_open_regular(fd, limit=_max_graph_file_bytes(), label=requested.name)
+                after = os.stat(requested.name, dir_fd=detached.fd, follow_symlinks=False)
+                if (_stat_signature(before) != _stat_signature(os.fstat(fd))
+                        or _stat_signature(before) != _stat_signature(after)
+                        or len(payload) != before.st_size):
+                    raise PendingTransactionError("detached graph changed during read")
+                return payload, _stat_signature(before)
+            finally:
+                os.close(fd)
+
+        payload, signature = read_copy()
+        try:
+            data = json.loads(payload)
+        except (ValueError, UnicodeError, RecursionError) as exc:
+            raise PendingTransactionError("malformed detached graph payload") from exc
+        metadata = data.get("graph") if isinstance(data, dict) else None
+        if not isinstance(metadata, dict) or GRAPH_WATERMARK_KEY not in metadata:
+            return open_graph_snapshot(requested, purpose="query").data
+        with pin_output(selected, mutation=False) as managed, _locked(managed):
+            receipt_info = _entry_stat(managed, RECEIPT_FILE)
+            receipt, receipt_digest, inventory = _validate_receipt_locked(
+                managed, require_closed=True, retain_artifacts=("graph.json",),
+            )
+            native = inventory.get("graph.json")
+            if native is None or native != payload:
+                raise PendingTransactionError("detached graph differs from the selected generation")
+            watermark = _watermark(native)
+            if (watermark.get("state") != "active"
+                    or type(watermark.get("generation")) is not int
+                    or receipt.get("generation") != watermark["generation"]
+                    or receipt.get("graph_name", "graph.json") != "graph.json"
+                    or receipt.get("watermark") != watermark):
+                raise PendingTransactionError("generation receipt does not match graph watermark")
+            _receipt, current_digest, current_inventory = _validate_receipt_locked(
+                managed, require_closed=True, retain_artifacts=("graph.json",),
+            )
+            current_info = _entry_stat(managed, RECEIPT_FILE)
+            if (receipt_info is None or current_info is None
+                    or _stat_signature(receipt_info) != _stat_signature(current_info)
+                    or current_digest != receipt_digest
+                    or current_inventory.get("graph.json") != native):
+                raise PendingTransactionError("selected query generation changed")
+            if read_copy() != (payload, signature) or _coordination_present(detached):
+                raise PendingTransactionError("detached query binding changed")
+            managed.validate()
+            detached.validate()
+        return cast(dict[str, Any], data)
 
 
 def open_graph_snapshot(

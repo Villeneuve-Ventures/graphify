@@ -1,5 +1,7 @@
 import os
 import unicodedata
+
+import pytest
 from pathlib import Path
 from graphify.detect import classify_file, count_words, detect, detect_incremental, save_manifest, FileType, _looks_like_paper, _is_ignored, _load_graphifyignore, _is_sensitive
 from graphify import detect as detect_mod
@@ -2069,3 +2071,471 @@ def test_detect_incremental_exclusion_stable_across_runs(tmp_path):
     inc2 = detect_incremental(tmp_path, manifest_path, extra_excludes=["b.py"])
     assert inc2["deleted_files"] == []
     assert inc2["excluded_files"] == []
+
+
+def _native_detection_fixture(root, *, output=None, finalize=False):
+    """Create native operational state, never hand-author ownership markers."""
+    import json
+    from graphify import transaction as tx
+
+    output = output or root / "graphify-out"
+    transaction = tx.begin_transaction("full", root, output=output)
+    token = tx.stage_transaction_handoff(transaction)
+    graph = json.dumps({
+        "directed": False, "multigraph": False,
+        "graph": {tx.GRAPH_WATERMARK_KEY: {
+            "schema": 1, "protocol_epoch": 1, "generation": 1, "state": "active",
+        }}, "nodes": [], "links": [],
+    }).encode()
+    code = (
+        "from graphify.transaction import current_transaction,commit_prepared_bytes; "
+        "owner=current_transaction(); "
+        f"commit_prepared_bytes(owner,'graph.json',{graph!r}); "
+        "commit_prepared_bytes(owner,'manifest.json',b'{}')"
+    )
+    tx.run_prepared_token(token.path, ["-c", code])
+    if finalize:
+        tx.run_token(token.path, ["-c", (
+            "from graphify.transaction import finalize_prepared_transaction; "
+            "finalize_prepared_transaction()"
+        )])
+    return output, token
+
+
+@pytest.mark.parametrize("locator", ["absent", "matching", "foreign", "replacement"])
+def test_active_native_output_selects_corpus_metadata(tmp_path, monkeypatch, locator):
+    from graphify import transaction as tx
+
+    if tx._PLATFORM == "windows":
+        pytest.skip("native Windows publication remains unsupported")
+    (tmp_path / "source.py").write_text("def source(): return 1\n")
+    output = tmp_path / "nested" / "graphify-out"
+    _native_detection_fixture(tmp_path, output=output, finalize=True)
+    tx._AUTHORITY.set(None)
+    tx.begin_transaction("full", tmp_path, output=output)
+    if locator == "matching":
+        monkeypatch.setenv("GRAPHIFY_TRANSACTION_OUTPUT", str(output))
+    elif locator == "foreign":
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        monkeypatch.setenv("GRAPHIFY_TRANSACTION_OUTPUT", str(foreign))
+    elif locator == "replacement":
+        output.rename(output.with_name("retained-output"))
+        output.mkdir()
+    observed = detect(tmp_path)
+    if locator in {"foreign", "replacement"}:
+        assert observed["walk_errors"]
+    else:
+        assert observed["walk_errors"] == []
+        assert observed["files"]["code"] == [str(tmp_path / "source.py")]
+
+
+def test_detect_native_operational_corpus_separation(tmp_path):
+    import json
+    import subprocess
+    from graphify import transaction as tx
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    source = tmp_path / "source.py"
+    source.write_text("def retained_source(): return 1\n")
+    expected = [str(source)]
+    previous = tx._AUTHORITY.set(None)
+    try:
+        assert detect(tmp_path)["files"]["code"] == expected
+        output, token = _native_detection_fixture(tmp_path)
+        # Detection executes in the genuine prepared runner's output cwd.
+        observation = tmp_path.parent / (tmp_path.name + "-detection.json")
+        tx.run_prepared_token(token.path, ["-c", (
+            "import json; from pathlib import Path; from graphify.detect import detect; "
+            f"Path({str(observation)!r}).write_text(json.dumps(detect(Path({str(tmp_path)!r}))))"
+        )])
+        during = json.loads(observation.read_text())
+        assert during["walk_errors"] == []
+        assert during["files"]["code"] == expected
+        tx.run_token(token.path, ["-c", (
+            "from graphify.transaction import finalize_prepared_transaction; "
+            "finalize_prepared_transaction()"
+        )])
+        tx._AUTHORITY.set(None)
+        assert json.loads((output / tx.PROTOCOL_FILE).read_text())["state"] == "COMPLETE"
+        after = detect(tmp_path)
+        assert after["walk_errors"] == []
+        assert after["files"]["code"] == expected
+    finally:
+        tx._AUTHORITY.reset(previous)
+
+
+@pytest.fixture
+def native_detection_corpus(tmp_path):
+    from graphify import transaction as tx
+
+    previous = tx._AUTHORITY.set(None)
+    (tmp_path / "source.py").write_text("def retained_source(): return 1\n")
+    try:
+        output, _ = _native_detection_fixture(tmp_path, finalize=True)
+        tx._AUTHORITY.set(None)
+        yield tmp_path, output, next(tmp_path.glob(".graphify-retired-*"))
+    finally:
+        tx._AUTHORITY.reset(previous)
+
+
+@pytest.mark.parametrize("kind", ["ast", "semantic"])
+def test_native_operational_incremental_detection(native_detection_corpus, kind):
+    root, output, _ = native_detection_corpus
+    result = detect_incremental(root, str(output / "manifest.json"), kind=kind)
+    assert result["walk_errors"] == []
+    assert result["files"]["code"] == [str(root / "source.py")]
+
+
+@pytest.mark.parametrize("routing", ["default", "relative", "absolute", "external", "foreign-cwd"])
+def test_native_operational_output_routing(tmp_path, routing):
+    import json
+    import subprocess
+    import sys
+    from graphify import transaction as tx
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / "source.py").write_text("x = 1\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    configured = "graphify-out"
+    output = root / configured
+    if routing == "relative":
+        configured = "nested/generated"
+        output = root / configured
+    elif routing == "absolute":
+        output = root / "generated"
+        configured = str(output)
+    elif routing == "external":
+        output = elsewhere / "generated"
+        configured = str(output)
+    previous = tx._AUTHORITY.set(None)
+    try:
+        _native_detection_fixture(root, output=output, finalize=True)
+        result = subprocess.run([
+            sys.executable, "-c",
+            "import json,sys; from pathlib import Path; from graphify.detect import detect; "
+            "print(json.dumps(detect(Path(sys.argv[1]))))", str(root),
+        ], cwd=elsewhere if routing == "foreign-cwd" else root,
+            env=dict(os.environ, GRAPHIFY_OUT=configured), capture_output=True,
+            text=True, timeout=15, check=True)
+        observed = json.loads(result.stdout)
+        assert observed["walk_errors"] == []
+        assert observed["files"]["code"] == [str(root / "source.py")]
+    finally:
+        tx._AUTHORITY.reset(previous)
+
+
+@pytest.mark.parametrize("lookalike", ["unmarked", "malformed", "copied", "foreign", "child-mismatch"])
+def test_native_operational_lookalikes_remain_source(native_detection_corpus, lookalike):
+    import json
+    import shutil
+
+    root, _, workspace = native_detection_corpus
+    owner = workspace / ".graphify_prepared_owner.json"
+    if lookalike == "unmarked":
+        owner.unlink()
+    elif lookalike == "malformed":
+        owner.write_text("{broken JSON")
+    elif lookalike == "copied":
+        original = root.parent / (root.name + "-original")
+        workspace.rename(original)
+        shutil.copytree(original, workspace)
+    elif lookalike == "foreign":
+        marker = workspace / ".graphify_retired.json"
+        raw = json.loads(marker.read_text())
+        raw["managed_output_identity"]["inode"] += 1
+        marker.write_text(json.dumps(raw))
+    else:
+        (workspace / "graphify-out").rename(workspace / "old-output")
+        (workspace / "graphify-out").mkdir()
+    legitimate = workspace / "legitimate.py"
+    legitimate.write_text("retained = True\n")
+    observed = detect(root)
+    assert observed["walk_errors"] == []
+    assert str(legitimate) in observed["files"]["code"]
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "fifo", "open-swap", "unreadable", "oversize", "recursive"])
+def test_native_operational_unsafe_markers_are_incomplete(native_detection_corpus, monkeypatch, unsafe):
+    from graphify import transaction as tx
+
+    root, _, workspace = native_detection_corpus
+    marker = workspace / ".graphify_retired.json"
+    if unsafe == "symlink":
+        target = workspace / "retained.json"
+        marker.rename(target)
+        marker.symlink_to(target)
+    elif unsafe == "fifo":
+        marker.unlink()
+        os.mkfifo(marker)
+    elif unsafe == "oversize":
+        marker.write_bytes(b" " * tx._CORPUS_MARKER_BYTES)
+    elif unsafe == "recursive":
+        # Decoder recursion thresholds vary across supported Python builds.
+        # Inject its documented failure at the parser boundary deterministically.
+        marker.write_bytes(b'{"force_recursion":true}')
+        original_loads = tx.json.loads
+        def recursive_loads(payload, *args, **kwargs):
+            if payload == b'{"force_recursion":true}':
+                raise RecursionError("injected decoder depth failure")
+            return original_loads(payload, *args, **kwargs)
+        monkeypatch.setattr(tx.json, "loads", recursive_loads)
+    else:
+        original = tx.os.open
+        def changed_open(path, flags, *args, **kwargs):
+            if path == marker.name and kwargs.get("dir_fd") is not None:
+                if unsafe == "unreadable":
+                    raise PermissionError("injected unreadable marker")
+                marker.unlink()
+                os.mkfifo(marker)
+            return original(path, flags, *args, **kwargs)
+        monkeypatch.setattr(tx.os, "open", changed_open)
+    original_words = detect_mod.count_words
+    def guarded_words(path):
+        assert not Path(path).is_relative_to(workspace), "unsafe marker reached ordinary word counting"
+        return original_words(path)
+    monkeypatch.setattr(detect_mod, "count_words", guarded_words)
+    observed = detect(root)
+    assert observed["walk_errors"]
+    assert observed["files"]["code"] == [str(root / "source.py")]
+
+
+@pytest.mark.parametrize("budget", ["bytes", "workspaces"])
+def test_native_operational_aggregate_bounds(native_detection_corpus, monkeypatch, budget):
+    from graphify import transaction as tx
+
+    root, _, _ = native_detection_corpus
+    monkeypatch.setattr(tx, "_CORPUS_TOTAL_BYTES" if budget == "bytes" else "_CORPUS_WORKSPACES", 1)
+    if budget == "workspaces":
+        (root / (".graphify-prepare-" + "a" * 64)).mkdir()
+    observed = detect(root)
+    assert observed["walk_errors"]
+    assert observed["files"]["code"] == [str(root / "source.py")]
+
+
+@pytest.mark.parametrize("changed", ["marker", "workspace", "output", "child"])
+def test_native_operational_final_binding_recheck(native_detection_corpus, monkeypatch, changed):
+    import json
+
+    root, output, workspace = native_detection_corpus
+    original = detect_mod.count_words
+    injected = False
+    def replace_after_enumeration(path):
+        nonlocal injected
+        if not injected:
+            injected = True
+            if changed == "marker":
+                marker = workspace / ".graphify_retired.json"
+                # Same valid object and inode, different exact bytes.
+                marker.write_text(json.dumps(json.loads(marker.read_text()), indent=3))
+            else:
+                target = {"workspace": workspace, "output": output,
+                          "child": workspace / "graphify-out"}[changed]
+                target.rename(root.parent / (root.name + "-retained-" + changed))
+                target.mkdir()
+        return original(path)
+    if changed == "output":
+        real_resolve = Path.resolve
+        output_opens = 0
+        def replace_after_open(path, *args, **kwargs):
+            nonlocal output_opens, injected
+            if path == output:
+                output_opens += 1
+                if output_opens == 3:  # final observation, after no-follow open
+                    injected = True
+                    retained = output.with_name("retained-output")
+                    output.rename(retained)
+                    output.symlink_to(retained, target_is_directory=True)
+            return real_resolve(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "resolve", replace_after_open)
+    else:
+        monkeypatch.setattr(detect_mod, "count_words", replace_after_enumeration)
+    result = detect(root)
+    assert injected and result["walk_errors"]
+
+
+@pytest.mark.parametrize("alias", ["follow", "outside", "default"])
+def test_native_operational_alias_rules(native_detection_corpus, alias):
+    root, _, workspace = native_detection_corpus
+    target = workspace
+    if alias == "outside":
+        target = root.parent / (root.name + "-outside")
+        target.mkdir()
+        (target / "outside.py").write_text("not_selected = True\n")
+    (root / "source-alias").symlink_to(target, target_is_directory=True)
+    result = detect(root, follow_symlinks=alias != "default")
+    assert result["walk_errors"] == []
+    assert result["files"]["code"] == [str(root / "source.py")]
+
+
+def test_native_operational_absent_output_preserves_lookalike(tmp_path):
+    from graphify import transaction as tx
+
+    previous = tx._AUTHORITY.set(None)
+    try:
+        source = tmp_path / (".graphify-prepare-" + "a" * 64) / "source.py"
+        source.parent.mkdir()
+        source.write_text("retained = True\n")
+        result = detect(tmp_path)
+        assert result["walk_errors"] == []
+        assert result["files"]["code"] == [str(source)]
+    finally:
+        tx._AUTHORITY.reset(previous)
+
+
+@pytest.mark.parametrize("feature", ["memory", "ignore", "include"])
+def test_native_operational_preserves_corpus_rules(native_detection_corpus, feature):
+    root, output, _ = native_detection_corpus
+    if feature == "memory":
+        memory = output / "memory" / "finding.md"
+        memory.parent.mkdir()
+        memory.write_text("Retained memory from a prior query.\n")
+        result = detect(root)
+        assert str(memory) in result["files"]["document"]
+    elif feature == "ignore":
+        (root / ".graphifyignore").write_text("source.py\n")
+        result = detect(root)
+        assert str(root / "source.py") not in result["files"]["code"]
+    else:
+        (root / "data.txt").write_text("selected text source\n")
+        (root / ".graphifyinclude").write_text("data.txt\n")
+        result = detect(root)
+        assert str(root / "data.txt") in result["files"]["document"]
+    assert result["walk_errors"] == []
+
+
+def test_native_operational_environment_cannot_grant_ownership(native_detection_corpus, monkeypatch):
+    root, output, _ = native_detection_corpus
+    monkeypatch.setenv("GRAPHIFY_TRANSACTION_OUTPUT", str(output))
+    result = detect(root)
+    assert result["walk_errors"]
+
+
+def test_native_operational_reader_closes_bounded_handles(native_detection_corpus, monkeypatch):
+    from graphify import transaction as tx
+
+    root, output, workspace = native_detection_corpus
+    observer = tx._OperationalCorpusScan(root, output)
+    real_open, real_close = os.open, os.close
+    opened = set()
+    maximum = 0
+    def track_open(*args, **kwargs):
+        nonlocal maximum
+        fd = real_open(*args, **kwargs)
+        opened.add(fd)
+        maximum = max(maximum, len(opened))
+        return fd
+    def track_close(fd):
+        real_close(fd)
+        opened.discard(fd)
+    monkeypatch.setattr(tx.os, "open", track_open)
+    monkeypatch.setattr(tx.os, "close", track_close)
+    assert observer.prune(workspace, follow_symlinks=False)
+    assert observer.finish() == []
+    assert not opened and maximum <= 4
+    marker = workspace / ".graphify_retired.json"
+    marker.unlink()
+    os.mkfifo(marker)
+    observer = tx._OperationalCorpusScan(root, output)
+    assert observer.prune(workspace, follow_symlinks=False)
+    assert observer.finish()
+    assert not opened and maximum <= 4
+
+
+@pytest.mark.parametrize("bound", [True, False])
+def test_native_operational_interrupted_preparation(tmp_path, monkeypatch, bound):
+    from graphify import transaction as tx
+
+    source = tmp_path / "source.py"
+    source.write_text("x = 1\n")
+    previous = tx._AUTHORITY.set(None)
+    try:
+        output, _ = _native_detection_fixture(tmp_path)
+        tx._AUTHORITY.set(None)
+        workspace = next(tmp_path.glob(".graphify-prepare-*"))
+        if not bound:
+            (workspace / ".graphify_prepared_owner.json").unlink()
+            (workspace / "legitimate.py").write_text("retained = True\n")
+        state_paths = [p for base in (output, workspace) for p in base.rglob("*") if p.is_file()]
+        before = {p: p.read_bytes() for p in state_paths}
+        def prohibit_fence(*args, **kwargs):
+            raise AssertionError("detection entered transaction mutation validation")
+        monkeypatch.setattr(tx, "_fence_pending_enqueue_locked", prohibit_fence)
+        result = detect(tmp_path)
+        assert result["walk_errors"] == []
+        assert (str(workspace / "legitimate.py") in result["files"]["code"]) is not bound
+        assert str(source) in result["files"]["code"]
+        assert {p: p.read_bytes() for p in state_paths} == before
+    finally:
+        tx._AUTHORITY.reset(previous)
+
+
+def test_native_operational_interrupted_gc(native_detection_corpus):
+    from graphify import transaction as tx
+
+    root, output, workspace = native_detection_corpus
+    def identity(path):
+        info = path.stat()
+        return tx.OutputIdentity(info.st_dev, info.st_ino)
+    def interrupt(phase):
+        if phase == "after_gc_quarantine":
+            raise RuntimeError("injected GC pause")
+    with pytest.raises(RuntimeError, match="injected GC pause"):
+        tx.gc_retired_workspaces(output, expected_output_identity=identity(output),
+            workspace=workspace, expected_workspace_identity=identity(workspace),
+            dry_run=False, failpoint=interrupt)
+    quarantined = next(root.glob(".graphify-gc-root-*"))
+    before = {p: p.read_bytes() for p in quarantined.rglob("*") if p.is_file()}
+    result = detect(root)
+    assert result["walk_errors"] == []
+    assert all(not Path(p).is_relative_to(quarantined) for p in result["files"]["code"])
+    assert str(root / "source.py") in result["files"]["code"]
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("state, marker_name, field, value", [
+    ("retired", "retired", "schema", True),
+    ("retired", "retired", "schema", 1.0),
+    ("retired", "retired", "protocol_epoch", True),
+    ("retired", "retired", "protocol_epoch", 1.0),
+    ("retired", "owner", "identity", None),
+    ("retired", "owner", "output_identity", None),
+    ("retired", "retired", "managed_output_identity", None),
+    ("prepared", "prepared", "identity", None),
+    ("prepared", "prepared", "output_identity", None),
+    ("prepared", "prepared", "generation", True),
+    ("prepared", "prepared", "generation", 1.0),
+])
+def test_native_operational_malformed_numeric_bindings_remain_source(
+    tmp_path, state, marker_name, field, value,
+):
+    import json
+    from graphify import transaction as tx
+
+    previous = tx._AUTHORITY.set(None)
+    try:
+        output, _ = _native_detection_fixture(tmp_path, finalize=state == "retired")
+        tx._AUTHORITY.set(None)
+        workspace = next(tmp_path.glob(
+            ".graphify-retired-*" if state == "retired" else ".graphify-prepare-*"
+        ))
+        marker = {
+            "owner": workspace / ".graphify_prepared_owner.json",
+            "retired": workspace / ".graphify_retired.json",
+            "prepared": output / tx.PREPARED_FILE,
+        }[marker_name]
+        raw = json.loads(marker.read_text())
+        if value is None:
+            raw[field]["device"] = float(raw[field]["device"])
+        else:
+            raw[field] = value
+        marker.write_text(json.dumps(raw))
+        legitimate = workspace / "legitimate.py"
+        legitimate.write_text("retained = True\n")
+        observed = detect(tmp_path)
+        assert observed["walk_errors"] == []
+        assert str(legitimate) in observed["files"]["code"]
+    finally:
+        tx._AUTHORITY.reset(previous)
