@@ -85,9 +85,9 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert config["pr_reviewer"]["num_max_findings"] == 5
     assert config["config"]["restricted_mode"] is True
     assert config["config"]["repo_context_from_default_branch"] is False
-    assert config["config"]["repo_context_max_lines"] == 500
+    assert config["config"]["repo_context_max_lines"] == 1000
     assert hashlib.sha256((ROOT / ".pr_agent.toml").read_bytes()).hexdigest() == (
-        "d82aa7f6deb76ada6fa18f141212d5181ddd0f32da18e64e61f1f744d3c9129f"
+        "d574a37355093c929ae66a14226a9573f6a0da8e42a1b5268b52504765abceb3"
     )
 
 
@@ -503,7 +503,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
             "CONFIG.PROPAGATE_TOOL_ERRORS": True, "CONFIG.EXTRA_CONFIG_URL": "",
             "CONFIG.USE_GLOBAL_SETTINGS_FILE": False, "CONFIG.USE_REPO_SETTINGS_FILE": True,
             "CONFIG.RESTRICTED_MODE": True, "CONFIG.REPO_CONTEXT_FROM_DEFAULT_BRANCH": False,
-            "CONFIG.REPO_CONTEXT_MAX_LINES": 500,
+            "CONFIG.REPO_CONTEXT_MAX_LINES": 1000,
             "CONFIG.REPO_CONTEXT_FILES": ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"],
             "GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER": False,
             "GITHUB_ACTION_CONFIG.AUTO_REVIEW": True, "GITHUB_ACTION_CONFIG.AUTO_DESCRIBE": True,
@@ -753,12 +753,42 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
     assert reads["aliases"] == ["review"]
 
 
+@pytest.mark.parametrize("event_name", ["pull_request", "issue_comment"])
+def test_stubbed_entry_accepts_complete_repository_context(monkeypatch, tmp_path, event_name) -> None:
+    context = {path: (ROOT / path).read_bytes()
+               for path in _config()["config"]["repo_context_files"]}
+    reads, _, _ = _run_stubbed_entry(
+        monkeypatch, tmp_path, event_name=event_name, context_overrides=context)
+    assert reads["context_fetches"] == [(path, "a" * 40) for path in context]
+    assert dict(reads["context_served"]) == {
+        path: content.decode("utf-8").rstrip() for path, content in context.items()}
+    assert reads["published"] == (["summary", "review"] if event_name == "pull_request" else ["review"])
+
+
+@pytest.mark.parametrize("event_name", ["pull_request", "issue_comment"])
+@pytest.mark.parametrize(("agent_lines", "accepted"), [(974, True), (975, False)])
+def test_stubbed_entry_enforces_formatted_context_limit(
+        monkeypatch, tmp_path, event_name, agent_lines, accepted) -> None:
+    # 23 wrapper lines and three one-line files make these totals 1000 and 1001.
+    record = {}
+    kwargs = dict(event_name=event_name, context_overrides={"AGENTS.md": b"line\n" * agent_lines},
+                  record=record)
+    if accepted:
+        reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, **kwargs)
+        assert reads["published"] == (["summary", "review"] if event_name == "pull_request" else ["review"])
+    else:
+        with pytest.raises(RuntimeError, match="exceeds the complete-context budget"):
+            _run_stubbed_entry(monkeypatch, tmp_path, **kwargs)
+        assert record["reads"]["completion_kwargs"] == []
+        assert record["reads"]["published"] == []
+
+
 @pytest.mark.parametrize(("kwargs", "message"), [
     ({"context_error": "SECURITY.md"}, "context is unavailable"),
     ({"context_overrides": {"SECURITY.md": None}}, "context is unavailable"),
     ({"context_overrides": {"SECURITY.md": b" \n"}}, "context is empty"),
     ({"context_overrides": {"SECURITY.md": b"\xff"}}, "context is not UTF-8"),
-    ({"context_overrides": {"AGENTS.md": b"line\n" * 480}}, "exceeds the complete-context budget"),
+    ({"context_overrides": {"AGENTS.md": b"line\n" * 980}}, "exceeds the complete-context budget"),
 ])
 def test_stubbed_entry_requires_complete_frozen_repo_context(
         monkeypatch, tmp_path, kwargs, message) -> None:
