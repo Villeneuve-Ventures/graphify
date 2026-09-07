@@ -299,7 +299,7 @@ jobs:
                   raise RuntimeError(f"Frozen repository context is empty: {path}")
               context_text[path] = rendered
               context_lines += len(rendered.splitlines()) + 5  # file header and footer
-          if context_lines > 500:
+          if context_lines > 1000:
               raise RuntimeError("Frozen repository context exceeds the complete-context budget")
           manifest_files = _manifest(pull, list(pull.get_files()))
           verified_renames = set()
@@ -374,7 +374,7 @@ jobs:
                   "CONFIG.PROPAGATE_TOOL_ERRORS": True, "CONFIG.EXTRA_CONFIG_URL": "",
                   "CONFIG.USE_GLOBAL_SETTINGS_FILE": False, "CONFIG.USE_REPO_SETTINGS_FILE": True,
                   "CONFIG.RESTRICTED_MODE": True, "CONFIG.REPO_CONTEXT_FROM_DEFAULT_BRANCH": False,
-                  "CONFIG.REPO_CONTEXT_MAX_LINES": 500, "GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER": False,
+                  "CONFIG.REPO_CONTEXT_MAX_LINES": 1000, "GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER": False,
                   "GITHUB_ACTION_CONFIG.AUTO_REVIEW": True, "GITHUB_ACTION_CONFIG.AUTO_DESCRIBE": True,
                   "GITHUB_ACTION_CONFIG.AUTO_IMPROVE": False,
                   "GITHUB_ACTION_CONFIG.PR_ACTIONS": ["opened", "reopened", "ready_for_review"],
