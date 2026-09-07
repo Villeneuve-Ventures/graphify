@@ -16,7 +16,7 @@ allow_dynamic_context = true
 
 # Load only trusted PR target-branch policy and tool configuration. This keeps
 # reviews aligned with workspace/v1 as well as v8 without reading PR-head edits.
-# These files total fewer than 500 lines on both branches.
+# The finite allowance includes PR-Agent's context wrappers and room for growth.
 repo_context_files = [
     "AGENTS.md",
     "SECURITY.md",
@@ -24,7 +24,7 @@ repo_context_files = [
     ".github/workflows/ci.yml",
 ]
 repo_context_from_default_branch = false
-repo_context_max_lines = 500
+repo_context_max_lines = 1000
 
 ignore_pr_labels = ["skip-pr-agent"]
 restricted_mode = true
