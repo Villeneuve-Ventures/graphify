@@ -55,13 +55,19 @@ Every relationship is tagged with one of three labels:
 | `INFERRED` | A relationship derived by structural resolution or semantic inference |
 | `AMBIGUOUS` | Uncertain — flagged in the report for manual review |
 
-The semantic extraction prompt assigns EXTRACTED edges a `confidence_score` of
-1.0 and uses this rubric for INFERRED edges:
+The installed skill's semantic extraction instructions assign EXTRACTED edges a
+`confidence_score` of 1.0, AMBIGUOUS edges a score of 0.1–0.3, and use this rubric
+for INFERRED edges:
 - **0.95** — near-certain (explicit cross-file reference, one plausible target)
 - **0.85** — strong evidence (naming + context align)
 - **0.75** — reasonable (contextual but not explicit)
 - **0.65** — weak (naming similarity only)
 - **0.55** — speculative
+
+This rubric describes semantic-pass output. Structural/code-only edges may
+supply their own scores or omit them. JSON export preserves supplied scores and
+fills missing scores with 1.0 for EXTRACTED, 0.5 for INFERRED, and 0.2 for
+AMBIGUOUS; these defaults are not semantic inference scores.
 
 ---
 
@@ -115,7 +121,7 @@ Each edge has:
 - `source`, `target` — node IDs
 - `relation` — verb phrase (e.g. `calls`, `imports`, `implements`, `semantically_similar_to`)
 - `confidence` — `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
-- `confidence_score` — numeric score supplied by semantic extraction for each confidence tag
+- `confidence_score` — numeric score supplied by the extractor or filled by JSON export when absent
 - `source_file` — where the relationship was found
 
 Hyperedges (group relationships connecting 3+ nodes) live in `G.graph["hyperedges"]`.
