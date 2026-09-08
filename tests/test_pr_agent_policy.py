@@ -68,11 +68,11 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert "github.event.pull_request.draft == false" in workflow
     assert "timeout-minutes: 45" in workflow
     assert 'python-version: "3.14"' in workflow
-    assert "570f67ed5fc8db5be74c18df070bc20079b64b0d" in workflow
-    assert 'config.model: "gemini/gemini-3.7-flash"' in workflow
+    assert "f3b385ea2927247ddcff2fe252472380b9c8f5fc" in workflow
+    assert 'config.model: "gemini/gemini-3.8-flash"' in workflow
     assert 'config.fallback_models: \'["gemini/gemini-3.5-flash-lite"]\'' in workflow
     assert 'config.max_model_tokens: "262144"' in workflow
-    assert config["config"]["model"] == "gemini/gemini-3.7-flash"
+    assert config["config"]["model"] == "gemini/gemini-3.8-flash"
     assert config["config"]["fallback_models"] == ["gemini/gemini-3.5-flash-lite"]
     assert config["config"]["reasoning_effort"] == "high"
     assert config["config"]["max_model_tokens"] == 262144
@@ -83,11 +83,15 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert 'config.use_repo_settings_file: "true"' in workflow
     assert 'github_action_config.handle_push_trigger: "false"' in workflow
     assert config["pr_reviewer"]["num_max_findings"] == 5
+    assert config["github_action_config"]["auto_describe"] is False
+    assert 'github_action_config.auto_describe: "false"' in workflow
+    assert config["pr_reviewer"]["persistent_finding_state"] is False
+    assert config["pr_reviewer"]["enable_large_pr_chunking"] is False
     assert config["config"]["restricted_mode"] is True
     assert config["config"]["repo_context_from_default_branch"] is False
     assert config["config"]["repo_context_max_lines"] == 1000
     assert hashlib.sha256((ROOT / ".pr_agent.toml").read_bytes()).hexdigest() == (
-        "d574a37355093c929ae66a14226a9573f6a0da8e42a1b5268b52504765abceb3"
+        "ed562a234853987541e437d56e7d325669fa53c307fa0ce2bc45a1b85a09ce79"
     )
 
 
@@ -432,7 +436,7 @@ def test_publication_rejects_wrong_binding_and_canonicalizes_persistent_update()
 
 def test_wiring_attests_policy_before_constructors_and_uses_one_raw_builder() -> None:
     code = _embedded_python()
-    shim = code.index('MAX_TOKENS["gemini/gemini-3.7-flash"] = 1048576')
+    shim = code.index('MAX_TOKENS["gemini/gemini-3.8-flash"] = 1048576')
     assert shim < code.index("from pr_agent.agent.pr_agent import PRAgent")
     assert code.index("policy_attested = True") < code.index("asyncio.run(_run_action_and_drain())")
     assert "pr_description.get_pr_diff = _complete_diff" in code
@@ -497,7 +501,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         def __init__(self):
             self.values = {
             "CONFIG.GIT_PROVIDER": "github", "CONFIG.PUBLISH_OUTPUT": True,
-            "CONFIG.MODEL": "gemini/gemini-3.7-flash",
+            "CONFIG.MODEL": "gemini/gemini-3.8-flash",
             "CONFIG.FALLBACK_MODELS": ["gemini/gemini-3.5-flash-lite"],
             "CONFIG.REASONING_EFFORT": "high", "CONFIG.MAX_MODEL_TOKENS": 262144,
             "CONFIG.PROPAGATE_TOOL_ERRORS": True, "CONFIG.EXTRA_CONFIG_URL": "",
@@ -506,12 +510,14 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
             "CONFIG.REPO_CONTEXT_MAX_LINES": 1000,
             "CONFIG.REPO_CONTEXT_FILES": ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"],
             "GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER": False,
-            "GITHUB_ACTION_CONFIG.AUTO_REVIEW": True, "GITHUB_ACTION_CONFIG.AUTO_DESCRIBE": True,
+            "GITHUB_ACTION_CONFIG.AUTO_REVIEW": True, "GITHUB_ACTION_CONFIG.AUTO_DESCRIBE": False,
             "GITHUB_ACTION_CONFIG.AUTO_IMPROVE": False,
             "GITHUB_ACTION_CONFIG.PR_ACTIONS": ["opened", "reopened", "ready_for_review"],
             "PR_DESCRIPTION.PUBLISH_DESCRIPTION_AS_COMMENT": True,
             "PR_DESCRIPTION.PUBLISH_DESCRIPTION_AS_COMMENT_PERSISTENT": True,
             "PR_REVIEWER.PUBLISH_OUTPUT_NO_SUGGESTIONS": True,
+            "PR_REVIEWER.PERSISTENT_FINDING_STATE": False,
+            "PR_REVIEWER.ENABLE_LARGE_PR_CHUNKING": False,
             "PR_REVIEWER.PERSISTENT_COMMENT": True, "PR_REVIEWER.FINAL_UPDATE_MESSAGE": True,
             "PR_REVIEWER.NUM_MAX_FINDINGS": 5, "PR_REVIEWER.REQUIRE_TESTS_REVIEW": True,
             "PR_REVIEWER.REQUIRE_SECURITY_REVIEW": True,
@@ -642,7 +648,9 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     module("pr_agent.algo.language_handler", is_valid_file=lambda name: True)
     def stub_get_max_tokens(model):
         return min(max_tokens[model], settings.values["CONFIG.MAX_MODEL_TOKENS"])
-    module("pr_agent.algo.utils", get_max_tokens=stub_get_max_tokens)
+    module("litellm", register_model=lambda entries: None, model_cost={})
+    module("pr_agent.algo.utils", get_max_tokens=stub_get_max_tokens,
+           add_pr_review_identity=lambda body, marker: body)
     module("pr_agent.config_loader", get_settings=lambda: settings)
     module("pr_agent.git_providers")
     github_provider_module = module("pr_agent.git_providers.github_provider", GithubProvider=GithubProvider)
@@ -659,7 +667,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         except yaml.YAMLError:
             return None
     async def retry_with_fallback_models(function, _model_type):
-        models = ["gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
+        models = ["gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite"]
         for index, model in enumerate(models):
             try:
                 return await function(model)
@@ -678,7 +686,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
                 runner_module.apply_repo_settings("https://example/pr/7")
             except Exception as error:
                 reads["errors"].append(repr(error))
-            if omit != "summary":
+            if description_predictions is not None and omit != "summary":
                 await Description().run()
             if omit != "review":
                 await Reviewer().run()
@@ -715,7 +723,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     exec(compile(_embedded_python(), "<embedded-entry>", "exec"), {})
     reads["effective_tokens"] = {
         model: stub_get_max_tokens(model) for model in (
-            "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite")
+            "gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite")
     }
     reads["no_temperature_models"] = list(no_temperature_models)
     reads["reasoning_models"] = list(algo.SUPPORT_REASONING_EFFORT_MODELS)
@@ -726,27 +734,26 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
 def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_path) -> None:
     reads, description, reviewer = _run_stubbed_entry(monkeypatch, tmp_path)
     context_files = ["AGENTS.md", "SECURITY.md", "pyproject.toml", ".github/workflows/ci.yml"]
-    assert reads["pull"] >= 6
+    assert reads["pull"] >= 4
     assert description.get_pr_diff is reviewer.get_pr_diff
-    assert reads["aliases"] == ["summary", "review"]
-    assert "__new hunk__" not in reads["description_diffs"][0]
+    assert reads["aliases"] == ["review"]
+    assert reads["description_diffs"] == []
     assert "## File: 'src/a.py'" in reads["tool_diffs"][0]
     assert "__new hunk__\n1 +new" in reads["tool_diffs"][0]
     assert reads["conversions"] == [None]
-    assert reads["eager"] >= 3
+    assert reads["eager"] >= 2
     assert reads["context_fetches"] == [(path, "a" * 40) for path in context_files]
     assert {path for path, _content in reads["context_served"]} == set(context_files)
     assert reads["effective_tokens"] == {
-        "gemini/gemini-3.7-flash": 262144,
+        "gemini/gemini-3.8-flash": 262144,
         "gemini/gemini-3.5-flash-lite": 262144,
     }
     assert reads["no_temperature_models"] == [
-        "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
+        "gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite"]
     assert reads["completion_kwargs"] == [
-        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
-        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
+        {"model": "gemini/gemini-3.8-flash", "reasoning_effort": "high"},
     ]
-    assert reads["reasoning_models"] == ["gemini-3.7-flash", "gemini-3.5-flash-lite"]
+    assert reads["reasoning_models"] == ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
     assert reads["reasoning_effort"] == "high"
     reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment")
     assert reads["requests"] == ["/review"]
@@ -762,7 +769,7 @@ def test_stubbed_entry_accepts_complete_repository_context(monkeypatch, tmp_path
     assert reads["context_fetches"] == [(path, "a" * 40) for path in context]
     assert dict(reads["context_served"]) == {
         path: content.decode("utf-8").rstrip() for path, content in context.items()}
-    assert reads["published"] == (["summary", "review"] if event_name == "pull_request" else ["review"])
+    assert reads["published"] == ["review"]
 
 
 @pytest.mark.parametrize("event_name", ["pull_request", "issue_comment"])
@@ -775,7 +782,7 @@ def test_stubbed_entry_enforces_formatted_context_limit(
                   record=record)
     if accepted:
         reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, **kwargs)
-        assert reads["published"] == (["summary", "review"] if event_name == "pull_request" else ["review"])
+        assert reads["published"] == ["review"]
     else:
         with pytest.raises(RuntimeError, match="exceeds the complete-context budget"):
             _run_stubbed_entry(monkeypatch, tmp_path, **kwargs)
@@ -811,11 +818,11 @@ def test_description_malformed_primary_uses_valid_fallback(monkeypatch, tmp_path
     reads, _, _ = _run_stubbed_entry(
         monkeypatch, tmp_path, description_predictions=[malformed, VALID_DESCRIPTION])
     assert reads["description_models"] == [
-        "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
+        "gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite"]
     assert reads["completion_kwargs"] == [
-        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
+        {"model": "gemini/gemini-3.8-flash", "reasoning_effort": "high"},
         {"model": "gemini/gemini-3.5-flash-lite", "reasoning_effort": "high"},
-        {"model": "gemini/gemini-3.7-flash", "reasoning_effort": "high"},
+        {"model": "gemini/gemini-3.8-flash", "reasoning_effort": "high"},
     ]
     assert reads["aliases"] == ["summary", "summary", "review"]
     assert reads["description_diffs"][0] == reads["description_diffs"][1]
@@ -838,14 +845,14 @@ def test_description_all_invalid_attempts_publish_nothing(
         _run_stubbed_entry(
             monkeypatch, tmp_path, description_predictions=predictions, record=record)
     assert record["reads"]["description_models"] == [
-        "gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite"]
+        "gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite"]
     assert record["reads"]["published"] == []
 
 
 def test_description_valid_primary_is_single_attempt(monkeypatch, tmp_path) -> None:
     reads, _, _ = _run_stubbed_entry(
         monkeypatch, tmp_path, description_predictions=[VALID_DESCRIPTION])
-    assert reads["description_models"] == ["gemini/gemini-3.7-flash"]
+    assert reads["description_models"] == ["gemini/gemini-3.8-flash"]
     assert reads["aliases"] == ["summary", "review"]
     assert reads["published"] == ["summary", "review"]
 
@@ -857,7 +864,7 @@ def test_description_changes_summary_is_required_only_when_prompt_includes_it(
     reads, _, _ = _run_stubbed_entry(
         monkeypatch, tmp_path, description_predictions=[prediction],
         summary_include_changes=False)
-    assert reads["description_models"] == ["gemini/gemini-3.7-flash"]
+    assert reads["description_models"] == ["gemini/gemini-3.8-flash"]
 
 
 def test_stubbed_entry_rejects_numbered_conversion_loss_and_invalid_flag(
@@ -938,7 +945,7 @@ def test_stubbed_entry_propagates_settings_tool_and_policy_api_failures(monkeypa
     assert recorded_failure(
         "swallowed a review failure", event_name="issue_comment", apply_error=True
     ) == ["RuntimeError('settings apply failed')"]
-    with pytest.raises(RuntimeError, match="all description models failed"):
+    with pytest.raises(RuntimeError, match="tool failed"):
         _run_stubbed_entry(monkeypatch, tmp_path, tool_error=True)
     assert recorded_failure(
         "swallowed a review failure", event_name="issue_comment", tool_error=True
@@ -983,14 +990,14 @@ def test_stubbed_entry_rejects_stale_or_altered_visible_publication(monkeypatch,
                            publish_current=False, seed_old=True)
     with pytest.raises(RuntimeError, match="not visible intact"):
         _run_stubbed_entry(monkeypatch, tmp_path,
-                           visible_transform=lambda body: body.replace("Body", "Altered"))
+                           visible_transform=lambda body: body.replace("| A | B |", "| Altered | B |"))
     with pytest.raises(RuntimeError, match="not visible intact"):
         _run_stubbed_entry(monkeypatch, tmp_path,
                            visible_transform=lambda body: body.rsplit("\n", 1)[0])
 
 
 @pytest.mark.parametrize("event_name,omit", [
-    ("pull_request", "summary"), ("pull_request", "review"), ("issue_comment", "review")
+    ("pull_request", "review"), ("issue_comment", "review")
 ])
 def test_stubbed_entry_requires_event_specific_outputs(monkeypatch, tmp_path,
                                                        event_name, omit) -> None:
@@ -1000,5 +1007,5 @@ def test_stubbed_entry_requires_event_specific_outputs(monkeypatch, tmp_path,
 
 def test_embedded_python_compiles_and_stays_lean() -> None:
     compile(_embedded_python(), ".github/workflows/pr-agent.yml", "exec")
-    assert len(_workflow().splitlines()) <= 500
+    assert len(_workflow().splitlines()) <= 510
     assert len((ROOT / ".pr_agent.toml").read_text().splitlines()) <= 125

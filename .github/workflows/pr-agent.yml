@@ -28,8 +28,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   review:
-    # Fork pull requests receive no secret. A trusted maintainer can explicitly
-    # request the default-branch issue_comment workflow after inspecting them.
+    # Forks require a trusted maintainer request through issue_comment.
     if: >-
       ${{
         github.event.sender.type != 'Bot' &&
@@ -51,8 +50,6 @@ jobs:
         )
       }}
     runs-on: ubuntu-latest
-    # Description and review run sequentially; primary and fallback each get
-    # two attempts, so leave headroom beyond eight 300-second attempts.
     timeout-minutes: 45
     permissions:
       contents: read
@@ -66,12 +63,12 @@ jobs:
       - name: Install pinned PR-Agent
         run: >-
           python -m pip install --disable-pip-version-check
-          "git+https://github.com/the-pr-agent/pr-agent.git@570f67ed5fc8db5be74c18df070bc20079b64b0d"
+          "git+https://github.com/the-pr-agent/pr-agent.git@f3b385ea2927247ddcff2fe252472380b9c8f5fc"
       - name: Run PR-Agent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          config.model: "gemini/gemini-3.7-flash"
+          config.model: "gemini/gemini-3.8-flash"
           config.fallback_models: '["gemini/gemini-3.5-flash-lite"]'
           config.reasoning_effort: "high"
           config.max_model_tokens: "262144"
@@ -80,12 +77,14 @@ jobs:
           config.use_global_settings_file: "false"
           config.use_repo_settings_file: "true"
           github_action_config.auto_review: "true"
-          github_action_config.auto_describe: "true"
+          github_action_config.auto_describe: "false"
           github_action_config.auto_improve: "false"
           pr_description.publish_description_as_comment: "true"
           pr_description.publish_description_as_comment_persistent: "true"
           github_action_config.handle_push_trigger: "false"
           pr_reviewer.publish_output_no_suggestions: "true"
+          pr_reviewer.persistent_finding_state: "false"
+          pr_reviewer.enable_large_pr_chunking: "false"
           pr_reviewer.persistent_comment: "true"
           pr_reviewer.final_update_message: "true"
         run: |
@@ -95,13 +94,19 @@ jobs:
           from pr_agent.algo import MAX_TOKENS, NO_SUPPORT_TEMPERATURE_MODELS, SUPPORT_REASONING_EFFORT_MODELS
           from pr_agent.algo.git_patch_processing import decouple_and_convert_to_hunks_with_lines_numbers
           from pr_agent.algo.language_handler import is_valid_file
-          from pr_agent.algo.utils import get_max_tokens
+          from pr_agent.algo.utils import add_pr_review_identity, get_max_tokens
           from pr_agent.config_loader import get_settings
-          MAX_TOKENS["gemini/gemini-3.7-flash"] = 1048576
+          from litellm import register_model, model_cost
+          from datetime import datetime, timezone
+          # https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash
+          if "gemini/gemini-3.8-flash" not in model_cost:
+              price_factor = 2 if datetime.now(timezone.utc).year >= 2027 else 1
+              register_model({"gemini/gemini-3.8-flash": {"litellm_provider": "gemini", "mode": "chat", "max_input_tokens": 1048576, "max_output_tokens": 65536, "supports_reasoning": True, "input_cost_per_token": 0.75e-6 * price_factor, "output_cost_per_token": 3.75e-6 * price_factor, "cache_read_input_token_cost": 0.075e-6 * price_factor}})
+          MAX_TOKENS["gemini/gemini-3.8-flash"] = 1048576
           NO_SUPPORT_TEMPERATURE_MODELS.extend(
-              model for model in ("gemini/gemini-3.7-flash", "gemini/gemini-3.5-flash-lite")
+              model for model in ("gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite")
               if model not in NO_SUPPORT_TEMPERATURE_MODELS)
-          SUPPORT_REASONING_EFFORT_MODELS.extend(model for model in ("gemini-3.7-flash", "gemini-3.5-flash-lite") if model not in SUPPORT_REASONING_EFFORT_MODELS)
+          SUPPORT_REASONING_EFFORT_MODELS.extend(model for model in ("gemini-3.8-flash", "gemini-3.5-flash-lite") if model not in SUPPORT_REASONING_EFFORT_MODELS)
           def _valid_int(value, positive=False):
               return type(value) is int and value >= (1 if positive else 0)
           def _valid_path(path):
@@ -203,6 +208,10 @@ jobs:
                   index = lines.index(marker)
                   if index == 1:
                       del lines[index]
+                      identity = "<!-- pr-agent:review:full -->"
+                      if fields[0] == "review" and lines.count(identity) == 1:
+                          anchor = lines.index(identity)
+                          if lines[anchor + 1:anchor + 4] == ["", update, ""]: del lines[anchor + 1:anchor + 4]
                   elif index == 4 and lines[1] == lines[3] == "" and lines[2] == update:
                       del lines[1:5]
               return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -368,19 +377,20 @@ jobs:
           def _attest():
               checks = {
                   "CONFIG.GIT_PROVIDER": "github", "CONFIG.PUBLISH_OUTPUT": True,
-                  "CONFIG.MODEL": "gemini/gemini-3.7-flash",
+                  "CONFIG.MODEL": "gemini/gemini-3.8-flash",
                   "CONFIG.FALLBACK_MODELS": ["gemini/gemini-3.5-flash-lite"],
                   "CONFIG.REASONING_EFFORT": "high", "CONFIG.MAX_MODEL_TOKENS": 262144,
                   "CONFIG.PROPAGATE_TOOL_ERRORS": True, "CONFIG.EXTRA_CONFIG_URL": "",
                   "CONFIG.USE_GLOBAL_SETTINGS_FILE": False, "CONFIG.USE_REPO_SETTINGS_FILE": True,
                   "CONFIG.RESTRICTED_MODE": True, "CONFIG.REPO_CONTEXT_FROM_DEFAULT_BRANCH": False,
                   "CONFIG.REPO_CONTEXT_MAX_LINES": 1000, "GITHUB_ACTION_CONFIG.HANDLE_PUSH_TRIGGER": False,
-                  "GITHUB_ACTION_CONFIG.AUTO_REVIEW": True, "GITHUB_ACTION_CONFIG.AUTO_DESCRIBE": True,
+                  "GITHUB_ACTION_CONFIG.AUTO_REVIEW": True, "GITHUB_ACTION_CONFIG.AUTO_DESCRIBE": False,
                   "GITHUB_ACTION_CONFIG.AUTO_IMPROVE": False,
                   "GITHUB_ACTION_CONFIG.PR_ACTIONS": ["opened", "reopened", "ready_for_review"],
                   "PR_DESCRIPTION.PUBLISH_DESCRIPTION_AS_COMMENT": True,
                   "PR_DESCRIPTION.PUBLISH_DESCRIPTION_AS_COMMENT_PERSISTENT": True,
                   "PR_REVIEWER.PUBLISH_OUTPUT_NO_SUGGESTIONS": True,
+                  "PR_REVIEWER.PERSISTENT_FINDING_STATE": False, "PR_REVIEWER.ENABLE_LARGE_PR_CHUNKING": False,
                   "PR_REVIEWER.PERSISTENT_COMMENT": True, "PR_REVIEWER.FINAL_UPDATE_MESSAGE": True,
                   "PR_REVIEWER.NUM_MAX_FINDINGS": 5, "PR_REVIEWER.REQUIRE_TESTS_REVIEW": True,
                   "PR_REVIEWER.REQUIRE_SECURITY_REVIEW": True,
@@ -454,6 +464,7 @@ jobs:
                   def publish(body, *args, **kwargs):
                       if not policy_attested or not _substantive(kind, body):
                           raise RuntimeError(f"Non-substantive or unattested {kind} publication")
+                      body = add_pr_review_identity(body, kwargs.get("identity_marker"))
                       marker = _marker(kind, frozen, run_id, attempt, body, policy_digest)
                       first, separator, rest = body.partition("\n")
                       marked = first + "\n" + marker + ("\n" + rest if separator else "")
@@ -487,8 +498,7 @@ jobs:
           PRAgent.handle_request = handle_verified
           from pr_agent.servers.github_action_runner import _run_action_and_drain
           asyncio.run(_run_action_and_drain())
-          if (not policy_attested or not verification["review"]
-                  or (event_name == "pull_request" and not verification["summary"])):
+          if not policy_attested or not verification["review"]:
               raise RuntimeError("Required PR-Agent outputs did not complete")
           _fresh()
           PY

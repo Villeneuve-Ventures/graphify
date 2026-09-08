@@ -1,10 +1,10 @@
 [config]
-model = "gemini/gemini-3.7-flash"
+model = "gemini/gemini-3.8-flash"
 fallback_models = ["gemini/gemini-3.5-flash-lite"]
 reasoning_effort = "high"
 
 # High-effort reviews and larger diffs need more time and context than the
-# PR-Agent defaults. Gemini 3.7 Flash supports a 1M-token input window; this
+# PR-Agent defaults. Gemini 3.8 Flash supports a 1M-token input window; this
 # repository caps complete review comparisons at 262K to keep usage bounded.
 ai_timeout = 300
 max_model_tokens = 262144
@@ -31,7 +31,9 @@ restricted_mode = true
 
 
 [github_action_config]
-# Run the summary and full review only when a PR first enters non-draft review.
+# Save model tokens by avoiding a second automatic description request.
+auto_describe = false
+# Run a full review only when a PR first enters non-draft review.
 # Subsequent reviews are requested explicitly with /prreview. Each request
 # regenerates a frozen full review without waiting for a push.
 pr_actions = ["opened", "reopened", "ready_for_review"]
@@ -46,6 +48,9 @@ publish_description_as_comment_persistent = true
 
 
 [pr_reviewer]
+# Keep the attested full-diff and publication path; finding state/chunking bypass it.
+persistent_finding_state = false
+enable_large_pr_chunking = false
 publish_output_no_suggestions = true
 persistent_comment = true
 final_update_message = true
