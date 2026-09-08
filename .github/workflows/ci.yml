@@ -8,6 +8,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  pr-agent-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install pinned PR-Agent test runtime
+        run: >-
+          python -m pip install pytest
+          "git+https://github.com/the-pr-agent/pr-agent.git@f3b385ea2927247ddcff2fe252472380b9c8f5fc"
+      - name: Verify offline runtime compatibility
+        env:
+          LITELLM_LOCAL_MODEL_COST_MAP: "true"
+        run: python -m pytest --noconftest tests/test_pr_agent_runtime.py -q
+
   skillgen-check:
     # Fast lint-style guard: the skill files under graphify/ are generated from
     # the fragments in tools/skillgen/. This fails if someone hand-edited a
