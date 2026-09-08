@@ -402,3 +402,57 @@ def test_public_code_refresh_refuses_used_ambiguous_source_alias(tmp_path):
     result = _run(repo, "--code-only", "--no-viz", "--out", str(output), output=output)
     assert result.returncode != 0, "used scan/output alias must have one source identity"
     assert graph_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("spelling", ["absolute", "scan_relative"])
+def test_code_refresh_cross_drive_output_alias(tmp_path, monkeypatch, spelling):
+    import ntpath
+    from graphify.cli import _code_refresh_sources
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    source = repo / "second.py"
+    fact = {"id": "accepted", "label": "Accepted cross-drive claim", "file_type": "concept",
+            "source_file": str(source) if spelling == "absolute" else "second.py"}
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    manifest_path = graph_path.parent / "manifest.json"
+    before = (graph_path.read_bytes(), manifest_path.read_bytes())
+    relpath = os.path.relpath
+    attempted = []
+
+    def cross_drive(path, start):
+        if Path(start) == output:
+            attempted.append(str(path))
+            return ntpath.relpath(r"C:\corpus\second.py", r"D:\output")
+        return relpath(path, start)
+
+    monkeypatch.setattr(os.path, "relpath", cross_drive)
+    paths = sorted(repo.glob("*.py"))
+    changed, aliases = _code_refresh_sources(
+        graph_path, manifest_path, paths, repo, output, [str(p) for p in paths])
+    assert attempted
+    assert changed == []
+    assert aliases[os.path.normpath(fact["source_file"])] == "second.py"
+    assert aliases[str(source)] == aliases["second.py"] == "second.py"
+    assert (graph_path.read_bytes(), manifest_path.read_bytes()) == before
+
+
+def test_code_refresh_output_alias_oserror_propagates(tmp_path, monkeypatch):
+    from graphify.cli import _code_refresh_sources
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    relpath = os.path.relpath
+
+    def denied_output(path, start):
+        if Path(start) == output:
+            raise OSError("output alias denied")
+        return relpath(path, start)
+
+    monkeypatch.setattr(os.path, "relpath", denied_output)
+    paths = sorted(repo.glob("*.py"))
+    with pytest.raises(OSError, match="output alias denied"):
+        _code_refresh_sources(graph_path, graph_path.parent / "manifest.json",
+                              paths, repo, output, [str(p) for p in paths])

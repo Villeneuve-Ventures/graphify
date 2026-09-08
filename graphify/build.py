@@ -905,7 +905,7 @@ def deduplicate_by_label(nodes: list[dict], edges: list[dict]) -> tuple[list[dic
     return deduped_nodes, deduped_edges
 
 
-def _compose_ast_refresh(chunks, nodes, edges, hyperedges, replaced, pruned, *, root, directed, dedup, source_map):
+def _compose_ast_refresh(chunks, nodes, edges, hyperedges, replaced, pruned, *, root, directed, dedup, source_map, dedup_llm_backend):
     """Normalize fresh AST only; accepted semantic records are not extraction input."""
     def normalize(source):
         if source and source_map:
@@ -922,7 +922,8 @@ def _compose_ast_refresh(chunks, nodes, edges, hyperedges, replaced, pruned, *, 
     def keep(record):
         return record.get("_origin") != "ast" and normalize(record.get("source_file")) not in removed
 
-    graph = build(chunks, directed=directed, dedup=dedup, root=root)
+    graph = build(chunks, directed=directed, dedup=dedup, root=root,
+                  dedup_llm_backend=dedup_llm_backend)
     # Explicit deletion still wins for sources outside the actual replacement set.
     graph.remove_nodes_from([node for node, attrs in graph.nodes(data=True)
                              if normalize(attrs.get("source_file")) in pruned])
@@ -1039,6 +1040,7 @@ def build_merge(
             new_chunks, existing_nodes, existing_edges, existing_hyperedges,
             ast_refresh_sources, prune_sources or [], root=_eff_root,
             directed=directed, dedup=dedup, source_map=ast_refresh_source_map,
+            dedup_llm_backend=dedup_llm_backend,
         )
         if graph_path.exists() and not dedup and not prune_sources and len(refreshed) < len(existing_nodes):
             raise ValueError(

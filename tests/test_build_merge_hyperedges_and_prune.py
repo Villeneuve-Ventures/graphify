@@ -291,3 +291,47 @@ def test_ast_refresh_reference_owner_transitions_match_full(tmp_path, owners):
                  attrs.get("source_file"), attrs.get("source_location"), attrs.get("_origin"))
                 for _, _, attrs in graph.edges(data=True)}
     assert records(actual) == records(expected)
+
+
+@pytest.mark.parametrize("backend", ["gemini", None])
+def test_ast_refresh_explicit_dedup_backend_preserves_retained(tmp_path, monkeypatch, backend):
+    from copy import deepcopy
+    from graphify import dedup
+    from graphify.build import build
+
+    graph, ast, fact, global_fact, edge, hyperedge = _ast_refresh_seed(tmp_path)
+    rationale = {"id": "rationale", "label": "Quasar indexing balances recovery latency",
+                 "file_type": "rationale", "source_file": "module.py", "_origin": "ast"}
+    concept = {"id": "concept", "label": "Zephyr transactions preserve durable provenance",
+               "file_type": "concept", "source_file": "module.py", "_origin": "ast"}
+    fresh = {"nodes": [ast, rationale, concept], "edges": [
+        {"source": "rationale", "target": "symbol", "relation": "explains", "_origin": "ast"}]}
+    calls = []
+
+    def tiebreak(candidates, uf, communities, *, backend):
+        assert {node["id"] for node in candidates} == {"rationale", "concept"}
+        assert all(node["_origin"] == "ast" for node in candidates)
+        assert uf.find("rationale") != uf.find("concept")
+        calls.append(backend)
+        uf.union("rationale", "concept")
+
+    monkeypatch.setattr(dedup, "_llm_tiebreak", tiebreak)
+    expected = build([deepcopy(fresh)], root=tmp_path, dedup_llm_backend=backend)
+    assert calls == ([backend] if backend is not None else [])
+    assert len(expected) == (2 if backend is not None else 3)
+    calls.clear()
+    before = graph.read_bytes()
+    actual = build_merge([deepcopy(fresh)], graph, root=tmp_path,
+                         ast_refresh_sources=[], dedup_llm_backend=backend)
+    assert calls == ([backend] if backend is not None else [])
+    actual_fresh = actual.subgraph(expected.nodes)
+    assert {n: dict(a) for n, a in actual_fresh.nodes(data=True)} == dict(expected.nodes(data=True))
+    assert list(actual_fresh.edges(data=True)) == list(expected.edges(data=True))
+    assert set(actual) == set(expected) | {"fact", "global"}
+    assert dict(actual.nodes["fact"]) == {k: v for k, v in fact.items() if k != "id"}
+    assert dict(actual.nodes["global"]) == {k: v for k, v in global_fact.items() if k != "id"}
+    assert dict(actual.edges["fact", "symbol"]) == {
+        **{k: v for k, v in edge.items() if k not in {"source", "target"}},
+        "_src": "fact", "_tgt": "symbol"}
+    assert actual.graph["hyperedges"] == [hyperedge]
+    assert graph.read_bytes() == before
