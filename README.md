@@ -392,6 +392,20 @@ See the [full command reference](#full-command-reference) below.
 
 ---
 
+### Prepared code-only refresh
+
+`graphify extract PATH --code-only` against an existing graph, with clustering
+enabled and without `--force`, rebuilds the full admitted code corpus and its
+resolution context. It bypasses AST caches; this is not a changed-file fast path.
+Retained semantic facts for code require a valid semantic hash for their accepted
+source bytes. An AST-only `graphify update` cannot renew that semantic proof.
+Missing or conflicting proof causes refusal rather than certifying stale facts.
+
+Failed extraction of a selected source aborts before publication, including a
+missing required language extra such as `graphifyy[sql]` for SQL. Genuine optional
+metadata absence and working documented backend fallbacks remain supported.
+The separate `graphify update` command retains its own AST update behavior.
+
 ## Ignoring files
 
 Create a `.graphifyignore` in your project root — same syntax as `.gitignore`, including `!` negation.

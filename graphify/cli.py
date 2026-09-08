@@ -135,7 +135,8 @@ def _code_refresh_sources(graph_path, manifest_path, paths, root, out_root, corp
             aliases.setdefault(os.path.normpath(alias), set()).add(owner)
     records = [record for key in ("nodes", "links", "edges", "hyperedges")
                for record in data.get(key, []) if record.get("source_file")]
-    if any(len(aliases.get(os.path.normpath(record["source_file"]), ())) > 1 for record in records):
+    if any(len(aliases.get(os.path.normpath(record["source_file"]), ())) > 1
+           for record in records if record.get("_origin") != "ast"):
         raise ValueError("code refresh has ambiguous source ownership")
     source_map = {alias: next(iter(owners)) for alias, owners in aliases.items() if len(owners) == 1}
     semantic_sources = {
@@ -150,7 +151,8 @@ def _code_refresh_sources(graph_path, manifest_path, paths, root, out_root, corp
         nonempty = [value for value in hashes if value != ""]
         valid = (bool(nonempty) and all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value)
                                        for value in nonempty) and len(set(nonempty)) == 1)
-        if not valid and _norm_source_file(str(path), str(root)) in semantic_sources:
+        if (_norm_source_file(str(path), str(root)) in semantic_sources
+                and (not valid or not entry.get("semantic_hash"))):
             raise ValueError("code refresh has unknown or conflicting retained semantic source baseline")
         current_hash = _md5_file(path)
         if not isinstance(current_hash, str) or not re.fullmatch(r"[0-9a-f]{32}", current_hash):

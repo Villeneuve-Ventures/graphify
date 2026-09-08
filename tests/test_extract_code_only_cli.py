@@ -456,3 +456,99 @@ def test_code_refresh_output_alias_oserror_propagates(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="output alias denied"):
         _code_refresh_sources(graph_path, graph_path.parent / "manifest.json",
                               paths, repo, output, [str(p) for p in paths])
+
+
+
+def test_public_update_invalidates_retained_code_semantic_baseline(tmp_path):
+    from graphify.transaction import RECEIPT_FILE
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    data = json.loads(graph_path.read_text())
+    fact = {"id": "accepted", "label": "Accepted second module evidence",
+            "file_type": "concept", "source_file": "second.py", "quotation": "old bytes"}
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    source = repo / "second.py"
+    source.write_text(source.read_text() + "\ndef newly_observed():\n    return 7\n")
+    env = {k: v for k, v in os.environ.items() if k not in _KEY_VARS}
+    env["GRAPHIFY_OUT"] = str(graph_path.parent)
+    updated = subprocess.run([PYTHON, "-m", "graphify", "update", "."], cwd=repo,
+                             env=env, capture_output=True, text=True)
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    manifest_path = graph_path.parent / "manifest.json"
+    entry = json.loads(manifest_path.read_text())["second.py"]
+    assert entry["ast_hash"] and entry["semantic_hash"] == ""
+    retained = next(n for n in json.loads(graph_path.read_text())["nodes"] if n["id"] == "accepted")
+    assert {k: retained[k] for k in fact} == fact
+    protected = [graph_path, manifest_path, graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() if p.exists() else None for p in protected}
+    result = _run(repo, "--code-only", "--no-viz")
+    assert result.returncode != 0, "AST update cannot certify retained semantic freshness"
+    assert {p: p.read_bytes() if p.exists() else None for p in protected} == before
+
+
+@pytest.mark.parametrize("shape,retained", [("blank", True), ("legacy", True),
+                                           ("blank", False), ("legacy", False)])
+def test_code_refresh_requires_semantic_stage_proof_only_for_retained_sources(tmp_path, shape, retained):
+    from graphify.cli import _code_refresh_sources
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    data = json.loads(graph_path.read_text())
+    if retained:
+        data["nodes"].append({"id": "accepted", "label": "Accepted code evidence",
+                              "file_type": "concept", "source_file": "second.py"})
+        graph_path.write_text(json.dumps(data))
+    manifest_path = graph_path.parent / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    entry = manifest["second.py"]
+    manifest["second.py"] = ({"mtime": entry["mtime"], "hash": entry["ast_hash"]}
+                             if shape == "legacy" else {**entry, "semantic_hash": ""})
+    manifest_path.write_text(json.dumps(manifest))
+    before = (graph_path.read_bytes(), manifest_path.read_bytes())
+    paths = sorted(repo.glob("*.py"))
+    args = (graph_path, manifest_path, paths, repo, repo, [str(p) for p in paths])
+    if retained:
+        with pytest.raises(ValueError, match="semantic.*baseline"):
+            _code_refresh_sources(*args)
+    else:
+        changed, aliases = _code_refresh_sources(*args)
+        assert changed == [] and aliases["second.py"] == "second.py"
+    assert (graph_path.read_bytes(), manifest_path.read_bytes()) == before
+
+
+@pytest.mark.parametrize("retained_semantic", [False, True])
+def test_public_code_refresh_historical_alias_ownership(tmp_path, retained_semantic):
+    from graphify.build import build
+    from graphify.detect import save_manifest
+    from graphify.extract import extract
+    from graphify.transaction import RECEIPT_FILE
+
+    output = tmp_path / "corpus" / "nested"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    historical = output / "second.py"
+    historical.write_text("def historical_symbol():\n    return 1\n")
+    save_manifest({"code": [str(historical)]}, str(graph_path.parent / "manifest.json"), root=repo)
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append({"id": "historical", "label": "Historical nested symbol",
+                          "file_type": "code", "source_file": "second.py", "_origin": "ast"})
+    if retained_semantic:
+        data["nodes"].append({"id": "ambiguous", "label": "Historical accepted claim",
+                              "file_type": "concept", "source_file": "second.py"})
+    graph_path.write_text(json.dumps(data))
+    historical.unlink()
+    _append_refresh_function(repo)
+    protected = [graph_path, graph_path.parent / "manifest.json", graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() if p.exists() else None for p in protected}
+    result = _run(repo, "--code-only", "--no-viz", "--out", str(output), output=output)
+    if retained_semantic:
+        assert result.returncode != 0, "historical aliases must still constrain retained semantics"
+        assert {p: p.read_bytes() if p.exists() else None for p in protected} == before
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    oracle = build([extract(sorted(repo.glob("*.py")), cache_root=output, strict=True)], root=repo)
+    refreshed = json.loads(graph_path.read_text())
+    assert {n["id"] for n in refreshed["nodes"] if n.get("_origin") == "ast"} == set(oracle)
+    fields = ("relation", "confidence", "source_file", "source_location", "_origin")
+    assert {(e["source"], e["target"], *(e.get(k) for k in fields))
+            for e in refreshed["links"] if e.get("_origin") == "ast"} == {
+                (a["_src"], a["_tgt"], *(a.get(k) for k in fields)) for _, _, a in oracle.edges(data=True)}

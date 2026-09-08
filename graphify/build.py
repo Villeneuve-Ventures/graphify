@@ -916,7 +916,10 @@ def _compose_ast_refresh(chunks, nodes, edges, hyperedges, replaced, pruned, *, 
     removed = replaced | pruned
     permitted_missing = {
         node["id"] for node in nodes
-        if normalize(node.get("source_file")) in pruned
+        if (normalize(node.get("source_file")) in pruned
+            and (node.get("_origin") != "ast" or source_map is None
+                 or (node.get("source_file")
+                     and os.path.normpath(node["source_file"]) in source_map)))
         or (node.get("_origin") != "ast" and normalize(node.get("source_file")) in replaced)
     }
     def keep(record):

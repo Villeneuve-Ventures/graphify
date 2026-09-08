@@ -4404,8 +4404,10 @@ def extract(
             value of GRAPHIFY_MAX_WORKERS if set), bounded by len(uncached_work).
         strict: reject missing/error results and failures while reading, parsing
             or enumerating selected sources and dependencies; bypass AST and
-            resolver caches. Genuine optional absence, tolerant syntax and
-            documented unavailable-backend alternatives remain valid.
+            resolver caches. Genuine optional metadata absence, tolerant syntax
+            and working documented alternatives for absent backends remain valid.
+            A selected source that returns an error, including a missing required
+            language extra, still fails; an unavailable backend alone is no waiver.
     """
     paths = [Path(p) for p in paths]
     _check_tree_sitter_version()

@@ -335,3 +335,46 @@ def test_ast_refresh_explicit_dedup_backend_preserves_retained(tmp_path, monkeyp
         "_src": "fact", "_tgt": "symbol"}
     assert actual.graph["hyperedges"] == [hyperedge]
     assert graph.read_bytes() == before
+
+
+
+@pytest.mark.parametrize("case", ["fresh_endpoint", "missing_edge", "unmapped_hyperedge"])
+def test_ast_refresh_requires_proved_retirement_for_retained_endpoints(tmp_path, case):
+    root = tmp_path / "corpus"
+    root.mkdir()
+    graph, ast, fact, global_fact, edge, hyperedge = _ast_refresh_seed(root)
+    for record in (fact, edge, hyperedge):
+        record["source_file"] = "docs/evidence.md"
+    # The same raw spelling can mean a live output-relative source or a deleted
+    # scan-root source. A supplied ownership map deliberately omits that alias.
+    live = tmp_path / "module.py"
+    live.write_text("def symbol():\n    return 1\n")
+    deleted = root / "module.py"
+    source_map = {str(live): "../module.py", "../module.py": "../module.py",
+                  str(deleted): "module.py"}
+    if case == "unmapped_hyperedge":
+        ast["source_file"] = "historical.py"
+        deleted = root / "historical.py"
+        source_map = {}  # Supplied empty proof is distinct from the no-map API.
+    edges = [edge] if case != "unmapped_hyperedge" else []
+    hyperedges = [hyperedge] if case != "missing_edge" else []
+    _write_graph(graph, [ast, fact, global_fact], edges, hyperedges)
+    before = graph.read_bytes()
+    fresh = {"nodes": [{**ast, "source_file": str(live)}] if case == "fresh_endpoint" else [],
+             "edges": []}
+    kwargs = dict(root=root, ast_refresh_sources=[], prune_sources=[str(deleted)],
+                  ast_refresh_source_map=source_map)
+    if case == "fresh_endpoint":
+        actual = build_merge([fresh], graph, **kwargs)
+        assert "symbol" in actual
+        assert actual.has_edge("fact", "symbol"), "unproved retirement cannot discard a live evidence edge"
+        assert dict(actual.edges["fact", "symbol"]) == {
+            **{k: v for k, v in edge.items() if k not in {"source", "target"}},
+            "_src": "fact", "_tgt": "symbol"}
+        assert actual.graph["hyperedges"] == [hyperedge]
+        assert dict(actual.nodes["fact"]) == {k: v for k, v in fact.items() if k != "id"}
+    else:
+        message = "retained evidence endpoint" if case == "missing_edge" else "retained hyperedge endpoint"
+        with pytest.raises(ValueError, match=message):
+            build_merge([fresh], graph, **kwargs)
+    assert graph.read_bytes() == before
