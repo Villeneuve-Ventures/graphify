@@ -4,14 +4,17 @@ from __future__ import annotations
 import re
 
 from pathlib import Path
-from graphify.extractors.base import _make_id
+from graphify.extractors.base import _make_id, strict_aware
 
 
-def extract_sln(path: Path) -> dict:
+@strict_aware
+def extract_sln(path: Path, *, strict: bool = False) -> dict:
     """Extract projects and inter-project dependencies from a .sln file."""
     try:
         src = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        if strict:
+            raise
         return {"nodes": [], "edges": [], "error": f"cannot read {path}"}
 
     file_nid = _make_id(str(path))
@@ -48,6 +51,8 @@ def extract_sln(path: Path) -> dict:
             try:
                 abs_proj = str((path.parent / proj_path).resolve())
             except Exception:
+                if strict:
+                    raise
                 abs_proj = proj_path
         proj_nid = _make_id(abs_proj)
         if proj_nid and proj_nid not in seen_ids:

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from graphify.extractors.base import _file_stem, _make_id, _read_text
+from graphify.extractors.base import _file_stem, _make_id, _read_text, strict_aware, checked_exists, checked_is_file
 
 
-def extract_bash(path: Path) -> dict:
+@strict_aware
+def extract_bash(path: Path, *, strict: bool = False) -> dict:
     """Extract functions, source imports, and cross-function calls from a .sh file."""
     try:
         import tree_sitter_bash as tsbash
@@ -176,7 +177,7 @@ def extract_bash(path: Path) -> dict:
                             # disk — prevents graph pollution from crafted paths
                             # like `source ../../etc/passwd` that traverse outside
                             # the project tree (B-1).
-                            if resolved.exists():
+                            if checked_exists(resolved, strict=strict):
                                 tgt_nid = _make_id(str(resolved))
                                 add_edge(file_nid, tgt_nid, "imports_from", line,
                                          context="import")
@@ -191,7 +192,7 @@ def extract_bash(path: Path) -> dict:
                         raw = literal(args[0])
                     if raw and raw.endswith(".sh"):
                         resolved = (path.parent / raw).resolve()
-                        if resolved.is_file():
+                        if checked_is_file(resolved, strict=strict):
                             target_path = resolved
                             if not path.is_absolute():
                                 try:

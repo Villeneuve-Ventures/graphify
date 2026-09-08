@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from graphify.extractors.base import _file_stem, _make_id
+from graphify.extractors.base import _file_stem, _make_id, strict_aware
 from graphify.extractors.resolution import _pascal_resolve_class, _pascal_resolve_unit
 from pathlib import Path
 from typing import Any, Callable
@@ -228,7 +228,7 @@ def _resolve_pascal_callee_factory(
     return _resolve
 
 
-def _extract_pascal_regex(path: Path) -> dict:
+def _extract_pascal_regex(path: Path, *, strict: bool = False) -> dict:
     """Regex fallback for Pascal/Delphi extraction when tree-sitter-pascal
     is unavailable. Produces the same node/edge schema as the tree-sitter pass.
     """
@@ -302,7 +302,7 @@ def _extract_pascal_regex(path: Path) -> dict:
         for um in _PAS_USES_RE.finditer(section_text):
             line = _lineno(stripped, section_off + um.start())
             for unit_name in _pascal_split_uses(um.group(1)):
-                tgt_nid = _pascal_resolve_unit(path, unit_name)
+                tgt_nid = _pascal_resolve_unit(path, unit_name, strict=strict)
                 _add_edge(module_nid, tgt_nid, "imports", line, context="import")
 
     # Type declarations (classes / interfaces) in interface section
@@ -329,7 +329,7 @@ def _extract_pascal_regex(path: Path) -> dict:
                 # duplicate node for a base class that shares this file).
                 base_nid = same_file_nid
             else:
-                resolved = _pascal_resolve_class(path, base_name)
+                resolved = _pascal_resolve_class(path, base_name, strict=strict)
                 if resolved:
                     # Cross-file base class found on disk -- its real node
                     # arrives via THAT file's own extraction. Do not add a
@@ -427,7 +427,8 @@ def _extract_pascal_regex(path: Path) -> dict:
         "raw_calls": raw_calls,
     }
 
-def extract_pascal(path: Path) -> dict:
+@strict_aware
+def extract_pascal(path: Path, *, strict: bool = False) -> dict:
     """Extract units, classes, procedures, uses-imports, and calls from Pascal/Delphi files.
 
     Produces nodes for:
@@ -452,7 +453,7 @@ def extract_pascal(path: Path) -> dict:
         import tree_sitter_pascal as tspascal
         from tree_sitter import Language, Parser
     except ImportError:
-        return _extract_pascal_regex(path)
+        return _extract_pascal_regex(path, strict=strict)
 
     try:
         language = Language(tspascal.language())
@@ -461,7 +462,9 @@ def extract_pascal(path: Path) -> dict:
         tree = parser.parse(source)
         root = tree.root_node
     except Exception:
-        return _extract_pascal_regex(path)
+        if strict:
+            raise
+        return _extract_pascal_regex(path, strict=strict)
 
     stem = _file_stem(path)
     str_path = str(path)
@@ -538,7 +541,7 @@ def extract_pascal(path: Path) -> dict:
             for child in node.children:
                 if child.type == "moduleName":
                     mod_name = _read(child)
-                    tgt_nid = _pascal_resolve_unit(path, mod_name)
+                    tgt_nid = _pascal_resolve_unit(path, mod_name, strict=strict)
                     add_edge(parent_nid, tgt_nid, "imports", line, context="import")
             return
 
@@ -560,7 +563,7 @@ def extract_pascal(path: Path) -> dict:
                         base_nid = _make_id(stem, base_name)
                         if base_nid not in seen_ids:
                             # Try cross-file resolution (TFooBar → FooBar.pas)
-                            resolved = _pascal_resolve_class(path, base_name)
+                            resolved = _pascal_resolve_class(path, base_name, strict=strict)
                             if resolved:
                                 # Cross-file base class found on disk -- its
                                 # real node arrives via THAT file's own

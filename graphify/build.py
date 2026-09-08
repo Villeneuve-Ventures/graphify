@@ -905,6 +905,69 @@ def deduplicate_by_label(nodes: list[dict], edges: list[dict]) -> tuple[list[dic
     return deduped_nodes, deduped_edges
 
 
+def _compose_ast_refresh(chunks, nodes, edges, hyperedges, replaced, pruned, *, root, directed, dedup, source_map):
+    """Normalize fresh AST only; accepted semantic records are not extraction input."""
+    def normalize(source):
+        if source and source_map:
+            return source_map.get(os.path.normpath(source), _norm_source_file(source, root))
+        return _norm_source_file(source, root)
+    replaced = {normalize(source) for source in replaced}
+    pruned = {normalize(source) for source in pruned} - replaced
+    removed = replaced | pruned
+    permitted_missing = {
+        node["id"] for node in nodes
+        if normalize(node.get("source_file")) in pruned
+        or (node.get("_origin") != "ast" and normalize(node.get("source_file")) in replaced)
+    }
+    def keep(record):
+        return record.get("_origin") != "ast" and normalize(record.get("source_file")) not in removed
+
+    graph = build(chunks, directed=directed, dedup=dedup, root=root)
+    # Explicit deletion still wins for sources outside the actual replacement set.
+    graph.remove_nodes_from([node for node, attrs in graph.nodes(data=True)
+                             if normalize(attrs.get("source_file")) in pruned])
+    def comparable(attrs):
+        return {key: value for key, value in attrs.items()
+                if key not in {"community", "community_name", "_src", "_tgt"}}
+
+    for node in nodes:
+        if not keep(node):
+            continue
+        identity = node["id"]
+        attrs = {key: value for key, value in node.items() if key != "id"}
+        if identity in graph and comparable(graph.nodes[identity]) != comparable(attrs):
+            raise ValueError("AST refresh conflicts with retained node identity")
+        graph.add_node(identity, **attrs)
+    for edge in edges:
+        if not keep(edge):
+            continue
+        source, target = edge["source"], edge["target"]
+        if source in permitted_missing or target in permitted_missing:
+            continue
+        if source not in graph or target not in graph:
+            raise ValueError("AST refresh lost retained evidence endpoint")
+        attrs = {key: value for key, value in edge.items() if key not in {"source", "target"}}
+        if graph.has_edge(source, target):
+            current = graph.edges[source, target]
+            if (comparable(current) != comparable(attrs)
+                    or (current.get("_src", source), current.get("_tgt", target)) != (source, target)):
+                raise ValueError("AST refresh conflicts with retained edge slot")
+        graph.add_edge(source, target, **{**attrs, "_src": source, "_tgt": target})
+    carried = list(graph.graph.get("hyperedges", []))
+    for hyperedge in hyperedges:
+        if not keep(hyperedge):
+            continue
+        members = [member for member in hyperedge.get("nodes", []) if member not in permitted_missing]
+        if any(member not in graph for member in members):
+            raise ValueError("AST refresh lost retained hyperedge endpoint")
+        if not members:
+            continue
+        carried.append(hyperedge if members == hyperedge.get("nodes") else {**hyperedge, "nodes": members})
+    if carried:
+        graph.graph["hyperedges"] = carried
+    return graph
+
+
 def build_merge(
     new_chunks: list[dict],
     graph_path: str | Path | None = None,
@@ -914,6 +977,8 @@ def build_merge(
     dedup: bool = True,
     dedup_llm_backend: str | None = None,
     root: str | Path | None = None,
+    ast_refresh_sources: list[str] | None = None,
+    ast_refresh_source_map: dict[str, str] | None = None,
 ) -> nx.Graph:
     """Load existing graph.json, merge new chunks into it, and save back.
 
@@ -923,6 +988,10 @@ def build_merge(
     preserved unchanged; deleted files are removed via prune_sources.
     Safe to call repeatedly.
     root: if given, absolute source_file paths in new_chunks are made relative (#932).
+    ast_refresh_sources: opt into complete AST replacement, preserving accepted
+        semantics except for these proven changed sources and explicit prunes.
+    ast_refresh_source_map: verified aliases to scan-root source keys, used for
+        ownership comparisons without rewriting retained payloads.
     """
     graph_path = Path(graph_path if graph_path is not None else _default_graph_json())
     if graph_path.exists():
@@ -965,6 +1034,18 @@ def build_merge(
         str(Path(root).resolve()) if root is not None
         else _infer_merge_root(graph_path)
     )
+    if ast_refresh_sources is not None:
+        refreshed = _compose_ast_refresh(
+            new_chunks, existing_nodes, existing_edges, existing_hyperedges,
+            ast_refresh_sources, prune_sources or [], root=_eff_root,
+            directed=directed, dedup=dedup, source_map=ast_refresh_source_map,
+        )
+        if graph_path.exists() and not dedup and not prune_sources and len(refreshed) < len(existing_nodes):
+            raise ValueError(
+                f"graphify: build_merge would shrink graph from {len(existing_nodes)} → {len(refreshed)} nodes. "
+                "Pass prune_sources explicitly if you intend to remove nodes."
+            )
+        return refreshed
 
     # Re-extracted files REPLACE their prior contribution. Every source_file
     # present in new_chunks is dropped from the loaded base before merging, so a

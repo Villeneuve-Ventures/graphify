@@ -3,16 +3,19 @@ from __future__ import annotations
 
 
 from pathlib import Path
-from graphify.extractors.base import _file_stem, _make_id
+from graphify.extractors.base import _file_stem, _make_id, strict_aware
 
 
-def extract_apex(path: Path) -> dict:
+@strict_aware
+def extract_apex(path: Path, *, strict: bool = False) -> dict:
     """Extract classes, interfaces, enums, methods, and Salesforce constructs from
     Apex .cls and .trigger files using regex (no tree-sitter grammar on PyPI)."""
     import re as _re
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        if strict:
+            raise
         return {"nodes": [], "edges": []}
 
     str_path = str(path)

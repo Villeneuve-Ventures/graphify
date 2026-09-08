@@ -3,12 +3,12 @@ from __future__ import annotations
 
 
 from pathlib import Path
-from graphify.extractors.base import _file_stem, _make_id, _read_text
+from graphify.extractors.base import _file_stem, _make_id, _read_text, strict_aware
 
 
 _FORTRAN_CPP_EXTS = {".F", ".F90", ".F95", ".F03", ".F08"}
 
-def _cpp_preprocess(path: Path) -> bytes:
+def _cpp_preprocess(path: Path, *, strict: bool = False) -> bytes:
     """Run cpp -w -P on a capital-F Fortran file and return preprocessed bytes.
 
     Falls back to raw file bytes if cpp is not available. Capital-F extensions
@@ -35,13 +35,18 @@ def _cpp_preprocess(path: Path) -> bytes:
             capture_output=True,
             timeout=30,
         )
-        if result.returncode == 0 and result.stdout:
+        if strict and result.returncode != 0:
+            raise RuntimeError(f"Fortran cpp failed with exit {result.returncode}")
+        if result.returncode == 0 and (result.stdout or strict):
             return result.stdout
     except Exception:
+        if strict:
+            raise
         pass
     return path.read_bytes()
 
-def extract_fortran(path: Path) -> dict:
+@strict_aware
+def extract_fortran(path: Path, *, strict: bool = False) -> dict:
     """Extract programs, modules, subroutines, functions, use statements, and calls from Fortran files.
 
     Capital-F extensions (.F, .F90, etc.) are run through the C preprocessor before
@@ -56,7 +61,7 @@ def extract_fortran(path: Path) -> dict:
     try:
         language = Language(tsfortran.language())
         parser = Parser(language)
-        source = _cpp_preprocess(path) if path.suffix in _FORTRAN_CPP_EXTS else path.read_bytes()
+        source = _cpp_preprocess(path, strict=strict) if path.suffix in _FORTRAN_CPP_EXTS else path.read_bytes()
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:

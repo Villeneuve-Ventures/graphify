@@ -207,3 +207,87 @@ def test_genuine_deletion_still_prunes(tmp_path):
     labels = {G.nodes[n].get("label") for n in G.nodes()}
     assert "Other" not in labels, "genuinely deleted file's node should be pruned"
     assert "Widget Cache Design" in labels
+
+
+def _ast_refresh_seed(tmp_path):
+    graph = tmp_path / "graph.json"
+    ast = {"id": "symbol", "label": "Symbol", "file_type": "code",
+           "source_file": "module.py", "_origin": "ast"}
+    fact = {"id": "fact", "label": "Accepted invariant", "file_type": "concept",
+            "source_file": "module.py", "quotation": "retained bytes", "confidence": "EXTRACTED"}
+    global_fact = {"id": "global", "label": "Global accepted assertion", "custom": {"value": 3}}
+    edge = {"source": "fact", "target": "symbol", "relation": "describes",
+            "source_file": "module.py", "confidence": "EXTRACTED", "quotation": "retained bytes"}
+    hyperedge = {"id": "bundle", "nodes": ["fact", "symbol", "global"],
+                 "source_file": "module.py", "custom": ["do", "not", "normalize"]}
+    _write_graph(graph, [ast, fact, global_fact], [edge], [hyperedge])
+    return graph, ast, fact, global_fact, edge, hyperedge
+
+
+def test_ast_refresh_preserves_unchanged_semantic_payloads(tmp_path):
+    graph, ast, fact, global_fact, edge, hyperedge = _ast_refresh_seed(tmp_path)
+    result = build_merge([{"nodes": [ast], "edges": []}], graph, root=tmp_path,
+                         ast_refresh_sources=[], directed=True)
+    assert result.is_directed() and not result.has_edge("symbol", "fact")
+    assert dict(result.nodes["fact"]) == {k: v for k, v in fact.items() if k != "id"}
+    assert dict(result.nodes["global"]) == {k: v for k, v in global_fact.items() if k != "id"}
+    assert all(result.edges["fact", "symbol"].get(k) == v
+               for k, v in edge.items() if k not in {"source", "target"})
+    assert result.graph["hyperedges"] == [hyperedge]
+
+
+@pytest.mark.parametrize("removed", ["changed", "deleted"])
+def test_ast_refresh_removes_only_authorized_source_contributions(tmp_path, removed):
+    graph, ast, *_ = _ast_refresh_seed(tmp_path)
+    result = build_merge([{"nodes": [ast] if removed == "changed" else [], "edges": []}],
+                         graph, root=tmp_path,
+                         ast_refresh_sources=[str(tmp_path / "module.py")] if removed == "changed" else [],
+                         prune_sources=[str(tmp_path / "module.py")])
+    assert "fact" not in result
+    assert "global" in result
+    assert ("symbol" in result) == (removed == "changed")
+    assert not result.graph.get("hyperedges")
+
+
+@pytest.mark.parametrize("conflict", ["endpoint", "node", "edge"])
+def test_ast_refresh_refuses_retained_identity_conflicts(tmp_path, conflict):
+    graph, ast, *_ = _ast_refresh_seed(tmp_path)
+    fresh = {"nodes": [ast], "edges": []}
+    if conflict == "endpoint":
+        fresh["nodes"] = []
+    elif conflict == "node":
+        fresh["nodes"].append({"id": "fact", "label": "Different AST object", "_origin": "ast"})
+    else:
+        fresh["nodes"].append({"id": "fact", "label": "Accepted invariant", "file_type": "concept",
+                               "source_file": "module.py", "quotation": "retained bytes", "confidence": "EXTRACTED"})
+        fresh["edges"] = [{"source": "fact", "target": "symbol", "relation": "calls", "_origin": "ast"}]
+    original = graph.read_bytes()
+    with pytest.raises(ValueError, match={"endpoint": "endpoint", "node": "node identity", "edge": "edge slot"}[conflict]):
+        build_merge([fresh], graph, root=tmp_path, ast_refresh_sources=[])
+    assert graph.read_bytes() == original
+
+
+@pytest.mark.parametrize("owners", [(1, 2), (2, 1)])
+def test_ast_refresh_reference_owner_transitions_match_full(tmp_path, owners):
+    from graphify.build import build
+    from graphify.extract import extract
+    from graphify.export import to_json
+
+    paths = []
+    for name in ("first", "second"):
+        path = tmp_path / f"{name}.py"
+        path.write_text(f"from typing import Any\ndef {name}(value: Any):\n    return value\n")
+        paths.append(path)
+    graph = tmp_path / "graph.json"
+    initial = build([extract(paths[:owners[0]], cache_root=tmp_path, parallel=False)], root=tmp_path)
+    to_json(initial, {}, str(graph))
+    fresh = extract(paths[:owners[1]], cache_root=tmp_path, parallel=False)
+    expected = build([fresh], root=tmp_path)
+    actual = build_merge([fresh], graph, root=tmp_path, ast_refresh_sources=[],
+                         prune_sources=[str(paths[1])] if owners[1] == 1 else None)
+    assert set(actual) == set(expected)
+    def records(graph):
+        return {(attrs["_src"], attrs["_tgt"], attrs.get("relation"), attrs.get("confidence"),
+                 attrs.get("source_file"), attrs.get("source_location"), attrs.get("_origin"))
+                for _, _, attrs in graph.edges(data=True)}
+    assert records(actual) == records(expected)

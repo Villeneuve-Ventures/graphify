@@ -63,6 +63,7 @@ def run_language_resolvers(
     all_edges: list[dict],
     *,
     resolvers: Sequence[LanguageResolver] | None = None,
+    strict: bool = False,
 ) -> None:
     """Run every resolver whose suffix appears in ``paths``.
 
@@ -72,7 +73,8 @@ def run_language_resolvers(
     execution order (registration order).
 
     ``resolvers`` defaults to the global registry; tests pass an explicit list to
-    exercise the driver in isolation.
+    exercise the driver in isolation. ``strict`` propagates resolver failures
+    instead of logging and continuing.
     """
     active = _REGISTRY if resolvers is None else resolvers
     suffixes_present = {p.suffix for p in paths}
@@ -82,4 +84,6 @@ def run_language_resolvers(
         try:
             resolver.resolve(per_file, all_nodes, all_edges)
         except Exception as exc:
+            if strict:
+                raise
             _LOG.warning("%s resolution failed, skipping: %s", resolver.name, exc)

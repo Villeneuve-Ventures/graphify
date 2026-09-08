@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-from graphify.extractors.base import _LANGUAGE_BUILTIN_GLOBALS, _file_stem, _make_id, _read_text
+from graphify.extractors.base import (
+    _LANGUAGE_BUILTIN_GLOBALS, _file_stem, _make_id, _read_text, call_with_strict,
+)
 from graphify.ids import normalize_id
 from graphify.extractors.models import LanguageConfig
 from graphify.extractors.resolution import _resolve_js_import_target
@@ -1215,7 +1217,7 @@ def _find_body(node, config: LanguageConfig):
     return None
 
 def _dynamic_import_js(node, source: bytes, caller_nid: str, str_path: str, edges: list,
-                       seen_dyn_pairs: set) -> bool:
+                       seen_dyn_pairs: set, *, strict: bool = False) -> bool:
     """Detect dynamic import() calls in JS/TS and emit imports_from edges.
 
     Handles patterns like:
@@ -1255,7 +1257,7 @@ def _dynamic_import_js(node, source: bytes, caller_nid: str, str_path: str, edge
         if not raw:
             break
         # Resolve path using the same logic as static imports.
-        resolved = _resolve_js_import_target(raw, str_path)
+        resolved = _resolve_js_import_target(raw, str_path, strict=strict)
         if resolved is None:
             break
         tgt_nid, _ = resolved
@@ -1532,7 +1534,7 @@ def _find_require_call(value_node):
         return _find_require_call(obj)
     return None
 
-def _require_imports_js(node, source: bytes, file_nid: str, stem: str, edges: list, str_path: str) -> bool:
+def _require_imports_js(node, source: bytes, file_nid: str, stem: str, edges: list, str_path: str, *, strict: bool = False) -> bool:
     """Detect CommonJS require imports inside lexical_declaration / variable_declaration.
 
     Handles three patterns:
@@ -1565,7 +1567,7 @@ def _require_imports_js(node, source: bytes, file_nid: str, stem: str, edges: li
                 break
         if not raw:
             continue
-        resolved = _resolve_js_import_target(raw, str_path)
+        resolved = _resolve_js_import_target(raw, str_path, strict=strict)
         if resolved is None:
             continue
         tgt_nid, resolved_path = resolved
@@ -1665,7 +1667,7 @@ def _js_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                    nodes: list, edges: list, seen_ids: set, function_bodies: list,
                    parent_class_nid: str | None, add_node_fn, add_edge_fn,
                    callable_def_nids: set | None = None,
-                   local_bound_names: dict | None = None) -> bool:
+                   local_bound_names: dict | None = None, *, strict: bool = False) -> bool:
     """Handle lexical_declaration (arrow functions, CJS requires, module-level const literals) for JS/TS. Returns True if handled."""
     # CommonJS / prototype member assignments whose value is a function:
     #   exports.X = () => {}     → file-contained function  X()
@@ -1732,7 +1734,7 @@ def _js_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
 
     if node.type in ("lexical_declaration", "variable_declaration"):
         # CJS require imports — emit edges, do not block other lexical_declaration handling
-        require_found = _require_imports_js(node, source, file_nid, stem, edges, str_path)
+        require_found = _require_imports_js(node, source, file_nid, stem, edges, str_path, strict=strict)
 
         # Scope guard (#1077): only emit nodes for module-level declarations.
         # Without this, `const x = ...` inside an arrow callback (e.g. inside
@@ -2145,7 +2147,8 @@ def _ruby_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: st
     return True
 
 def _extract_generic(
-    path: Path, config: LanguageConfig, *, source_override: bytes | None = None
+    path: Path, config: LanguageConfig, *, source_override: bytes | None = None,
+    strict: bool = False,
 ) -> dict:
     """Generic AST extractor driven by LanguageConfig.
 
@@ -2157,7 +2160,7 @@ def _extract_generic(
         mod = importlib.import_module(config.ts_module)
         from tree_sitter import Language, Parser
         lang_fn = getattr(mod, config.ts_language_fn, None)
-        if lang_fn is None:
+        if lang_fn is None and not strict:
             # Fallback for PHP: try "language_php" then "language"
             lang_fn = getattr(mod, "language", None)
         if lang_fn is None:
@@ -2310,7 +2313,7 @@ def _extract_generic(
         # Import types
         if t in config.import_types:
             if config.import_handler:
-                imported_modules = config.import_handler(node, source, file_nid, stem, edges, str_path, scope_stack)
+                imported_modules = call_with_strict(config.import_handler, node, source, file_nid, stem, edges, str_path, scope_stack, strict=strict)
                 # Module-level import handlers (Swift) name a module, not a file
                 # path, so there is no pre-existing node to anchor the edge to.
                 # They return (id, label) pairs for which we materialize a
@@ -3499,7 +3502,7 @@ def _extract_generic(
             if _js_extra_walk(node, source, file_nid, stem, str_path,
                               nodes, edges, seen_ids, function_bodies,
                               parent_class_nid, add_node, add_edge,
-                              callable_def_nids, local_bound_names):
+                              callable_def_nids, local_bound_names, strict=strict):
                 return
 
         # TS namespace / module containers (internal_module, module)
@@ -3764,7 +3767,7 @@ def _extract_generic(
             # JS/TS dynamic imports: await import('./foo.js')
             if config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript"):
                 if _dynamic_import_js(node, source, caller_nid, str_path,
-                                      edges, seen_dyn_import_pairs):
+                                      edges, seen_dyn_import_pairs, strict=strict):
                     # Still recurse into children (import().then(...) may have calls)
                     for child in node.children:
                         walk_calls(child, caller_nid, java_types)

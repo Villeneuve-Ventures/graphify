@@ -1,5 +1,6 @@
 # file discovery, type classification, and corpus health checks
 from __future__ import annotations
+from graphify.extractors.base import checked_exists, checked_is_file, checked_is_dir, checked_glob
 import fnmatch
 import json
 import os
@@ -360,7 +361,7 @@ def _env_command_args(args: list[str], *, allow_split: bool = True) -> list[str]
     return []
 
 
-def _shebang_interpreter(path: Path) -> str | None:
+def _shebang_interpreter(path: Path, *, strict: bool = False) -> str | None:
     """Return the interpreter name from a shebang line.
 
     Handles forms that a naive parser misses:
@@ -391,19 +392,21 @@ def _shebang_interpreter(path: Path) -> str | None:
                 return None
             interp = Path(env_args[0]).name
         return interp
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        if strict and isinstance(exc, OSError):
+            raise
         return None
 
 
-def _shebang_file_type(path: Path) -> FileType | None:
+def _shebang_file_type(path: Path, *, strict: bool = False) -> FileType | None:
     """Peek at the first line of an extensionless file for a shebang."""
-    interp = _shebang_interpreter(path)
+    interp = _shebang_interpreter(path, strict=strict)
     if interp in _SHEBANG_CODE_INTERPRETERS:
         return FileType.CODE
     return None
 
 
-def classify_file(path: Path) -> FileType | None:
+def classify_file(path: Path, *, strict: bool = False) -> FileType | None:
     # Package manifests (apm.yml, pyproject.toml, go.mod, pom.xml) are parsed
     # deterministically, so route them to the AST path (CODE) rather than the LLM
     # document path — otherwise apm.yml (a .yml "document") would be LLM-extracted
@@ -416,7 +419,7 @@ def classify_file(path: Path) -> FileType | None:
         return FileType.CODE
     ext = path.suffix.lower()
     if not ext:
-        return _shebang_file_type(path)
+        return _shebang_file_type(path, strict=strict)
     if ext in CODE_EXTENSIONS:
         return FileType.CODE
     if ext in PAPER_EXTENSIONS:
@@ -722,7 +725,7 @@ _SKIP_FILES = {
 _JS_SNAPSHOT_TEST_ROOTS = frozenset({"__tests__", "__test__"})
 
 
-def _is_noise_dir(part: str, parent: "Path | None" = None) -> bool:
+def _is_noise_dir(part: str, parent: "Path | None" = None, *, strict: bool = False) -> bool:
     """Return True if this directory name looks like a venv, cache, or dep dir."""
     if part in _SKIP_DIRS:
         return True
@@ -734,9 +737,11 @@ def _is_noise_dir(part: str, parent: "Path | None" = None) -> bool:
         if parent.name in _JS_SNAPSHOT_TEST_ROOTS:
             return True
         try:
-            if next(snap_dir.glob("*.snap"), None) is not None:
+            if next(checked_glob(snap_dir, "*.snap", strict=strict), None) is not None:
                 return True
         except OSError:
+            if strict:
+                raise
             pass
         return False
     # Catch *_venv, *_repo/site-packages patterns
@@ -777,12 +782,12 @@ def _parse_gitignore_line(raw: str) -> str:
     return line
 
 
-def _find_vcs_root(start: Path) -> Path | None:
+def _find_vcs_root(start: Path, *, strict: bool = False) -> Path | None:
     """Walk upward from start; return the first directory containing a VCS marker."""
     current = start.resolve()
     home = Path.home()
     while True:
-        if any((current / m).exists() for m in _VCS_MARKERS):
+        if any(checked_exists(current / m, strict=strict) for m in _VCS_MARKERS):
             return current
         parent = current.parent
         if parent == current or current == home:
@@ -790,7 +795,7 @@ def _find_vcs_root(start: Path) -> Path | None:
         current = parent
 
 
-def _git_info_exclude(vcs_root: Path) -> Path | None:
+def _git_info_exclude(vcs_root: Path, *, strict: bool = False) -> Path | None:
     """Resolve ``$GIT_DIR/info/exclude`` for the repo rooted at ``vcs_root``.
 
     ``info/exclude`` is where git records local-only, uncommitted excludes — and
@@ -803,12 +808,14 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
     """
     dot_git = vcs_root / ".git"
     git_dir: Path | None = None
-    if dot_git.is_dir():
+    if checked_is_dir(dot_git, strict=strict):
         git_dir = dot_git
-    elif dot_git.is_file():
+    elif checked_is_file(dot_git, strict=strict):
         try:
             content = dot_git.read_text(encoding="utf-8", errors="ignore").strip()
         except OSError:
+            if strict:
+                raise
             content = ""
         if content.startswith("gitdir:"):
             gd = Path(content[len("gitdir:"):].strip())
@@ -818,10 +825,12 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
             # A linked worktree's gitdir holds a `commondir` file pointing at the
             # shared git dir, where info/exclude actually lives.
             commondir = gd / "commondir"
-            if commondir.exists():
+            if checked_exists(commondir, strict=strict):
                 try:
                     cd_raw = commondir.read_text(encoding="utf-8", errors="ignore").strip()
                 except OSError:
+                    if strict:
+                        raise
                     cd_raw = ""
                 if cd_raw:
                     cd = Path(cd_raw)
@@ -829,10 +838,10 @@ def _git_info_exclude(vcs_root: Path) -> Path | None:
     if git_dir is None:
         return None
     exclude = git_dir / "info" / "exclude"
-    return exclude if exclude.is_file() else None
+    return exclude if checked_is_file(exclude, strict=strict) else None
 
 
-def _load_dir_own_ignore(d: Path) -> list[tuple[Path, str]]:
+def _load_dir_own_ignore(d: Path, *, strict: bool = False) -> list[tuple[Path, str]]:
     """Read .gitignore/.graphifyignore directly inside *d* (not its ancestors).
 
     Merges .gitignore and .graphifyignore for this one directory (#1363):
@@ -851,7 +860,7 @@ def _load_dir_own_ignore(d: Path) -> list[tuple[Path, str]]:
     patterns: list[tuple[Path, str]] = []
     for fname in (".gitignore", ".graphifyignore"):
         ignore_file = d / fname
-        if ignore_file.exists():
+        if checked_exists(ignore_file, strict=strict):
             for raw in ignore_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
@@ -859,7 +868,7 @@ def _load_dir_own_ignore(d: Path) -> list[tuple[Path, str]]:
     return patterns
 
 
-def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
+def _load_graphifyignore(root: Path, *, strict: bool = False) -> list[tuple[Path, str]]:
     """Read .graphifyignore files and return (anchor_dir, pattern) pairs.
 
     Patterns are returned outer-first so that inner (closer) rules are
@@ -874,7 +883,7 @@ def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
     since they aren't known until the walk reaches them (#1206).
     """
     root = root.resolve()
-    ceiling = _find_vcs_root(root) or root
+    ceiling = _find_vcs_root(root, strict=strict) or root
 
     # Collect ancestor dirs from ceiling down to root (outer → inner)
     dirs: list[Path] = []
@@ -892,7 +901,7 @@ def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
     # per-directory .gitignore/.graphifyignore — so load it first (lowest priority
     # under last-match-wins) anchored at the VCS root, letting a nearer `!`
     # re-include still override it (#1810).
-    info_exclude = _git_info_exclude(ceiling)
+    info_exclude = _git_info_exclude(ceiling, strict=strict)
     if info_exclude is not None:
         for raw in info_exclude.read_text(encoding="utf-8", errors="ignore").splitlines():
             line = _parse_gitignore_line(raw)
@@ -900,7 +909,7 @@ def _load_graphifyignore(root: Path) -> list[tuple[Path, str]]:
                 patterns.append((ceiling, line))
 
     for d in dirs:
-        patterns.extend(_load_dir_own_ignore(d))
+        patterns.extend(_load_dir_own_ignore(d, strict=strict))
     return patterns
 
 
@@ -991,7 +1000,7 @@ def _is_ignored(
     return _eval(path)
 
 
-def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
+def _load_graphifyinclude(root: Path, *, strict: bool = False) -> list[tuple[Path, str]]:
     """Read .graphifyinclude allowlist patterns from root and ancestors.
 
     Include patterns opt matching hidden files/dirs into traversal. Sensitive
@@ -999,7 +1008,7 @@ def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
     Uses the same VCS-root ceiling logic as _load_graphifyignore.
     """
     root = root.resolve()
-    ceiling = _find_vcs_root(root) or root
+    ceiling = _find_vcs_root(root, strict=strict) or root
 
     dirs: list[Path] = []
     current = root
@@ -1013,7 +1022,7 @@ def _load_graphifyinclude(root: Path) -> list[tuple[Path, str]]:
     patterns: list[tuple[Path, str]] = []
     for d in dirs:
         include_file = d / ".graphifyinclude"
-        if include_file.exists():
+        if checked_exists(include_file, strict=strict):
             for raw in include_file.read_text(encoding="utf-8", errors="ignore").splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
@@ -1118,16 +1127,18 @@ def _auto_follow_symlinks(root: Path) -> bool:
     return False
 
 
-def _resolves_under_root(path: Path, root: Path) -> bool:
+def _resolves_under_root(path: Path, root: Path, *, strict: bool = False) -> bool:
     """True when ``path`` resolves to a target inside ``root``."""
     try:
         path.resolve().relative_to(root.resolve())
-    except (OSError, RuntimeError, ValueError):
+    except (OSError, RuntimeError, ValueError) as exc:
+        if strict and not isinstance(exc, ValueError):
+            raise
         return False
     return True
 
 
-def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None) -> dict:
+def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None, strict: bool = False) -> dict:
     root = root.resolve()
     if follow_symlinks is None:
         follow_symlinks = False
@@ -1156,7 +1167,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
     # of silently vanishing from the graph (#1922). Directory-level entries keep
     # this bounded — a pruned `data/` is one entry, not one per contained file.
     ignored: list[str] = []
-    ignore_patterns = _load_graphifyignore(root)
+    ignore_patterns = _load_graphifyignore(root, strict=strict)
     ignore_cache: dict[Path, bool] = {}  # shared across all _is_ignored calls in this scan
     # CLI --exclude patterns are anchored at the scan root and appended last
     # so they win over any .graphifyignore/.gitignore rules (#947).
@@ -1165,12 +1176,12 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             line = _parse_gitignore_line(pat)
             if line:
                 ignore_patterns.append((root, line))
-    include_patterns = _load_graphifyinclude(root)
+    include_patterns = _load_graphifyinclude(root, strict=strict)
 
     # Always include graphify-out/memory/ - query results filed back into the graph
     memory_dir = root / GRAPHIFY_OUT / "memory"
     scan_paths = [root]
-    if memory_dir.exists():
+    if checked_exists(memory_dir, strict=strict):
         scan_paths.append(memory_dir)
 
     seen: set[Path] = set()
@@ -1197,7 +1208,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         )
 
     for scan_root in scan_paths:
-        in_memory_tree = memory_dir.exists() and str(scan_root).startswith(str(memory_dir))
+        in_memory_tree = checked_exists(memory_dir, strict=strict) and str(scan_root).startswith(str(memory_dir))
         for dirpath, dirnames, filenames in os.walk(
             scan_root, followlinks=follow_symlinks, onerror=_on_walk_error
         ):
@@ -1216,7 +1227,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                 # Load it now, before pruning dp's children, so a nested ignore
                 # file governs its own subtree the same way git honors it (#1206).
                 if dp != root:
-                    ignore_patterns.extend(_load_dir_own_ignore(dp))
+                    ignore_patterns.extend(_load_dir_own_ignore(dp, strict=strict))
                 # Prune noise dirs in-place so os.walk never descends into them.
                 # Dot dirs are allowed — users often want .github/, .claude/, etc.
                 # Framework caches (.next, .nuxt, …) are caught by _is_noise_dir.
@@ -1231,7 +1242,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                 # repos for no correctness gain.
                 kept_dirs: list[str] = []
                 for d in dirnames:
-                    if _is_noise_dir(d, dp):
+                    if _is_noise_dir(d, dp, strict=strict):
                         continue
                     if _is_ignored(dp / d, root, ignore_patterns, _cache=ignore_cache):
                         ignored.append(str(dp / d) + os.sep)
@@ -1244,7 +1255,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                     safe_dirs: list[str] = []
                     for d in dirnames:
                         child = dp / d
-                        if child.is_symlink() and not _resolves_under_root(child, root):
+                        if child.is_symlink() and not _resolves_under_root(child, root, strict=strict):
                             skipped_sensitive.append(str(child) + " [symlink target outside scan root]")
                             continue
                         safe_dirs.append(d)
@@ -1263,7 +1274,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
 
     for p in all_files:
         # For memory dir files, skip hidden/noise filtering
-        in_memory = memory_dir.exists() and str(p).startswith(str(memory_dir))
+        in_memory = checked_exists(memory_dir, strict=strict) and str(p).startswith(str(memory_dir))
         if not in_memory:
             # Skip files inside our own converted/ dir (avoid re-processing sidecars)
             if str(p).startswith(str(converted_dir)):
@@ -1271,13 +1282,13 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         if not in_memory and _is_ignored(p, root, ignore_patterns, _cache=ignore_cache):
             ignored.append(str(p))
             continue
-        if not _resolves_under_root(p, root):
+        if not _resolves_under_root(p, root, strict=strict):
             skipped_sensitive.append(str(p) + " [symlink target outside scan root]")
             continue
         if _is_sensitive(p):
             skipped_sensitive.append(str(p))
             continue
-        ftype = classify_file(p)
+        ftype = classify_file(p, strict=strict)
         if not ftype:
             # Considered but unclassifiable: an extension not in any supported set,
             # or an extensionless, non-shebang file (Dockerfile, Gemfile, Makefile,
@@ -1621,7 +1632,7 @@ def detect_incremental(
     google_workspace: bool | None = None,
     kind: str = "semantic",
     extra_excludes: list[str] | None = None,
-) -> dict:
+ strict: bool = False) -> dict:
     """Like detect(), but returns only new or modified files since the last run.
 
     kind="semantic" (default for extract): a file is "changed" when its
@@ -1644,7 +1655,7 @@ def detect_incremental(
     runs. ``None`` (default) does not follow symlinked directories; callers must
     opt in explicitly, and resolved targets outside the scan root are skipped.
     """
-    full = detect(root, follow_symlinks=follow_symlinks, google_workspace=google_workspace, extra_excludes=extra_excludes)
+    full = detect(root, follow_symlinks=follow_symlinks, google_workspace=google_workspace, extra_excludes=extra_excludes, strict=strict)
     # Pass ``root`` so a manifest written with relative keys (post-#777) is
     # re-anchored to the absolute form the rest of this function compares
     # against. Legacy absolute-keyed manifests pass through unchanged.
@@ -1665,10 +1676,17 @@ def detect_incremental(
 
     for ftype, file_list in full["files"].items():
         for f in file_list:
+            if strict:
+                # Qualified refresh consumes every admitted source and performs
+                # its own byte-baseline comparison; mtime is not evidence here.
+                new_files[ftype].append(f)
+                continue
             stored = manifest.get(f)
             try:
                 current_mtime = os.stat(_os_path(Path(f))).st_mtime
             except Exception:
+                if strict:
+                    raise
                 current_mtime = 0
 
             # Legacy manifest: plain float value stores only mtime.
@@ -1723,8 +1741,10 @@ def detect_incremental(
         if f in current_files:
             continue
         try:
-            alive = Path(f).exists()
+            alive = checked_exists(Path(f), strict=strict)
         except OSError:
+            if strict:
+                raise
             alive = False
         (excluded_files if alive else deleted_files).append(f)
 

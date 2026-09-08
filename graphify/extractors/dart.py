@@ -4,14 +4,17 @@ from __future__ import annotations
 import re
 
 from pathlib import Path
-from graphify.extractors.base import _file_stem, _make_id
+from graphify.extractors.base import _file_stem, _make_id, strict_aware, checked_exists
 
 
-def extract_dart(path: Path) -> dict:
+@strict_aware
+def extract_dart(path: Path, *, strict: bool = False) -> dict:
     """Extract classes, mixins, functions, imports, generic calls, and annotations from a .dart file using regex."""
     try:
         src = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
+        if strict:
+            raise
         return {"error": f"cannot read {path}"}
 
     # Remove inline and multi-line comments while leaving string literals untouched to prevent stripping URLs/paths inside strings
@@ -41,11 +44,13 @@ def extract_dart(path: Path) -> dict:
         if parent_ref.endswith(".dart"):
             try:
                 parent_path = (path.parent / parent_ref).resolve()
-                if parent_path.exists():
+                if checked_exists(parent_path, strict=strict):
                     stem = _file_stem(parent_path)
                     file_nid = _make_id(str(parent_path))
                     is_part = True
             except Exception:
+                if strict:
+                    raise
                 pass
 
     nodes = []

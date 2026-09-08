@@ -1,7 +1,7 @@
 """objc — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
 
-from graphify.extractors.base import _file_stem, _make_id, _read_text
+from graphify.extractors.base import _file_stem, _make_id, _read_text, strict_aware
 from graphify.extractors.engine import _cpp_declarator_name, _semantic_reference_edge
 from graphify.extractors.resolution import _resolve_c_include_path
 from pathlib import Path
@@ -40,7 +40,8 @@ def _objc_local_var_types(body_node, source: bytes, table: dict[str, str]) -> No
         for c in n.children:
             stack.append(c)
 
-def extract_objc(path: Path) -> dict:
+@strict_aware
+def extract_objc(path: Path, *, strict: bool = False) -> dict:
     """Extract interfaces, implementations, protocols, methods, and imports from .m/.mm/.h files."""
     try:
         import tree_sitter_objc as tsobjc
@@ -160,7 +161,7 @@ def extract_objc(path: Path) -> dict:
                             # that file; the bare-stem id never survives
                             # _disambiguate_colliding_node_ids when a .h/.m pair exists,
                             # so the edge dangled and was dropped (#1475).
-                            resolved = _resolve_c_include_path(raw, str_path)
+                            resolved = _resolve_c_include_path(raw, str_path, strict=strict)
                             if resolved is not None:
                                 add_edge(file_nid, _make_id(str(resolved)), "imports", line, context="import")
                             else:
