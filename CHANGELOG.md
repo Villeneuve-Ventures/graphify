@@ -1,8 +1,21 @@
 # Changelog
 
-Full release notes with details on each version: [GitHub Releases](https://github.com/safishamsi/graphify/releases)
+Upstream release notes: [GitHub Releases](https://github.com/safishamsi/graphify/releases).
+Fork-specific changes below are identified separately; the historical release
+entries retain their original attribution.
 
 ## 0.10.0 (unreleased)
+
+- Fork tooling ([PR #121](https://github.com/Villeneuve-Ventures/graphify/pull/121)):
+  upgraded PR-Agent to v0.45.0, configured Gemini 3.8 Flash with Gemini 3.5 Flash
+  Lite fallback, disabled automatic PR summaries, and added an offline
+  compatibility CI job for the pinned runtime. Automatic full reviews and
+  explicit maintainer `/prreview` requests remain supported. Persistent finding
+  state and large-PR chunking are disabled to retain the attested full-diff
+  review path.
+- Fork docs: corrected development setup, current architecture APIs and schema,
+  extractor migration status, native-Leiden fallback behavior, and PR review
+  guidance against the merged `v8` implementation.
 
 - Breaking: Graphify now requires CPython 3.14.2 through the final 3.14.x release (`>=3.14.2,==3.14.*`); package metadata positively allowlists the 3.14 line instead of relying on prerelease upper-bound interpretation. CI, release graph generation, lint/type targets, Docker, and public installation guidance now declare the same compatibility window.
 - Changed: the optional `leiden` extra now uses `graspologic-native` directly instead of the Python-version-gated `graspologic` wrapper. Graphify preserves deterministic weighted Leiden behavior with stable structural node-ID encodings; opaque hashables use a type-qualified repr and fail on collisions. NetworkX Louvain remains the fallback only when the top-level native module is genuinely absent.

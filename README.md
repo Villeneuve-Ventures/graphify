@@ -16,6 +16,12 @@
 
 Type `/graphify` in your AI coding assistant and it maps your entire project (code, docs, PDFs, images, videos) into a **knowledge graph** you can **query instead of grepping** through files.
 
+> **Development fork:** This is the `v8` branch of
+> [Villeneuve-Ventures/graphify](https://github.com/Villeneuve-Ventures/graphify),
+> based on [upstream Graphify](https://github.com/Graphify-Labs/graphify).
+> Use the [development setup](#development-setup) for this fork. The
+> package-name install commands below do not select this repository or branch.
+
 - **Code maps for free, fully local.** Code is parsed with tree-sitter AST: deterministic, no LLM, nothing leaves your machine. (Docs, PDFs, images and video use your assistant's model, or a configured API key, for a semantic pass.)
 - **Every edge is explained.** Each connection is tagged `EXTRACTED` (explicit in the source) or `INFERRED` (resolved by graphify), so you can tell what was read directly from what was inferred.
 - **Not a vector index.** No embeddings, no vector store: a real graph you traverse. Ask a question, trace the path between two things, or explain one concept.
@@ -143,6 +149,9 @@ uv python install '>=3.14.2,<3.15'
 ## Install
 
 > **Official package:** The PyPI package is `graphifyy` (double-y). Other `graphify*` packages on PyPI are not affiliated. The CLI command is still `graphify`.
+
+These are published-package installation instructions. To develop or test this
+fork from source, use [Development setup](#development-setup).
 
 **Step 1 — install the package:**
 
@@ -783,29 +792,42 @@ Built for people whose work lives across hundreds of conversations and documents
 The project uses [uv](https://docs.astral.sh/uv/) for dev workflow. Install it once, then:
 
 ```bash
-git clone https://github.com/safishamsi/graphify.git
+git clone --branch v8 https://github.com/Villeneuve-Ventures/graphify.git
 cd graphify
-git checkout v8                        # active development branch
 
 # Create the project venv and install graphify + all extras + the dev group
 # (pytest). uv installs the dev dependency group by default; pass --no-dev to
 # skip it.
-uv sync --all-extras
+uv sync --all-extras --frozen
 ```
 
 Verify the editable install:
 ```bash
-uv run graphify --version
-uv run python -c "import graphify; print(graphify.__file__)"
+uv run --frozen graphify --version
+uv run --frozen python -c "import graphify; print(graphify.__file__)"
 ```
+
+The version should match `pyproject.toml`, and the module path should point into
+this checkout. Use `uv run --frozen graphify ...` when testing fork commands so
+a global executable does not take precedence. The supported interpreter window
+is CPython 3.14.2 through final 3.14.x releases.
 
 ### Running tests
 
 ```bash
-uv run pytest tests/ -q                # run the full suite
-uv run pytest tests/test_extract.py -q # one module
-uv run pytest tests/ -q -k "python"    # filter by name
+uv run --frozen pytest tests/ -q --tb=short               # full Graphify pytest gate
+uv run --frozen pytest tests/test_extract.py -q --tb=short # one module
+uv run --frozen pytest tests/ -q -k "python" --tb=short    # filter by name
 ```
+
+The [CI workflow](.github/workflows/ci.yml) also defines separate generated-skill,
+protected-verifier, native-Leiden, and PR-Agent compatibility checks. In
+particular, `tests/test_pr_agent_runtime.py` requires the workflow's pinned
+PR-Agent installation in a separate environment and is skipped by the ordinary
+Graphify environment when that package is absent. A regular pytest pass does
+not prove that runtime compatibility job passed. The full CI test environment
+also pins Git 2.55.0 for the acceptance-sensitive tests; follow the workflow when
+reproducing those checks.
 
 > macOS note: the test suite includes both `sample.f90` and `sample.F90` fixtures. These collide on case-insensitive HFS+ / APFS file systems. Run on Linux or in a Docker container if you need to test both Fortran variants simultaneously.
 
@@ -813,8 +835,24 @@ uv run pytest tests/ -q -k "python"    # filter by name
 
 - Active development happens on the `v8` branch.
 - Commit style: `fix: <description>` / `feat: <description>` / `docs: <description>`
-- Before opening a PR, run `uv run pytest tests/ -q` and confirm it passes.
+- Before opening a PR, run `uv run --frozen pytest tests/ -q --tb=short` and confirm it passes.
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
+
+### Automated PR review
+
+For eligible non-draft PRs whose head branch is in this repository, PR-Agent
+runs a full review on `opened`, `reopened`, and `ready_for_review` events.
+Later pushes do not trigger another automatic review. An authorized owner,
+member, or collaborator can request a fresh full review with an exact
+`/prreview` comment; fork PRs require this explicit maintainer request.
+
+Automatic PR summaries are disabled, and maintainer-authored PR titles and
+bodies are preserved. [PR #121](https://github.com/Villeneuve-Ventures/graphify/pull/121)
+upgraded the pinned PR-Agent runtime to v0.45.0 and selected Gemini 3.8 Flash
+with Gemini 3.5 Flash Lite as fallback. The
+[workflow](.github/workflows/pr-agent.yml) owns the runtime pin and event rules;
+[`.pr_agent.toml`](.pr_agent.toml) owns review settings alongside its attested
+workflow overrides.
 
 ### What to contribute
 

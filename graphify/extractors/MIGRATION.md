@@ -25,13 +25,20 @@ written so an AI agent can execute it in a single session.
 | sln | yes |
 | pascal_forms (dfm + lfm) | yes |
 | json_config | yes |
-| (config-driven core: python, js, java, c, cpp, csharp, kotlin, scala, php, lua, swift, groovy, vue, svelte, astro, xaml, groovy) | no — shared _extract_generic core, move as one batch |
-| (other bespoke: julia, verilog, markdown, objc, csproj, slnx, lazarus_package, pascal) | no |
+| julia | yes |
+| verilog | yes |
+| markdown | yes |
+| objc | yes |
+| pascal | yes |
+| shared engine / models / resolution | yes — `engine.py`, `models.py`, `resolution.py` |
+| language wrappers/configuration: python, js, java, c, cpp, ruby, csharp, kotlin, scala, php, lua, swift, groovy; embedded-language extractors: vue, svelte, astro, xaml | remain in `extract.py` |
+| other bespoke: csproj, slnx, lazarus_package | no |
 
-Note: config-driven extractors (python, js, java, c, cpp, ruby, csharp,
-kotlin, scala, php, lua, swift, groovy) depend on the shared
-`_extract_generic` core (~1,300 lines). Do NOT port them one-by-one; the core
-must move first as its own coordinated batch. Pick a bespoke extractor.
+The shared `_extract_generic` engine, `LanguageConfig` models, and shared
+resolution helpers have moved into this package and are re-imported by the
+`extract.py` facade. Language wrappers and configuration still remain in the
+facade. This playbook continues to cover one bespoke extractor at a time;
+wrapper/configuration migration requires a separately coordinated batch.
 
 ## Invariants (non-negotiable)
 
@@ -94,7 +101,7 @@ that are not satisfied internally, and verify each header import is used.
    the now-adjacent top-level definitions; add the facade re-import; add the
    registry entry in `__init__.py` (alphabetical); update the Status table
    above.
-5. `uv run pytest -q` -> 0 failures, no test file changed except the registry
+5. `uv run --frozen pytest tests/ -q --tb=short` -> 0 failures, no test file changed except the registry
    test. If ImportError/NameError: a helper was misclassified — go to
    Helper classification.
 6. One commit: `refactor(extract): move extract_<lang> to extractors/<lang>.py (verbatim)`.

@@ -2,18 +2,23 @@
 
 ## The three passes
 
-graphify processes your files in three passes:
+Graphify processes your files in three passes.
 
 **Pass 1 — Code structure (free, no API calls)**
-Tree-sitter parses your code files and extracts classes, functions, imports, call graphs, and inline comments. This runs locally with no LLM involved. 25 languages supported. SQL files get special treatment: tables, views, foreign keys, and JOIN relationships are extracted deterministically.
+Tree-sitter parses your code files and extracts classes, functions, imports, call graphs, and inline comments. This runs locally with no LLM involved; see the [supported formats](../README.md#what-files-it-handles) for language coverage and optional extras. SQL files get special treatment: tables, views, foreign keys, and JOIN relationships are extracted deterministically.
 
 Code files are not sent to the LLM semantic extractor in the normal pipeline. If a corpus contains only code files, Pass 3 is skipped entirely; semantic extraction is reserved for docs, papers, images, and transcripts.
 
 **Pass 2 — Video and audio (local, no API calls)**
 Video and audio files are transcribed with faster-whisper. To focus the transcript on your domain, the transcription prompt is seeded with your top god nodes (the most-connected concepts in your code graph so far). Transcripts are cached — re-runs skip already-processed files.
 
-**Pass 3 — Docs, papers, images (Claude subagents, costs tokens)**
-Claude runs in parallel over markdown, PDFs, images, and transcripts. Each subagent reads a batch of files and outputs a JSON fragment: nodes, edges, and any group relationships. The fragments are merged into a single graph.
+**Pass 3 — Docs, papers, images (assistant or configured backend, costs tokens)**
+The host assistant extracts relationships from Markdown, PDFs, images, and
+transcripts, or the headless CLI uses a configured LLM backend. Parallel dispatch
+depends on the assistant and backend. Each batch produces a JSON fragment with
+nodes, edges, and group relationships, which are merged into a single graph.
+See the [command reference](../README.md#full-command-reference) for headless
+backend examples.
 
 Before Pass 3, optional converters turn supported pointer/binary formats into
 Markdown sidecars under `graphify-out/converted/`. Office files (`.docx`,
@@ -25,9 +30,18 @@ Markdown sidecars under `graphify-out/converted/`. Office files (`.docx`,
 
 ## How community detection works
 
-Communities are found using the [Leiden algorithm](https://www.nature.com/articles/s41598-019-41695-z) — a graph-clustering method that groups nodes by edge density. Nodes with many connections between them end up in the same community.
+Community detection uses native Leiden through `graspologic_native`, installed
+with the optional `leiden` extra (also included in `all`). NetworkX Louvain is
+used only when the top-level native module is absent. A broken native import or
+Leiden execution error propagates instead of silently changing algorithms.
+Both algorithms group nodes by graph connectivity;
+[`graphify/cluster.py`](../graphify/cluster.py) owns the selection and splitting
+logic.
 
-**No embeddings needed.** The semantic similarity edges that Claude extracts (`semantically_similar_to`) are already in the graph, so they influence community shape directly. The graph structure is the similarity signal — there's no separate embedding step or vector database.
+**No embeddings needed.** Semantic similarity edges (`semantically_similar_to`)
+from the semantic pass influence community shape alongside structural edges.
+The graph structure is the similarity signal, with no separate embedding step
+or vector database.
 
 ---
 
@@ -38,21 +52,30 @@ Every relationship is tagged with one of three labels:
 | Tag | Meaning |
 |-----|---------|
 | `EXTRACTED` | Found directly in the source (e.g. a function call, an import) |
-| `INFERRED` | A reasonable inference Claude made, with a `confidence_score` (0.0–1.0) |
+| `INFERRED` | A relationship derived by structural resolution or semantic inference |
 | `AMBIGUOUS` | Uncertain — flagged in the report for manual review |
 
-EXTRACTED edges always have confidence 1.0. INFERRED edges use a discrete rubric:
+The installed skill's semantic extraction instructions assign EXTRACTED edges a
+`confidence_score` of 1.0, AMBIGUOUS edges a score of 0.1–0.3, and use this rubric
+for INFERRED edges:
 - **0.95** — near-certain (explicit cross-file reference, one plausible target)
 - **0.85** — strong evidence (naming + context align)
 - **0.75** — reasonable (contextual but not explicit)
 - **0.65** — weak (naming similarity only)
 - **0.55** — speculative
 
+This rubric describes semantic-pass output. Structural/code-only edges may
+supply their own scores or omit them. JSON export preserves supplied scores and
+fills missing scores with 1.0 for EXTRACTED, 0.5 for INFERRED, and 0.2 for
+AMBIGUOUS; these defaults are not semantic inference scores.
+
 ---
 
 ## Token benchmark
 
-The first run extracts and builds the graph — this costs tokens. Every subsequent query reads the compact graph instead of raw files. That's where the savings compound.
+An initial mixed-corpus build spends tokens on semantic extraction; a code-only
+AST build needs no LLM. Subsequent graph queries retrieve compact graph context
+instead of re-reading the full corpus. That's where the savings compound.
 
 On a mixed corpus (Karpathy repos + 5 papers + 4 images, 52 files): **71.5x fewer tokens per query** vs reading the raw files directly.
 
@@ -70,7 +93,10 @@ Each `worked/` folder in the repo has the raw input files and actual output (`GR
 
 ## Parallel extraction
 
-Code files are extracted in parallel using `ProcessPoolExecutor` — bypasses Python's GIL for genuine multiprocessing. Doc/paper/image batches are dispatched as parallel Claude subagents. On a corpus of 84 code files, parallel AST extraction runs in about 1.66x less time than sequential.
+Code files can be extracted in parallel using `ProcessPoolExecutor` for
+multiprocessing. Doc/paper/image concurrency depends on the host assistant or
+configured backend. In the recorded 84-code-file example, parallel AST extraction
+ran in about 1.66x less time than sequential.
 
 ---
 
@@ -95,7 +121,7 @@ Each edge has:
 - `source`, `target` — node IDs
 - `relation` — verb phrase (e.g. `calls`, `imports`, `implements`, `semantically_similar_to`)
 - `confidence` — `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
-- `confidence_score` — float (INFERRED only)
+- `confidence_score` — numeric score supplied by the extractor or filled by JSON export when absent
 - `source_file` — where the relationship was found
 
 Hyperedges (group relationships connecting 3+ nodes) live in `G.graph["hyperedges"]`.
