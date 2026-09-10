@@ -149,11 +149,12 @@ def _code_refresh_sources(graph_path, manifest_path, paths, root, out_root, corp
     for source in set(corpus) | set(manifest):
         actual = Path(source).resolve()
         owner = _norm_source_file(str(actual), str(root))
-        source_aliases = [str(actual), os.path.relpath(actual, root)]
-        try:
-            source_aliases.append(os.path.relpath(actual, out_root))
-        except ValueError:
-            pass  # Windows paths on different drives have no relative alias.
+        source_aliases = [str(actual)]
+        for base in (root, out_root):
+            try:
+                source_aliases.append(os.path.relpath(actual, base))
+            except ValueError:
+                pass  # Windows paths on different drives have no relative alias.
         for alias in source_aliases:
             aliases.setdefault(os.path.normpath(alias), set()).add(owner)
     records = [record for key in ("nodes", "links", "edges", "hyperedges")

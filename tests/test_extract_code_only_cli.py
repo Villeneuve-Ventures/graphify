@@ -406,6 +406,108 @@ def test_public_code_refresh_refuses_used_ambiguous_source_alias(tmp_path):
     assert graph_path.read_bytes() == before
 
 
+@pytest.mark.parametrize("case", ["both-unavailable", "output-available", "root-oserror"])
+def test_public_code_refresh_cross_drive_manifest_aliases(tmp_path, monkeypatch, capsys, case):
+    import ntpath
+    import graphify.cli as cli
+    import graphify.__main__ as mainmod
+    from graphify.detect import load_manifest, save_manifest
+    from graphify.transaction import RECEIPT_FILE, open_graph_snapshot
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    external = tmp_path / "external.py"
+    external.write_text("def external_symbol(): return 1\n")
+    manifest_path = graph_path.parent / "manifest.json"
+    save_manifest({"code": [str(external)]}, str(manifest_path), root=repo)
+    payload = {}
+    if case == "output-available":
+        source = str(repo / "second.py")
+        payload = {
+            "nodes": [{"id": "inside-a", "label": "Accepted claim", "file_type": "concept",
+                       "source_file": source, "confidence": "EXTRACTED", "quotation": "MarketObservation"},
+                      {"id": "inside-b", "label": "Accepted evidence", "file_type": "document",
+                       "source_file": source}],
+            "links": [{"source": "inside-b", "target": "inside-a", "relation": "supports",
+                       "source_file": source, "confidence": "EXTRACTED", "quotation": "MarketObservation"}],
+            "hyperedges": [{"id": "inside-pair", "nodes": ["inside-a", "inside-b"],
+                            "source_file": source, "confidence": "EXTRACTED"}],
+        }
+        data = json.loads(graph_path.read_text())
+        for key, records in payload.items():
+            data.setdefault(key, []).extend(records)
+        graph_path.write_text(json.dumps(data))
+
+    def assert_payload(data):
+        for key, records in payload.items():
+            for record in records:
+                assert any(all(actual.get(k) == v for k, v in record.items()) for actual in data[key])
+
+    seed = _run(repo, "--code-only", "--no-viz", "--out", str(output), output=output)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    assert (graph_path.parent / RECEIPT_FILE).is_file()
+    assert_payload(open_graph_snapshot(graph_path, purpose="cross-drive-seed").data)
+    manifest = load_manifest(str(manifest_path), root=repo)
+    external_row = manifest[str(external)]
+    if payload:
+        retained = manifest[str(repo / "second.py")]
+        assert retained["semantic_hash"] and retained["semantic_hash"] == retained["ast_hash"]
+    protected = [graph_path, manifest_path, graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() for p in protected}
+    _append_refresh_function(repo)
+    original = cli._code_refresh_sources
+    relpath = os.path.relpath
+    phase, aliases, attempted = {}, {}, []
+
+    def source_spy(*args, **kwargs):
+        assert Path(args[3]) == repo and Path(args[4]) == output
+        phase.update(entered=True, active=True)
+        try:
+            result = original(*args, **kwargs)
+            aliases.update(result[1])
+            return result
+        finally:
+            phase["active"] = False
+
+    def cross_drive(path, start):
+        if phase.get("active") and Path(path) == external:
+            attempted.append(Path(start))
+            if Path(start) == repo and case == "root-oserror":
+                raise OSError("injected root alias failure")
+            if Path(start) == repo or case == "both-unavailable":
+                return ntpath.relpath(r"C:\external\external.py", r"D:\scan")
+        return relpath(path, start)
+
+    monkeypatch.setattr(cli, "_code_refresh_sources", source_spy)
+    monkeypatch.setattr(os.path, "relpath", cross_drive)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(graph_path.parent))
+    monkeypatch.setattr(sys, "argv", ["graphify", "extract", str(repo), "--code-only", "--no-viz",
+                                      "--out", str(output)])
+    status = 0
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        status = exc.code
+    captured = capsys.readouterr()
+    assert phase.get("entered")
+    if case == "root-oserror":
+        assert status not in (None, 0)
+        assert "injected root alias failure" in captured.err
+        assert attempted == [repo]
+        assert {p: p.read_bytes() for p in protected} == before
+    else:
+        assert status in (None, 0), captured.out + captured.err
+        assert attempted == [repo, output]
+        assert aliases[str(external)] == external.as_posix()
+        if case == "output-available":
+            assert aliases[os.path.normpath(relpath(external, output))] == external.as_posix()
+        published = open_graph_snapshot(graph_path, purpose="cross-drive-published").data
+        assert any(str(n.get("label", "")).startswith("refresh_beacon") for n in published["nodes"])
+        assert_payload(published)
+    assert load_manifest(str(manifest_path), root=repo)[str(external)] == external_row
+
+
 @pytest.mark.parametrize("spelling", ["absolute", "scan_relative"])
 def test_code_refresh_cross_drive_output_alias(tmp_path, monkeypatch, spelling):
     import ntpath
