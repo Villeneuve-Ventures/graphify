@@ -1,6 +1,11 @@
 # Protected-change review policy
 
-Policy version: `graphify.protected-change-review.policy.v2`.
+Policy version: `graphify.protected-change-review.policy.v3`.
+
+Version 3 adds bounded repair review and an opt-in committed-content equivalence
+path. It does not change the version-2 candidate manifest or canonical JSON
+encoding. Existing attempts remain governed by their pinned policy; this file
+does not retroactively authorize an exception, including for its own change.
 
 This policy provides a bounded, invariant-gated workflow for protected changes without allowing review and repair to expand indefinitely.
 
@@ -71,7 +76,13 @@ with a bounded rationale. Freeze the plan and invariant map by digest.
   writer, acceptance owner, and leader; self-approval is prohibited.
 - Initial reviews are feedback-blind to each other.
 - The leader adjudicates findings and sends one consolidated repair packet.
-- Re-reviewers may see that packet but must inspect the complete new candidate.
+- Re-reviewers receive the complete new candidate and consolidated repair packet.
+  After the initial comprehensive review, inspect the repair, affected dependencies
+  and invariants, and outstanding findings. Carry supported dispositions forward.
+  Reopen comprehensive discovery only for changed acceptance/scope, changed
+  authority or contracts, or concrete evidence of a broader regression. Record the
+  trigger and affected scope; a changed digest alone does not require rediscovery.
+  Both reviewers still bind their resulting verdicts to the new exact candidate.
 - Give every reviewer the exact policy, acceptance packet, complete candidate
   manifest, validation provenance, and their digests.
 
@@ -108,7 +119,7 @@ acceptance_packet: {
 base_oid: full_git_oid
 head_oid: full_git_oid
 paths: [path_record, ...]
-policy: {version: "graphify.protected-change-review.policy.v2", sha256: sha256}
+policy: {version: "graphify.protected-change-review.policy.v3", sha256: sha256}
 schema: "graphify.protected-change-review.candidate.v2"
 status_porcelain_v2_z_base64: base64_string
 tracked_binary_diff_sha256: sha256
@@ -476,8 +487,11 @@ digest.
 
 Re-pin content immediately before and after every review and validation. Any
 in-scope byte, mode, type, path, status, base, or HEAD change creates a new
-candidate and invalidates prior approvals. Unchanged feasibility evidence may be
-reused only when its inputs and assumptions are proven unchanged.
+candidate and prevents treating prior approvals as approvals of that candidate.
+The explicit commit-equivalence path in section 10 may link existing approvals
+to a new committed identity; it never rewrites them as fresh reviews. Unchanged
+feasibility evidence may be reused only when its inputs and assumptions are
+proven unchanged.
 
 ## 6. Triage before repair
 
@@ -500,7 +514,7 @@ mechanical proof tied to a frozen invariant.
 One attempt permits:
 
 1. initial independent review;
-2. one consolidated repair batch and full independent re-review; and
+2. one consolidated repair batch and independent repair review under section 3; and
 3. at most one second repair batch, limited to a reproduced regression introduced
    by the first repair or one narrowly missed frozen invariant.
 
@@ -550,6 +564,11 @@ explicit justification, or rejection; it is never a correctness waiver.
 - Review-clean final candidate: full suite and final security, CLI,
   generated-state, and graph-refresh checks required by repository instructions.
 - Broad-impact edits: escalate validation earlier.
+- Reuse a completed check only when its complete relevant inputs, environment,
+  runtime, command, and freshness requirements remain satisfied. Changed inputs
+  require the affected checks; incomplete, failed, expired, and HEAD-sensitive
+  receipts cannot transfer through the commit-equivalence path. Section 10 does
+  not reduce the required initial or final validation matrix.
 
 Read task-level receipts, not only process exit codes. A blocked, incomplete, or
 stale receipt is not a pass. A documentation-only change does not require graph
@@ -562,10 +581,12 @@ authority exists. Immediately before handoff or any separately authorized commit
 regenerate the complete candidate manifest and compare its digest with the
 approved candidate-content digest; stop on drift. Because a commit changes HEAD
 and status, re-freeze and re-approve the resulting committed candidate before
-claiming delivery. Deliver only when:
+claiming delivery, unless the explicitly adopted exception below succeeds.
+Deliver only when:
 
 - every frozen criterion maps to evidence;
-- both independent reviewers approve the final candidate-content digest;
+- both independent reviewers approve the final candidate-content digest, or their
+  approved predecessor is linked by the authorized commit-equivalence evidence;
 - the final evidence envelope binds all required checks and approvals to it;
 - no reproduced P0 or reproduced in-scope P1 finding remains, and no reproduced
   in-scope P2 correctness or integrity finding remains;
@@ -576,6 +597,98 @@ claiming delivery. Deliver only when:
 Stop without claiming readiness when identity drifts, required review or
 validation is unavailable, the repair cap is exhausted, or a central P1
 terminates the attempt.
+
+### Optional committed-content equivalence
+
+The acceptance owner may opt into this exception **before the approved candidate
+is frozen**, with an explicit reference in the acceptance packet. Stage the exact
+intended content before that freeze. This is a one-commit transition, not a repair,
+rebase, amend, merge, or permission to skip a required check. Missing opt-in or any
+failed prerequisite uses the ordinary re-freeze/re-review path. Editing policy
+cannot opt its own attempt into this exception.
+
+Retain both independent approvals of the predecessor and all original validation
+receipts. Acquire complete immutable before/after manifests under section 5; do
+not replace raw inventory with a Git diff or clean-status assertion. The owner
+must independently establish receipt authenticity, the completeness of the
+required check set, current freshness, and absence of HEAD-sensitive checks from
+the reused set. Run any HEAD-sensitive checks freshly outside the reused set and
+bind their results to the committed candidate before delivery. An equivalence
+result is only comparison evidence, never authority or an approval.
+
+Run the additive read-only verifier with five separately captured inputs:
+
+```sh
+/absolute/pinned-runtime/bin/python -I -B -m graphify.protected_change_equivalence \
+  --approved /absolute/evidence/approved-candidate.json \
+  --committed /absolute/evidence/committed-candidate.json \
+  --commit-object /absolute/evidence/committed-object.raw \
+  --validation-before /absolute/evidence/validation-before.json \
+  --validation-after /absolute/evidence/validation-after.json \
+  --digests /absolute/evidence/expected-digests.json
+```
+
+Use an external, pinned, read-only runtime containing the installed wheel, not an
+editable installation or the candidate checkout. Bind the entire interpreter,
+standard library, site configuration (including startup hooks), installed package
+and imported dependencies in `runtime_sha256` provenance. Verify that all module
+search paths resolve inside that pinned runtime and keep its mutation barrier in
+place throughout comparison, with pre/post identity checks. `-I` excludes ambient
+Python environment, user-site, and current-directory imports; it does not itself
+authenticate site-packages or establish immutability. Missing runtime identity or
+a writable/unpinned import path blocks protected use. The ordinary module CLI is
+not a substitute for these controls. `commit-object` contains the exact raw bytes from
+`git cat-file commit <committed-head>` acquired under section 5's Git isolation.
+The canonical digests file has exactly `approved`, `committed`, `commit_object`,
+`validation_before`, and `validation_after`, each a lowercase SHA-256 pinned by
+the owner at its respective observation. Generating all pins from untrusted files
+immediately before comparison does not establish provenance or approval.
+
+The verifier requires:
+
+- equal acceptance, policy and base identities; equal complete path sets and raw
+  worktree records, including ignored/untracked entries and their modes/types;
+- predecessor index equal to resulting HEAD and index, and each staged record
+  equal to its raw worktree bytes/type/mode; no additional staged files, partial
+  staging, or filter/line-ending conversion hidden by Git;
+- empty resulting canonical status; a distinct committed HEAD whose raw object
+  hash matches and whose only parent is the predecessor HEAD; and a reconstructed
+  tree hash matching that committed object's tree;
+- separate canonical before/after validation-context objects bound to the
+  respective candidate digests, with all other fields equal and unexpired.
+
+The validation-context schema is
+`graphify.protected-change-review.validation-context.v1`, with exactly these keys:
+`schema`, `candidate_sha256`, `inputs_sha256`, `environment_sha256`,
+`runtime_sha256`, and `checks`. Identity fields are lowercase SHA-256 values
+(nonzero), not descriptions. Their referenced records must cover the actual
+commands/fixtures/dependencies, relevant environment/configuration, and observed
+interpreter/tool/helper bytes. The current observation must be independent; do
+not copy an old context to make equality pass.
+
+`checks` is a nonempty ordered list of at most 256 records with exactly `name`,
+`command_sha256`, `receipt_sha256`, `result`, `head_sensitive`, and `valid_until`.
+Names are unique nonempty strings (at most 256 characters), the two hashes bind
+actual command and passed receipt bytes, `result` is `passed`, `head_sensitive`
+is `false`, and `valid_until` is a future Unix timestamp in whole seconds. The
+owner derives expiry from existing freshness rules, never invents a longer
+window to enable reuse, and rechecks eligibility immediately before delivery.
+The before record binds the original receipt; the after record preserves that
+reference and records eligibility for the new candidate, not a fictitious rerun.
+
+Inputs use section 5's canonical JSON (raw commit bytes excepted). The verifier
+bounds each input to 8 MiB, raw commit objects to 1 MiB, inventories to 20,000 paths,
+and paths to 4,096 characters/64 components. These are exception-only limits;
+unsupported or larger valid candidates use the ordinary review path. The existing
+index verifier schema and its conformance matrix remain unchanged.
+
+Append one equivalence-link to the external evidence envelope binding the old
+and new candidate digests, both original approval records, original validation
+receipts, all five input digests, and the verifier result/source digest. Preserve
+historical approvals unchanged. Record `approval carried by commit equivalence`,
+not `fresh committed review`. Recheck snapshot/validation freshness before handoff;
+drift invalidates the link. This exception grants no commit or publication
+permission and does not relax any remaining delivery condition.
 
 ## Per-change execution packet
 
@@ -623,7 +736,8 @@ Evidence envelope:
 - Final evidence-envelope SHA-256:
 Done when:
 - Frozen criteria map to evidence.
-- Both reviewers approve the final exact candidate.
+- Both reviewers approve the final exact candidate, or their approved predecessor
+  is linked to it through the explicitly adopted section 10 commit-equivalence path.
 - No reproduced P0 or reproduced in-scope P1 issue remains, and no reproduced
   in-scope P2 correctness or integrity issue remains.
 - Deferrals, watch items, validation gaps, and tripwire status are explicit.
