@@ -811,3 +811,134 @@ def test_public_code_refresh_checks_source_observations(
                   else "source observation changed")
         assert f"error: code refresh {reason}: {target}" in capsys.readouterr().err
         assert after == before, "refusal must preserve accepted graph, manifest and receipt bytes"
+
+
+@pytest.mark.parametrize("case", ["pg_changed", "pg_empty", "endpoint_recreated", "endpoint_absent"])
+def test_public_code_refresh_selected_replacement_membership(tmp_path, monkeypatch, capsys, case):
+    from pathlib import PurePosixPath
+
+    import graphify.__main__ as mainmod
+    import graphify.build as buildmod
+    import graphify.cli as cli
+    import graphify.pg_introspect as pgmod
+    from graphify.extract import extract_sql
+    from graphify.transaction import RECEIPT_FILE, open_graph_snapshot
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    data = json.loads(graph_path.read_text())
+    is_pg = case.startswith("pg_")
+    if is_pg:
+        virtual = PurePosixPath("postgresql://host/db")
+        old = extract_sql(virtual, content=(
+            "CREATE TABLE public.keep (id integer);\nCREATE TABLE public.gone (id integer);\n"
+        ))
+        fresh = extract_sql(virtual, content=(
+            "CREATE TABLE public.fresh (id integer);\n"
+            "CREATE TABLE public.keep (id integer, added text);\n"
+        ) if case == "pg_changed" else "")
+        assert not old.get("error") and not fresh.get("error")
+        assert old["nodes"] and fresh["nodes"]
+        assert {n["source_file"] for n in old["nodes"] + fresh["nodes"]} == {"postgresql:/host/db"}
+        endpoint = next(n["id"] for n in old["nodes"] if n["label"] == "public.keep")
+        gone = next(n["id"] for n in old["nodes"] if n["label"] == "public.gone")
+        if case == "pg_changed":
+            assert next(n for n in old["nodes"] if n["id"] == endpoint)["source_location"] != next(
+                n for n in fresh["nodes"] if n["id"] == endpoint
+            )["source_location"]
+        else:
+            assert len(fresh["nodes"]) == 1 and fresh["nodes"][0]["source_location"] is None
+        data["nodes"].extend(old["nodes"])
+        data["links"].extend(old["edges"])
+    else:
+        target = next(n for n in data["nodes"] if n.get("label") == "first()"
+                      and (output / n["source_file"]).resolve() == repo / "first.py")
+        endpoint = target["id"]
+        assert target.pop("_origin") == "ast"
+    facts = [{"id": name, "label": f"Accepted local evidence {name}", "file_type": "concept",
+              "source_file": "fixture.json", "confidence": "EXTRACTED", "quotation": quote}
+             for name, quote in (("local-a", "prices"), ("local-b", "total_volumes"))]
+    edge = {"source": "local-a", "target": endpoint, "relation": "documents",
+            "source_file": "fixture.json", "confidence": "EXTRACTED",
+            "quotation": "accepted relation", "weight": 0.75}
+    hyperedge = {"id": "local-hyper", "nodes": ["local-b", endpoint, "local-a"],
+                 "source_file": "fixture.json", "confidence": "EXTRACTED",
+                 "quotation": "ordered accepted members"}
+    data["nodes"].extend(facts)
+    if case != "pg_empty":
+        data["links"].append(edge)
+        data.setdefault("hyperedges", []).append(hyperedge)
+    graph_path.write_text(json.dumps(data))
+    baseline = open_graph_snapshot(graph_path, purpose="replacement-test-baseline").data
+    if case != "pg_empty":
+        assert edge in baseline["links"] and hyperedge in baseline["hyperedges"]
+    protected = [graph_path, graph_path.parent / "manifest.json", graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() if p.exists() else None for p in protected}
+    first = repo / "first.py"
+    if case == "endpoint_recreated":
+        first.write_text(first.read_text().replace(
+            "return MarketObservation(value)", "return MarketObservation(value + 1)"
+        ))
+    elif case == "endpoint_absent":
+        first.write_text(first.read_text().split("def first(")[0])
+    else:
+        _append_refresh_function(repo)
+    changed, replacements, pg_calls = [], [], []
+    real_sources, real_merge = cli._code_refresh_sources, buildmod.build_merge
+
+    def observe_sources(*args, **kwargs):
+        result = real_sources(*args, **kwargs)
+        changed.extend(result[0])
+        return result
+
+    def observe_merge(*args, **kwargs):
+        replacements.extend(kwargs.get("ast_refresh_sources") or [])
+        return real_merge(*args, **kwargs)
+
+    def introspect(dsn):
+        pg_calls.append(dsn)
+        return fresh
+
+    monkeypatch.setattr(cli, "_code_refresh_sources", observe_sources)
+    monkeypatch.setattr(buildmod, "build_merge", observe_merge)
+    if is_pg:
+        monkeypatch.setattr(pgmod, "introspect_postgres", introspect)
+    for key in _KEY_VARS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(graph_path.parent))
+    argv = ["graphify", "extract", str(repo), "--code-only", "--no-viz", "--out", str(output)]
+    if is_pg:
+        argv.extend(["--postgres", "postgresql://host/db"])
+    monkeypatch.setattr(sys, "argv", argv)
+    status = 0
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        status = exc.code
+    if status not in (None, 0):
+        assert {p: p.read_bytes() if p.exists() else None for p in protected} == before
+    captured = capsys.readouterr()
+    assert status in (None, 0), captured.out + captured.err
+    assert str(first) in changed
+    assert pg_calls == (["postgresql://host/db"] if is_pg else [])
+    published = open_graph_snapshot(graph_path, purpose="replacement-test-published").data
+    nodes = {n["id"]: n for n in published["nodes"]}
+    for fact in facts:
+        assert all(nodes.get(fact["id"], {}).get(k) == v for k, v in fact.items())
+    if is_pg:
+        assert {n["id"] for n in published["nodes"] if n.get("source_file") == "postgresql:/host/db"} == {
+            n["id"] for n in fresh["nodes"]
+        }
+        assert gone not in nodes
+        for node in fresh["nodes"]:
+            assert all(nodes[node["id"]].get(k) == v for k, v in node.items())
+        assert "postgresql:/host/db" in replacements
+    if case in ("pg_changed", "endpoint_recreated"):
+        assert endpoint in nodes
+        assert any(all(actual.get(k) == v for k, v in edge.items()) for actual in published["links"])
+        assert hyperedge in published.get("hyperedges", [])
+    elif case == "endpoint_absent":
+        assert endpoint not in nodes
+        assert not any(e.get("source") == "local-a" and e.get("target") == endpoint
+                       for e in published["links"])
+        assert {**hyperedge, "nodes": ["local-b", "local-a"]} in published.get("hyperedges", [])

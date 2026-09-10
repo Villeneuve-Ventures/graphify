@@ -4056,6 +4056,10 @@ def _dispatch_command(cmd: str) -> None:
             except (ConnectionError, ImportError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 sys.exit(1)
+            if ast_refresh_sources is not None:
+                ast_refresh_sources.extend(sorted({
+                    node["source_file"] for node in pg_result["nodes"] if node.get("source_file")
+                }))
             print(f"[graphify extract] PostgreSQL: {len(pg_result['nodes'])} nodes, "
                   f"{len(pg_result['edges'])} edges")
 

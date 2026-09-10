@@ -939,6 +939,7 @@ def _compose_ast_refresh(chunks, nodes, edges, hyperedges, replaced, pruned, *, 
         if identity in graph and comparable(graph.nodes[identity]) != comparable(attrs):
             raise ValueError("AST refresh conflicts with retained node identity")
         graph.add_node(identity, **attrs)
+    permitted_missing.difference_update(graph)
     for edge in edges:
         if not keep(edge):
             continue
