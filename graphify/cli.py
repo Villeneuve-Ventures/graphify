@@ -113,11 +113,34 @@ def _stamped_manifest_files(
     }
 
 
+def _code_refresh_observation(path):
+    """Bracket one digest read with metadata; this is not an immutable snapshot."""
+    import re
+    import stat
+    from graphify.detect import _md5_file
+
+    try:
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"code refresh source observation failed: {path}")
+        digest = _md5_file(path)
+        after = path.stat()
+    except OSError as exc:
+        raise ValueError(f"code refresh source observation failed: {path}") from exc
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    metadata = tuple(getattr(before, field) for field in fields)
+    if metadata != tuple(getattr(after, field) for field in fields):
+        raise ValueError(f"code refresh source observation changed: {path}")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{32}", digest):
+        raise ValueError(f"code refresh source observation failed: {path}")
+    return digest, metadata
+
+
 def _code_refresh_sources(graph_path, manifest_path, paths, root, out_root, corpus):
     """Compare bytes against the trusted accepted graph/manifest snapshot pair."""
     import re
     from graphify.build import _norm_source_file
-    from graphify.detect import load_manifest, _md5_file
+    from graphify.detect import load_manifest
     from graphify.transaction import open_graph_snapshot
 
     data = open_graph_snapshot(graph_path, purpose="code-refresh-baseline").data
@@ -145,6 +168,7 @@ def _code_refresh_sources(graph_path, manifest_path, paths, root, out_root, corp
         for record in records if record.get("_origin") != "ast"
     }
     changed = []
+    observations = {}
     for path in paths:
         entry = manifest.get(str(path), {})
         hashes = [entry.get("ast_hash", entry.get("hash", "")), entry.get("semantic_hash", "")] if isinstance(entry, dict) else []
@@ -154,12 +178,11 @@ def _code_refresh_sources(graph_path, manifest_path, paths, root, out_root, corp
         if (_norm_source_file(str(path), str(root)) in semantic_sources
                 and (not valid or not entry.get("semantic_hash"))):
             raise ValueError("code refresh has unknown or conflicting retained semantic source baseline")
-        current_hash = _md5_file(path)
-        if not isinstance(current_hash, str) or not re.fullmatch(r"[0-9a-f]{32}", current_hash):
-            raise ValueError("code refresh could not verify current source bytes")
+        observations[str(path)] = _code_refresh_observation(path)
+        current_hash = observations[str(path)][0]
         if not valid or current_hash != nonempty[0]:
             changed.append(str(path))
-    return changed, source_map
+    return changed, source_map, observations
 
 
 def _stale_graph_sources(
@@ -3627,6 +3650,7 @@ def _dispatch_command(cmd: str) -> None:
         ast_refresh = incremental_mode and code_only and not no_cluster
         ast_refresh_sources = None
         ast_refresh_source_map = None
+        ast_refresh_observations = {}
         if force:
             print("[graphify extract] --force: full re-scan, semantic cache reads skipped")
         elif incremental_mode and not manifest_path.exists():
@@ -3682,7 +3706,7 @@ def _dispatch_command(cmd: str) -> None:
             if ast_refresh:
                 code_files = [Path(path) for path in files_by_type.get("code", [])]
                 try:
-                    ast_refresh_sources, ast_refresh_source_map = _code_refresh_sources(
+                    ast_refresh_sources, ast_refresh_source_map, ast_refresh_observations = _code_refresh_sources(
                         existing_graph_path, manifest_path, code_files, target, out_root, _seen_files,
                     )
                 except (ValueError, OSError) as exc:
@@ -4046,10 +4070,9 @@ def _dispatch_command(cmd: str) -> None:
             print(f"[graphify extract] Cargo: {len(cargo_result['nodes'])} nodes, "
                   f"{len(cargo_result['edges'])} edges")
 
-        # Merge AST + semantic + pg_result + cargo_result. Order matters for deduplication: passing AST
-        # first means semantic node attributes win on collision (richer labels
-        # for symbols also referenced in docs). Hyperedges only come from the
-        # semantic side.
+        # Merge AST, semantic, PostgreSQL and Cargo results. Default build dedup
+        # ranks representatives; input order does not guarantee semantic
+        # precedence. Hyperedges come only from the semantic side.
         merged: dict = {
             "nodes": list(ast_result.get("nodes", [])) + list(sem_result.get("nodes", [])) + list(pg_result.get("nodes", [])) + list(cargo_result.get("nodes", [])),
             "edges": list(ast_result.get("edges", [])) + list(sem_result.get("edges", [])) + list(pg_result.get("edges", [])) + list(cargo_result.get("edges", [])),
@@ -4286,6 +4309,21 @@ def _dispatch_command(cmd: str) -> None:
         except Exception as exc:
             print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
             raise
+
+        if ast_refresh:
+            from graphify.detect import load_manifest
+            try:
+                staged_manifest = load_manifest(str(manifest_path), root=target)
+                for source, initial in ast_refresh_observations.items():
+                    entry = staged_manifest.get(source) if isinstance(staged_manifest, dict) else None
+                    if (not isinstance(entry, dict)
+                            or any(entry.get(kind) != initial[0] for kind in ("ast_hash", "semantic_hash"))):
+                        raise ValueError(f"code refresh staged manifest does not match source observation: {source}")
+                    if _code_refresh_observation(Path(source)) != initial:
+                        raise ValueError(f"code refresh source observation changed: {source}")
+            except (ValueError, OSError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                sys.exit(1)
 
         cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
         print(

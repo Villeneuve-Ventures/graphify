@@ -445,9 +445,9 @@ def extract_pascal(path: Path, *, strict: bool = False) -> dict:
     - class/module --contains--> procedure/function implementation
     - procedure --calls--> other procedure (within the same file)
 
-    Uses tree-sitter-pascal when available; falls back to a regex-based extractor
-    (_extract_pascal_regex) when it isn't installed or fails to parse, so Pascal
-    extraction works out of the box without an extra pip install.
+    Uses tree-sitter-pascal when available. An absent backend uses the regex
+    extractor, including in strict mode. An attempted backend failure propagates
+    in strict mode; non-strict extraction may fall back to regex.
     """
     try:
         import tree_sitter_pascal as tspascal

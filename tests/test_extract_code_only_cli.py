@@ -331,6 +331,8 @@ def test_public_code_refresh_withholds_vue_read_failure(tmp_path, monkeypatch, p
     monkeypatch.setattr(extraction, "_PARALLEL_THRESHOLD", 1 if parallel else 1000)
     if parallel:
         import concurrent.futures
+        # Restore process-local worker state after substituting threads in this test.
+        monkeypatch.setattr(extraction, "_XAML_ACTIVE_EXTRACT_ROOT", extraction._XAML_ACTIVE_EXTRACT_ROOT)
         monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", concurrent.futures.ThreadPoolExecutor)
     monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
     monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "extract", str(repo), "--code-only", "--no-viz"])
@@ -430,7 +432,7 @@ def test_code_refresh_cross_drive_output_alias(tmp_path, monkeypatch, spelling):
 
     monkeypatch.setattr(os.path, "relpath", cross_drive)
     paths = sorted(repo.glob("*.py"))
-    changed, aliases = _code_refresh_sources(
+    changed, aliases, _observations = _code_refresh_sources(
         graph_path, manifest_path, paths, repo, output, [str(p) for p in paths])
     assert attempted
     assert changed == []
@@ -511,7 +513,7 @@ def test_code_refresh_requires_semantic_stage_proof_only_for_retained_sources(tm
         with pytest.raises(ValueError, match="semantic.*baseline"):
             _code_refresh_sources(*args)
     else:
-        changed, aliases = _code_refresh_sources(*args)
+        changed, aliases, _observations = _code_refresh_sources(*args)
         assert changed == [] and aliases["second.py"] == "second.py"
     assert (graph_path.read_bytes(), manifest_path.read_bytes()) == before
 
@@ -552,3 +554,158 @@ def test_public_code_refresh_historical_alias_ownership(tmp_path, retained_seman
     assert {(e["source"], e["target"], *(e.get(k) for k in fields))
             for e in refreshed["links"] if e.get("_origin") == "ast"} == {
                 (a["_src"], a["_tgt"], *(a.get(k) for k in fields)) for _, _, a in oracle.edges(data=True)}
+
+
+@pytest.mark.parametrize("schedule", [
+    "R1-after-baseline", "R2-after-ast", "R3-aba", "R4-initial-hash",
+    "R5-final-hash", "R6-final-missing", "R7-ast-only", "R8-no-edit",
+    "R9-manifest-hash", "R10-manifest-row",
+])
+def test_public_code_refresh_checks_source_observations(
+    tmp_path, monkeypatch, record_property, capsys, schedule,
+):
+    import hashlib
+    import graphify.__main__ as mainmod
+    import graphify.cli as cli
+    import graphify.detect as detection
+    import graphify.extract as extraction
+    from graphify.transaction import RECEIPT_FILE, open_graph_snapshot
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    fact = {"id": "accepted-code-fact", "label": "Accepted second module claim",
+            "source_file": "second.py", "file_type": "concept",
+            "confidence": "EXTRACTED", "source_location": "L4",
+            "quotation": "def second(value: Any) -> Decimal:"}
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    seed = _run(repo, "--code-only", "--no-viz")
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    protected = [graph_path, graph_path.parent / "manifest.json",
+                 graph_path.parent / RECEIPT_FILE]
+    assert all(path.is_file() for path in protected), "seed must create a managed receipt"
+    open_graph_snapshot(graph_path, purpose="observation-seed")
+    before = {path: path.read_bytes() for path in protected}
+    target = repo / ("model.py" if schedule == "R7-ast-only" else "second.py")
+    original = target.read_bytes()
+    initial_stat = target.stat()
+    _append_refresh_function(repo)
+    events = []
+    phase = ""
+
+    def edit_source(event):
+        target.write_bytes(original + b"\n# source changed during preparation\n")
+        events.append(event)
+
+    real_sources = cli._code_refresh_sources
+    real_extract = extraction.extract
+    real_save = detection.save_manifest
+    real_hash = detection._md5_file
+
+    def classify(*args, **kwargs):
+        nonlocal phase
+        phase = "initial"
+        try:
+            result = real_sources(*args, **kwargs)
+        finally:
+            phase = ""
+        if schedule in {"R1-after-baseline", "R3-aba", "R7-ast-only"}:
+            edit_source("after-baseline")
+        return result
+
+    def extract(*args, **kwargs):
+        result = real_extract(*args, **kwargs)
+        if schedule == "R2-after-ast":
+            edit_source("after-ast")
+        elif schedule == "R3-aba":
+            target.write_bytes(original)
+            os.utime(target, ns=(initial_stat.st_atime_ns,
+                                 initial_stat.st_mtime_ns + 10_000_000_000))
+            assert target.read_bytes() == original
+            assert target.stat().st_mtime_ns != initial_stat.st_mtime_ns
+            events.append("restored-after-ast")
+        return result
+
+    def save(*args, **kwargs):
+        nonlocal phase
+        result = real_save(*args, **kwargs)
+        staged = Path(kwargs["manifest_path"])
+        assert staged != protected[1], "must wrap actual prepared manifest save"
+        phase = "final"
+        if schedule == "R6-final-missing":
+            target.unlink()
+            events.append("removed-after-save")
+        elif schedule in {"R9-manifest-hash", "R10-manifest-row"}:
+            manifest = json.loads(staged.read_text())
+            key = target.relative_to(repo).as_posix()
+            assert key in manifest
+            if schedule == "R9-manifest-hash":
+                assert manifest[key]["semantic_hash"] != "0" * 32
+                manifest[key]["semantic_hash"] = "0" * 32
+            else:
+                del manifest[key]
+            staged.write_text(json.dumps(manifest))
+            events.append("changed-staged-manifest")
+        elif schedule == "R8-no-edit":
+            events.append("saved-without-edit")
+        return result
+
+    def hash_source(path):
+        digest = real_hash(path)
+        if Path(path) == target:
+            event = {"R4-initial-hash": "initial", "R5-final-hash": "final"}.get(schedule)
+            if event is not None and phase == event and not events:
+                edit_source(event + "-hash")
+        return digest
+
+    monkeypatch.setattr(cli, "_code_refresh_sources", classify)
+    monkeypatch.setattr(extraction, "extract", extract)
+    monkeypatch.setattr(detection, "save_manifest", save)
+    monkeypatch.setattr(detection, "_md5_file", hash_source)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(graph_path.parent))
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "extract", str(repo),
+                                            "--code-only", "--no-viz"])
+    status = 0
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        status = exc.code
+    after = {path: path.read_bytes() if path.exists() else None for path in protected}
+    record_property("public_exit", str(status))
+    record_property("scheduled_events", json.dumps(events))
+    record_property("accepted_artifacts_unchanged", str(before == after))
+    for path in protected:
+        record_property("before_" + path.name, hashlib.sha256(before[path]).hexdigest())
+        record_property("after_" + path.name,
+                        hashlib.sha256(after[path]).hexdigest() if after[path] is not None else "absent")
+    expected = {
+        "R1-after-baseline": ["after-baseline"], "R2-after-ast": ["after-ast"],
+        "R3-aba": ["after-baseline", "restored-after-ast"],
+        "R4-initial-hash": ["initial-hash"], "R5-final-hash": ["final-hash"],
+        "R6-final-missing": ["removed-after-save"], "R7-ast-only": ["after-baseline"],
+        "R8-no-edit": ["saved-without-edit"],
+        "R9-manifest-hash": ["changed-staged-manifest"],
+        "R10-manifest-row": ["changed-staged-manifest"],
+    }
+    assert events == expected[schedule], "required scheduling phase did not run"
+    if schedule == "R8-no-edit":
+        assert status in (None, 0)
+        refreshed = open_graph_snapshot(graph_path, purpose="observation-success").data
+        assert any("refresh_beacon" in str(node.get("label")) for node in refreshed["nodes"])
+        retained = next(node for node in refreshed["nodes"] if node["id"] == fact["id"])
+        assert {key: retained[key] for key in fact} == fact
+        manifest = detection.load_manifest(str(protected[1]), root=repo)
+        for path in sorted(repo.glob("*.py")):
+            assert manifest[str(path)]["ast_hash"] == real_hash(path)
+            assert manifest[str(path)]["semantic_hash"] == real_hash(path)
+        assert after[protected[2]] != before[protected[2]], "refresh must publish a new generation"
+    else:
+        assert status not in (None, 0), "source observation drift must refuse publication"
+        reason = ("staged manifest does not match source observation"
+                  if schedule in {"R1-after-baseline", "R2-after-ast", "R7-ast-only",
+                                  "R9-manifest-hash", "R10-manifest-row"}
+                  else "source observation failed" if schedule == "R6-final-missing"
+                  else "source observation changed")
+        assert f"error: code refresh {reason}: {target}" in capsys.readouterr().err
+        assert after == before, "refusal must preserve accepted graph, manifest and receipt bytes"
