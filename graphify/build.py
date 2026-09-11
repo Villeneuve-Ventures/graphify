@@ -996,7 +996,8 @@ def build_merge(
         ownership comparisons without rewriting retained payloads.
     """
     graph_path = Path(graph_path if graph_path is not None else _default_graph_json())
-    if graph_path.exists():
+    prepared = os.environ.get("GRAPHIFY_PREPARED_OUTPUT") == "1"
+    if prepared or graph_path.exists():
         # Read JSON directly instead of going through node_link_graph().
         # The latter rebuilds an undirected nx.Graph and then enumerating
         # edges() yields endpoints based on node insertion order, which
@@ -1005,10 +1006,27 @@ def build_merge(
         # attrs are popped before saving in export.py, so going through the
         # NetworkX round-trip loses direction permanently (#760).
         from graphify.security import check_graph_file_size_cap
-        check_graph_file_size_cap(graph_path)
+        if not prepared:
+            check_graph_file_size_cap(graph_path)
         try:
-            from graphify.transaction import open_graph_snapshot
-            data = open_graph_snapshot(graph_path, purpose="build-merge").data
+            if prepared:
+                from graphify.transaction import (
+                    PendingTransactionError,
+                    current_transaction,
+                    open_prepared_graph,
+                )
+                # Prepared intent selects the reader; only native owner validation
+                # grants access. Ordinary CLI staging still uses the public reader.
+                transaction = current_transaction()
+                snapshot = open_prepared_graph(transaction, graph_path)
+                if current_transaction() != transaction:
+                    raise PendingTransactionError(
+                        "prepared merge transaction authority changed after admission"
+                    )
+                data = snapshot.data
+            else:
+                from graphify.transaction import open_graph_snapshot
+                data = open_graph_snapshot(graph_path, purpose="build-merge").data
         except (json.JSONDecodeError, OSError, RuntimeError) as exc:
             raise RuntimeError(
                 f"Cannot read {graph_path} for incremental merge: {exc}. "

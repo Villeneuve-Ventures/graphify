@@ -9985,6 +9985,8 @@ def open_external_graph_snapshot(
 
 def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnapshot:
     """Read an unpublished graph only for its exact live transaction owner."""
+    from graphify.security import _max_graph_file_bytes
+
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         prepared_capability = _pin_prepared_workspace(transaction, capability)
@@ -9994,7 +9996,11 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
             live_alias = transaction.output / requested.name
             if requested not in {expected, live_alias}:
                 raise PendingTransactionError("prepared graph is outside the owned workspace")
-            payload = _read_relative_bytes(prepared_capability.output, requested.name)
+            payload = _read_relative_bytes(
+                prepared_capability.output,
+                requested.name,
+                min(_max_graph_file_bytes(), 512 * 1024 * 1024),
+            )
             artifacts: dict[str, bytes] = {requested.name: payload}
             marker = _load_json(capability, PREPARED_FILE)
             if marker is None or not isinstance(marker.get("prior_inventory"), list):
