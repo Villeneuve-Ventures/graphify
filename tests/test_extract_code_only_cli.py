@@ -7,9 +7,12 @@ still builds, and the no-key error now points users at the flag.
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 PYTHON = sys.executable
 _KEY_VARS = ("GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
@@ -25,9 +28,9 @@ def _mixed_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _run(repo: Path, *extra: str):
+def _run(repo: Path, *extra: str, output=None):
     env = {k: v for k, v in os.environ.items() if k not in _KEY_VARS}
-    env["GRAPHIFY_OUT"] = str(repo / "graphify-out")
+    env["GRAPHIFY_OUT"] = str((output or repo) / "graphify-out")
     return subprocess.run(
         [PYTHON, "-m", "graphify", "extract", ".", *extra],
         cwd=repo, capture_output=True, text=True, env=env,
@@ -53,3 +56,889 @@ def test_mixed_repo_without_key_errors_and_points_at_code_only(tmp_path):
     r = _run(repo)  # no --code-only, no key
     assert r.returncode != 0, "mixed repo with no key should still error without the flag"
     assert "--code-only" in r.stderr, "the no-key error must point users at --code-only"
+
+
+def _refresh_repo(tmp_path, output=None):
+    from graphify.build import build
+    from graphify.detect import save_manifest
+    from graphify.export import to_json
+    from graphify.extract import extract
+
+    repo = tmp_path / "corpus"
+    repo.mkdir()
+    imports = "from typing import Any\nfrom decimal import Decimal\nfrom model import MarketObservation\n"
+    for name in ("first", "second"):
+        (repo / f"{name}.py").write_text(
+            imports + f"def {name}(value: Any) -> Decimal:\n    return MarketObservation(value)\n"
+        )
+    (repo / "model.py").write_text("class MarketObservation:\n    pass\n")
+    (repo / "fixture.json").write_text('{"prices": [[1, 2]], "total_volumes": [[1, 3]]}\n')
+    (repo / ".gitignore").write_text("graphify-out/\n")
+    for args in (("init", "-q"), ("add", "."),
+                 ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                  "commit", "-qm", "baseline")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    paths = sorted(repo.glob("*.py"))
+    graph_path = (output or repo) / "graphify-out" / "graph.json"
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    to_json(build([extract(paths, cache_root=output or repo, parallel=False)], root=repo), {}, str(graph_path))
+    save_manifest({"code": [str(p) for p in paths + [repo / "fixture.json"]]},
+                  str(graph_path.parent / "manifest.json"), root=repo)
+    return repo, graph_path
+
+
+def _append_refresh_function(repo):
+    with (repo / "first.py").open("a") as stream:
+        stream.write("\ndef refresh_beacon(value: Any) -> Decimal:\n    return MarketObservation(value)\n")
+
+
+def test_public_code_refresh_preserves_accepted_price_volume_evidence(tmp_path):
+    repo, graph_path = _refresh_repo(tmp_path)
+    data = json.loads(graph_path.read_text())
+    facts = [
+        {"id": name, "label": f"Raw CoinGecko fixture {name} array",
+         "file_type": "concept", "source_file": "fixture.json",
+         "source_location": location, "confidence": "EXTRACTED",
+         "quotation": quotation}
+        for name, location, quotation in (
+            ("price", "L1", '"prices": [[1, 2]]'),
+            ("volume", "L1", '"total_volumes": [[1, 3]]'))
+    ]
+    evidence = {"id": "evidence", "label": "Raw fixture evidence",
+                "file_type": "document", "source_file": "fixture.json"}
+    edges = [{"source": "evidence", "target": fact["id"], "relation": "supports",
+              "confidence": "EXTRACTED", "source_file": "fixture.json",
+              "source_location": fact["source_location"], "quotation": fact["quotation"]}
+             for fact in facts]
+    data["nodes"].extend([*facts, evidence])
+    data.setdefault("links", []).extend(edges)
+    data["hyperedges"] = [{"id": "paired", "nodes": ["price", "volume"],
+                           "source_file": "fixture.json", "confidence": "EXTRACTED"}]
+    graph_path.write_text(json.dumps(data))
+    _append_refresh_function(repo)
+    result = _run(repo, "--code-only", "--no-viz")
+    assert result.returncode == 0, result.stdout + result.stderr
+    refreshed = json.loads(graph_path.read_text())
+    nodes = {n["id"]: n for n in refreshed["nodes"]}
+    for fact in facts:
+        assert fact["id"] in nodes, f"accepted fact lost: {fact['label']}"
+        assert {k: nodes[fact["id"]][k] for k in fact} == fact
+    for edge in edges:
+        assert any(all(actual.get(k) == v for k, v in edge.items())
+                   for actual in refreshed["links"]), edge
+    assert refreshed["hyperedges"] == data["hyperedges"]
+
+
+def test_public_code_refresh_matches_full_reference_identities(tmp_path):
+    from graphify.build import build
+    from graphify.extract import extract
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    _append_refresh_function(repo)
+    full = build([extract(sorted(repo.glob("*.py")), cache_root=repo, parallel=False)], root=repo)
+    result = _run(repo, "--code-only", "--no-viz")
+    assert result.returncode == 0, result.stdout + result.stderr
+    refreshed = json.loads(graph_path.read_text())
+    labels = {"Any", "Decimal", "MarketObservation"}
+    expected = {node for node, attrs in full.nodes(data=True) if attrs.get("label") in labels}
+    actual = {n["id"] for n in refreshed["nodes"] if n.get("label") in labels}
+    assert actual == expected
+    provenance = ("relation", "confidence", "source_file", "source_location", "_origin")
+    expected_edges = {(attrs["_src"], attrs["_tgt"], *(attrs.get(key) for key in provenance))
+                      for a, b, attrs in full.edges(data=True) if a in expected or b in expected}
+    actual_edges = {(edge["source"], edge["target"], *(edge.get(key) for key in provenance))
+                    for edge in refreshed["links"] if edge["source"] in actual or edge["target"] in actual}
+    assert actual_edges == expected_edges
+    # Repeating the prepared refresh must preserve logical AST records.
+    repeated = _run(repo, "--code-only", "--no-viz")
+    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+    again = json.loads(graph_path.read_text())
+    def logical(payload):
+        return {key: [{k: v for k, v in item.items() if k not in {"community", "community_name"}}
+                      for item in payload[key]] for key in ("nodes", "links")}
+    assert logical(again) == logical(refreshed)
+
+
+@pytest.mark.parametrize("baseline", ["unchanged", "changed_same_mtime", "unknown", "conflicting"])
+def test_public_code_refresh_uses_byte_baseline_for_code_semantics(tmp_path, baseline):
+    repo, graph_path = _refresh_repo(tmp_path)
+    data = json.loads(graph_path.read_text())
+    fact = {"id": "code_fact", "label": "Accepted second module claim", "file_type": "concept",
+            "source_file": "second.py", "source_location": "L4", "confidence": "EXTRACTED"}
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    manifest_path = graph_path.parent / "manifest.json"
+    if baseline in {"unknown", "conflicting"}:
+        manifest = json.loads(manifest_path.read_text())
+        if baseline == "unknown":
+            manifest["second.py"]["ast_hash"] = ""
+            manifest["second.py"]["semantic_hash"] = ""
+        else:
+            manifest["second.py"]["semantic_hash"] = "0" * 32
+        manifest_path.write_text(json.dumps(manifest))
+    elif baseline == "changed_same_mtime":
+        path = repo / "second.py"
+        previous = path.stat()
+        path.write_text(path.read_text().replace("value", "other"))
+        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    _append_refresh_function(repo)
+    before = (graph_path.read_bytes(), manifest_path.read_bytes())
+    result = _run(repo, "--code-only", "--no-viz")
+    if baseline in {"unknown", "conflicting"}:
+        assert result.returncode != 0, "unverifiable accepted semantic baseline must refuse publication"
+        assert (graph_path.read_bytes(), manifest_path.read_bytes()) == before
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        nodes = {n["id"]: n for n in json.loads(graph_path.read_text())["nodes"]}
+        assert ("code_fact" in nodes) == (baseline == "unchanged")
+        if baseline == "unchanged":
+            assert {k: nodes["code_fact"][k] for k in fact} == fact
+
+
+@pytest.mark.parametrize("failure", ["missing", "error", "raised", "hash_read", "registered_resolver", "inner_import_read"])
+def test_public_code_refresh_withholds_failed_ast_publication(tmp_path, monkeypatch, failure):
+    import graphify.__main__ as mainmod
+    import graphify.extract as extraction
+    from graphify.transaction import RECEIPT_FILE
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    if failure == "inner_import_read":
+        from graphify.build import build
+        from graphify.export import to_json
+        from graphify.detect import save_manifest
+        (repo / "first.py").write_text("from second import Response\nclass Auth: pass\n")
+        (repo / "second.py").write_text("class Response: pass\n")
+        paths = sorted(repo.glob("*.py"))
+        baseline = extraction.extract(paths, cache_root=repo, parallel=False, strict=True)
+        assert any(edge.get("relation") == "uses" for edge in baseline["edges"])
+        to_json(build([baseline], root=repo), {}, str(graph_path))
+        save_manifest({"code": [str(path) for path in paths]},
+                      str(graph_path.parent / "manifest.json"), root=repo)
+    if failure == "hash_read":
+        data = json.loads(graph_path.read_text())
+        data["nodes"].append({"id": "accepted", "label": "Accepted second module claim",
+                              "source_file": "second.py", "file_type": "concept"})
+        graph_path.write_text(json.dumps(data))
+    _append_refresh_function(repo)
+    protected = [graph_path, graph_path.parent / "manifest.json", graph_path.parent / RECEIPT_FILE]
+    before = {path: path.read_bytes() if path.exists() else None for path in protected}
+
+    def failed_worker(work, results, *args):
+        if failure == "raised":
+            raise RuntimeError("injected extraction failure")
+        if failure == "error":
+            for index, _ in work:
+                results[index] = {"nodes": [], "edges": [], "error": "injected extraction failure"}
+
+    reads = []
+    if failure == "inner_import_read":
+        original_read = Path.read_bytes
+        def inner_read(path):
+            if path == repo / "first.py" and sys._getframe(1).f_code.co_name == "_resolve_cross_file_imports":
+                reads.append(path)
+                raise OSError("injected inner import read")
+            return original_read(path)
+        monkeypatch.setattr(Path, "read_bytes", inner_read)
+    elif failure == "hash_read":
+        import graphify.detect as detection
+        original_hash = detection._md5_file
+        monkeypatch.setattr(detection, "_md5_file", lambda path: "" if path.name == "second.py" else original_hash(path))
+    elif failure == "registered_resolver":
+        import graphify.resolver_registry as registry
+        def failed_resolver(*args):
+            raise RuntimeError("injected registered resolver failure")
+        monkeypatch.setattr(registry, "_REGISTRY", [registry.LanguageResolver("injected", frozenset({".py"}), failed_resolver)])
+    else:
+        monkeypatch.setattr(extraction, "load_cached", lambda *a, **k: None)
+        monkeypatch.setattr(extraction, "_extract_sequential", failed_worker)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(graph_path.parent))
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "extract", str(repo), "--code-only", "--no-viz"])
+    with pytest.raises(SystemExit) as failed:
+        mainmod.main()
+    assert failed.value.code not in (None, 0)
+    if failure == "inner_import_read":
+        assert reads
+    assert {path: path.read_bytes() if path.exists() else None for path in protected} == before
+
+
+def test_public_code_refresh_ignores_same_stat_stale_ast_cache(tmp_path, monkeypatch):
+    import graphify.cache as cache
+    from graphify.extract import extract
+
+    monkeypatch.setattr(cache, "_stat_index", {})
+    monkeypatch.setattr(cache, "_stat_index_root", None)
+    repo, graph_path = _refresh_repo(tmp_path)
+    cache._flush_stat_index()
+    path = repo / "second.py"
+    old_stat = path.stat()
+    path.write_text(path.read_text().replace("def second(", "def modern("))
+    assert path.stat().st_size == old_stat.st_size
+    os.utime(path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    _append_refresh_function(repo)
+    result = _run(repo, "--code-only", "--no-viz")
+    assert result.returncode == 0, result.stdout + result.stderr
+    cold = tmp_path / "cold"
+    cold.mkdir()
+    for source in repo.glob("*.py"):
+        (cold / source.name).write_bytes(source.read_bytes())
+    oracle = extract(sorted(cold.glob("*.py")), cache_root=cold, parallel=False)
+    expected = {n["label"] for n in oracle["nodes"] if n.get("label") in {"second()", "modern()"}}
+    actual = {n["label"] for n in json.loads(graph_path.read_text())["nodes"]
+              if n.get("label") in {"second()", "modern()"}}
+    assert expected == {"modern()"}
+    assert actual == expected
+
+
+@pytest.mark.parametrize("suffix", ["vue", "svelte", "astro"])
+@pytest.mark.parametrize("parallel", [False, True])
+def test_public_code_refresh_withholds_vue_read_failure(tmp_path, monkeypatch, parallel, suffix):
+    import graphify.__main__ as mainmod
+    import graphify.extract as extraction
+    from graphify.detect import save_manifest
+    from graphify.transaction import RECEIPT_FILE
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    vue = repo / ("component." + suffix)
+    vue.write_text('<script>function renderCard() { return 1; }</script>{import("./child.js")}')
+    child = repo / "child.js"
+    child.write_text("export function child() {}")
+    fragment = extraction.extract([vue, child], cache_root=repo, parallel=False)
+    assert any(edge.get("relation") == "dynamic_import" for edge in fragment["edges"])
+    data = json.loads(graph_path.read_text())
+    data["nodes"].extend(fragment["nodes"])
+    data["links"].extend(fragment["edges"])
+    graph_path.write_text(json.dumps(data))
+    save_manifest({"code": [str(vue)]}, str(graph_path.parent / "manifest.json"), root=repo)
+    _append_refresh_function(repo)
+    # Keep the real shrink guard out of the failure assertion: publication would grow.
+    with (repo / "first.py").open("a") as stream:
+        stream.write("\ndef extra_vue_control():\n    return 1\n")
+    protected = [graph_path, graph_path.parent / "manifest.json", graph_path.parent / RECEIPT_FILE]
+    before = {path: path.read_bytes() if path.exists() else None for path in protected}
+    original_read = Path.read_text
+    reads = []
+    def failed_read(path, *args, **kwargs):
+        if path == vue and sys._getframe(1).f_code.co_name == "extract_" + suffix:
+            reads.append(path)
+            raise OSError("injected component read failure")
+        return original_read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", failed_read)
+    monkeypatch.setattr(extraction, "load_cached", lambda *a, **k: None)
+    assert "error" not in extraction.extract([vue, child], cache_root=repo, parallel=False)
+    assert reads
+    reads.clear()
+    monkeypatch.setattr(extraction, "_PARALLEL_THRESHOLD", 1 if parallel else 1000)
+    if parallel:
+        import concurrent.futures
+        # Restore process-local worker state after substituting threads in this test.
+        monkeypatch.setattr(extraction, "_XAML_ACTIVE_EXTRACT_ROOT", extraction._XAML_ACTIVE_EXTRACT_ROOT)
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", concurrent.futures.ThreadPoolExecutor)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "extract", str(repo), "--code-only", "--no-viz"])
+    with pytest.raises(SystemExit) as failed:
+        mainmod.main()
+    assert failed.value.code not in (None, 0)
+    assert reads
+    assert {path: path.read_bytes() if path.exists() else None for path in protected} == before
+
+
+@pytest.mark.parametrize("state", ["changed", "unchanged", "unknown", "prepared_parent_output"])
+def test_public_code_refresh_external_output_source_ownership(tmp_path, state):
+    from graphify.build import build
+    from graphify.extract import extract
+    from graphify.transaction import RECEIPT_FILE
+
+    output = tmp_path if state == "prepared_parent_output" else tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    fact = {"id": "accepted", "label": "Accepted second module claim", "file_type": "concept",
+            "source_file": os.path.relpath(repo / "second.py", output), "quotation": "unchanged evidence"}
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    if state in {"changed", "prepared_parent_output"}:
+        path = repo / "second.py"
+        path.write_text(path.read_text().replace("value", "other"))
+    elif state == "unknown":
+        manifest_path = graph_path.parent / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["second.py"] = {"mtime": (repo / "second.py").stat().st_mtime}
+        manifest_path.write_text(json.dumps(manifest))
+    _append_refresh_function(repo)
+    protected = [graph_path, graph_path.parent / "manifest.json", graph_path.parent / RECEIPT_FILE]
+    before = {path: path.read_bytes() if path.exists() else None for path in protected}
+    result = _run(repo, "--code-only", "--no-viz", "--out", str(output), output=output)
+    if state == "unknown":
+        assert result.returncode != 0, "external-output semantic baseline must refuse when unknown"
+        assert {path: path.read_bytes() if path.exists() else None for path in protected} == before
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    refreshed = json.loads(graph_path.read_text())
+    nodes = {node["id"]: node for node in refreshed["nodes"]}
+    assert ("accepted" in nodes) == (state == "unchanged")
+    if state == "unchanged":
+        assert {key: nodes["accepted"][key] for key in fact} == fact
+    oracle = build([extract(sorted(repo.glob("*.py")), cache_root=output, strict=True)], root=repo)
+    assert {node["id"] for node in refreshed["nodes"] if node.get("_origin") == "ast"} == set(oracle)
+    fields = ("relation", "confidence", "source_file", "source_location", "_origin")
+    assert {(edge["source"], edge["target"], *(edge.get(key) for key in fields))
+            for edge in refreshed["links"] if edge.get("_origin") == "ast"} == {
+                (attrs["_src"], attrs["_tgt"], *(attrs.get(key) for key in fields))
+                for _, _, attrs in oracle.edges(data=True)}
+
+
+def test_public_code_refresh_refuses_used_ambiguous_source_alias(tmp_path):
+    from graphify.detect import save_manifest
+
+    output = tmp_path / "corpus" / "nested"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    nested = output / "second.py"
+    nested.write_text("def nested_symbol():\n    return 1\n")
+    save_manifest({"code": [str(nested)]}, str(graph_path.parent / "manifest.json"), root=repo)
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append({"id": "ambiguous", "label": "Ambiguous accepted source",
+                          "source_file": "second.py", "file_type": "concept"})
+    graph_path.write_text(json.dumps(data))
+    _append_refresh_function(repo)
+    before = graph_path.read_bytes()
+    result = _run(repo, "--code-only", "--no-viz", "--out", str(output), output=output)
+    assert result.returncode != 0, "used scan/output alias must have one source identity"
+    assert graph_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("case", ["both-unavailable", "output-available", "root-oserror"])
+def test_public_code_refresh_cross_drive_manifest_aliases(tmp_path, monkeypatch, capsys, case):
+    import ntpath
+    import graphify.cli as cli
+    import graphify.__main__ as mainmod
+    from graphify.detect import load_manifest, save_manifest
+    from graphify.transaction import RECEIPT_FILE, open_graph_snapshot
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    external = tmp_path / "external.py"
+    external.write_text("def external_symbol(): return 1\n")
+    manifest_path = graph_path.parent / "manifest.json"
+    save_manifest({"code": [str(external)]}, str(manifest_path), root=repo)
+    payload = {}
+    if case == "output-available":
+        source = str(repo / "second.py")
+        payload = {
+            "nodes": [{"id": "inside-a", "label": "Accepted claim", "file_type": "concept",
+                       "source_file": source, "confidence": "EXTRACTED", "quotation": "MarketObservation"},
+                      {"id": "inside-b", "label": "Accepted evidence", "file_type": "document",
+                       "source_file": source}],
+            "links": [{"source": "inside-b", "target": "inside-a", "relation": "supports",
+                       "source_file": source, "confidence": "EXTRACTED", "quotation": "MarketObservation"}],
+            "hyperedges": [{"id": "inside-pair", "nodes": ["inside-a", "inside-b"],
+                            "source_file": source, "confidence": "EXTRACTED"}],
+        }
+        data = json.loads(graph_path.read_text())
+        for key, records in payload.items():
+            data.setdefault(key, []).extend(records)
+        graph_path.write_text(json.dumps(data))
+
+    def assert_payload(data):
+        for key, records in payload.items():
+            for record in records:
+                assert any(all(actual.get(k) == v for k, v in record.items()) for actual in data[key])
+
+    seed = _run(repo, "--code-only", "--no-viz", "--out", str(output), output=output)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    assert (graph_path.parent / RECEIPT_FILE).is_file()
+    assert_payload(open_graph_snapshot(graph_path, purpose="cross-drive-seed").data)
+    manifest = load_manifest(str(manifest_path), root=repo)
+    external_row = manifest[str(external)]
+    if payload:
+        retained = manifest[str(repo / "second.py")]
+        assert retained["semantic_hash"] and retained["semantic_hash"] == retained["ast_hash"]
+    protected = [graph_path, manifest_path, graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() for p in protected}
+    _append_refresh_function(repo)
+    original = cli._code_refresh_sources
+    relpath = os.path.relpath
+    phase, aliases, attempted = {}, {}, []
+
+    def source_spy(*args, **kwargs):
+        assert Path(args[3]) == repo and Path(args[4]) == output
+        phase.update(entered=True, active=True)
+        try:
+            result = original(*args, **kwargs)
+            aliases.update(result[1])
+            return result
+        finally:
+            phase["active"] = False
+
+    def cross_drive(path, start):
+        if phase.get("active") and Path(path) == external:
+            attempted.append(Path(start))
+            if Path(start) == repo and case == "root-oserror":
+                raise OSError("injected root alias failure")
+            if Path(start) == repo or case == "both-unavailable":
+                return ntpath.relpath(r"C:\external\external.py", r"D:\scan")
+        return relpath(path, start)
+
+    monkeypatch.setattr(cli, "_code_refresh_sources", source_spy)
+    monkeypatch.setattr(os.path, "relpath", cross_drive)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(graph_path.parent))
+    monkeypatch.setattr(sys, "argv", ["graphify", "extract", str(repo), "--code-only", "--no-viz",
+                                      "--out", str(output)])
+    status = 0
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        status = exc.code
+    captured = capsys.readouterr()
+    assert phase.get("entered")
+    if case == "root-oserror":
+        assert status not in (None, 0)
+        assert "injected root alias failure" in captured.err
+        assert attempted == [repo]
+        assert {p: p.read_bytes() for p in protected} == before
+    else:
+        assert status in (None, 0), captured.out + captured.err
+        assert attempted == [repo, output]
+        assert aliases[str(external)] == external.as_posix()
+        if case == "output-available":
+            assert aliases[os.path.normpath(relpath(external, output))] == external.as_posix()
+        published = open_graph_snapshot(graph_path, purpose="cross-drive-published").data
+        assert any(str(n.get("label", "")).startswith("refresh_beacon") for n in published["nodes"])
+        assert_payload(published)
+    assert load_manifest(str(manifest_path), root=repo)[str(external)] == external_row
+
+
+@pytest.mark.parametrize("spelling", ["absolute", "scan_relative"])
+def test_code_refresh_cross_drive_output_alias(tmp_path, monkeypatch, spelling):
+    import ntpath
+    from graphify.cli import _code_refresh_sources
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    source = repo / "second.py"
+    fact = {"id": "accepted", "label": "Accepted cross-drive claim", "file_type": "concept",
+            "source_file": str(source) if spelling == "absolute" else "second.py"}
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    manifest_path = graph_path.parent / "manifest.json"
+    before = (graph_path.read_bytes(), manifest_path.read_bytes())
+    relpath = os.path.relpath
+    attempted = []
+
+    def cross_drive(path, start):
+        if Path(start) == output:
+            attempted.append(str(path))
+            return ntpath.relpath(r"C:\corpus\second.py", r"D:\output")
+        return relpath(path, start)
+
+    monkeypatch.setattr(os.path, "relpath", cross_drive)
+    paths = sorted(repo.glob("*.py"))
+    changed, aliases, _observations = _code_refresh_sources(
+        graph_path, manifest_path, paths, repo, output, [str(p) for p in paths])
+    assert attempted
+    assert changed == []
+    assert aliases[os.path.normpath(fact["source_file"])] == "second.py"
+    assert aliases[str(source)] == aliases["second.py"] == "second.py"
+    assert (graph_path.read_bytes(), manifest_path.read_bytes()) == before
+
+
+def test_code_refresh_output_alias_oserror_propagates(tmp_path, monkeypatch):
+    from graphify.cli import _code_refresh_sources
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    relpath = os.path.relpath
+
+    def denied_output(path, start):
+        if Path(start) == output:
+            raise OSError("output alias denied")
+        return relpath(path, start)
+
+    monkeypatch.setattr(os.path, "relpath", denied_output)
+    paths = sorted(repo.glob("*.py"))
+    with pytest.raises(OSError, match="output alias denied"):
+        _code_refresh_sources(graph_path, graph_path.parent / "manifest.json",
+                              paths, repo, output, [str(p) for p in paths])
+
+
+
+def test_public_update_invalidates_retained_code_semantic_baseline(tmp_path):
+    from graphify.transaction import RECEIPT_FILE
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    data = json.loads(graph_path.read_text())
+    fact = {"id": "accepted", "label": "Accepted second module evidence",
+            "file_type": "concept", "source_file": "second.py", "quotation": "old bytes"}
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    source = repo / "second.py"
+    source.write_text(source.read_text() + "\ndef newly_observed():\n    return 7\n")
+    env = {k: v for k, v in os.environ.items() if k not in _KEY_VARS}
+    env["GRAPHIFY_OUT"] = str(graph_path.parent)
+    updated = subprocess.run([PYTHON, "-m", "graphify", "update", "."], cwd=repo,
+                             env=env, capture_output=True, text=True)
+    assert updated.returncode == 0, updated.stdout + updated.stderr
+    manifest_path = graph_path.parent / "manifest.json"
+    entry = json.loads(manifest_path.read_text())["second.py"]
+    assert entry["ast_hash"] and entry["semantic_hash"] == ""
+    retained = next(n for n in json.loads(graph_path.read_text())["nodes"] if n["id"] == "accepted")
+    assert {k: retained[k] for k in fact} == fact
+    protected = [graph_path, manifest_path, graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() if p.exists() else None for p in protected}
+    result = _run(repo, "--code-only", "--no-viz")
+    assert result.returncode != 0, "AST update cannot certify retained semantic freshness"
+    assert {p: p.read_bytes() if p.exists() else None for p in protected} == before
+
+
+@pytest.mark.parametrize("shape,retained", [("blank", True), ("legacy", True),
+                                           ("blank", False), ("legacy", False)])
+def test_code_refresh_requires_semantic_stage_proof_only_for_retained_sources(tmp_path, shape, retained):
+    from graphify.cli import _code_refresh_sources
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    data = json.loads(graph_path.read_text())
+    if retained:
+        data["nodes"].append({"id": "accepted", "label": "Accepted code evidence",
+                              "file_type": "concept", "source_file": "second.py"})
+        graph_path.write_text(json.dumps(data))
+    manifest_path = graph_path.parent / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    entry = manifest["second.py"]
+    manifest["second.py"] = ({"mtime": entry["mtime"], "hash": entry["ast_hash"]}
+                             if shape == "legacy" else {**entry, "semantic_hash": ""})
+    manifest_path.write_text(json.dumps(manifest))
+    before = (graph_path.read_bytes(), manifest_path.read_bytes())
+    paths = sorted(repo.glob("*.py"))
+    args = (graph_path, manifest_path, paths, repo, repo, [str(p) for p in paths])
+    if retained:
+        with pytest.raises(ValueError, match="semantic.*baseline"):
+            _code_refresh_sources(*args)
+    else:
+        changed, aliases, _observations = _code_refresh_sources(*args)
+        assert changed == [] and aliases["second.py"] == "second.py"
+    assert (graph_path.read_bytes(), manifest_path.read_bytes()) == before
+
+
+@pytest.mark.parametrize("retained_semantic", [False, True])
+def test_public_code_refresh_historical_alias_ownership(tmp_path, retained_semantic):
+    from graphify.build import build
+    from graphify.detect import save_manifest
+    from graphify.extract import extract
+    from graphify.transaction import RECEIPT_FILE
+
+    output = tmp_path / "corpus" / "nested"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    historical = output / "second.py"
+    historical.write_text("def historical_symbol():\n    return 1\n")
+    save_manifest({"code": [str(historical)]}, str(graph_path.parent / "manifest.json"), root=repo)
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append({"id": "historical", "label": "Historical nested symbol",
+                          "file_type": "code", "source_file": "second.py", "_origin": "ast"})
+    if retained_semantic:
+        data["nodes"].append({"id": "ambiguous", "label": "Historical accepted claim",
+                              "file_type": "concept", "source_file": "second.py"})
+    graph_path.write_text(json.dumps(data))
+    historical.unlink()
+    _append_refresh_function(repo)
+    protected = [graph_path, graph_path.parent / "manifest.json", graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() if p.exists() else None for p in protected}
+    result = _run(repo, "--code-only", "--no-viz", "--out", str(output), output=output)
+    if retained_semantic:
+        assert result.returncode != 0, "historical aliases must still constrain retained semantics"
+        assert {p: p.read_bytes() if p.exists() else None for p in protected} == before
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    oracle = build([extract(sorted(repo.glob("*.py")), cache_root=output, strict=True)], root=repo)
+    refreshed = json.loads(graph_path.read_text())
+    assert {n["id"] for n in refreshed["nodes"] if n.get("_origin") == "ast"} == set(oracle)
+    fields = ("relation", "confidence", "source_file", "source_location", "_origin")
+    assert {(e["source"], e["target"], *(e.get(k) for k in fields))
+            for e in refreshed["links"] if e.get("_origin") == "ast"} == {
+                (a["_src"], a["_tgt"], *(a.get(k) for k in fields)) for _, _, a in oracle.edges(data=True)}
+
+
+@pytest.mark.parametrize("schedule", [
+    "R1-after-baseline", "R2-after-ast", "R3-aba", "R4-initial-hash",
+    "R5-final-hash", "R6-final-missing", "R7-ast-only", "R8-no-edit",
+    "R9-manifest-hash", "R10-manifest-row",
+])
+def test_public_code_refresh_checks_source_observations(
+    tmp_path, monkeypatch, record_property, capsys, schedule,
+):
+    import hashlib
+    import graphify.__main__ as mainmod
+    import graphify.cli as cli
+    import graphify.detect as detection
+    import graphify.extract as extraction
+    from graphify.transaction import RECEIPT_FILE, open_graph_snapshot
+
+    repo, graph_path = _refresh_repo(tmp_path)
+    fact = {"id": "accepted-code-fact", "label": "Accepted second module claim",
+            "source_file": "second.py", "file_type": "concept",
+            "confidence": "EXTRACTED", "source_location": "L4",
+            "quotation": "def second(value: Any) -> Decimal:"}
+    data = json.loads(graph_path.read_text())
+    data["nodes"].append(fact)
+    graph_path.write_text(json.dumps(data))
+    seed = _run(repo, "--code-only", "--no-viz")
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    protected = [graph_path, graph_path.parent / "manifest.json",
+                 graph_path.parent / RECEIPT_FILE]
+    assert all(path.is_file() for path in protected), "seed must create a managed receipt"
+    open_graph_snapshot(graph_path, purpose="observation-seed")
+    before = {path: path.read_bytes() for path in protected}
+    target = repo / ("model.py" if schedule == "R7-ast-only" else "second.py")
+    original = target.read_bytes()
+    initial_stat = target.stat()
+    _append_refresh_function(repo)
+    events = []
+    phase = ""
+
+    def edit_source(event):
+        target.write_bytes(original + b"\n# source changed during preparation\n")
+        events.append(event)
+
+    real_sources = cli._code_refresh_sources
+    real_extract = extraction.extract
+    real_save = detection.save_manifest
+    real_hash = detection._md5_file
+
+    def classify(*args, **kwargs):
+        nonlocal phase
+        phase = "initial"
+        try:
+            result = real_sources(*args, **kwargs)
+        finally:
+            phase = ""
+        if schedule in {"R1-after-baseline", "R3-aba", "R7-ast-only"}:
+            edit_source("after-baseline")
+        return result
+
+    def extract(*args, **kwargs):
+        result = real_extract(*args, **kwargs)
+        if schedule == "R2-after-ast":
+            edit_source("after-ast")
+        elif schedule == "R3-aba":
+            target.write_bytes(original)
+            os.utime(target, ns=(initial_stat.st_atime_ns,
+                                 initial_stat.st_mtime_ns + 10_000_000_000))
+            assert target.read_bytes() == original
+            assert target.stat().st_mtime_ns != initial_stat.st_mtime_ns
+            events.append("restored-after-ast")
+        return result
+
+    def save(*args, **kwargs):
+        nonlocal phase
+        result = real_save(*args, **kwargs)
+        staged = Path(kwargs["manifest_path"])
+        assert staged != protected[1], "must wrap actual prepared manifest save"
+        phase = "final"
+        if schedule == "R6-final-missing":
+            target.unlink()
+            events.append("removed-after-save")
+        elif schedule in {"R9-manifest-hash", "R10-manifest-row"}:
+            manifest = json.loads(staged.read_text())
+            key = target.relative_to(repo).as_posix()
+            assert key in manifest
+            if schedule == "R9-manifest-hash":
+                assert manifest[key]["semantic_hash"] != "0" * 32
+                manifest[key]["semantic_hash"] = "0" * 32
+            else:
+                del manifest[key]
+            staged.write_text(json.dumps(manifest))
+            events.append("changed-staged-manifest")
+        elif schedule == "R8-no-edit":
+            events.append("saved-without-edit")
+        return result
+
+    def hash_source(path):
+        digest = real_hash(path)
+        if Path(path) == target:
+            event = {"R4-initial-hash": "initial", "R5-final-hash": "final"}.get(schedule)
+            if event is not None and phase == event and not events:
+                edit_source(event + "-hash")
+        return digest
+
+    monkeypatch.setattr(cli, "_code_refresh_sources", classify)
+    monkeypatch.setattr(extraction, "extract", extract)
+    monkeypatch.setattr(detection, "save_manifest", save)
+    monkeypatch.setattr(detection, "_md5_file", hash_source)
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(graph_path.parent))
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "extract", str(repo),
+                                            "--code-only", "--no-viz"])
+    status = 0
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        status = exc.code
+    after = {path: path.read_bytes() if path.exists() else None for path in protected}
+    record_property("public_exit", str(status))
+    record_property("scheduled_events", json.dumps(events))
+    record_property("accepted_artifacts_unchanged", str(before == after))
+    for path in protected:
+        record_property("before_" + path.name, hashlib.sha256(before[path]).hexdigest())
+        record_property("after_" + path.name,
+                        hashlib.sha256(after[path]).hexdigest() if after[path] is not None else "absent")
+    expected = {
+        "R1-after-baseline": ["after-baseline"], "R2-after-ast": ["after-ast"],
+        "R3-aba": ["after-baseline", "restored-after-ast"],
+        "R4-initial-hash": ["initial-hash"], "R5-final-hash": ["final-hash"],
+        "R6-final-missing": ["removed-after-save"], "R7-ast-only": ["after-baseline"],
+        "R8-no-edit": ["saved-without-edit"],
+        "R9-manifest-hash": ["changed-staged-manifest"],
+        "R10-manifest-row": ["changed-staged-manifest"],
+    }
+    assert events == expected[schedule], "required scheduling phase did not run"
+    if schedule == "R8-no-edit":
+        assert status in (None, 0)
+        refreshed = open_graph_snapshot(graph_path, purpose="observation-success").data
+        assert any("refresh_beacon" in str(node.get("label")) for node in refreshed["nodes"])
+        retained = next(node for node in refreshed["nodes"] if node["id"] == fact["id"])
+        assert {key: retained[key] for key in fact} == fact
+        manifest = detection.load_manifest(str(protected[1]), root=repo)
+        for path in sorted(repo.glob("*.py")):
+            assert manifest[str(path)]["ast_hash"] == real_hash(path)
+            assert manifest[str(path)]["semantic_hash"] == real_hash(path)
+        assert after[protected[2]] != before[protected[2]], "refresh must publish a new generation"
+    else:
+        assert status not in (None, 0), "source observation drift must refuse publication"
+        reason = ("staged manifest does not match source observation"
+                  if schedule in {"R1-after-baseline", "R2-after-ast", "R7-ast-only",
+                                  "R9-manifest-hash", "R10-manifest-row"}
+                  else "source observation failed" if schedule == "R6-final-missing"
+                  else "source observation changed")
+        assert f"error: code refresh {reason}: {target}" in capsys.readouterr().err
+        assert after == before, "refusal must preserve accepted graph, manifest and receipt bytes"
+
+
+@pytest.mark.parametrize("case", ["pg_changed", "pg_empty", "endpoint_recreated", "endpoint_absent"])
+def test_public_code_refresh_selected_replacement_membership(tmp_path, monkeypatch, capsys, case):
+    from pathlib import PurePosixPath
+
+    import graphify.__main__ as mainmod
+    import graphify.build as buildmod
+    import graphify.cli as cli
+    import graphify.pg_introspect as pgmod
+    from graphify.extract import extract_sql
+    from graphify.transaction import RECEIPT_FILE, open_graph_snapshot
+
+    output = tmp_path / "output"
+    repo, graph_path = _refresh_repo(tmp_path, output=output)
+    data = json.loads(graph_path.read_text())
+    is_pg = case.startswith("pg_")
+    if is_pg:
+        virtual = PurePosixPath("postgresql://host/db")
+        old = extract_sql(virtual, content=(
+            "CREATE TABLE public.keep (id integer);\nCREATE TABLE public.gone (id integer);\n"
+        ))
+        fresh = extract_sql(virtual, content=(
+            "CREATE TABLE public.fresh (id integer);\n"
+            "CREATE TABLE public.keep (id integer, added text);\n"
+        ) if case == "pg_changed" else "")
+        assert not old.get("error") and not fresh.get("error")
+        assert old["nodes"] and fresh["nodes"]
+        assert {n["source_file"] for n in old["nodes"] + fresh["nodes"]} == {"postgresql:/host/db"}
+        endpoint = next(n["id"] for n in old["nodes"] if n["label"] == "public.keep")
+        gone = next(n["id"] for n in old["nodes"] if n["label"] == "public.gone")
+        if case == "pg_changed":
+            assert next(n for n in old["nodes"] if n["id"] == endpoint)["source_location"] != next(
+                n for n in fresh["nodes"] if n["id"] == endpoint
+            )["source_location"]
+        else:
+            assert len(fresh["nodes"]) == 1 and fresh["nodes"][0]["source_location"] is None
+        data["nodes"].extend(old["nodes"])
+        data["links"].extend(old["edges"])
+    else:
+        target = next(n for n in data["nodes"] if n.get("label") == "first()"
+                      and (output / n["source_file"]).resolve() == repo / "first.py")
+        endpoint = target["id"]
+        assert target.pop("_origin") == "ast"
+    facts = [{"id": name, "label": f"Accepted local evidence {name}", "file_type": "concept",
+              "source_file": "fixture.json", "confidence": "EXTRACTED", "quotation": quote}
+             for name, quote in (("local-a", "prices"), ("local-b", "total_volumes"))]
+    edge = {"source": "local-a", "target": endpoint, "relation": "documents",
+            "source_file": "fixture.json", "confidence": "EXTRACTED",
+            "quotation": "accepted relation", "weight": 0.75}
+    hyperedge = {"id": "local-hyper", "nodes": ["local-b", endpoint, "local-a"],
+                 "source_file": "fixture.json", "confidence": "EXTRACTED",
+                 "quotation": "ordered accepted members"}
+    data["nodes"].extend(facts)
+    if case != "pg_empty":
+        data["links"].append(edge)
+        data.setdefault("hyperedges", []).append(hyperedge)
+    graph_path.write_text(json.dumps(data))
+    baseline = open_graph_snapshot(graph_path, purpose="replacement-test-baseline").data
+    if case != "pg_empty":
+        assert edge in baseline["links"] and hyperedge in baseline["hyperedges"]
+    protected = [graph_path, graph_path.parent / "manifest.json", graph_path.parent / RECEIPT_FILE]
+    before = {p: p.read_bytes() if p.exists() else None for p in protected}
+    first = repo / "first.py"
+    if case == "endpoint_recreated":
+        first.write_text(first.read_text().replace(
+            "return MarketObservation(value)", "return MarketObservation(value + 1)"
+        ))
+    elif case == "endpoint_absent":
+        first.write_text(first.read_text().split("def first(")[0])
+    else:
+        _append_refresh_function(repo)
+    changed, replacements, pg_calls = [], [], []
+    real_sources, real_merge = cli._code_refresh_sources, buildmod.build_merge
+
+    def observe_sources(*args, **kwargs):
+        result = real_sources(*args, **kwargs)
+        changed.extend(result[0])
+        return result
+
+    def observe_merge(*args, **kwargs):
+        replacements.extend(kwargs.get("ast_refresh_sources") or [])
+        return real_merge(*args, **kwargs)
+
+    def introspect(dsn):
+        pg_calls.append(dsn)
+        return fresh
+
+    monkeypatch.setattr(cli, "_code_refresh_sources", observe_sources)
+    monkeypatch.setattr(buildmod, "build_merge", observe_merge)
+    if is_pg:
+        monkeypatch.setattr(pgmod, "introspect_postgres", introspect)
+    for key in _KEY_VARS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GRAPHIFY_OUT", str(graph_path.parent))
+    argv = ["graphify", "extract", str(repo), "--code-only", "--no-viz", "--out", str(output)]
+    if is_pg:
+        argv.extend(["--postgres", "postgresql://host/db"])
+    monkeypatch.setattr(sys, "argv", argv)
+    status = 0
+    try:
+        mainmod.main()
+    except SystemExit as exc:
+        status = exc.code
+    if status not in (None, 0):
+        assert {p: p.read_bytes() if p.exists() else None for p in protected} == before
+    captured = capsys.readouterr()
+    assert status in (None, 0), captured.out + captured.err
+    assert str(first) in changed
+    assert pg_calls == (["postgresql://host/db"] if is_pg else [])
+    published = open_graph_snapshot(graph_path, purpose="replacement-test-published").data
+    nodes = {n["id"]: n for n in published["nodes"]}
+    for fact in facts:
+        assert all(nodes.get(fact["id"], {}).get(k) == v for k, v in fact.items())
+    if is_pg:
+        assert {n["id"] for n in published["nodes"] if n.get("source_file") == "postgresql:/host/db"} == {
+            n["id"] for n in fresh["nodes"]
+        }
+        assert gone not in nodes
+        for node in fresh["nodes"]:
+            assert all(nodes[node["id"]].get(k) == v for k, v in node.items())
+        assert "postgresql:/host/db" in replacements
+    if case in ("pg_changed", "endpoint_recreated"):
+        assert endpoint in nodes
+        assert any(all(actual.get(k) == v for k, v in edge.items()) for actual in published["links"])
+        assert hyperedge in published.get("hyperedges", [])
+    elif case == "endpoint_absent":
+        assert endpoint not in nodes
+        assert not any(e.get("source") == "local-a" and e.get("target") == endpoint
+                       for e in published["links"])
+        assert {**hyperedge, "nodes": ["local-b", "local-a"]} in published.get("hyperedges", [])

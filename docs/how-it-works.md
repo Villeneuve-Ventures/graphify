@@ -102,7 +102,19 @@ ran in about 1.66x less time than sequential.
 
 ## SHA256 cache
 
-Every extracted file is fingerprinted by content hash. Re-runs skip unchanged files entirely — only new or modified files go through extraction again. The cache lives in `graphify-out/cache/`.
+Content hashes support skipping unchanged extraction in cache-enabled paths.
+The cache lives in `graphify-out/cache/`. Prepared `graphify extract PATH
+--code-only` against an existing graph (clustering enabled, without `--force`)
+rebuilds the full admitted code corpus and cross-file resolution while bypassing
+AST caches. It has no changed-file-only extraction fast path. This differs from
+the separate `graphify update` command.
+
+Prepared refresh preserves retained semantic evidence only with valid semantic
+hash proof for its accepted code-source bytes; current AST hashes alone do not
+prove semantic freshness. Missing or conflicting proof refuses publication.
+Selected-source extraction errors also abort before publication, including a
+missing required language extra such as SQL. Genuine optional metadata absence,
+tolerant syntax and documented working absent-backend fallbacks remain valid.
 
 ---
 

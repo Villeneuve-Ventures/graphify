@@ -12,6 +12,122 @@ from graphify.extract import extract_python, extract, collect_files, _make_id, e
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.mark.parametrize("failure", ["missing", "error", "resolver"])
+def test_strict_ast_completeness_refuses_failed_worker_result(tmp_path, monkeypatch, failure):
+    import graphify.extract as extraction
+
+    source = tmp_path / "module.py"
+    source.write_text("def symbol():\n    pass\n")
+    monkeypatch.setattr(extraction, "load_cached", lambda *a, **k: None)
+    monkeypatch.setattr(extraction, "_PARALLEL_THRESHOLD", 1)
+
+    def failed_worker(work, results, *args):
+        if failure == "error":
+            results[0] = {"nodes": [], "edges": [], "error": "worker failed"}
+        return True
+
+    if failure == "resolver":
+        def failed_resolver(*args, **kwargs):
+            raise RuntimeError("resolver failed")
+        monkeypatch.setattr(extraction, "_resolve_cross_file_imports", failed_resolver)
+    else:
+        monkeypatch.setattr(extraction, "_extract_parallel", failed_worker)
+    with pytest.raises(RuntimeError, match="worker|incomplete|failed"):
+        extraction.extract([source], cache_root=tmp_path, strict=True, parallel=failure != "resolver")
+
+
+def test_strict_ast_completeness_accepts_empty_json_supplement(tmp_path):
+    supplement = tmp_path / "fixture.json"
+    supplement.write_text('{"prices": [[1, 2]]}\n')
+    result = extract([supplement], cache_root=tmp_path, parallel=False, strict=True)
+    assert result["nodes"] == []
+    assert result["edges"] == []
+
+
+def test_vue_read_failure_default_remains_empty(tmp_path, monkeypatch):
+    from graphify.extract import extract_vue
+    source = tmp_path / "component.vue"
+    source.write_text('<script setup>function renderCard() { return 1; }</script>')
+    def failed_read(*args, **kwargs):
+        raise OSError("injected Vue read failure")
+    monkeypatch.setattr(Path, "read_text", failed_read)
+    assert extract_vue(source) == {"nodes": [], "edges": []}
+
+
+@pytest.mark.parametrize("helper,suffix", [
+    ("_resolve_cross_file_java_imports", ".java"),
+    ("_resolve_java_type_references", ".java"),
+    ("_resolve_php_type_references", ".php"),
+    ("_parse_python_tree", ".py"), ("_parse_js_tree", ".js"),
+    ("_extract_python_rationale", ".py"), ("_extract_js_rationale", ".js"),
+])
+def test_strict_inner_source_read_refusal(tmp_path, monkeypatch, helper, suffix):
+    import graphify.extract as extraction
+    sources = {
+        ".py": "# WHY: preserve the rationale\nfrom Response import Response\nclass Auth: pass\ndef use(): return Response()\n",
+        ".js": "// WHY: preserve the rationale\nimport {Response} from './Response.js';\nexport class Auth {}\nexport function use() { return new Response(); }\n",
+        ".java": "package app; import app.Response; public class Auth extends Response {}",
+        ".php": "<?php namespace App; use App\\Response; class Auth extends Response {}",
+    }
+    source = tmp_path / ("Auth" + suffix)
+    source.write_text(sources[suffix])
+    peer = tmp_path / ("Response" + suffix)
+    peer.write_text({".py": "class Response: pass", ".js": "export class Response {}",
+                     ".java": "package app; public class Response {}",
+                     ".php": "<?php namespace App; class Response {}"}[suffix])
+    method = "read_text" if helper == "_extract_js_rationale" else "read_bytes"
+    original = getattr(Path, method)
+    observed = []
+    fail = False
+    def inner_read(path, *args, **kwargs):
+        if path == source and sys._getframe(1).f_code.co_name == helper:
+            observed.append(path)
+            if fail:
+                raise OSError("injected inner source read")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, method, inner_read)
+    monkeypatch.setattr(extraction, "load_cached", lambda *a, **k: None)
+    baseline = extraction.extract([source, peer], cache_root=tmp_path, parallel=False, strict=True)
+    assert observed and baseline["nodes"] and baseline["edges"]
+    assert {"Auth", "Response"} <= {node["label"] for node in baseline["nodes"]}
+    if helper.endswith("rationale"):
+        assert any(node.get("file_type") == "rationale" for node in baseline["nodes"])
+    fail = True
+    observed.clear()
+    legacy = extraction.extract([source, peer], cache_root=tmp_path, parallel=False)
+    assert observed and legacy["nodes"]  # Default retains the existing partial-result fallback.
+    observed.clear()
+    with pytest.raises((OSError, RuntimeError), match="inner source read|incomplete"):
+        extraction.extract([source, peer], cache_root=tmp_path, parallel=False, strict=True)
+    assert observed
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_strict_ast_bypasses_cache_reads_and_writes(tmp_path, monkeypatch, parallel):
+    import graphify.extract as extraction
+
+    source = tmp_path / "module.py"
+    source.write_text("def before():\n    pass\n")
+    extract([source], cache_root=tmp_path, parallel=False)
+    old_stat = source.stat()
+    source.write_text("def latter():\n    pass\n")
+    os.utime(source, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+
+    def forbidden_cache(*args, **kwargs):
+        pytest.fail("strict AST must neither read nor write the stat-keyed cache")
+
+    monkeypatch.setattr(extraction, "load_cached", forbidden_cache)
+    monkeypatch.setattr(extraction, "save_cached", forbidden_cache)
+    monkeypatch.setattr(extraction, "_PARALLEL_THRESHOLD", 1)
+    if parallel:
+        # Exercise the same picklable worker in process so cache traps remain visible.
+        import concurrent.futures
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", concurrent.futures.ThreadPoolExecutor)
+    result = extract([source], cache_root=tmp_path, parallel=parallel, strict=True)
+    labels = {node["label"] for node in result["nodes"]}
+    assert "latter()" in labels and "before()" not in labels
+
+
 def test_make_id_strips_dots_and_underscores():
     assert _make_id("_auth") == "auth"
     assert _make_id(".httpx._client") == "httpx_client"

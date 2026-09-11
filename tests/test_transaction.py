@@ -11276,6 +11276,7 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
         ("callflow_html.py", "load_graph", "callflow-html"),
         ("callflow_html.py", "write_callflow_html", "callflow-html"),
         ("cli.py", "_stale_graph_sources", "stale-source-scan"),
+        ("cli.py", "_code_refresh_sources", "code-refresh-baseline"),
         ("cli.py", "_prune_graph_json_sources", "source-prune"),
         ("cli.py", "_transactional_extract", "extract-baseline"),
         ("cli.py", "_transactional_cluster_only", "publication-prepare"),

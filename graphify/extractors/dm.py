@@ -5,10 +5,11 @@ import re
 
 from pathlib import Path
 from typing import Any
-from graphify.extractors.base import _file_stem, _make_id, _read_text
+from graphify.extractors.base import _file_stem, _make_id, _read_text, strict_aware, checked_exists
 
 
-def extract_dm(path: Path) -> dict:
+@strict_aware
+def extract_dm(path: Path, *, strict: bool = False) -> dict:
     """Extract types, procs, includes, and calls from a .dm/.dme file."""
     try:
         import tree_sitter_dm as tsdm
@@ -90,15 +91,15 @@ def extract_dm(path: Path) -> dict:
                 resolved = (path.parent / norm).resolve()
                 edge: dict = {
                     "source": file_nid,
-                    "target": _make_id(str(resolved)) if resolved.exists() else _make_id(norm),
-                    "relation": "imports_from" if resolved.exists() else "imports",
+                    "target": _make_id(str(resolved)) if checked_exists(resolved, strict=strict) else _make_id(norm),
+                    "relation": "imports_from" if checked_exists(resolved, strict=strict) else "imports",
                     "context": "import",
                     "confidence": "EXTRACTED",
                     "source_file": str_path,
                     "source_location": f"L{line}",
                     "weight": 1.0,
                 }
-                if not resolved.exists():
+                if not checked_exists(resolved, strict=strict):
                     edge["external"] = True
                 edges.append(edge)
             return

@@ -6,6 +6,7 @@ module. The path-redirect (`graphify <path>` -> extract) re-enters via a lazy
 import of main to avoid a cli<->__main__ import cycle.
 """
 from __future__ import annotations
+from graphify.extractors.base import checked_exists
 import contextlib
 import io
 import json
@@ -112,11 +113,86 @@ def _stamped_manifest_files(
     }
 
 
+def _code_refresh_observation(path):
+    """Bracket one digest read with metadata; this is not an immutable snapshot."""
+    import re
+    import stat
+    from graphify.detect import _md5_file
+
+    try:
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"code refresh source observation failed: {path}")
+        digest = _md5_file(path)
+        after = path.stat()
+    except OSError as exc:
+        raise ValueError(f"code refresh source observation failed: {path}") from exc
+    fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+    metadata = tuple(getattr(before, field) for field in fields)
+    if metadata != tuple(getattr(after, field) for field in fields):
+        raise ValueError(f"code refresh source observation changed: {path}")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{32}", digest):
+        raise ValueError(f"code refresh source observation failed: {path}")
+    return digest, metadata
+
+
+def _code_refresh_sources(graph_path, manifest_path, paths, root, out_root, corpus):
+    """Compare bytes against the trusted accepted graph/manifest snapshot pair."""
+    import re
+    from graphify.build import _norm_source_file
+    from graphify.detect import load_manifest
+    from graphify.transaction import open_graph_snapshot
+
+    data = open_graph_snapshot(graph_path, purpose="code-refresh-baseline").data
+    manifest = load_manifest(str(manifest_path), root=root)
+    aliases = {}
+    for source in set(corpus) | set(manifest):
+        actual = Path(source).resolve()
+        owner = _norm_source_file(str(actual), str(root))
+        source_aliases = [str(actual)]
+        for base in (root, out_root):
+            try:
+                source_aliases.append(os.path.relpath(actual, base))
+            except ValueError:
+                pass  # Windows paths on different drives have no relative alias.
+        for alias in source_aliases:
+            aliases.setdefault(os.path.normpath(alias), set()).add(owner)
+    records = [record for key in ("nodes", "links", "edges", "hyperedges")
+               for record in data.get(key, []) if record.get("source_file")]
+    if any(len(aliases.get(os.path.normpath(record["source_file"]), ())) > 1
+           for record in records if record.get("_origin") != "ast"):
+        raise ValueError("code refresh has ambiguous source ownership")
+    source_map = {alias: next(iter(owners)) for alias, owners in aliases.items() if len(owners) == 1}
+    semantic_sources = {
+        source_map.get(os.path.normpath(record["source_file"]),
+                       _norm_source_file(record["source_file"], str(root)))
+        for record in records if record.get("_origin") != "ast"
+    }
+    changed = []
+    observations = {}
+    for path in paths:
+        entry = manifest.get(str(path), {})
+        hashes = [entry.get("ast_hash", entry.get("hash", "")), entry.get("semantic_hash", "")] if isinstance(entry, dict) else []
+        nonempty = [value for value in hashes if value != ""]
+        valid = (bool(nonempty) and all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value)
+                                       for value in nonempty) and len(set(nonempty)) == 1)
+        if (_norm_source_file(str(path), str(root)) in semantic_sources
+                and (not valid or not entry.get("semantic_hash"))):
+            raise ValueError("code refresh has unknown or conflicting retained semantic source baseline")
+        observations[str(path)] = _code_refresh_observation(path)
+        current_hash = observations[str(path)][0]
+        if not valid or current_hash != nonempty[0]:
+            changed.append(str(path))
+    return changed, source_map, observations
+
+
 def _stale_graph_sources(
     graph_path: Path,
     scan_root: Path,
     seen_files: set[str],
-) -> list[str]:
+    *,
+    output_root: Path | None = None,
+ strict: bool = False) -> list[str]:
     """Source files graph.json still references but the current scan no longer
     contains (#1909).
 
@@ -149,12 +225,16 @@ def _stale_graph_sources(
     try:
         root_res = scan_root.resolve()
     except (OSError, RuntimeError):
+        if strict:
+            raise
         root_res = scan_root
     # <out>/graphify-out/graph.json — relative source_files may be anchored here.
-    out_base = graph_path.parent.parent
+    out_base = output_root if output_root is not None else graph_path.parent.parent
     try:
         out_base = out_base.resolve()
     except (OSError, RuntimeError):
+        if strict:
+            raise
         pass
 
     def _within_root(p: Path) -> bool:
@@ -166,7 +246,9 @@ def _stale_graph_sources(
         try:
             p.resolve().relative_to(root_res)
             return True
-        except (ValueError, OSError, RuntimeError):
+        except (ValueError, OSError, RuntimeError) as exc:
+            if strict and not isinstance(exc, ValueError):
+                raise
             return False
 
     def _in_seen(p: Path) -> bool:
@@ -175,6 +257,8 @@ def _stale_graph_sources(
         try:
             return str(p.resolve()) in seen_files
         except (OSError, RuntimeError):
+            if strict:
+                raise
             return False
 
     stale: list[str] = []
@@ -3559,10 +3643,15 @@ def _dispatch_command(cmd: str) -> None:
         # and genuinely-deleted sources against the current corpus, so doc/
         # paper/image nodes survive a --code-only rebuild instead of being
         # dropped with the rest of the committed graph.
-        incremental_mode = existing_graph_path.exists() if has_path else False
+        potential_ast_refresh = has_path and code_only and not no_cluster and not force
+        incremental_mode = checked_exists(existing_graph_path, strict=potential_ast_refresh) if has_path else False
         # --force: full scan, not the manifest-gated incremental diff — a warm
         # unchanged tree would otherwise dispatch zero files (#1894).
         incremental_mode = incremental_mode and not force
+        ast_refresh = incremental_mode and code_only and not no_cluster
+        ast_refresh_sources = None
+        ast_refresh_source_map = None
+        ast_refresh_observations = {}
         if force:
             print("[graphify extract] --force: full re-scan, semantic cache reads skipped")
         elif incremental_mode and not manifest_path.exists():
@@ -3590,6 +3679,7 @@ def _dispatch_command(cmd: str) -> None:
                 manifest_path=str(manifest_path),
                 google_workspace=google_workspace or None,
                 extra_excludes=cli_excludes or None,
+                **({"kind": "ast", "strict": True} if ast_refresh else {}),
             )
             if detection.get("walk_errors"):
                 print("error: source scan incomplete; refusing graph publication", file=sys.stderr)
@@ -3611,8 +3701,18 @@ def _dispatch_command(cmd: str) -> None:
             _seen_files = {f for _fl in files_by_type.values() for f in _fl}
             _seen_files.update(detection.get("unclassified", []))
             graph_stale_sources = _stale_graph_sources(
-                existing_graph_path, target, _seen_files
+                existing_graph_path, target, _seen_files,
+                **({"output_root": out_root, "strict": True} if ast_refresh else {}),
             )
+            if ast_refresh:
+                code_files = [Path(path) for path in files_by_type.get("code", [])]
+                try:
+                    ast_refresh_sources, ast_refresh_source_map, ast_refresh_observations = _code_refresh_sources(
+                        existing_graph_path, manifest_path, code_files, target, out_root, _seen_files,
+                    )
+                except (ValueError, OSError) as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    sys.exit(1)
         else:
             print(f"[graphify extract] scanning {target}")
             detection = _detect(target, google_workspace=google_workspace or None, extra_excludes=cli_excludes or None, cache_root=out_root)
@@ -3798,6 +3898,8 @@ def _dispatch_command(cmd: str) -> None:
             # with --out, a <target>/graphify-out/cache/ would leak a
             # graphify-out/ dir into a project that asked for external output.
             ast_kwargs: dict = {"cache_root": out_root}
+            if ast_refresh:
+                ast_kwargs["strict"] = True
             if cli_max_workers is not None:
                 ast_kwargs["max_workers"] = cli_max_workers
             print(f"[graphify extract] AST extraction on {len(code_files)} code files...")
@@ -3805,6 +3907,8 @@ def _dispatch_command(cmd: str) -> None:
                 ast_result = _ast_extract(code_files, **ast_kwargs)
             except Exception as exc:
                 print(f"[graphify extract] AST extraction failed: {exc}", file=sys.stderr)
+                if ast_refresh:
+                    sys.exit(1)
                 ast_result = {"nodes": [], "edges": [], "input_tokens": 0, "output_tokens": 0}
         stages.mark("AST extract")
 
@@ -3952,6 +4056,10 @@ def _dispatch_command(cmd: str) -> None:
             except (ConnectionError, ImportError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 sys.exit(1)
+            if ast_refresh_sources is not None:
+                ast_refresh_sources.extend(sorted({
+                    node["source_file"] for node in pg_result["nodes"] if node.get("source_file")
+                }))
             print(f"[graphify extract] PostgreSQL: {len(pg_result['nodes'])} nodes, "
                   f"{len(pg_result['edges'])} edges")
 
@@ -3967,10 +4075,9 @@ def _dispatch_command(cmd: str) -> None:
             print(f"[graphify extract] Cargo: {len(cargo_result['nodes'])} nodes, "
                   f"{len(cargo_result['edges'])} edges")
 
-        # Merge AST + semantic + pg_result + cargo_result. Order matters for deduplication: passing AST
-        # first means semantic node attributes win on collision (richer labels
-        # for symbols also referenced in docs). Hyperedges only come from the
-        # semantic side.
+        # Merge AST, semantic, PostgreSQL and Cargo results. Default build dedup
+        # ranks representatives; input order does not guarantee semantic
+        # precedence. Hyperedges come only from the semantic side.
         merged: dict = {
             "nodes": list(ast_result.get("nodes", [])) + list(sem_result.get("nodes", [])) + list(pg_result.get("nodes", [])) + list(cargo_result.get("nodes", [])),
             "edges": list(ast_result.get("edges", [])) + list(sem_result.get("edges", [])) + list(pg_result.get("edges", [])) + list(cargo_result.get("edges", [])),
@@ -4136,6 +4243,8 @@ def _dispatch_command(cmd: str) -> None:
                 dedup=True,
                 dedup_llm_backend=dedup_backend,
                 root=target,
+                **({"ast_refresh_sources": ast_refresh_sources,
+                    "ast_refresh_source_map": ast_refresh_source_map} if ast_refresh else {}),
             )
         else:
             G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
@@ -4205,6 +4314,21 @@ def _dispatch_command(cmd: str) -> None:
         except Exception as exc:
             print(f"[graphify extract] warning: could not write manifest: {exc}", file=sys.stderr)
             raise
+
+        if ast_refresh:
+            from graphify.detect import load_manifest
+            try:
+                staged_manifest = load_manifest(str(manifest_path), root=target)
+                for source, initial in ast_refresh_observations.items():
+                    entry = staged_manifest.get(source) if isinstance(staged_manifest, dict) else None
+                    if (not isinstance(entry, dict)
+                            or any(entry.get(kind) != initial[0] for kind in ("ast_hash", "semantic_hash"))):
+                        raise ValueError(f"code refresh staged manifest does not match source observation: {source}")
+                    if _code_refresh_observation(Path(source)) != initial:
+                        raise ValueError(f"code refresh source observation changed: {source}")
+            except (ValueError, OSError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                sys.exit(1)
 
         cost = _estimate_cost(backend, merged["input_tokens"], merged["output_tokens"])
         print(
