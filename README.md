@@ -836,6 +836,19 @@ this checkout. Use `uv run --frozen graphify ...` when testing fork commands so
 a global executable does not take precedence. The supported interpreter window
 is CPython 3.14.2 through final 3.14.x releases.
 
+### Commands by purpose
+
+| Purpose | Existing command or procedure | What it proves |
+| --- | --- | --- |
+| Setup | `uv sync --all-extras --frozen` | Installs the checkout and development dependencies from the lockfile. |
+| Quick feedback | `uv run --frozen pytest tests/test_extract.py -q --tb=short` (choose the affected module) | Exercises the selected module only. |
+| Docs closeout | The pre-PR procedure under [Git workflow](#git-workflow) | No separate docs-only closeout command is defined. |
+| Full readiness | `uv run --frozen pytest tests/ -q --tb=short` plus applicable separate CI checks below | The pytest result proves the suite ran; it does not certify the separate jobs. |
+| Independent review | [Protected-change review policy](docs/protected-change-review.md), when explicitly applicable under [AGENTS.md](AGENTS.md) | Follow that policy's acceptance and review procedure; a passing test run does not activate or replace it. |
+
+Choose checks by purpose; setup and focused tests are not substitutes for the
+pre-PR procedure. Graphify has no `make review-ready` target.
+
 ### Running tests
 
 ```bash
