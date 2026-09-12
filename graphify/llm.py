@@ -95,10 +95,12 @@ BACKENDS: dict[str, dict] = {
         # Gemini models (LiteLLM, self-hosted proxy, ...). Falls back to Google's
         # official OpenAI-compatible endpoint.
         "base_url": os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        "default_model": "gemini-3-flash-preview",
+        "default_model": "gemini-3.8-flash",
         "env_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "model_env_key": "GRAPHIFY_GEMINI_MODEL",
-        "pricing": {"input": 0.50, "output": 3.00},  # USD per 1M tokens
+        # Paid standard USD per 1M tokens through 2026-12-31; free tier is free.
+        # https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash
+        "pricing": {"input": 0.75, "output": 3.75},
         "temperature": 0,
         "reasoning_effort": "low",
         "max_completion_tokens": 16384,
@@ -311,7 +313,8 @@ def _resolve_temperature(default: float | None, model: str = "") -> float | None
              "omit the temperature parameter entirely" (-> None).
       2. Otherwise, reasoning models (o1/o3/o4/gpt-5) get None — the parameter
          must be omitted or the API rejects the request.
-      3. Otherwise, the backend config default (`default`, usually 0).
+      3. Gemini 3.8 Flash omits sampling per Google's migration guidance.
+      4. Otherwise, the backend config default (`default`, usually 0).
 
     Returns None when the temperature parameter should be omitted from the
     request; the call sites already guard `if temperature is not None`.
@@ -329,6 +332,10 @@ def _resolve_temperature(default: float | None, model: str = "") -> float | None
                 file=sys.stderr,
             )
     if _model_requires_default_temperature(model):
+        return None
+    # Omit sampling for this default without changing legacy model overrides.
+    # https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist
+    if (model or "").lower().rsplit("/", 1)[-1] == "gemini-3.8-flash":
         return None
     return default
 

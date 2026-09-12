@@ -559,7 +559,7 @@ _TRIAGE_MODEL_DEFAULTS: dict[str, str] = {
     "claude": "claude-opus-4-7",
     "kimi":   "kimi-k2.6",
     "openai": "gpt-4.1-mini",
-    "gemini": "gemini-3-flash-preview",
+    "gemini": "gemini-3.8-flash",
 }
 
 

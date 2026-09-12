@@ -70,7 +70,7 @@ def test_extract_files_direct_routes_gemini_through_openai_compat(tmp_path, monk
     assert call.call_args.args[:3] == (
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         "google-key",
-        "gemini-3-flash-preview",
+        "gemini-3.8-flash",
     )
     # Source content is wrapped in an untrusted_source delimiter block (#1210)
     # rather than the old `=== path ===` separator.
@@ -78,7 +78,7 @@ def test_extract_files_direct_routes_gemini_through_openai_compat(tmp_path, monk
     assert '<untrusted_source path="note.md" sha256=' in user_msg
     assert "# Architecture\n\nThe runner emits a snapshot." in user_msg
     assert user_msg.rstrip().endswith("</untrusted_source>")
-    assert call.call_args.kwargs["temperature"] == 0
+    assert call.call_args.kwargs["temperature"] is None
     assert call.call_args.kwargs["reasoning_effort"] == "low"
     assert call.call_args.kwargs["max_completion_tokens"] == 16384
 
@@ -131,6 +131,47 @@ def test_missing_gemini_key_names_both_supported_env_vars(monkeypatch):
         llm.extract_files_direct([Path("missing.md")], backend="gemini")
 
     assert "GEMINI_API_KEY or GOOGLE_API_KEY" in str(exc.value)
+
+
+@pytest.mark.parametrize("entrypoint", ["extract", "text"])
+@pytest.mark.parametrize(
+    "explicit_model,env_model,temperature,expected_model,expected_temperature",
+    [
+        (None, None, None, "gemini-3.8-flash", None),
+        (None, "gemini-3-flash-preview", None, "gemini-3-flash-preview", 0),
+        ("gemini-3.8-flash", "gemini-3-flash-preview", "0.3", "gemini-3.8-flash", 0.3),
+        ("gemini-3-flash-preview", "gemini-3.8-flash", "omit", "gemini-3-flash-preview", None),
+    ],
+)
+def test_gemini_request_model_and_sampling(
+    tmp_path, monkeypatch, entrypoint, explicit_model, env_model, temperature,
+    expected_model, expected_temperature,
+):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.delenv("GRAPHIFY_LLM_TEMPERATURE", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    if env_model is not None:
+        monkeypatch.setenv("GRAPHIFY_GEMINI_MODEL", env_model)
+    if temperature is not None:
+        monkeypatch.setenv("GRAPHIFY_LLM_TEMPERATURE", temperature)
+    captured = _install_capturing_openai(monkeypatch)
+    if entrypoint == "extract":
+        source = tmp_path / "note.md"
+        source.write_text("# Architecture\n")
+        llm.extract_files_direct([source], backend="gemini", model=explicit_model, root=tmp_path)
+    else:
+        llm._call_llm("Classify this note", backend="gemini", model=explicit_model)
+
+    assert captured["model"] == expected_model
+    assert captured["reasoning_effort"] == "low"
+    if expected_temperature is None:
+        assert "temperature" not in captured
+    else:
+        assert captured["temperature"] == expected_temperature
+
+
+def test_gemini_default_paid_cost_estimate():
+    assert llm.estimate_cost("gemini", 1_000_000, 1_000_000) == pytest.approx(0.75 + 3.75)
 
 
 # ---------------------------------------------------------------------------
