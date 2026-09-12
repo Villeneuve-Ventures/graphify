@@ -164,8 +164,9 @@ def test_prepared_intent_never_grants_authority(tmp_path, monkeypatch, authority
         monkeypatch.setenv("GRAPHIFY_TRANSACTION_OUTPUT", str(fixture.output))
     before = _published_bytes(fixture.output)
     path = fixture.output / ("missing.json" if missing else "graph.json")
-    with pytest.raises(RuntimeError, match="owner"):
+    with pytest.raises(tx.PendingTransactionError, match="owner") as refused:
         build_merge([], path)
+    assert "delete" not in str(refused.value).lower()
     assert _published_bytes(fixture.output) == before
     assert not (fixture.output / "missing.json").exists()
 
@@ -210,8 +211,9 @@ def test_authority_changed_after_real_admission_refuses(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(tx, "open_prepared_graph", read_then_change)
     before = _published_bytes(fixture.output)
-    with pytest.raises(RuntimeError, match="owner|authority|transaction"):
+    with pytest.raises(tx.PendingTransactionError, match="owner|authority|transaction") as refused:
         _run(fixture, "build_merge([], Path.cwd() / 'graph.json', root=root)")
+    assert "delete" not in str(refused.value).lower()
     assert len(admitted) == 1
     assert _published_bytes(fixture.output) == before
 
@@ -258,8 +260,10 @@ def test_public_merge_keeps_certification_requirements(tmp_path, monkeypatch, da
     before = _published_bytes(fixture.output)
     with pytest.raises(tx.PendingTransactionError):
         tx.open_graph_snapshot(fixture.output / "graph.json", purpose="tamper-regression")
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as refused:
         build_merge([], fixture.output / "graph.json", root=fixture.root)
+    assert type(refused.value) is RuntimeError
+    assert "Delete the file and run a full rebuild." in str(refused.value)
     assert _published_bytes(fixture.output) == before
 
 

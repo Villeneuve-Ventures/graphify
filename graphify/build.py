@@ -1008,30 +1008,30 @@ def build_merge(
         from graphify.security import check_graph_file_size_cap
         if not prepared:
             check_graph_file_size_cap(graph_path)
-        try:
-            if prepared:
-                from graphify.transaction import (
-                    PendingTransactionError,
-                    current_transaction,
-                    open_prepared_graph,
+        if prepared:
+            from graphify.transaction import (
+                PendingTransactionError,
+                current_transaction,
+                open_prepared_graph,
+            )
+            # Prepared intent selects the reader; only native owner validation
+            # grants access. Ordinary CLI staging still uses the public reader.
+            transaction = current_transaction()
+            snapshot = open_prepared_graph(transaction, graph_path)
+            if current_transaction() != transaction:
+                raise PendingTransactionError(
+                    "prepared merge transaction authority changed after admission"
                 )
-                # Prepared intent selects the reader; only native owner validation
-                # grants access. Ordinary CLI staging still uses the public reader.
-                transaction = current_transaction()
-                snapshot = open_prepared_graph(transaction, graph_path)
-                if current_transaction() != transaction:
-                    raise PendingTransactionError(
-                        "prepared merge transaction authority changed after admission"
-                    )
-                data = snapshot.data
-            else:
+            data = snapshot.data
+        else:
+            try:
                 from graphify.transaction import open_graph_snapshot
                 data = open_graph_snapshot(graph_path, purpose="build-merge").data
-        except (json.JSONDecodeError, OSError, RuntimeError) as exc:
-            raise RuntimeError(
-                f"Cannot read {graph_path} for incremental merge: {exc}. "
-                "Delete the file and run a full rebuild."
-            ) from exc
+            except (json.JSONDecodeError, OSError, RuntimeError) as exc:
+                raise RuntimeError(
+                    f"Cannot read {graph_path} for incremental merge: {exc}. "
+                    "Delete the file and run a full rebuild."
+                ) from exc
         links_key = "links" if "links" in data else "edges"
         existing_nodes = list(data.get("nodes", []))
         existing_edges = list(data.get(links_key, []))
