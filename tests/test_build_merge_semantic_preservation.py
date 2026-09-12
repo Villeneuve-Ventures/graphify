@@ -201,3 +201,107 @@ def test_fresh_ghost_alias_cannot_redirect_ambiguous_retained_reference(tmp_path
     assert "actual" in graph and "rule_one" not in graph
     assert not graph.has_edge("fresh", "actual")
     assert graph.has_edge("fresh", "Rule-One") is exact
+
+
+@pytest.mark.parametrize("directed", [False, True])
+def test_retained_legacy_edge_endpoints_remain_readable(tmp_path, directed):
+    legacy = dict(edge("a", "b"))
+    legacy["from"], legacy["to"] = legacy.pop("source"), legacy.pop("target")
+    path, _ = seed(tmp_path, [node("a"), node("b")], [legacy])
+    before = path.read_bytes()
+    graph = build_merge([{"nodes": [node("fresh", source="changed.md")]}], path,
+                        directed=directed)
+    assert graph.has_edge("a", "b")
+    assert graph.edges["a", "b"]["_src"] == "a"
+    assert "from" not in graph.edges["a", "b"] and "to" not in graph.edges["a", "b"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("member_key", ["members", "node_ids"])
+@pytest.mark.parametrize("prune", [False, True])
+def test_retained_group_member_alias_preserves_payload_and_retirement(tmp_path, member_key, prune):
+    group = {"id": "group", "label": "Evidence", "source_file": "stable.md", member_key: ["a", "b"]}
+    path, _ = seed(tmp_path, [node("a"), node("b", source="deleted.md")], [], [group])
+    graph = build_merge([], path, prune_sources=["deleted.md"] if prune else None)
+    expected = dict(group, **{member_key: ["a"]}) if prune else group
+    assert graph.graph["hyperedges"] == [expected]
+
+
+@pytest.mark.parametrize("prune", [False, True])
+def test_retained_legacy_node_owner_is_used_without_rewriting_payload(tmp_path, prune):
+    legacy = node("a", source="deleted.md")
+    legacy["source"] = legacy.pop("source_file")
+    path, _ = seed(tmp_path, [legacy, node("b")], [])
+    graph = build_merge([], path, root=tmp_path,
+                        prune_sources=[str(tmp_path / "deleted.md")] if prune else None)
+    assert ("a" not in graph) is prune
+    if not prune:
+        assert graph.nodes["a"] == {k: v for k, v in legacy.items() if k != "id"}
+
+
+@pytest.mark.parametrize("malformed", [{}, {"id": []}, {"id": {}}])
+def test_malformed_retained_node_ids_do_not_block_recovery(tmp_path, malformed, capsys):
+    bad = dict(label="Invalid", source_file="broken.md", file_type="document", **malformed)
+    path, _ = seed(tmp_path, [node("a"), bad], [])
+    graph = build_merge([{"nodes": [node("fresh", source="changed.md")]}], path, dedup=False)
+    assert set(graph) == {"a", "fresh"}
+    assert ("skipping node with non-hashable id" in capsys.readouterr().err) is ("id" in malformed)
+
+
+@pytest.mark.parametrize("member_key", ["nodes", "members", "node_ids"])
+@pytest.mark.parametrize("alias", ["docs_policy_rule", "policy_rule"])
+def test_equivalent_group_claim_uses_actual_member_resolution(tmp_path, member_key, alias):
+    group = {"id": "group", "label": "Evidence", "source_file": "stable.md", "nodes": ["anchor", "docs_policy_rule"]}
+    path, _ = seed(tmp_path, [node("anchor"), node("docs_policy_rule", source="docs/policy.md")], [], [group])
+    incoming = {k: v for k, v in group.items() if k != "nodes"}
+    incoming[member_key] = ["anchor", alias]
+    graph = build_merge([{"nodes": [node("fresh", source="changed.md")], "hyperedges": [incoming]}], path)
+    assert graph.graph["hyperedges"] == [group]
+
+
+def test_group_conflict_cannot_disappear_during_member_filtering(tmp_path):
+    group = {"id": "group", "source_file": "stable.md", "nodes": ["a"]}
+    path, _ = seed(tmp_path, [node("a")], [], [group])
+    with pytest.raises(ValueError, match="retained hyperedge"):
+        build_merge([{"hyperedges": [dict(group, nodes=["a", "unknown"])]}], path)
+
+
+@pytest.mark.parametrize("malformed", [[], {}])
+def test_fresh_dedup_tolerates_unhashable_group_members(tmp_path, malformed):
+    path, _ = seed(tmp_path, [node("a")], [])
+    fresh = {"nodes": [node("fresh", "Same entity", "changed.md"),
+                       node("fresh_chunk1", "Same entity", "changed.md")],
+             "hyperedges": [{"id": "new", "source_file": "changed.md", "nodes": ["a", "fresh_chunk1", malformed]}]}
+    graph = build_merge([fresh], path)
+    assert graph.graph["hyperedges"][0]["nodes"] == ["a", "fresh"]
+
+
+@pytest.mark.parametrize("confidence", ["EXTRACTED", "INFERRED", "AMBIGUOUS"])
+@pytest.mark.parametrize("score_mode", ["default", "explicit_equal", "explicit_conflict"])
+def test_exported_edge_default_score_is_semantically_compatible(tmp_path, confidence, score_mode):
+    accepted = dict(edge("a", "b"), confidence=confidence)
+    incoming = dict(accepted)
+    if score_mode != "default":
+        accepted["confidence_score"] = 0.73
+    if score_mode == "explicit_equal":
+        incoming["confidence_score"] = 0.73
+    graph = build([{"nodes": [node("a"), node("b")], "edges": [accepted]}], dedup=False)
+    path = tmp_path / "graph.json"
+    assert to_json(graph, {}, path)
+    before = json.loads(path.read_text())["links"][0]
+    fresh = {"nodes": [node("fresh", source="changed.md")], "edges": [incoming]}
+    if score_mode == "explicit_conflict":
+        with pytest.raises(ValueError, match="retained edge"):
+            build_merge([fresh], path)
+    else:
+        result = build_merge([fresh], path)
+        assert result.edges["a", "b"]["confidence_score"] == before["confidence_score"]
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_malformed_retained_edge_endpoints_preserve_recovery_warning(tmp_path, endpoint, capsys):
+    edge = {"source": "a", "target": "b", endpoint: [], "relation": "supports"}
+    path, _ = seed(tmp_path, [node("a"), node("b")], [edge])
+    graph = build_merge([], path, root=tmp_path)
+    assert set(graph) == {"a", "b"} and graph.number_of_edges() == 0
+    assert "skipping edge with non-hashable endpoint" in capsys.readouterr().err

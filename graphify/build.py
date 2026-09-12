@@ -389,7 +389,7 @@ def _doc_twin_remap(nodes: list) -> dict[str, str]:
 
 def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None,
                     _retained_nodes: list[dict] | None = None,
-                    _validate_edge=None) -> nx.Graph:
+                    _validate_edge=None, _validate_hyperedge=None) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
     directed=True produces a DiGraph that preserves edge direction (source→target).
@@ -807,6 +807,13 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             # are legal in this codebase, e.g. a per-file flow, so we prune
             # rather than require two survivors).
             if isinstance(he, dict) and isinstance(he.get("nodes"), list):
+                if _validate_hyperedge is not None:
+                    claim = {**he, "nodes": [
+                        norm_to_id.get(_normalize_id(m), m)
+                        if isinstance(m, str) and m not in node_set else m
+                        for m in he["nodes"]
+                    ]}
+                    _validate_hyperedge(claim)
                 valid_members = []
                 for m in he["nodes"]:
                     try:
@@ -1007,12 +1014,23 @@ def _fact_attributes(record):
             if key not in {"community", "community_name", "norm_label", "_src", "_tgt"}}
 
 
+def _hashable(value):
+    try:
+        hash(value)
+    except TypeError:
+        return False
+    return True
+
+
 def _check_retained_node(retained, incoming, root):
     from graphify.dedup import _defines_id
 
     def normalized(record):
-        return {**_fact_attributes(record),
-                "source_file": _norm_source_file(record.get("source_file"), root)}
+        result = _fact_attributes(record)
+        if "source_file" not in result and "source" in result:
+            result["source_file"] = result.pop("source")
+        result["source_file"] = _norm_source_file(result.get("source_file"), root)
+        return result
     old, new = normalized(retained), normalized(incoming)
     if old == new:
         return
@@ -1032,26 +1050,67 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         for key in fresh:
             fresh[key].extend(deepcopy(chunk.get(key, [])))
     normalize = lambda source: _norm_source_file(source, root)
+    node_owner = lambda n: normalize(n.get("source_file", n.get("source")))
+    valid_nodes = []
+    for node in nodes:
+        if "id" not in node:
+            continue
+        if not _hashable(node["id"]):
+            print(f"[graphify] WARNING: skipping node with non-hashable id "
+                  f"{node['id']!r} (must be a string).", file=sys.stderr)
+            continue
+        valid_nodes.append(node)
+    nodes = valid_nodes
     replaced = {normalize(n.get("source_file")) for n in fresh["nodes"] if n.get("source_file")}
     pruned = {normalize(source) for source in pruned if source} - replaced
     removed = replaced | pruned
     fresh["edges"] = [e for e in fresh["edges"] if normalize(e.get("source_file")) not in pruned]
-    retained = [n for n in nodes if normalize(n.get("source_file")) not in removed]
+    retained = [n for n in nodes if node_owner(n) not in removed]
     repos = {n.get("repo") for n in retained + fresh["nodes"] if n.get("repo")}
     if dedup and len(repos) > 1:
         raise ValueError("Cross-project dedup is disabled — run dedup per-repo before merging.")
     retained_by_id = {n["id"]: n for n in retained}
-    retired = {n["id"] for n in nodes if normalize(n.get("source_file")) in removed}
+    retired = {n["id"] for n in nodes if node_owner(n) in removed}
 
     def slot(source, target):
         return (source, target) if directed else frozenset((source, target))
 
-    retained_edges = [e for e in edges if normalize(e.get("source_file")) not in removed]
+    retained_edges = []
+    for edge in edges:
+        source, target = edge.get("source", edge.get("from")), edge.get("target", edge.get("to"))
+        if source is None or target is None:
+            continue
+        if not _hashable(source) or not _hashable(target):
+            print(f"[graphify] WARNING: skipping edge with non-hashable endpoint "
+                  f"(source={source!r}, target={target!r}).", file=sys.stderr)
+            continue
+        if normalize(edge.get("source_file")) in removed:
+            continue
+        retained_edges.append({**{k: v for k, v in edge.items() if k not in {"from", "to"}},
+                               "source": source, "target": target})
     occupied = {slot(e["source"], e["target"]): e for e in retained_edges}
     retained_groups = [h for h in hyperedges if normalize(h.get("source_file")) not in removed]
     groups_by_id = {h["id"]: h for h in retained_groups if h.get("id")}
 
+    def group_facts(group):
+        canonical = deepcopy(group)
+        _normalize_hyperedge_members(canonical)
+        canonical["source_file"] = normalize(canonical.get("source_file"))
+        return _fact_attributes(canonical)
+
+    def check_group(incoming, *, members=True):
+        old = groups_by_id.get(incoming.get("id"))
+        if old is not None:
+            before, after = group_facts(old), group_facts(incoming)
+            if not members:
+                before.pop("nodes", None)
+                after.pop("nodes", None)
+            if before != after:
+                raise ValueError("Semantic update conflicts with retained hyperedge identity")
+
     def check_edge(incoming):
+        from graphify.export import _CONFIDENCE_SCORE_DEFAULTS
+
         source = incoming.get("source", incoming.get("from"))
         target = incoming.get("target", incoming.get("to"))
         if not isinstance(source, str) or not isinstance(target, str):
@@ -1060,7 +1119,10 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         if old is not None:
             normalized = {k: v for k, v in incoming.items() if k not in {"from", "to"}}
             normalized.update(source=source, target=target)
-            if _fact_attributes(normalized) != _fact_attributes(old):
+            before, after = _fact_attributes(old), _fact_attributes(normalized)
+            for fact in (before, after):
+                fact.setdefault("confidence_score", _CONFIDENCE_SCORE_DEFAULTS.get(fact.get("confidence", "EXTRACTED"), 1.0))
+            if before != after:
                 raise ValueError("Semantic update conflicts with retained edge slot")
 
     # Validate claims before deduplication or normalization can discard them.
@@ -1080,9 +1142,7 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
     for record in fresh["edges"]:
         check_edge(record)
     for record in fresh["hyperedges"]:
-        old = groups_by_id.get(record.get("id"))
-        if old is not None and _fact_attributes(old) != _fact_attributes(record):
-            raise ValueError("Semantic update conflicts with retained hyperedge identity")
+        check_group(record, members=False)
     if dedup and fresh["nodes"]:
         fresh["nodes"], fresh["edges"], remap = _deduplicate_entities_with_remap(
             fresh["nodes"], fresh["edges"], communities={}, dedup_llm_backend=dedup_llm_backend,
@@ -1090,9 +1150,9 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         for group in fresh["hyperedges"]:
             _normalize_hyperedge_members(group)
             if isinstance(group.get("nodes"), list):
-                group["nodes"] = [remap.get(member, member) for member in group["nodes"]]
+                group["nodes"] = [remap.get(m, m) if _hashable(m) else m for m in group["nodes"]]
     graph = build_from_json(fresh, directed=directed, root=root, _retained_nodes=retained,
-                            _validate_edge=check_edge)
+                            _validate_edge=check_edge, _validate_hyperedge=check_group)
     retired.difference_update(graph)
     for record in retained_edges:
         source, target = record["source"], record["target"]
@@ -1107,15 +1167,17 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
     carried = {h["id"]: h for h in graph.graph.get("hyperedges", []) if h.get("id")}
     result_groups = [h for h in graph.graph.get("hyperedges", []) if not h.get("id")]
     for record in retained_groups:
-        members = [member for member in record.get("nodes", []) if member not in retired]
+        original_members = group_facts(record).get("nodes", [])
+        members = [member for member in original_members if member not in retired]
         if any(member not in graph for member in members):
             raise ValueError("Semantic update lost retained hyperedge endpoint")
         if not members:
             continue
-        kept = record if members == record.get("nodes") else {**record, "nodes": members}
+        member_key = next(key for key in ("nodes", *_HE_MEMBER_ALIASES) if isinstance(record.get(key), list))
+        kept = record if members == original_members else {**record, member_key: members}
         identity = kept.get("id")
         if identity:
-            if identity in carried and _fact_attributes(carried[identity]) != _fact_attributes(kept):
+            if identity in carried and group_facts(carried[identity]) != group_facts(kept):
                 raise ValueError("Semantic update conflicts with retained hyperedge identity")
             carried[identity] = kept
         else:
