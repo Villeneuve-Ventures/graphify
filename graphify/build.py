@@ -386,7 +386,10 @@ def _doc_twin_remap(nodes: list) -> dict[str, str]:
     return remap
 
 
-def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None) -> nx.Graph:
+def build_from_json(
+    extraction: dict, *, directed: bool = False, root: str | Path | None = None,
+    _retained: dict | None = None,
+) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
     directed=True produces a DiGraph that preserves edge direction (source→target).
@@ -395,6 +398,8 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         relative to root so all nodes share a consistent path key (#932).
     """
     _root = str(Path(root).resolve()) if root else None
+    retained = _retained or {}
+    retained_nodes = {n["id"]: n for n in retained.get("nodes", [])}
     # NetworkX <= 3.1 serialised edges as "links"; remap to "edges" for compatibility.
     if "edges" not in extraction and "links" in extraction:
         extraction = dict(extraction, edges=extraction["links"])
@@ -451,6 +456,9 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
     # already carry canonical ids (the extract() id-remap post-pass guarantees it)
     # and are left untouched.
     _rekey: dict[str, str] = _semantic_id_remap(extraction.get("nodes", []), _root)
+    if retained_nodes and any(_rekey.get(n["id"], n["id"]) in retained_nodes
+           for n in extraction.get("nodes", []) if isinstance(n, dict) and "id" in n):
+        raise ValueError("graphify: fresh extraction conflicts with retained node identity")
     if _rekey:
         for node in extraction.get("nodes", []):
             if isinstance(node, dict) and node.get("id") in _rekey:
@@ -599,6 +607,27 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         G.remove_node(ghost_id)
         node_set.discard(ghost_id)
 
+    # Accepted context bypasses dedup, re-keying and ghost merging. It is still
+    # available to the existing endpoint/legacy-alias resolver below.
+    if retained_nodes:
+        fresh_nodes = list(G.nodes(data=True))
+        G.clear()
+        for nid, node in retained_nodes.items():
+            G.add_node(nid, **{k: v for k, v in node.items() if k != "id"})
+        G.add_nodes_from(fresh_nodes)
+    node_set.update(retained_nodes)
+    retained_edges = nx.DiGraph() if directed else nx.Graph()
+    for edge in retained.get("edges", []):
+        src, tgt = edge["source"], edge["target"]
+        if src not in node_set or tgt not in node_set:
+            removed = retained.get("removed_ids", set())
+            if all(n in node_set or n in removed for n in (src, tgt)):
+                continue
+            raise ValueError("graphify: retained edge has an unexplained missing endpoint")
+        attrs = {k: v for k, v in edge.items() if k not in ("source", "target")}
+        attrs.update(_src=src, _tgt=tgt)
+        retained_edges.add_edge(src, tgt, **attrs)
+
     # Normalized ID map: lets edges survive when the LLM generates IDs with
     # slightly different casing or punctuation than the AST extractor.
     # e.g. "Session_ValidateToken" maps to "session_validatetoken".
@@ -742,6 +771,18 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         # causing display functions to show edges backwards.
         attrs["_src"] = src
         attrs["_tgt"] = tgt
+        if retained_edges.has_edge(src, tgt):
+            from graphify.export import _CONFIDENCE_SCORE_DEFAULTS
+            fresh, accepted = dict(attrs), dict(retained_edges[src][tgt])
+            # Export materializes this optional extraction field. Compare the
+            # documented default without rewriting the accepted payload.
+            for record in (fresh, accepted):
+                record.setdefault("confidence_score", _CONFIDENCE_SCORE_DEFAULTS.get(
+                    record.get("confidence", "EXTRACTED"), 1.0,
+                ))
+            if fresh != accepted:
+                raise ValueError("graphify: fresh extraction conflicts with retained edge evidence or direction")
+            continue
         # When the graph is undirected and the same node pair appears twice with
         # the same relation but opposite directions (e.g. a `calls` b and b `calls` a),
         # nx.Graph collapses them into one edge. The deterministic sort above means
@@ -756,6 +797,7 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             ):
                 continue
         G.add_edge(src, tgt, **attrs)
+    G.add_edges_from(retained_edges.edges(data=True))
     hyperedges = extraction.get("hyperedges", [])
     if hyperedges:
         # Relativize hyperedge source_file the same way nodes and edges are
@@ -808,6 +850,7 @@ def build(
     dedup: bool = True,
     dedup_llm_backend: str | None = None,
     root: str | Path | None = None,
+    _retained: dict | None = None,
 ) -> nx.Graph:
     """Merge multiple extraction results into one graph.
 
@@ -832,12 +875,15 @@ def build(
         combined["hyperedges"].extend(ext.get("hyperedges", []))
         combined["input_tokens"] += ext.get("input_tokens", 0)
         combined["output_tokens"] += ext.get("output_tokens", 0)
+    if _retained:
+        retained_ids = {n["id"] for n in _retained["nodes"]}
+        combined["nodes"] = [n for n in combined["nodes"] if n.get("id") not in retained_ids]
     if dedup and combined["nodes"]:
         combined["nodes"], combined["edges"] = deduplicate_entities(
             combined["nodes"], combined["edges"], communities={},
             dedup_llm_backend=dedup_llm_backend,
         )
-    return build_from_json(combined, directed=directed, root=root)
+    return build_from_json(combined, directed=directed, root=root, _retained=_retained)
 
 
 def _norm_label(label: str | None) -> str:
@@ -1036,12 +1082,10 @@ def build_merge(
         existing_nodes = list(data.get("nodes", []))
         existing_edges = list(data.get(links_key, []))
         existing_hyperedges = list(data.get("hyperedges", []))
-        had_graph = True
     else:
         existing_nodes = []
         existing_edges = []
         existing_hyperedges = []
-        had_graph = False
 
     # Effective root for relativizing absolute source_file / prune paths back to the
     # stored relative source_file keys. When the caller passes root we use it;
@@ -1078,6 +1122,7 @@ def build_merge(
     # Matched in both raw and _norm_source_file form because new_chunks may carry
     # absolute win32 paths while the stored graph keeps relative posix (#1007).
     _replace_root = _eff_root
+    prior_ids = {n["id"] for n in existing_nodes}
     new_sources: set[str] = set()
     for ch in new_chunks:
         for n in ch.get("nodes", []):
@@ -1094,11 +1139,6 @@ def build_merge(
             return sf not in new_sources and _norm_source_file(sf, _replace_root) not in new_sources
         existing_nodes = [n for n in existing_nodes if _kept(n)]
         existing_edges = [e for e in existing_edges if _kept(e)]
-
-    base = [{"nodes": existing_nodes, "edges": existing_edges}] if had_graph else []
-
-    all_chunks = base + list(new_chunks)
-    G = build(all_chunks, directed=directed, dedup=dedup, dedup_llm_backend=dedup_llm_backend, root=root)
 
     # Prune set for deleted source files — both the raw form (matches nodes that
     # kept absolute source_file) and the normalised relative form (matches nodes
@@ -1120,6 +1160,21 @@ def build_merge(
     # the old edit-workflow of passing the changed file in prune_sources (#1796).
     # "replace" wins over a contradictory "delete" of the same source.
     prune_set -= new_sources
+
+    # Exclude explicitly deleted context before construction, so it cannot
+    # conflict with fresh evidence. Replacement remains authoritative above.
+    def _not_pruned(item: dict) -> bool:
+        sf = item.get("source_file")
+        return sf not in prune_set and _norm_source_file(sf, _eff_root) not in prune_set
+
+    retained_nodes = [n for n in existing_nodes if _not_pruned(n)]
+    retained_edges = [e for e in existing_edges if _not_pruned(e)]
+    G = build(
+        list(new_chunks), directed=directed, dedup=dedup,
+        dedup_llm_backend=dedup_llm_backend, root=root,
+        _retained={"nodes": retained_nodes, "edges": retained_edges,
+                   "removed_ids": prior_ids - {n["id"] for n in retained_nodes}},
+    )
 
     # Carry forward hyperedges from files that were neither re-extracted nor
     # deleted (#1574). build() only sees the new chunks' hyperedges, so without

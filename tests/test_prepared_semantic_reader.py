@@ -47,7 +47,7 @@ def _published_bytes(output):
             for name in ("graph.json", "manifest.json", tx.RECEIPT_FILE)}
 
 
-def _baseline(tmp_path, monkeypatch, *, separate=False):
+def _baseline(tmp_path, monkeypatch, *, separate=False, extraction=None):
     root = tmp_path / "corpus"
     root.mkdir()
     monkeypatch.chdir(root)
@@ -66,12 +66,13 @@ def _baseline(tmp_path, monkeypatch, *, separate=False):
     token = tx.stage_transaction_handoff(owner)
     tx.run_prepared_token(token.path, ["-c", f"""
 from pathlib import Path
-from graphify.build import build
+from graphify.build import build, build_from_json
 from graphify.detect import save_manifest
 from graphify.export import to_json
 from graphify.transaction import finalize_prepared_transaction
 root = Path({str(root)!r})
-graph = build([{_chunk('one')!r}], root=root)
+graph = (build_from_json({extraction!r}, root=root) if {extraction is not None!r}
+         else build([{_chunk('one')!r}], root=root))
 assert to_json(graph, {{}}, 'graph.json', built_at_commit={first_head!r})
 save_manifest({{'document': [str(root / 'changed.md'), str(root / 'retained.md')]}},
               manifest_path='manifest.json', root=root)
@@ -325,3 +326,41 @@ tx.finalize_prepared_transaction()
         assert nodes[node["id"]] == node
     assert all(edge in published.data["links"] for edge in fixture.baseline.data["links"])
     assert published.data["hyperedges"] == fixture.baseline.data["hyperedges"]
+
+
+@pytest.mark.parametrize("conflict", [False, True], ids=["publish-preserved", "refuse-conflict"])
+def test_native_semantic_retention_and_collision_atomicity(tmp_path, monkeypatch, conflict):
+    extraction = _chunk("one")
+    extraction["nodes"][1]["label"] = "Raw CoinGecko fixture price array"
+    extraction["nodes"][2]["label"] = "Raw CoinGecko fixture volume array"
+    extraction["nodes"][1]["source_location"] = "2-6"
+    extraction["nodes"][2]["source_location"] = "12-16"
+    fixture = _prepare(_baseline(tmp_path, monkeypatch, extraction=extraction))
+    before = _published_bytes(fixture.output)
+    chunk = {"nodes": [_chunk("two")["nodes"][0]], "edges": []}
+    if conflict:
+        chunk["edges"] = [dict(extraction["edges"][0], source_location="wrong evidence")]
+    code = f"""
+from graphify.detect import detect_incremental, save_manifest
+from graphify.export import to_json
+incremental = detect_incremental(root, manifest_path='manifest.json', kind='semantic', google_workspace=False)
+assert incremental['new_files']['document'] == [str(root / 'changed.md')]
+graph = build_merge([{chunk!r}], graph_path=Path.cwd() / "graph.json", root=root)
+assert graph.nodes['retained']['source_location'] == '2-6'
+assert graph.nodes['anchor']['source_location'] == '12-16'
+assert to_json(graph, {{}}, 'graph.json', built_at_commit={fixture.second_head!r})
+save_manifest(incremental['files'], manifest_path='manifest.json', root=root)
+tx.finalize_prepared_transaction()
+"""
+    if conflict:
+        with pytest.raises(ValueError, match="retained edge"):
+            _run(fixture, code)
+        assert _published_bytes(fixture.output) == before
+        return
+    _run(fixture, code)
+    published = tx.open_graph_snapshot(fixture.output / "graph.json", purpose="retention-regression")
+    assert published.generation != fixture.baseline.generation
+    old = {n["id"]: n for n in fixture.baseline.data["nodes"]}
+    new = {n["id"]: n for n in published.data["nodes"]}
+    assert {k: new[k] for k in ("retained", "anchor")} == {k: old[k] for k in ("retained", "anchor")}
+    assert published.data["links"] == fixture.baseline.data["links"]
