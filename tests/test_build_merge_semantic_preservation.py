@@ -305,3 +305,144 @@ def test_malformed_retained_edge_endpoints_preserve_recovery_warning(tmp_path, e
     graph = build_merge([], path, root=tmp_path)
     assert set(graph) == {"a", "b"} and graph.number_of_edges() == 0
     assert "skipping edge with non-hashable endpoint" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("malformed", [None, [], 7, "invalid"])
+@pytest.mark.parametrize("fresh_group", [False, True])
+@pytest.mark.parametrize("dedup", [False, True])
+def test_non_object_groups_do_not_block_valid_semantic_evidence(tmp_path, capsys, malformed, fresh_group, dedup):
+    group = {"id": "group", "nodes": ["a", "b"], "source_file": "stable.md"}
+    path, _ = seed(tmp_path, [node("a"), node("b")], [], [] if fresh_group else [malformed, group])
+    before = path.read_bytes()
+    fresh = {"nodes": [node("fresh", source="changed.md")]}
+    if fresh_group:
+        fresh["hyperedges"] = [malformed, group]
+    graph = build_merge([fresh], path, root=tmp_path, dedup=dedup)
+    assert graph.graph["hyperedges"] == [group]
+    assert set(graph) == {"a", "b", "fresh"}
+    assert path.read_bytes() == before
+    assert capsys.readouterr().err.count("skipping non-object fresh hyperedge") == int(fresh_group)
+
+
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("source_form", ["missing", "absolute", "relative"])
+@pytest.mark.parametrize("source_from_target", [False, True])
+def test_equivalent_edge_source_matches_builder_normalization(tmp_path, directed, source_form, source_from_target):
+    accepted = edge("a", "b")
+    path, _ = seed(tmp_path, [node("a", source="" if source_from_target else "stable.md"), node("b")], [accepted])
+    before = path.read_bytes()
+    incoming = dict(accepted)
+    if source_form == "missing":
+        incoming.pop("source_file")
+    elif source_form == "absolute":
+        incoming["source_file"] = str(tmp_path / "stable.md")
+    graph = build_merge([{"edges": [incoming]}], path, root=tmp_path, directed=directed)
+    assert graph.edges["a", "b"]["source_file"] == "stable.md"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("recreated", [False, True])
+def test_missing_edge_source_cannot_borrow_retained_edge_provenance(tmp_path, recreated):
+    accepted = edge("a", "b", "evidence.md")
+    path, _ = seed(tmp_path, [node("a", source="deleted.md" if recreated else "stable.md"), node("b")], [accepted])
+    before = path.read_bytes()
+    incoming = {key: value for key, value in accepted.items() if key != "source_file"}
+    fresh = {"edges": [incoming, accepted]}
+    if recreated:
+        fresh["nodes"] = [node("a", source="changed.md")]
+    with pytest.raises(ValueError, match="retained edge"):
+        build_merge([fresh], path, root=tmp_path, prune_sources=["deleted.md"] if recreated else None)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("dedup", [False, True])
+@pytest.mark.parametrize("empty_last", [False, True])
+def test_edge_source_uses_actual_duplicate_node_survivor(tmp_path, dedup, empty_last):
+    accepted = edge("a", "b")
+    path, _ = seed(tmp_path, [node("a", source="deleted.md"), node("b")], [accepted])
+    before = path.read_bytes()
+    owners = ["other.md", ""] if empty_last else ["", "other.md"]
+    fresh = {"nodes": [node("a", source=owner) for owner in owners],
+             "edges": [{key: value for key, value in accepted.items() if key != "source_file"}]}
+    if dedup or empty_last:
+        graph = build_merge([fresh], path, root=tmp_path, prune_sources=["deleted.md"], dedup=dedup)
+        assert graph.edges["a", "b"]["source_file"] == "stable.md"
+        assert graph.nodes["a"]["source_file"] == ""
+    else:
+        with pytest.raises(ValueError, match="retained edge"):
+            build_merge([fresh], path, root=tmp_path, prune_sources=["deleted.md"], dedup=dedup)
+    assert path.read_bytes() == before
+
+
+def test_duplicate_node_omission_preserves_earlier_source_attribute(tmp_path):
+    accepted = edge("a", "b")
+    path, _ = seed(tmp_path, [node("a", source="deleted.md"), node("b")], [accepted])
+    later = node("a")
+    later.pop("source_file")
+    fresh = {"nodes": [node("a", source="other.md"), later],
+             "edges": [{key: value for key, value in accepted.items() if key != "source_file"}, accepted]}
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="retained edge"):
+        build_merge([fresh], path, root=tmp_path, prune_sources=["deleted.md"], dedup=False)
+    assert path.read_bytes() == before
+
+
+def test_raw_edge_source_conflict_survives_dedup_self_loop_removal(tmp_path):
+    accepted = edge("a", "b")
+    path, _ = seed(tmp_path, [node("a", source="deleted.md"), node("b", source="deleted.md")], [accepted])
+    before = path.read_bytes()
+    fresh = {"nodes": [node("a", "Shared concept", "changed.md"), node("b", "Shared concept", "changed.md")],
+             "edges": [{key: value for key, value in accepted.items() if key != "source_file"}]}
+    with pytest.raises(ValueError, match="retained edge"):
+        build_merge([fresh], path, root=tmp_path, prune_sources=["deleted.md"])
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("dedup", [False, True])
+@pytest.mark.parametrize("owner", ["docs/policy.md", "wrong.md", None])
+@pytest.mark.parametrize("legacy_source", [False, True])
+def test_edge_source_uses_constructed_semantic_identity(tmp_path, dedup, owner, legacy_source):
+    accepted = edge("docs_policy_rule", "b", owner)
+    if owner is None:
+        accepted.pop("source_file")
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="deleted.md"), node("b")], [accepted])
+    before = path.read_bytes()
+    replacement = node("policy_rule", source="docs/policy.md")
+    if legacy_source:
+        replacement["source"] = replacement.pop("source_file")
+    fresh = {"nodes": [replacement],
+             "edges": [{key: value for key, value in accepted.items() if key != "source_file"}]}
+    if owner != "wrong.md":
+        graph = build_merge([fresh], path, root=tmp_path, prune_sources=["deleted.md"], dedup=dedup)
+        assert graph.has_edge("docs_policy_rule", "b")
+        assert graph.nodes["docs_policy_rule"]["source_file"] == "docs/policy.md"
+    else:
+        with pytest.raises(ValueError, match="retained edge"):
+            build_merge([fresh], path, root=tmp_path, prune_sources=["deleted.md"], dedup=dedup)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("dedup", [False, True])
+@pytest.mark.parametrize("owner", [None, "wrong.md"])
+def test_resolved_edge_source_is_not_semantically_rekeyed_twice(tmp_path, dedup, owner):
+    accepted = edge("docs_policy_rule", "b", owner)
+    if owner is None:
+        accepted.pop("source_file")
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="deleted.md"), node("b")], [accepted])
+    before = path.read_bytes()
+    fresh_nodes = [node("policy_rule", source="docs/policy.md"),
+                   node("docs_policy_rule", source="two/docs/policy.md")]
+    for record in fresh_nodes:
+        record["source"] = record.pop("source_file")
+    incoming = edge("policy_rule", "b")
+    incoming.pop("source_file")
+    if owner is None:
+        graph = build_merge([{"nodes": fresh_nodes, "edges": [incoming]}], path,
+                            root=tmp_path, prune_sources=["deleted.md"], dedup=dedup)
+        assert graph.has_edge("docs_policy_rule", "b")
+        assert graph.nodes["docs_policy_rule"]["source_file"] == "docs/policy.md"
+    else:
+        with pytest.raises(ValueError, match="retained edge"):
+            build_merge([{"nodes": fresh_nodes, "edges": [incoming]}], path,
+                        root=tmp_path, prune_sources=["deleted.md"], dedup=dedup)
+    assert path.read_bytes() == before

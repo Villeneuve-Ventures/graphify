@@ -389,7 +389,7 @@ def _doc_twin_remap(nodes: list) -> dict[str, str]:
 
 def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None,
                     _retained_nodes: list[dict] | None = None,
-                    _validate_edge=None, _validate_hyperedge=None) -> nx.Graph:
+                    _validate_edge=None, _validate_hyperedge=None, _validate_raw_edges=None) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
     directed=True produces a DiGraph that preserves edge direction (source→target).
@@ -692,6 +692,14 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         for alias, identities in _alias_candidates.items():
             by_normalized.setdefault(_normalize_id(alias), set()).update(identities)
         norm_to_id = {key: next(iter(ids)) for key, ids in by_normalized.items() if len(ids) == 1}
+    if _validate_raw_edges is not None:
+        def endpoint_source(identity):
+            identity = _rekey.get(identity, identity)
+            identity = _doc_remap.get(identity, identity)
+            if identity not in node_set:
+                identity = norm_to_id.get(_normalize_id(identity), identity)
+            return G.nodes[identity].get("source_file") if identity in G else None
+        _validate_raw_edges(endpoint_source, G.nodes)
     # Iterate edges in a deterministic order. The graph is undirected and stores
     # direction in _src/_tgt; when two edges collapse onto the same node pair the
     # last write wins, so an unstable iteration order flips _src/_tgt run-to-run
@@ -1049,6 +1057,13 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
     for chunk in chunks:
         for key in fresh:
             fresh[key].extend(deepcopy(chunk.get(key, [])))
+    valid_groups = []
+    for group in fresh["hyperedges"]:
+        if isinstance(group, dict):
+            valid_groups.append(group)
+        else:
+            print("[graphify] WARNING: skipping non-object fresh hyperedge.", file=sys.stderr)
+    fresh["hyperedges"] = valid_groups
     normalize = lambda source: _norm_source_file(source, root)
     node_owner = lambda n: normalize(n.get("source_file", n.get("source")))
     valid_nodes = []
@@ -1089,7 +1104,8 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         retained_edges.append({**{k: v for k, v in edge.items() if k not in {"from", "to"}},
                                "source": source, "target": target})
     occupied = {slot(e["source"], e["target"]): e for e in retained_edges}
-    retained_groups = [h for h in hyperedges if normalize(h.get("source_file")) not in removed]
+    retained_groups = [h for h in hyperedges if isinstance(h, dict)
+                       and normalize(h.get("source_file")) not in removed]
     groups_by_id = {h["id"]: h for h in retained_groups if h.get("id")}
 
     def group_facts(group):
@@ -1108,7 +1124,7 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             if before != after:
                 raise ValueError("Semantic update conflicts with retained hyperedge identity")
 
-    def check_edge(incoming):
+    def check_edge(incoming, *, raw=False):
         from graphify.export import _CONFIDENCE_SCORE_DEFAULTS
 
         source = incoming.get("source", incoming.get("from"))
@@ -1120,7 +1136,13 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             normalized = {k: v for k, v in incoming.items() if k not in {"from", "to"}}
             normalized.update(source=source, target=target)
             before, after = _fact_attributes(old), _fact_attributes(normalized)
+            endpoint_sources = [retained_by_id[endpoint].get("source_file")
+                if endpoint in retained_by_id else source_for(remap.get(endpoint, endpoint)) if raw
+                else resolved_nodes[endpoint].get("source_file")
+                for endpoint in (source, target)]
             for fact in (before, after):
+                fact["source_file"] = normalize(fact.get("source_file")
+                    or endpoint_sources[0] or endpoint_sources[1] or "")
                 fact.setdefault("confidence_score", _CONFIDENCE_SCORE_DEFAULTS.get(fact.get("confidence", "EXTRACTED"), 1.0))
             if before != after:
                 raise ValueError("Semantic update conflicts with retained edge slot")
@@ -1139,8 +1161,8 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         else:
             new_nodes.append(record)
     fresh["nodes"] = new_nodes
-    for record in fresh["edges"]:
-        check_edge(record)
+    raw_edges = deepcopy(fresh["edges"])
+    remap = {}
     for record in fresh["hyperedges"]:
         check_group(record, members=False)
     if dedup and fresh["nodes"]:
@@ -1151,8 +1173,17 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             _normalize_hyperedge_members(group)
             if isinstance(group.get("nodes"), list):
                 group["nodes"] = [remap.get(m, m) if _hashable(m) else m for m in group["nodes"]]
+    def check_raw_edges(endpoint_source, node_attributes):
+        nonlocal source_for, resolved_nodes
+        source_for, resolved_nodes = endpoint_source, node_attributes
+        # Preserve every original claim, including edges removed by transformations.
+        for record in raw_edges:
+            check_edge(record, raw=True)
+
+    source_for = resolved_nodes = None
     graph = build_from_json(fresh, directed=directed, root=root, _retained_nodes=retained,
-                            _validate_edge=check_edge, _validate_hyperedge=check_group)
+                            _validate_edge=check_edge, _validate_hyperedge=check_group,
+                            _validate_raw_edges=check_raw_edges)
     retired.difference_update(graph)
     for record in retained_edges:
         source, target = record["source"], record["target"]
