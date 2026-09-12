@@ -6,6 +6,11 @@ entries retain their original attribution.
 
 ## 0.10.0 (unreleased)
 
+- Fix: semantic incremental merges preserve unrelated accepted entities and
+  reference evidence. Only fresh extraction input is deduplicated; new references
+  resolve against retained identities, and conflicting node, edge or hyperedge
+  claims refuse publication. Full-build deduplication behavior is unchanged.
+
 - Fork tooling ([PR #121](https://github.com/Villeneuve-Ventures/graphify/pull/121)):
   upgraded PR-Agent to v0.45.0, configured Gemini 3.8 Flash with Gemini 3.5 Flash
   Lite fallback, disabled automatic PR summaries, and added an offline

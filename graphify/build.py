@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import unicodedata
+from copy import deepcopy
 from pathlib import Path
 import networkx as nx
 from .ids import make_id, normalize_id as _normalize_id
@@ -386,7 +387,9 @@ def _doc_twin_remap(nodes: list) -> dict[str, str]:
     return remap
 
 
-def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None) -> nx.Graph:
+def build_from_json(extraction: dict, *, directed: bool = False, root: str | Path | None = None,
+                    _retained_nodes: list[dict] | None = None,
+                    _validate_edge=None) -> nx.Graph:
     """Build a NetworkX graph from an extraction dict.
 
     directed=True produces a DiGraph that preserves edge direction (source→target).
@@ -599,10 +602,29 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         G.remove_node(ghost_id)
         node_set.discard(ghost_id)
 
+    # Accepted incremental records bypass every extraction transformation above.
+    # They join the namespace only for resolving fresh references below.
+    if _retained_nodes is not None:
+        transformed = G
+        G = nx.DiGraph() if directed else nx.Graph()
+        for record in _retained_nodes:
+            identity = record["id"]
+            if identity in transformed:
+                _check_retained_node(record, {"id": identity, **transformed.nodes[identity]}, _root)
+            G.add_node(identity, **{k: v for k, v in record.items() if k != "id"})
+        G.add_nodes_from((identity, attrs) for identity, attrs in transformed.nodes(data=True)
+                         if identity not in G)
+        node_set = set(G)
+
     # Normalized ID map: lets edges survive when the LLM generates IDs with
     # slightly different casing or punctuation than the AST extractor.
     # e.g. "Session_ValidateToken" maps to "session_validatetoken".
     norm_to_id: dict[str, str] = {_normalize_id(nid): nid for nid in node_set}
+    if _retained_nodes is not None:
+        by_normalized: dict[str, set[str]] = {}
+        for nid in node_set:
+            by_normalized.setdefault(_normalize_id(nid), set()).add(nid)
+        norm_to_id = {key: next(iter(ids)) for key, ids in by_normalized.items() if len(ids) == 1}
     # Also map ghost IDs to their canonical AST replacements.
     for ghost_id, canonical_id in _ghost_remap.items():
         norm_to_id[_normalize_id(ghost_id)] = canonical_id
@@ -662,6 +684,14 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
     for alias_key, candidates in _alias_candidates.items():
         if len(candidates) == 1:
             norm_to_id.setdefault(alias_key, next(iter(candidates)))
+    if _retained_nodes is not None:
+        # Every spelling competes in one namespace; a fresh ghost or legacy
+        # alias must not override an accepted identity with the same spelling.
+        for alias, identity in _ghost_remap.items():
+            by_normalized.setdefault(_normalize_id(alias), set()).add(identity)
+        for alias, identities in _alias_candidates.items():
+            by_normalized.setdefault(_normalize_id(alias), set()).update(identities)
+        norm_to_id = {key: next(iter(ids)) for key, ids in by_normalized.items() if len(ids) == 1}
     # Iterate edges in a deterministic order. The graph is undirected and stores
     # direction in _src/_tgt; when two edges collapse onto the same node pair the
     # last write wins, so an unstable iteration order flips _src/_tgt run-to-run
@@ -713,6 +743,8 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             )
         if "source_file" in attrs:
             attrs["source_file"] = _norm_source_file(attrs["source_file"], _root)
+        if _validate_edge is not None:
+            _validate_edge({**attrs, "source": src, "target": tgt})
         # Drop cross-language phantom edges — the same short names (render, parse,
         # time, ...) recur across language boundaries, so an unresolved target can
         # bind to a same-named node in another language. The extraction spec forbids
@@ -970,6 +1002,131 @@ def _compose_ast_refresh(chunks, nodes, edges, hyperedges, replaced, pruned, *, 
     return graph
 
 
+def _fact_attributes(record):
+    return {key: value for key, value in record.items()
+            if key not in {"community", "community_name", "norm_label", "_src", "_tgt"}}
+
+
+def _check_retained_node(retained, incoming, root):
+    from graphify.dedup import _defines_id
+
+    def normalized(record):
+        return {**_fact_attributes(record),
+                "source_file": _norm_source_file(record.get("source_file"), root)}
+    old, new = normalized(retained), normalized(incoming)
+    if old == new:
+        return
+    if (old.get("source_file") != new.get("source_file")
+            and _defines_id(old) and not _defines_id(new)):
+        return  # A proved cross-reference does not redefine the accepted entity.
+    raise ValueError("Semantic update conflicts with retained node identity")
+
+
+def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
+                             directed, dedup, dedup_llm_backend):
+    """Transform fresh extraction only, then compose accepted facts without loss."""
+    from graphify.dedup import _deduplicate_entities_with_remap
+
+    fresh = {key: [] for key in ("nodes", "edges", "hyperedges")}
+    for chunk in chunks:
+        for key in fresh:
+            fresh[key].extend(deepcopy(chunk.get(key, [])))
+    normalize = lambda source: _norm_source_file(source, root)
+    replaced = {normalize(n.get("source_file")) for n in fresh["nodes"] if n.get("source_file")}
+    pruned = {normalize(source) for source in pruned if source} - replaced
+    removed = replaced | pruned
+    fresh["edges"] = [e for e in fresh["edges"] if normalize(e.get("source_file")) not in pruned]
+    retained = [n for n in nodes if normalize(n.get("source_file")) not in removed]
+    repos = {n.get("repo") for n in retained + fresh["nodes"] if n.get("repo")}
+    if dedup and len(repos) > 1:
+        raise ValueError("Cross-project dedup is disabled — run dedup per-repo before merging.")
+    retained_by_id = {n["id"]: n for n in retained}
+    retired = {n["id"] for n in nodes if normalize(n.get("source_file")) in removed}
+
+    def slot(source, target):
+        return (source, target) if directed else frozenset((source, target))
+
+    retained_edges = [e for e in edges if normalize(e.get("source_file")) not in removed]
+    occupied = {slot(e["source"], e["target"]): e for e in retained_edges}
+    retained_groups = [h for h in hyperedges if normalize(h.get("source_file")) not in removed]
+    groups_by_id = {h["id"]: h for h in retained_groups if h.get("id")}
+
+    def check_edge(incoming):
+        source = incoming.get("source", incoming.get("from"))
+        target = incoming.get("target", incoming.get("to"))
+        if not isinstance(source, str) or not isinstance(target, str):
+            return
+        old = occupied.get(slot(source, target))
+        if old is not None:
+            normalized = {k: v for k, v in incoming.items() if k not in {"from", "to"}}
+            normalized.update(source=source, target=target)
+            if _fact_attributes(normalized) != _fact_attributes(old):
+                raise ValueError("Semantic update conflicts with retained edge slot")
+
+    # Validate claims before deduplication or normalization can discard them.
+    rekey = _semantic_id_remap(fresh["nodes"], root)
+    new_nodes = []
+    for record in fresh["nodes"]:
+        raw_old = retained_by_id.get(record.get("id"))
+        if raw_old is not None:
+            _check_retained_node(raw_old, record, root)
+        identity = rekey.get(record.get("id"), record.get("id"))
+        old = retained_by_id.get(identity)
+        if old is not None:
+            _check_retained_node(old, {**record, "id": identity}, root)
+        else:
+            new_nodes.append(record)
+    fresh["nodes"] = new_nodes
+    for record in fresh["edges"]:
+        check_edge(record)
+    for record in fresh["hyperedges"]:
+        old = groups_by_id.get(record.get("id"))
+        if old is not None and _fact_attributes(old) != _fact_attributes(record):
+            raise ValueError("Semantic update conflicts with retained hyperedge identity")
+    if dedup and fresh["nodes"]:
+        fresh["nodes"], fresh["edges"], remap = _deduplicate_entities_with_remap(
+            fresh["nodes"], fresh["edges"], communities={}, dedup_llm_backend=dedup_llm_backend,
+        )
+        for group in fresh["hyperedges"]:
+            _normalize_hyperedge_members(group)
+            if isinstance(group.get("nodes"), list):
+                group["nodes"] = [remap.get(member, member) for member in group["nodes"]]
+    graph = build_from_json(fresh, directed=directed, root=root, _retained_nodes=retained,
+                            _validate_edge=check_edge)
+    retired.difference_update(graph)
+    for record in retained_edges:
+        source, target = record["source"], record["target"]
+        if source in retired or target in retired:
+            continue
+        if source not in graph or target not in graph:
+            raise ValueError("Semantic update lost retained evidence endpoint")
+        graph.add_edge(source, target, **{
+            **{k: v for k, v in record.items() if k not in {"source", "target"}},
+            "_src": source, "_tgt": target,
+        })
+    carried = {h["id"]: h for h in graph.graph.get("hyperedges", []) if h.get("id")}
+    result_groups = [h for h in graph.graph.get("hyperedges", []) if not h.get("id")]
+    for record in retained_groups:
+        members = [member for member in record.get("nodes", []) if member not in retired]
+        if any(member not in graph for member in members):
+            raise ValueError("Semantic update lost retained hyperedge endpoint")
+        if not members:
+            continue
+        kept = record if members == record.get("nodes") else {**record, "nodes": members}
+        identity = kept.get("id")
+        if identity:
+            if identity in carried and _fact_attributes(carried[identity]) != _fact_attributes(kept):
+                raise ValueError("Semantic update conflicts with retained hyperedge identity")
+            carried[identity] = kept
+        else:
+            result_groups.append(kept)
+    if carried or result_groups:
+        graph.graph["hyperedges"] = result_groups + list(carried.values())
+    if not dedup and not pruned and len(graph) < len(retained):
+        raise ValueError("Semantic update would shrink retained graph without explicit pruning")
+    return graph
+
+
 def build_merge(
     new_chunks: list[dict],
     graph_path: str | Path | None = None,
@@ -988,6 +1145,8 @@ def build_merge(
     in new_chunks is dropped from the loaded graph before merging, so a changed
     file's stale nodes/edges don't accumulate. Files absent from new_chunks are
     preserved unchanged; deleted files are removed via prune_sources.
+    Deduplication and extraction normalization apply only to fresh chunks.
+    Conflicting claims on retained identities refuse the update before export.
     Safe to call repeatedly.
     root: if given, absolute source_file paths in new_chunks are made relative (#932).
     ast_refresh_sources: opt into complete AST replacement, preserving accepted
@@ -1036,12 +1195,10 @@ def build_merge(
         existing_nodes = list(data.get("nodes", []))
         existing_edges = list(data.get(links_key, []))
         existing_hyperedges = list(data.get("hyperedges", []))
-        had_graph = True
     else:
         existing_nodes = []
         existing_edges = []
         existing_hyperedges = []
-        had_graph = False
 
     # Effective root for relativizing absolute source_file / prune paths back to the
     # stored relative source_file keys. When the caller passes root we use it;
@@ -1068,128 +1225,11 @@ def build_merge(
             )
         return refreshed
 
-    # Re-extracted files REPLACE their prior contribution. Every source_file
-    # present in new_chunks is dropped from the loaded base before merging, so a
-    # CHANGED file's stale nodes/edges don't accumulate across incremental
-    # updates. Without this, build() merges old+new for the same file and only
-    # exact-duplicate edges collapse — edges/nodes that disappeared from the new
-    # version survive forever. Brand-new files aren't in base, so this is a no-op
-    # for them; genuinely deleted files are still handled via prune_sources.
-    # Matched in both raw and _norm_source_file form because new_chunks may carry
-    # absolute win32 paths while the stored graph keeps relative posix (#1007).
-    _replace_root = _eff_root
-    new_sources: set[str] = set()
-    for ch in new_chunks:
-        for n in ch.get("nodes", []):
-            sf = n.get("source_file")
-            if not sf:
-                continue
-            new_sources.add(sf)
-            norm = _norm_source_file(sf, _replace_root)
-            if norm:
-                new_sources.add(norm)
-    if new_sources:
-        def _kept(item: dict) -> bool:
-            sf = item.get("source_file")
-            return sf not in new_sources and _norm_source_file(sf, _replace_root) not in new_sources
-        existing_nodes = [n for n in existing_nodes if _kept(n)]
-        existing_edges = [e for e in existing_edges if _kept(e)]
-
-    base = [{"nodes": existing_nodes, "edges": existing_edges}] if had_graph else []
-
-    all_chunks = base + list(new_chunks)
-    G = build(all_chunks, directed=directed, dedup=dedup, dedup_llm_backend=dedup_llm_backend, root=root)
-
-    # Prune set for deleted source files — both the raw form (matches nodes that
-    # kept absolute source_file) and the normalised relative form (matches nodes
-    # relativised by _norm_source_file at build time). .resolve() (via _eff_root)
-    # handles symlinked roots and ".." / "./" segments so Path.relative_to()
-    # succeeds even when the scan root is a symlink. (#1007, #1571)
-    prune_set: set[str] = set()
-    for p in (prune_sources or []):
-        if not p:
-            continue
-        prune_set.add(p)
-        norm = _norm_source_file(p, _eff_root)
-        if norm:
-            prune_set.add(norm)
-    # A file that was just re-extracted (present in new_chunks) is being REPLACED,
-    # never deleted — so never prune it, even if the caller also lists it in
-    # prune_sources. Otherwise its fresh, just-built nodes are silently removed
-    # (data loss): common when an edit keeps a node's label and the caller follows
-    # the old edit-workflow of passing the changed file in prune_sources (#1796).
-    # "replace" wins over a contradictory "delete" of the same source.
-    prune_set -= new_sources
-
-    # Carry forward hyperedges from files that were neither re-extracted nor
-    # deleted (#1574). build() only sees the new chunks' hyperedges, so without
-    # this every --update collapses the graph's hyperedge set down to just the
-    # changed files'. Re-extracted files' prior hyperedges are dropped (their new
-    # version is already in G — replace-per-source, like nodes/edges); deleted
-    # files' are dropped via prune_set. id-dedup (attach_hyperedges) so a carried
-    # hyperedge never duplicates one the new chunks re-emitted. Mirrors watch.py,
-    # which already preserves existing hyperedges across a rebuild.
-    if existing_hyperedges:
-        carried = []
-        for he in existing_hyperedges:
-            if not isinstance(he, dict):
-                continue
-            sf = he.get("source_file")
-            norm = _norm_source_file(sf, _eff_root)
-            if sf in new_sources or norm in new_sources:
-                continue  # re-extracted — replaced by the new chunk's version
-            if sf in prune_set or norm in prune_set:
-                continue  # deleted — pruned
-            carried.append(he)
-        if carried:
-            from graphify.export import attach_hyperedges
-            attach_hyperedges(G, carried)
-
-    # Prune nodes and edges from deleted source files
-    if prune_sources:
-        to_remove = [
-            n for n, d in G.nodes(data=True)
-            if d.get("source_file") in prune_set
-        ]
-        G.remove_nodes_from(to_remove)
-        n_files = len(prune_sources)
-        n_nodes = len(to_remove)
-        if n_nodes:
-            print(
-                f"[graphify] Pruned {n_nodes} node(s) from {n_files} deleted source file(s).",
-                file=sys.stderr,
-            )
-
-        edges_to_remove = [
-            (u, v) for u, v, d in G.edges(data=True)
-            if d.get("source_file") in prune_set
-        ]
-        if edges_to_remove:
-            G.remove_edges_from(edges_to_remove)
-            print(
-                f"[graphify] Pruned {len(edges_to_remove)} edge(s) from deleted source file(s).",
-                file=sys.stderr,
-            )
-
-        if not n_nodes and not edges_to_remove:
-            print(
-                f"[graphify] {n_files} source file(s) deleted since last run — "
-                f"no matching nodes or edges in graph, already clean.",
-                file=sys.stderr,
-            )
-
-    # Safety check: refuse to shrink the graph silently (#479)
-    # Skip when dedup or prune_sources is active — shrinkage is intentional there.
-    if graph_path.exists() and not dedup and not prune_sources:
-        existing_n = len(existing_nodes)
-        new_n = G.number_of_nodes()
-        if new_n < existing_n:
-            raise ValueError(
-                f"graphify: build_merge would shrink graph from {existing_n} → {new_n} nodes. "
-                f"Pass prune_sources explicitly if you intend to remove nodes."
-            )
-
-    return G
+    return _compose_semantic_update(
+        new_chunks, existing_nodes, existing_edges, existing_hyperedges,
+        prune_sources or [], root=_eff_root, directed=directed, dedup=dedup,
+        dedup_llm_backend=dedup_llm_backend,
+    )
 
 
 def prefix_graph_for_global(G: nx.Graph, repo_tag: str) -> nx.Graph:

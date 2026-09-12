@@ -47,7 +47,7 @@ def _published_bytes(output):
             for name in ("graph.json", "manifest.json", tx.RECEIPT_FILE)}
 
 
-def _baseline(tmp_path, monkeypatch, *, separate=False):
+def _baseline(tmp_path, monkeypatch, *, separate=False, accepted_chunk=None):
     root = tmp_path / "corpus"
     root.mkdir()
     monkeypatch.chdir(root)
@@ -55,7 +55,12 @@ def _baseline(tmp_path, monkeypatch, *, separate=False):
         monkeypatch.delenv(name, raising=False)
     (root / ".gitignore").write_text("graphify-out/\n.graphify-*\n")
     (root / "changed.md").write_text("Mutable policy one.\n")
-    (root / "retained.md").write_text("Unrelated stable rule requires permanent reference.\n")
+    (root / "retained.md").write_text(
+        "Unrelated stable rule requires permanent reference.\n" + (
+            "Raw CoinGecko fixture price array.\nRaw CoinGecko fixture volume array.\n"
+            if accepted_chunk is not None else ""
+        )
+    )
     _git(root, "init", "-q")
     _git(root, "add", ".")
     _git(root, "commit", "-qm", "fixture baseline")
@@ -66,12 +71,13 @@ def _baseline(tmp_path, monkeypatch, *, separate=False):
     token = tx.stage_transaction_handoff(owner)
     tx.run_prepared_token(token.path, ["-c", f"""
 from pathlib import Path
-from graphify.build import build
+from graphify.build import build, build_from_json
 from graphify.detect import save_manifest
 from graphify.export import to_json
 from graphify.transaction import finalize_prepared_transaction
 root = Path({str(root)!r})
-graph = build([{_chunk('one')!r}], root=root)
+graph = (build_from_json({accepted_chunk!r}, root=root) if {accepted_chunk is not None!r}
+         else build([{_chunk('one')!r}], root=root))
 assert to_json(graph, {{}}, 'graph.json', built_at_commit={first_head!r})
 save_manifest({{'document': [str(root / 'changed.md'), str(root / 'retained.md')]}},
               manifest_path='manifest.json', root=root)
@@ -147,6 +153,50 @@ tx.finalize_prepared_transaction()
     assert published.data["built_at_commit"] == fixture.second_head
     assert published.data["graph"][tx.GRAPH_WATERMARK_KEY]["generation"] == fixture.owner.generation
     assert published.generation != fixture.baseline.generation
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_native_semantic_update_preserves_distinct_facts_or_refuses_conflict(tmp_path, monkeypatch, conflict):
+    chunk = _chunk("one")
+    for identity, label, location in [("price", "price", "L2"), ("volume", "volume", "L3")]:
+        chunk["nodes"].append({"id": identity, "label": f"Raw CoinGecko fixture {label} array",
+                               "source_file": "retained.md", "file_type": "document"})
+        chunk["edges"].append({"source": "anchor", "target": identity, "relation": "references",
+                               "confidence": "EXTRACTED", "source_file": "retained.md",
+                               "source_location": location})
+    fixture = _prepare(_baseline(tmp_path, monkeypatch, accepted_chunk=chunk))
+    before = _published_bytes(fixture.output)
+    fresh = {"nodes": [_chunk("two")["nodes"][0]], "edges": []}
+    if conflict:
+        fresh["edges"] = [{"source": "anchor", "target": "price", "relation": "references",
+                            "source_file": "changed.md", "confidence": "INFERRED"}]
+    code = f"""
+from graphify.detect import detect_incremental, save_manifest
+from graphify.export import to_json
+incremental = detect_incremental(root, manifest_path='manifest.json', kind='semantic', google_workspace=False)
+graph = build_merge([{fresh!r}], Path.cwd() / 'graph.json', root=root)
+assert 'price' in graph and 'volume' in graph
+assert to_json(graph, {{}}, 'graph.json', built_at_commit={fixture.second_head!r})
+save_manifest(incremental['files'], manifest_path='manifest.json', root=root)
+tx.finalize_prepared_transaction()
+"""
+    if conflict:
+        with pytest.raises(Exception) as refused:
+            _run(fixture, code)
+        assert "retained edge" in str(refused.value)
+        assert _published_bytes(fixture.output) == before
+        # Refusal leaves native pending state; it does not claim cancellation.
+        with pytest.raises(tx.PendingTransactionError):
+            tx.open_graph_snapshot(fixture.output / "graph.json", purpose="refused-semantic")
+    else:
+        _run(fixture, code)
+        after = tx.open_graph_snapshot(fixture.output / "graph.json", purpose="preserved-semantic")
+        nodes = {node["id"]: node for node in after.data["nodes"]}
+        for record in fixture.baseline.data["nodes"]:
+            if record["id"] != "changed":
+                assert nodes[record["id"]] == record
+        assert after.data["links"] == fixture.baseline.data["links"]
+        assert after.generation != fixture.baseline.generation
 
 
 @pytest.mark.parametrize("authority", ["flag-only", "partial", "wrong-owner"])
