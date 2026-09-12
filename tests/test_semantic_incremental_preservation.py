@@ -155,3 +155,21 @@ def test_optional_confidence_defaults_do_not_conflict(tmp_path, confidence, defa
     edge["confidence_score"] = default / 2
     with pytest.raises(ValueError, match="retained edge"):
         build_merge([{"nodes": [], "edges": [edge]}], path, root=tmp_path)
+
+
+@pytest.mark.parametrize("bad_id", [["bad"], {"bad": "id"}], ids=["list", "dict"])
+@pytest.mark.parametrize("entrypoint", ["merge", "retained_json"])
+def test_retained_context_preserves_malformed_id_warning_and_skip(tmp_path, capsys, bad_id, entrypoint):
+    accepted, path = _save(tmp_path, _facts())
+    fresh = {"nodes": [_node("fresh", "Fresh", "changed.md"),
+                       _node(bad_id, "Malformed", "bad.md")], "edges": []}
+    if entrypoint == "merge":
+        graph = build_merge([fresh], path, root=tmp_path, dedup=False)
+    else:
+        retained = {"nodes": [dict(id=nid, **attrs) for nid, attrs in accepted.nodes(data=True)],
+                    "edges": []}
+        graph = build_from_json(fresh, root=tmp_path, _retained=retained)
+    assert set(graph) == set(accepted) | {"fresh"}
+    for nid, attrs in accepted.nodes(data=True):
+        assert graph.nodes[nid] == attrs
+    assert "skipping node with non-hashable id" in capsys.readouterr().err

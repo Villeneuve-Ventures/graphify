@@ -456,9 +456,16 @@ def build_from_json(
     # already carry canonical ids (the extract() id-remap post-pass guarantees it)
     # and are left untouched.
     _rekey: dict[str, str] = _semantic_id_remap(extraction.get("nodes", []), _root)
-    if retained_nodes and any(_rekey.get(n["id"], n["id"]) in retained_nodes
-           for n in extraction.get("nodes", []) if isinstance(n, dict) and "id" in n):
-        raise ValueError("graphify: fresh extraction conflicts with retained node identity")
+    if retained_nodes:
+        for node in extraction.get("nodes", []):
+            if not isinstance(node, dict) or "id" not in node:
+                continue
+            try:
+                conflict = _rekey.get(node["id"], node["id"]) in retained_nodes
+            except TypeError:
+                continue  # Leave malformed IDs to the warning/skip path below.
+            if conflict:
+                raise ValueError("graphify: fresh extraction conflicts with retained node identity")
     if _rekey:
         for node in extraction.get("nodes", []):
             if isinstance(node, dict) and node.get("id") in _rekey:
@@ -877,7 +884,16 @@ def build(
         combined["output_tokens"] += ext.get("output_tokens", 0)
     if _retained:
         retained_ids = {n["id"] for n in _retained["nodes"]}
-        combined["nodes"] = [n for n in combined["nodes"] if n.get("id") not in retained_ids]
+        fresh_nodes = []
+        for node in combined["nodes"]:
+            if isinstance(node, dict):
+                try:
+                    if node.get("id") in retained_ids:
+                        continue
+                except TypeError:
+                    pass  # Preserve malformed IDs for existing validation.
+            fresh_nodes.append(node)
+        combined["nodes"] = fresh_nodes
     if dedup and combined["nodes"]:
         combined["nodes"], combined["edges"] = deduplicate_entities(
             combined["nodes"], combined["edges"], communities={},
