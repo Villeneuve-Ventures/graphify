@@ -120,6 +120,14 @@ tolerant syntax and documented working absent-backend fallbacks remain valid.
 
 ## The graph format
 
+Semantic incremental merges replace contributions from re-extracted sources and
+deduplicate only their fresh input. Accepted entities, references and hyperedges
+from unrelated sources keep their identities and evidence. New references can
+target retained entities; a conflicting definition or occupied relationship
+refuses the merge before publication. Explicit source replacement or pruning
+can still retire contributions and their dependent references. A full rebuild
+continues to apply its ordinary deduplication rules to the complete input.
+
 The output `graph.json` uses NetworkX's node-link format. Each node has:
 - `id` — stable identifier
 - `label` — human-readable name
