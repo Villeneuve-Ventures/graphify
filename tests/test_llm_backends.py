@@ -139,12 +139,22 @@ def test_missing_gemini_key_names_both_supported_env_vars(monkeypatch):
     [
         (None, None, None, "gemini-3.8-flash", None),
         (None, "gemini-3-flash-preview", None, "gemini-3-flash-preview", 0),
-        ("gemini-3.8-flash", "gemini-3-flash-preview", "0.3", "gemini-3.8-flash", 0.3),
+        ("gemini-3.8-flash", "gemini-3-flash-preview", "0.3", "gemini-3.8-flash", None),
+        (None, None, "0", "gemini-3.8-flash", None),
+        (None, "gemini-3.8-flash", "0.7", "gemini-3.8-flash", None),
+        ("models/GEMINI-3.8-FLASH", None, "0.3", "models/GEMINI-3.8-FLASH", None),
+        (None, None, "private-invalid-override", "gemini-3.8-flash", None),
+        (None, None, " omit ", "gemini-3.8-flash", None),
+        (None, None, "None", "gemini-3.8-flash", None),
+        (None, None, "DEFAULT", "gemini-3.8-flash", None),
+        (None, None, " ", "gemini-3.8-flash", None),
+        (None, "gemini-3-flash-preview", "0.3", "gemini-3-flash-preview", 0.3),
+        ("gemini-2.5-flash", None, "0.7", "gemini-2.5-flash", 0.7),
         ("gemini-3-flash-preview", "gemini-3.8-flash", "omit", "gemini-3-flash-preview", None),
     ],
 )
 def test_gemini_request_model_and_sampling(
-    tmp_path, monkeypatch, entrypoint, explicit_model, env_model, temperature,
+    tmp_path, monkeypatch, capsys, entrypoint, explicit_model, env_model, temperature,
     expected_model, expected_temperature,
 ):
     _clear_backend_env(monkeypatch)
@@ -162,6 +172,14 @@ def test_gemini_request_model_and_sampling(
     else:
         llm._call_llm("Classify this note", backend="gemini", model=explicit_model)
 
+    stderr = capsys.readouterr().err
+    if expected_model.lower().rsplit("/", 1)[-1] == "gemini-3.8-flash":
+        assert {"temperature", "top_p", "top_k"}.isdisjoint(captured)
+        if temperature and temperature.strip().lower() not in ("", "none", "omit", "default"):
+            assert "GRAPHIFY_LLM_TEMPERATURE is ignored for Gemini 3.8 Flash" in stderr
+            assert "private-invalid-override" not in stderr
+        else:
+            assert "GRAPHIFY_LLM_TEMPERATURE" not in stderr
     assert captured["model"] == expected_model
     assert captured["reasoning_effort"] == "low"
     if expected_temperature is None:

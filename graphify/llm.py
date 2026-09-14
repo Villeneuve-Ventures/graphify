@@ -306,20 +306,29 @@ def _model_requires_default_temperature(model: str) -> bool:
 def _resolve_temperature(default: float | None, model: str = "") -> float | None:
     """Resolve the temperature to send, honouring GRAPHIFY_LLM_TEMPERATURE.
 
-    Precedence (issue #1191):
-      1. GRAPHIFY_LLM_TEMPERATURE env var, if set:
+    Precedence:
+      1. Gemini 3.8 Flash always omits sampling, including numeric overrides.
+      2. For other models, GRAPHIFY_LLM_TEMPERATURE env var, if set:
            - a numeric value (e.g. "0", "0.2", "1") is used verbatim;
            - the literal "none"/"omit"/"default" (case-insensitive) means
              "omit the temperature parameter entirely" (-> None).
-      2. Otherwise, reasoning models (o1/o3/o4/gpt-5) get None — the parameter
+      3. Otherwise, reasoning models (o1/o3/o4/gpt-5) get None — the parameter
          must be omitted or the API rejects the request.
-      3. Gemini 3.8 Flash omits sampling per Google's migration guidance.
       4. Otherwise, the backend config default (`default`, usually 0).
 
     Returns None when the temperature parameter should be omitted from the
     request; the call sites already guard `if temperature is not None`.
     """
     raw = os.environ.get("GRAPHIFY_LLM_TEMPERATURE", "").strip()
+    # https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist
+    if (model or "").lower().rsplit("/", 1)[-1] == "gemini-3.8-flash":
+        if raw and raw.lower() not in ("none", "omit", "default"):
+            print(
+                "[graphify] GRAPHIFY_LLM_TEMPERATURE is ignored for Gemini 3.8 Flash; "
+                "sampling parameters are omitted per Google's migration guidance.",
+                file=sys.stderr,
+            )
+        return None
     if raw:
         if raw.lower() in ("none", "omit", "default"):
             return None
@@ -332,10 +341,6 @@ def _resolve_temperature(default: float | None, model: str = "") -> float | None
                 file=sys.stderr,
             )
     if _model_requires_default_temperature(model):
-        return None
-    # Omit sampling for this default without changing legacy model overrides.
-    # https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist
-    if (model or "").lower().rsplit("/", 1)[-1] == "gemini-3.8-flash":
         return None
     return default
 
