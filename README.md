@@ -842,7 +842,7 @@ is CPython 3.14.2 through final 3.14.x releases.
 | --- | --- | --- |
 | Setup | `uv sync --all-extras --frozen` | Installs the checkout and development dependencies from the lockfile. |
 | Quick feedback | `uv run --frozen pytest tests/test_extract.py -q --tb=short` (choose the affected module) | Exercises the selected module only. |
-| Docs closeout | The pre-PR procedure under [Git workflow](#git-workflow) | No separate docs-only closeout command is defined. |
+| Docs closeout | `uv run --frozen pytest tests/test_readme_policy.py -q --tb=short` for README path policy, plus the pre-PR procedure under [Git workflow](#git-workflow) | Checks README filenames and parent-directory names; does not validate prose or links. No separate docs-only closeout command is defined. |
 | Full readiness | `uv run --frozen pytest tests/ -q --tb=short` plus applicable separate CI checks below | The pytest result proves the suite ran; it does not certify the separate jobs. |
 | Independent review | [Protected-change review policy](docs/protected-change-review.md), when explicitly applicable under [AGENTS.md](AGENTS.md) | Follow that policy's acceptance and review procedure; a passing test run does not activate or replace it. |
 
