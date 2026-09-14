@@ -15,6 +15,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Lock
 
 from graphify.file_slice import (
     FileSlice,
@@ -303,6 +304,11 @@ def _model_requires_default_temperature(model: str) -> bool:
     return False
 
 
+# One configuration diagnostic per process, shared by extraction and text calls.
+_GEMINI_TEMPERATURE_WARNING_LOCK = Lock()
+_GEMINI_TEMPERATURE_WARNED = False
+
+
 def _resolve_temperature(default: float | None, model: str = "") -> float | None:
     """Resolve the temperature to send, honouring GRAPHIFY_LLM_TEMPERATURE.
 
@@ -319,15 +325,19 @@ def _resolve_temperature(default: float | None, model: str = "") -> float | None
     Returns None when the temperature parameter should be omitted from the
     request; the call sites already guard `if temperature is not None`.
     """
+    global _GEMINI_TEMPERATURE_WARNED
     raw = os.environ.get("GRAPHIFY_LLM_TEMPERATURE", "").strip()
     # https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist
     if (model or "").lower().rsplit("/", 1)[-1] == "gemini-3.8-flash":
         if raw and raw.lower() not in ("none", "omit", "default"):
-            print(
-                "[graphify] GRAPHIFY_LLM_TEMPERATURE is ignored for Gemini 3.8 Flash; "
-                "sampling parameters are omitted per Google's migration guidance.",
-                file=sys.stderr,
-            )
+            with _GEMINI_TEMPERATURE_WARNING_LOCK:
+                if not _GEMINI_TEMPERATURE_WARNED:
+                    print(
+                        "[graphify] GRAPHIFY_LLM_TEMPERATURE is ignored for Gemini 3.8 Flash; "
+                        "sampling parameters are omitted per Google's migration guidance.",
+                        file=sys.stderr,
+                    )
+                    _GEMINI_TEMPERATURE_WARNED = True
         return None
     if raw:
         if raw.lower() in ("none", "omit", "default"):

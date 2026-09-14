@@ -8,6 +8,11 @@ import pytest
 from graphify import llm
 
 
+@pytest.fixture
+def fresh_gemini_temperature_warning(monkeypatch):
+    monkeypatch.setattr(llm, "_GEMINI_TEMPERATURE_WARNED", False)
+
+
 def _clear_backend_env(monkeypatch):
     for env_key in (
         "GEMINI_API_KEY",
@@ -155,7 +160,7 @@ def test_missing_gemini_key_names_both_supported_env_vars(monkeypatch):
 )
 def test_gemini_request_model_and_sampling(
     tmp_path, monkeypatch, capsys, entrypoint, explicit_model, env_model, temperature,
-    expected_model, expected_temperature,
+    expected_model, expected_temperature, fresh_gemini_temperature_warning,
 ):
     _clear_backend_env(monkeypatch)
     monkeypatch.delenv("GRAPHIFY_LLM_TEMPERATURE", raising=False)
@@ -186,6 +191,56 @@ def test_gemini_request_model_and_sampling(
         assert "temperature" not in captured
     else:
         assert captured["temperature"] == expected_temperature
+
+
+@pytest.mark.parametrize("entrypoint", ["extract", "text"])
+def test_gemini_temperature_warning_once_across_requests(
+    tmp_path, monkeypatch, capsys, entrypoint, fresh_gemini_temperature_warning,
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GRAPHIFY_LLM_TEMPERATURE", "0.3")
+    calls = []
+    _install_capturing_openai(monkeypatch, calls=calls)
+    if entrypoint == "extract":
+        files = [tmp_path / f"note-{i}.md" for i in range(16)]
+        for source in files:
+            source.write_text("# Architecture\n")
+        result = llm.extract_corpus_parallel(
+            files, backend="gemini", root=tmp_path, chunk_size=1,
+            token_budget=None, max_concurrency=8,
+        )
+        assert result["failed_chunks"] == 0
+    else:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(
+                lambda _: llm._call_llm("Classify this note", backend="gemini"),
+                range(16),
+            ))
+        assert all(results)
+
+    # A changed override and model alias share the same process-wide diagnostic.
+    monkeypatch.setenv("GRAPHIFY_LLM_TEMPERATURE", "private-invalid-override")
+    llm._call_llm("Classify again", backend="gemini", model="models/GEMINI-3.8-FLASH")
+    assert len(calls) == 17
+    assert all({"temperature", "top_p", "top_k"}.isdisjoint(call) for call in calls)
+    stderr = capsys.readouterr().err
+    assert stderr.count("GRAPHIFY_LLM_TEMPERATURE is ignored for Gemini 3.8 Flash") == 1
+    assert "private-invalid-override" not in stderr
+
+
+def test_gemini_quiet_overrides_do_not_consume_warning(
+    monkeypatch, capsys, fresh_gemini_temperature_warning,
+):
+    for value in ("", " ", "none", " omit ", "DEFAULT"):
+        monkeypatch.setenv("GRAPHIFY_LLM_TEMPERATURE", value)
+        assert llm._resolve_temperature(0, "gemini-3.8-flash") is None
+    assert capsys.readouterr().err == ""
+    monkeypatch.setenv("GRAPHIFY_LLM_TEMPERATURE", "0")
+    assert llm._resolve_temperature(0, "gemini-3.8-flash") is None
+    assert "GRAPHIFY_LLM_TEMPERATURE is ignored" in capsys.readouterr().err
 
 
 def test_gemini_default_paid_cost_estimate():
@@ -498,7 +553,7 @@ def test_call_openai_compat_preserves_real_finish_reason(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _install_capturing_openai(monkeypatch):
+def _install_capturing_openai(monkeypatch, *, calls=None):
     """Like _install_fake_openai but records kwargs passed to create()."""
     import sys
     import types
@@ -512,6 +567,8 @@ def _install_capturing_openai(monkeypatch):
 
         def create(self, **kwargs):
             captured.update(kwargs)
+            if calls is not None:
+                calls.append(kwargs)
             return _fake_openai_response(
                 '{"nodes":[{"id":"x"}],"edges":[],"hyperedges":[]}',
                 finish_reason="stop",
