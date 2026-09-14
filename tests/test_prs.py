@@ -25,6 +25,20 @@ from graphify.prs import (
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("explicit_backend", [False, True])
+def test_gemini_triage_default_and_override(monkeypatch, explicit_backend):
+    from graphify.prs import _resolve_triage_backend
+
+    monkeypatch.delenv("GRAPHIFY_TRIAGE_MODEL", raising=False)
+    monkeypatch.delenv("GRAPHIFY_TRIAGE_BACKEND", raising=False)
+    if explicit_backend:
+        monkeypatch.setenv("GRAPHIFY_TRIAGE_BACKEND", "gemini")
+    with patch("graphify.llm._get_backend_api_key", side_effect=lambda b: "test-key" if b == "gemini" else None):
+        assert _resolve_triage_backend() == ("gemini", "gemini-3.8-flash")
+        monkeypatch.setenv("GRAPHIFY_TRIAGE_MODEL", "gemini-3-flash-preview")
+        assert _resolve_triage_backend() == ("gemini", "gemini-3-flash-preview")
+
+
 def test_load_graph_json_maps_malformed_legacy_json_to_absence(tmp_path):
     graph = tmp_path / "graph.json"
     graph.write_text("{not-json", encoding="utf-8")
