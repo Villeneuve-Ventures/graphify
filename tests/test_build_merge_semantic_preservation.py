@@ -597,13 +597,14 @@ def test_anonymous_replay_preserves_retained_multiplicity(tmp_path, identity, di
     group = {"id": identity, "nodes": ["a"], "source_file": "stable.md", "quotation": "accepted"}
     path, _ = seed(tmp_path, [node("a")], [], [group, deepcopy(group)])
     incoming = dict(group, quotation="distinct") if distinct else deepcopy(group)
-    before = path.read_bytes()
-    for _ in range(2):
+    for _ in range(3):
+        before = path.read_bytes()
         graph = build_merge([{"hyperedges": [deepcopy(incoming)]}], path, root=tmp_path)
         groups = graph.graph["hyperedges"]
         assert groups.count(group) == 2
         assert len(groups) == (3 if distinct else 2)
-    assert path.read_bytes() == before
+        assert path.read_bytes() == before
+        assert to_json(graph, {}, path)
 
 
 @pytest.mark.parametrize("alias", ["DOCS POLICY RULE", "policy_rule"])
@@ -729,3 +730,90 @@ def test_retained_edge_checks_follow_definitive_retirement(tmp_path, defect, rec
         graph = build_merge(fresh, path, root=tmp_path, prune_sources=["deleted.md"])
         assert set(graph) == {"anchor"} and graph.number_of_edges() == 0
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("alias", ["policy_rule", "DOCS POLICY RULE"])
+@pytest.mark.parametrize("member_key", ["nodes", "members"])
+@pytest.mark.parametrize("claim", ["none", "equivalent", "conflict"])
+def test_retained_group_alias_view_preserves_raw_facts(tmp_path, alias, member_key, claim):
+    group = {"id": "group", member_key: [alias, "anchor"], "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"), node("anchor")], [], [group])
+    before = path.read_bytes()
+    fresh = [] if claim == "none" else [{"hyperedges": [{"id": "group", "nodes": ["docs_policy_rule", "anchor"],
+                                  "quotation": "conflict" if claim == "conflict" else "accepted"}]}]
+    if claim == "conflict":
+        with pytest.raises(ValueError, match="retained hyperedge"):
+            build_merge(fresh, path, root=tmp_path)
+    else:
+        graph = build_merge(fresh, path, root=tmp_path)
+        assert graph.graph["hyperedges"] == [group]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("recreation", ["none", "exact", "alias"])
+def test_retained_group_alias_retirement_preserves_raw_order(tmp_path, recreation):
+    group = {"id": "group", "members": ["anchor", "policy_rule", "anchor"], "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"), node("anchor")], [], [group])
+    fresh = [] if recreation == "none" else [{"nodes": [node(
+        "docs_policy_rule" if recreation == "exact" else "policy_rule", source="changed.md")]}]
+    graph = build_merge(fresh, path, root=tmp_path, prune_sources=["docs/policy.md"])
+    expected = group if recreation == "exact" else dict(group, members=["anchor", "anchor"])
+    assert graph.graph["hyperedges"] == [expected]
+
+
+@pytest.mark.parametrize("fresh_hijack", [False, True])
+def test_retained_group_ambiguous_alias_refuses_fresh_hijack(tmp_path, fresh_hijack):
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"),
+                            node("other_policy_rule", source="other/policy.md"), node("anchor")],
+                   [], [{"id": "group", "nodes": ["policy_rule"]}])
+    before = path.read_bytes()
+    fresh = [{"nodes": [node("policy_rule", source="changed.md")]}] if fresh_hijack else []
+    with pytest.raises(ValueError, match="retained hyperedge endpoint"):
+        build_merge(fresh, path, root=tmp_path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("identity", [0, False])
+@pytest.mark.parametrize("conflict", [False, True])
+def test_falsey_hashable_group_identity_participates_in_conflicts(tmp_path, identity, conflict):
+    group = {"id": identity, "nodes": ["a"], "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("a")], [], [group])
+    before = path.read_bytes()
+    incoming = dict(group, quotation="conflict") if conflict else deepcopy(group)
+    if conflict:
+        with pytest.raises(ValueError, match="retained hyperedge"):
+            build_merge([{"hyperedges": [incoming]}], path, root=tmp_path)
+    else:
+        graph = build_merge([{"hyperedges": [incoming]}], path, root=tmp_path)
+        assert graph.graph["hyperedges"] == [group]
+        assert type(graph.graph["hyperedges"][0]["id"]) is type(identity)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("identity", [[], {}, [1], {"bad": 1}])
+def test_retained_malformed_group_identity_policy_unchanged(tmp_path, identity):
+    group = {"id": identity, "nodes": ["a"]}
+    path, _ = seed(tmp_path, [node("a")], [], [group])
+    if identity:
+        with pytest.raises(TypeError):
+            build_merge([], path, root=tmp_path)
+    else:
+        assert build_merge([], path, root=tmp_path).graph["hyperedges"] == [group]
+
+
+def test_fresh_group_members_are_not_resolved_in_prior_namespace_again(tmp_path):
+    group = {"id": "group", "nodes": ["docs_policy_rule"]}
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md")], [], [group])
+    fresh = {"nodes": [node("policy_rule", source="changed.md")],
+             "hyperedges": [{"id": "group", "nodes": ["policy_rule"]}]}
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="retained hyperedge"):
+        build_merge([fresh], path, root=tmp_path)
+    assert path.read_bytes() == before
+
+
+def test_equivalent_retained_group_alias_copies_share_comparison_view(tmp_path):
+    group = {"id": "group", "members": ["policy_rule"], "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md")], [], [group, deepcopy(group)])
+    graph = build_merge([], path, root=tmp_path)
+    assert graph.graph["hyperedges"] == [group]
