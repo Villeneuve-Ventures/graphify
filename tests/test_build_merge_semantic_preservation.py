@@ -565,3 +565,167 @@ def test_retained_owner_view_preserves_language_guard(tmp_path, legacy_owner, re
     assert graph.has_edge("docs_service_run", "client") is kept
     assert_retained(graph, data)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("bad_id", [[], [1], {}, {"bad": 1}])
+@pytest.mark.parametrize("dedup", [False, True])
+def test_fresh_invalid_node_identity_keeps_valid_siblings(tmp_path, capsys, bad_id, dedup):
+    path, data = seed(tmp_path, [node("a")], [])
+    before = path.read_bytes()
+    fresh = {"nodes": [node(bad_id, "Invalid", "changed.md"), node("valid", source="changed.md")]}
+    graph = build_merge([fresh], path, root=tmp_path, dedup=dedup)
+    assert set(graph) == {"a", "valid"}
+    assert_retained(graph, data)
+    assert "non-hashable id" in capsys.readouterr().err
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("bad_member", [[], {"bad": 1}])
+@pytest.mark.parametrize("member_key", ["nodes", "members"])
+def test_retained_malformed_members_preserve_payload(tmp_path, bad_member, member_key):
+    group = {"id": "group", member_key: ["a", bad_member], "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("a"), node("deleted", source="deleted.md")], [], [group])
+    before = path.read_bytes()
+    graph = build_merge([], path, root=tmp_path, prune_sources=["deleted.md"])
+    assert graph.graph["hyperedges"] == [group]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("identity", [None, ""])
+@pytest.mark.parametrize("distinct", [False, True])
+def test_anonymous_replay_preserves_retained_multiplicity(tmp_path, identity, distinct):
+    group = {"id": identity, "nodes": ["a"], "source_file": "stable.md", "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("a")], [], [group, deepcopy(group)])
+    incoming = dict(group, quotation="distinct") if distinct else deepcopy(group)
+    before = path.read_bytes()
+    for _ in range(2):
+        graph = build_merge([{"hyperedges": [deepcopy(incoming)]}], path, root=tmp_path)
+        groups = graph.graph["hyperedges"]
+        assert groups.count(group) == 2
+        assert len(groups) == (3 if distinct else 2)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("alias", ["DOCS POLICY RULE", "policy_rule"])
+@pytest.mark.parametrize("directed", [False, True])
+def test_retained_edge_alias_resolves_before_attachment(tmp_path, alias, directed):
+    accepted = edge(alias, "anchor", quotation="original")
+    path, data = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"), node("anchor")], [accepted])
+    before = path.read_bytes()
+    graph = build_merge([], path, root=tmp_path, directed=directed)
+    assert graph.has_edge("docs_policy_rule", "anchor")
+    assert graph.edges["docs_policy_rule", "anchor"]["quotation"] == "original"
+    assert dict(graph.nodes["docs_policy_rule"]) == {k: v for k, v in data["nodes"][0].items() if k != "id"}
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("fresh_conflict", [False, True])
+def test_retained_alias_slot_conflict_is_not_overwritten(tmp_path, fresh_conflict):
+    accepted = edge("policy_rule", "anchor", quotation="accepted")
+    canonical = dict(accepted, source="docs_policy_rule", quotation="conflict")
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"), node("anchor")],
+                   [accepted] if fresh_conflict else [accepted, canonical])
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="retained edge"):
+        build_merge([{"edges": [canonical]}] if fresh_conflict else [], path, root=tmp_path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("recreation", ["none", "exact", "alias"])
+def test_retired_alias_is_bound_to_prior_namespace(tmp_path, recreation):
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"), node("anchor")],
+                   [edge("policy_rule", "anchor")])
+    fresh = [] if recreation == "none" else [{"nodes": [node(
+        "docs_policy_rule" if recreation == "exact" else "policy_rule", source="changed.md")]}]
+    graph = build_merge(fresh, path, root=tmp_path, prune_sources=["docs/policy.md"])
+    assert graph.has_edge("docs_policy_rule", "anchor") is (recreation == "exact")
+    assert not graph.has_edge("policy_rule", "anchor")
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_retained_alias_ambiguity_preserves_exact_id_precedence(tmp_path, exact):
+    records = [node("docs_policy_rule", source="docs/policy.md"),
+               node("other_policy_rule", source="other/policy.md"), node("anchor")]
+    if exact:
+        records.append(node("policy_rule"))
+    path, _ = seed(tmp_path, records, [edge("policy_rule", "anchor")])
+    if exact:
+        graph = build_merge([], path, root=tmp_path)
+        assert graph.has_edge("policy_rule", "anchor")
+    else:
+        with pytest.raises(ValueError, match="retained evidence endpoint"):
+            build_merge([], path, root=tmp_path)
+
+
+@pytest.mark.parametrize("case", ["nodes", "edges", "clean", "replacement"])
+def test_semantic_prune_diagnostics_describe_actual_removals(tmp_path, capsys, case):
+    path, _ = seed(tmp_path, [node("a", source="deleted.md" if case == "nodes" else "stable.md"),
+                              node("b"), node("c")],
+                   [edge("a", "b", "deleted.md"), edge("b", "c", "deleted.md")]
+                   if case in {"nodes", "edges"} else [])
+    fresh = [{"nodes": [node("new", source="deleted.md")]}] if case == "replacement" else []
+    build_merge(fresh, path, root=tmp_path, prune_sources=["deleted.md", "deleted.md"])
+    message = capsys.readouterr().err
+    if case == "nodes":
+        assert "Pruned 1 node(s) from 2 deleted source file(s)." in message
+        assert "Pruned 1 edge(s) from deleted source file(s)." in message
+    elif case == "edges":
+        assert "Pruned 2 edge(s) from deleted source file(s)." in message
+        assert "node(s)" not in message
+    else:
+        assert "2 source file(s) deleted since last run" in message
+        assert "already clean" in message and "Pruned" not in message
+
+
+def test_equivalent_retained_alias_slots_share_accepted_facts(tmp_path):
+    accepted = edge("policy_rule", "anchor")
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"), node("anchor")],
+                   [accepted, dict(accepted, source="docs_policy_rule", confidence_score=1.0)])
+    graph = build_merge([], path, root=tmp_path)
+    assert graph.number_of_edges() == 1
+    assert graph.edges["docs_policy_rule", "anchor"]["confidence"] == "EXTRACTED"
+
+
+def test_ambiguous_retained_alias_cannot_bind_new_identity(tmp_path):
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md"),
+                            node("other_policy_rule", source="other/policy.md"), node("anchor")],
+                   [edge("policy_rule", "anchor")])
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="retained evidence endpoint"):
+        build_merge([{"nodes": [node("policy_rule", source="changed.md")]}], path, root=tmp_path)
+    assert path.read_bytes() == before
+
+
+def test_refused_composition_does_not_report_successful_pruning(tmp_path, capsys):
+    path, _ = seed(tmp_path, [node("a"), node("b"), node("deleted", source="deleted.md")], [edge("a", "b")])
+    with pytest.raises(ValueError, match="retained edge"):
+        build_merge([{"edges": [dict(edge("a", "b"), confidence="INFERRED")]}],
+                    path, root=tmp_path, prune_sources=["deleted.md"])
+    assert "Pruned" not in capsys.readouterr().err
+
+
+def test_prune_diagnostics_count_recreated_identity_as_surviving(tmp_path, capsys):
+    path, _ = seed(tmp_path, [node("a", source="deleted.md"), node("b")], [edge("a", "b", "deleted.md")])
+    graph = build_merge([{"nodes": [node("a", source="changed.md")]}], path,
+                        root=tmp_path, prune_sources=["deleted.md"])
+    assert "a" in graph and not graph.has_edge("a", "b")
+    message = capsys.readouterr().err
+    assert "Pruned 1 edge(s) from deleted source file(s)." in message
+    assert "node(s)" not in message
+
+
+@pytest.mark.parametrize("defect", ["dangling", "conflicting"])
+@pytest.mark.parametrize("recreated", [False, True])
+def test_retained_edge_checks_follow_definitive_retirement(tmp_path, defect, recreated):
+    accepted = edge("a", "missing" if defect == "dangling" else "anchor", "evidence.md")
+    records = [accepted] if defect == "dangling" else [accepted, dict(accepted, confidence="INFERRED")]
+    path, _ = seed(tmp_path, [node("a", source="deleted.md"), node("anchor")], records)
+    before = path.read_bytes()
+    fresh = [{"nodes": [node("a", source="changed.md")]}] if recreated else []
+    if recreated:
+        with pytest.raises(ValueError, match="retained evidence endpoint|retained edge slot"):
+            build_merge(fresh, path, root=tmp_path, prune_sources=["deleted.md"])
+    else:
+        graph = build_merge(fresh, path, root=tmp_path, prune_sources=["deleted.md"])
+        assert set(graph) == {"anchor"} and graph.number_of_edges() == 0
+    assert path.read_bytes() == before
