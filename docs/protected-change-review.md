@@ -54,6 +54,31 @@ the frozen base, any designation field, another path, a semantic decision, or
 the authority model requires acceptance-owner approval and a new freeze.
 Unresolved material semantics block work.
 
+### Plan the commit transition before staging or candidate freeze
+
+Surface the section 10 decision in the acceptance packet now, even when commit
+authority is reserved. Record the designated owner's explicit opt-in reference
+or `ordinary review` with the missing, declined, or deferred decision. Silence,
+a later delivery request, and a comparator success are not opt-in. An early
+eligibility assessment is provisional, not an approval or permission to stage,
+commit, or publish; use only actions authorized by the active task.
+
+For prospective opt-in, plan exact staging before the approved candidate freeze,
+complete immutable manifests, authenticated independent approvals, the external
+pinned runtime, and independently captured validation contexts. Inventory all
+required checks, their existing freshness rules, and which require fresh
+committed-HEAD proof outside the reused set. Confirm these prerequisites again
+before freeze and immediately before delivery under section 10. If staging is
+not authorized, retain the ordinary path rather than silently staging.
+
+Missing opt-in, incomplete staging, acceptance/policy/base or raw inventory drift,
+failed runtime or validation prerequisites, and unresolved HEAD-sensitive proof
+gaps make equivalence unavailable. Use ordinary re-freeze/re-review, preserving
+required validation and repair limits; unavailable required proof still blocks
+delivery. Do not retrofit opt-in or staging into an already frozen approval.
+Any prospective acceptance change follows section 1's owner approval and new
+freeze rules; existing attempts retain their pinned policy and evidence.
+
 ## 2. Establish feasibility
 
 Before production code:
@@ -85,6 +110,62 @@ with a bounded rationale. Freeze the plan and invariant map by digest.
   Both reviewers still bind their resulting verdicts to the new exact candidate.
 - Give every reviewer the exact policy, acceptance packet, complete candidate
   manifest, validation provenance, and their digests.
+
+### Recover established reviewers after continuation
+
+Keep a continuation record in the attempt's external evidence envelope, outside
+the candidate inventory. Record each reviewer's canonical identity, lane,
+supported resume/followup API and target, independence, last reviewed candidate
+digest and review phase at that digest (`initial` or `post-initial re-review`),
+original response reference/digest, and supported finding dispositions.
+Preserve the consolidated repair packet, outstanding findings, scope-reopening
+triggers, and recovery outcomes in the leader's complete evidence record. Carry
+this record into continuation; filtering reviewer-facing inputs by review phase
+does not discard that history, change its attribution, or prove continuity.
+Names and leader summaries alone do not authenticate an approval or prove
+continuity.
+
+An inventory that omits a known reviewer is incomplete reachability evidence.
+Before creating a replacement, try that known identity through the host's
+supported resume/followup API. For the native collaboration surface, use
+`collaboration.followup_task` with the recorded `target` and bounded `message`;
+`collaboration.list_agents` omission alone is not an unavailable result. Use the
+current host tool schema rather than assuming a runtime-specific command exists.
+Before dispatch, distinguish an unfinished initial review from post-initial
+re-review. To complete an initial review, send the complete candidate materials
+required above and any retained work belonging to that reviewer, but withhold
+every other reviewer's findings and dispositions and the consolidated repair
+packet until the reviewer submits its initial verdict. For post-initial
+re-review, send the complete new candidate, consolidated repair packet, and
+supported disposition history. Preserve the section 3 review scope in either
+case.
+
+- Successful resumption: verify the responding identity and independence, then
+  retain that reviewer. Successful dispatch is not a completed review; await the
+  actual candidate-bound result and preserve its original provenance.
+- Explicit unavailable/unknown identity: record the exact target and tool result.
+  A replacement may then be assigned with documented identity, independence, and
+  reason. Apply the same phase distinction: a replacement completing an initial
+  independent review receives the complete candidate materials but no other
+  reviewer's findings or dispositions before its initial verdict; a replacement
+  continuing post-initial re-review receives the complete new candidate,
+  consolidated repair packet, and supported disposition history. It must
+  establish its own review basis and issue its own verdict. Never label it the old
+  reviewer or inherit an approval by renaming a lane.
+- Capacity exhaustion: record a capacity blocker, not reviewer unavailability.
+  Do not create backup lanes. Wait for capacity, or end only proven session-owned
+  redundant work through the supported lifecycle API when authorized. Retry the
+  original target after a recorded capacity change; interruption alone need not
+  release a slot. Preserve unrelated lanes and report blocked if capacity cannot
+  be recovered safely.
+- Ambiguous failure or missing API: retain the identity and report the specific
+  recovery gap. Do not infer permanent absence, fabricate continuity, or loop
+  retries without changed evidence. Any necessary replacement must document that
+  continuity was not recovered and satisfy the same independence and review
+  requirements; unavailable required review blocks delivery.
+
+See [the workflow scenario matrix](protected-review-workflow-scenarios.md) for
+the coverage boundary and the externally owned inventory issue.
 
 ## 4. Implement vertical invariants
 
@@ -713,10 +794,18 @@ Acceptance freeze:
 - Allowed paths by classification:
 - Churn budgets and measurement rules:
 - Acceptance owner, version, and SHA-256:
+- Prospective commit-equivalence owner decision/reference, or ordinary-review reason:
+- Staging authority and exact-stage-before-freeze checkpoint:
+- Immutable manifests, approval authenticity, and pinned runtime prerequisites:
+- Required validation set, freshness rules, reused checks, fresh HEAD-sensitive checks:
 Authority:
 - Authorized local actions:
 - Reserved external or destructive actions:
 - Writer, leader, and stable reviewers:
+- Continuation record: canonical reviewer IDs, lane/API/target, independence,
+  candidate digest and bound review phase, original response references/digests,
+  supported dispositions:
+- Recovery attempts/results, capacity change before retry, replacement basis if needed:
 Pre-implementation evidence:
 - Red regression or feasibility spike, or bounded N/A rationale:
 - Experimentally verified Git facts:
@@ -734,6 +823,7 @@ Evidence envelope:
 - Repair-link events, or initial-candidate `N/A`:
 - Pre/post ignored, generated, and local-state inventories:
 - Final evidence-envelope SHA-256:
+- Commit-transition eligibility recheck and equivalence link, or ordinary reapproval:
 Done when:
 - Frozen criteria map to evidence.
 - Both reviewers approve the final exact candidate, or their approved predecessor
