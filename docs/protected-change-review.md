@@ -655,6 +655,36 @@ Read task-level receipts, not only process exit codes. A blocked, incomplete, or
 stale receipt is not a pass. A documentation-only change does not require graph
 refresh unless code bytes or repository instructions require it.
 
+### Decide validation reuse before launching delivery checks
+
+At continuation and before commit/push/PR validation, reconcile the complete
+required check set with existing receipts in the external evidence envelope.
+For each check, record its command, relevant input and environment bindings,
+freshness rule, HEAD sensitivity, and one disposition: `reuse`, `run fresh`, or
+`blocked`, with the specific supporting reason. Reference and hash existing
+receipts when available. For a fresh result not yet produced, record `pending`;
+for a missing receipt, record `absent` and the reason. After execution, replace
+`pending` with the actual receipt reference/digest and outcome. These planning
+markers are not passing evidence and are not valid in section 10
+commit-equivalence validation contexts, which require passed receipts. Missing
+binding evidence cannot justify reuse. Resolve it with bounded inspection or run
+the affected check; unavailable required proof remains a blocker.
+
+A delivery request, new candidate digest, changed HEAD, or replacement reviewer
+alone does not invalidate every check. Identify the actual changed dependency or
+mandatory freshness requirement before starting an expensive repeat. Run
+HEAD-sensitive checks against the required identity and rerun checks affected by
+source, runtime, environment, command or freshness changes. Preserve authentic
+passing receipts for unaffected checks, without relabeling them as fresh runs.
+
+This decision applies to both ordinary committed reapproval and optional commit
+equivalence. Validation reuse does not transfer reviewer approval: ordinary
+section 10 reapproval remains required unless the prospectively adopted exception
+succeeds. A mandatory fresh full-suite gate still runs; cite its requirement in
+the decision. Do not weaken gates, change expiry, or amend historical evidence to
+avoid work. Record the decision before dispatching checks so continuation or a
+reviewer replacement does not silently restart the validation matrix.
+
 ## 10. Deliver locally
 
 Delivery means a verified local candidate or handoff unless separate publication
@@ -820,6 +850,10 @@ Candidate manifest:
 - Candidate-content SHA-256:
 Evidence envelope:
 - Validation and reviewer records bound to the candidate-content SHA-256:
+- Pre-dispatch validation decision per required check: command, existing receipt
+  reference/digest or pending/absent with reason, input/environment bindings,
+  freshness rule, HEAD sensitivity, reuse/run fresh/blocked disposition and reason;
+  replace pending with actual receipt reference/digest and outcome after execution:
 - Repair-link events, or initial-candidate `N/A`:
 - Pre/post ignored, generated, and local-state inventories:
 - Final evidence-envelope SHA-256:
