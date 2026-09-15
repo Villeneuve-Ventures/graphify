@@ -116,7 +116,8 @@ with a bounded rationale. Freeze the plan and invariant map by digest.
 Keep a continuation record in the attempt's external evidence envelope, outside
 the candidate inventory. Record each reviewer's canonical identity, lane,
 supported resume/followup API and target, independence, last reviewed candidate
-digest, original response reference/digest, and supported finding dispositions.
+digest and review phase at that digest (`initial` or `post-initial re-review`),
+original response reference/digest, and supported finding dispositions.
 Preserve the consolidated repair packet, outstanding findings, scope-reopening
 triggers, and recovery outcomes in the leader's complete evidence record. Carry
 this record into continuation; filtering reviewer-facing inputs by review phase
@@ -802,7 +803,8 @@ Authority:
 - Reserved external or destructive actions:
 - Writer, leader, and stable reviewers:
 - Continuation record: canonical reviewer IDs, lane/API/target, independence,
-  candidate digest, original response references/digests, supported dispositions:
+  candidate digest and bound review phase, original response references/digests,
+  supported dispositions:
 - Recovery attempts/results, capacity change before retry, replacement basis if needed:
 Pre-implementation evidence:
 - Red regression or feasibility spike, or bounded N/A rationale:
