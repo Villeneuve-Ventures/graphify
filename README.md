@@ -859,7 +859,11 @@ reproducing those checks.
 
 - Active development happens on the `v8` branch.
 - Commit style: `fix: <description>` / `feat: <description>` / `docs: <description>`
-- Before opening a PR, run `uv run --frozen pytest tests/ -q --tb=short` and confirm it passes.
+- Before opening a PR, ensure `uv run --frozen pytest tests/ -q --tb=short` has passed.
+  Reuse applicable passing evidence while relevant inputs, environment, and freshness
+  requirements remain satisfied; opening or pushing a PR alone does not require
+  another run. Protected changes must also satisfy the
+  [protected-change review policy](docs/protected-change-review.md).
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
 
 ### Automated PR review
