@@ -817,3 +817,90 @@ def test_equivalent_retained_group_alias_copies_share_comparison_view(tmp_path):
     path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md")], [], [group, deepcopy(group)])
     graph = build_merge([], path, root=tmp_path)
     assert graph.graph["hyperedges"] == [group]
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_fresh_group_claims_checked_before_cross_chunk_collapse(tmp_path, conflict):
+    path, _ = seed(tmp_path, [node("anchor")], [])
+    group = {"id": "group", "nodes": ["anchor"], "quotation": "accepted"}
+    other = dict(group, quotation="different") if conflict else deepcopy(group)
+    before = path.read_bytes()
+    chunks = [{"hyperedges": [group]}, {"hyperedges": [other]}]
+    if conflict:
+        with pytest.raises(ValueError, match="hyperedge identity"):
+            build_merge(chunks, path, root=tmp_path)
+    else:
+        assert build_merge(chunks, path, root=tmp_path).graph["hyperedges"] == [group]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("pair", [(0, False), (1, True)])
+@pytest.mark.parametrize("placement", ["fresh", "retained_fresh", "retained"])
+def test_numeric_and_boolean_group_identities_remain_distinct(tmp_path, pair, placement):
+    groups = [{"id": pair[0], "nodes": ["anchor"], "quotation": "numeric"},
+              {"id": pair[1], "nodes": ["anchor"], "quotation": "boolean"}]
+    old = groups if placement == "retained" else groups[:1] if placement == "retained_fresh" else []
+    fresh = [] if placement == "retained" else groups[1:] if placement == "retained_fresh" else groups
+    path, _ = seed(tmp_path, [node("anchor")], [], old)
+    before = path.read_bytes()
+    graph = build_merge([{"hyperedges": deepcopy(fresh)}], path, root=tmp_path)
+    actual = {(type(group["id"]), group["id"]): group for group in graph.graph["hyperedges"]}
+    assert len(actual) == 2
+    for group in groups:
+        assert actual[type(group["id"]), group["id"]] == group
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("mode", ["unrelated", "retired", "conflict"])
+def test_memberless_group_public_roundtrip(tmp_path, mode):
+    group = {"id": "group", "quotation": "accepted", "source_file": "stable.md"}
+    path = tmp_path / "graph.json"
+    graph = build([{"nodes": [node("anchor")], "hyperedges": [group]}])
+    assert graph.graph["hyperedges"] == [group]
+    assert to_json(graph, {}, path)
+    before = path.read_bytes()
+    fresh = {"nodes": [node("beacon", source="changed.md")]}
+    if mode == "conflict":
+        fresh["hyperedges"] = [dict(group, quotation="different")]
+        with pytest.raises(ValueError, match="hyperedge identity"):
+            build_merge([fresh], path, root=tmp_path)
+    else:
+        result = build_merge([fresh], path, root=tmp_path,
+                             prune_sources=["stable.md"] if mode == "retired" else None)
+        assert result.graph.get("hyperedges", []) == ([] if mode == "retired" else [group])
+    assert path.read_bytes() == before
+
+
+def test_explicit_empty_retained_group_list_policy_unchanged(tmp_path):
+    path, _ = seed(tmp_path, [node("anchor")], [], [{"id": "group", "nodes": []}])
+    assert not build_merge([], path, root=tmp_path).graph.get("hyperedges")
+
+
+@pytest.mark.parametrize("identity", [None, False, 0])
+@pytest.mark.parametrize("mode", ["default_fresh", "default_old_sibling", "singleton", "dedup_false"])
+def test_falsey_retained_node_default_dedup_recovery(tmp_path, identity, mode):
+    records = [node(identity, "Invalid")]
+    if mode == "default_old_sibling":
+        records.append(node("anchor"))
+    path, _ = seed(tmp_path, records, [])
+    before = path.read_bytes()
+    chunks = [] if mode in {"singleton", "default_old_sibling"} else [{"nodes": [node("beacon", source="changed.md")]}]
+    if mode in {"singleton", "dedup_false"}:
+        with pytest.raises((TypeError, ValueError)):
+            build_merge(chunks, path, root=tmp_path, **({"dedup": False} if mode == "dedup_false" else {}))
+    else:
+        graph = build_merge(chunks, path, root=tmp_path)
+        assert set(graph) == ({"anchor"} if mode == "default_old_sibling" else {"beacon"})
+    assert path.read_bytes() == before
+
+
+def test_empty_string_retained_node_preserves_edge_and_group_by_default(tmp_path):
+    group = {"id": "group", "nodes": ["", "anchor"], "quotation": "accepted"}
+    path, data = seed(tmp_path, [node("", "Empty identity"), node("anchor")],
+                      [edge("", "anchor", quotation="accepted")], [group])
+    before = path.read_bytes()
+    graph = build_merge([{"nodes": [node("beacon", source="changed.md")]}], path, root=tmp_path)
+    assert_retained(graph, data)
+    assert graph.graph["hyperedges"] == [group]
+    assert "beacon" in graph
+    assert path.read_bytes() == before

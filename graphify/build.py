@@ -1054,6 +1054,10 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
     fresh["hyperedges"] = valid_groups
     normalize = lambda source: _norm_source_file(source, root)
     node_owner = lambda n: normalize(n.get("source_file", n.get("source")))
+    replaced = {normalize(n.get("source_file")) for n in fresh["nodes"] if n.get("source_file")}
+    # Match the old dedup prepass size after replacement, but before explicit pruning.
+    dedup_prepass = dedup and (len(fresh["nodes"]) + sum(
+        normalize(n.get("source_file")) not in replaced for n in nodes)) > 1
     valid_nodes = []
     for node in nodes:
         if "id" not in node:
@@ -1062,9 +1066,10 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             print(f"[graphify] WARNING: skipping node with non-hashable id "
                   f"{node['id']!r} (must be a string).", file=sys.stderr)
             continue
+        if dedup_prepass and not isinstance(node["id"], str) and not node["id"]:
+            continue
         valid_nodes.append(node)
     nodes = valid_nodes
-    replaced = {normalize(n.get("source_file")) for n in fresh["nodes"] if n.get("source_file")}
     # Admission follows replacement-source selection, preserving its existing scope.
     admitted = []
     for record in fresh["nodes"]:
@@ -1132,7 +1137,12 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         # Preserve malformed retained-ID handling while recognizing valid zero/False IDs.
         return bool(identity) or (_hashable(identity) and identity is not None and identity != "")
 
-    groups_by_id = {h["id"]: h for h in retained_groups if has_group_identity(h)}
+    def group_key(group):
+        identity = group["id"]
+        # JSON booleans are distinct from numbers; retain existing numeric equality.
+        return isinstance(identity, bool), identity
+
+    groups_by_id = {group_key(h): h for h in retained_groups if has_group_identity(h)}
 
     def group_facts(group, *, retained=False):
         canonical = deepcopy(group)
@@ -1143,7 +1153,7 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         return _fact_attributes(canonical)
 
     def check_group(incoming, *, members=True):
-        old = groups_by_id.get(incoming.get("id")) if has_group_identity(incoming) else None
+        old = groups_by_id.get(group_key(incoming)) if has_group_identity(incoming) else None
         if old is not None:
             before, after = group_facts(old, retained=True), group_facts(incoming)
             if not members:
@@ -1234,8 +1244,18 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             **{k: v for k, v in record.items() if k not in {"source", "target"}},
             "_src": source, "_tgt": target,
         })
-    carried = {h["id"]: h for h in graph.graph.get("hyperedges", []) if has_group_identity(h)}
-    carried_facts = {identity: group_facts(group) for identity, group in carried.items()}
+    carried, carried_facts = {}, {}
+
+    def stage_group(group, *, retained=False):
+        key, facts = group_key(group), group_facts(group, retained=retained)
+        if key in carried_facts and carried_facts[key] != facts:
+            kind = "retained" if retained else "fresh"
+            raise ValueError(f"Semantic update conflicts with {kind} hyperedge identity")
+        carried[key], carried_facts[key] = group, facts
+
+    for group in graph.graph.get("hyperedges", []):
+        if has_group_identity(group):
+            stage_group(group)
     result_groups = [h for h in graph.graph.get("hyperedges", []) if not has_group_identity(h)]
     retained_anonymous = []
     for record in retained_groups:
@@ -1248,16 +1268,12 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         if any(_hashable(identity) and (identity not in prior_nodes or identity not in graph)
                for _, identity in surviving):
             raise ValueError("Semantic update lost retained hyperedge endpoint")
-        if not surviving:
+        if not surviving and member_key is not None:
             continue
         members = [raw for raw, _ in surviving]
-        kept = record if members == original_members else {**record, member_key: members}
-        identity = kept.get("id")
+        kept = record if member_key is None or members == original_members else {**record, member_key: members}
         if has_group_identity(kept):
-            facts = group_facts(kept, retained=True)
-            if identity in carried_facts and carried_facts[identity] != facts:
-                raise ValueError("Semantic update conflicts with retained hyperedge identity")
-            carried[identity], carried_facts[identity] = kept, facts
+            stage_group(kept, retained=True)
         else:
             retained_anonymous.append(kept)
     retained_facts = [group_facts(group, retained=True) for group in retained_anonymous]
