@@ -659,9 +659,14 @@ refresh unless code bytes or repository instructions require it.
 
 At continuation and before commit/push/PR validation, reconcile the complete
 required check set with existing receipts in the external evidence envelope.
-For each check, record its command and receipt reference/digest, relevant input
-and environment bindings, freshness rule, HEAD sensitivity, and one disposition:
-`reuse`, `run fresh`, or `blocked`, with the specific supporting reason. Missing
+For each check, record its command, relevant input and environment bindings,
+freshness rule, HEAD sensitivity, and one disposition: `reuse`, `run fresh`, or
+`blocked`, with the specific supporting reason. Reference and hash existing
+receipts when available. For a fresh result not yet produced, record `pending`;
+for a missing receipt, record `absent` and the reason. After execution, replace
+`pending` with the actual receipt reference/digest and outcome. These planning
+markers are not passing evidence and are not valid in section 10
+commit-equivalence validation contexts, which require passed receipts. Missing
 binding evidence cannot justify reuse. Resolve it with bounded inspection or run
 the affected check; unavailable required proof remains a blocker.
 
@@ -845,9 +850,10 @@ Candidate manifest:
 - Candidate-content SHA-256:
 Evidence envelope:
 - Validation and reviewer records bound to the candidate-content SHA-256:
-- Pre-dispatch validation decision per required check: command/receipt reference
-  and digest, input/environment bindings, freshness rule, HEAD sensitivity,
-  reuse/run fresh/blocked disposition and specific reason:
+- Pre-dispatch validation decision per required check: command, existing receipt
+  reference/digest or pending/absent with reason, input/environment bindings,
+  freshness rule, HEAD sensitivity, reuse/run fresh/blocked disposition and reason;
+  replace pending with actual receipt reference/digest and outcome after execution:
 - Repair-link events, or initial-candidate `N/A`:
 - Pre/post ignored, generated, and local-state inventories:
 - Final evidence-envelope SHA-256:
