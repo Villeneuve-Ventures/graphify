@@ -15,6 +15,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Lock
 
 from graphify.file_slice import (
     FileSlice,
@@ -95,10 +96,12 @@ BACKENDS: dict[str, dict] = {
         # Gemini models (LiteLLM, self-hosted proxy, ...). Falls back to Google's
         # official OpenAI-compatible endpoint.
         "base_url": os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        "default_model": "gemini-3-flash-preview",
+        "default_model": "gemini-3.8-flash",
         "env_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "model_env_key": "GRAPHIFY_GEMINI_MODEL",
-        "pricing": {"input": 0.50, "output": 3.00},  # USD per 1M tokens
+        # Paid standard USD per 1M tokens through 2026-12-31; free tier is free.
+        # https://ai.google.dev/gemini-api/docs/pricing#gemini-3.8-flash
+        "pricing": {"input": 0.75, "output": 3.75},
         "temperature": 0,
         "reasoning_effort": "low",
         "max_completion_tokens": 16384,
@@ -301,22 +304,41 @@ def _model_requires_default_temperature(model: str) -> bool:
     return False
 
 
+# One configuration diagnostic per process, shared by extraction and text calls.
+_GEMINI_TEMPERATURE_WARNING_LOCK = Lock()
+_GEMINI_TEMPERATURE_WARNED = False
+
+
 def _resolve_temperature(default: float | None, model: str = "") -> float | None:
     """Resolve the temperature to send, honouring GRAPHIFY_LLM_TEMPERATURE.
 
-    Precedence (issue #1191):
-      1. GRAPHIFY_LLM_TEMPERATURE env var, if set:
+    Precedence:
+      1. Gemini 3.8 Flash always omits sampling, including numeric overrides.
+      2. For other models, GRAPHIFY_LLM_TEMPERATURE env var, if set:
            - a numeric value (e.g. "0", "0.2", "1") is used verbatim;
            - the literal "none"/"omit"/"default" (case-insensitive) means
              "omit the temperature parameter entirely" (-> None).
-      2. Otherwise, reasoning models (o1/o3/o4/gpt-5) get None — the parameter
+      3. Otherwise, reasoning models (o1/o3/o4/gpt-5) get None — the parameter
          must be omitted or the API rejects the request.
-      3. Otherwise, the backend config default (`default`, usually 0).
+      4. Otherwise, the backend config default (`default`, usually 0).
 
     Returns None when the temperature parameter should be omitted from the
     request; the call sites already guard `if temperature is not None`.
     """
+    global _GEMINI_TEMPERATURE_WARNED
     raw = os.environ.get("GRAPHIFY_LLM_TEMPERATURE", "").strip()
+    # https://ai.google.dev/gemini-api/docs/latest-model#migration-checklist
+    if (model or "").lower().rsplit("/", 1)[-1] == "gemini-3.8-flash":
+        if raw and raw.lower() not in ("none", "omit", "default"):
+            with _GEMINI_TEMPERATURE_WARNING_LOCK:
+                if not _GEMINI_TEMPERATURE_WARNED:
+                    print(
+                        "[graphify] GRAPHIFY_LLM_TEMPERATURE is ignored for Gemini 3.8 Flash; "
+                        "sampling parameters are omitted per Google's migration guidance.",
+                        file=sys.stderr,
+                    )
+                    _GEMINI_TEMPERATURE_WARNED = True
+        return None
     if raw:
         if raw.lower() in ("none", "omit", "default"):
             return None

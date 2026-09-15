@@ -300,6 +300,17 @@ def deduplicate_entities(
     Returns:
         (deduped_nodes, deduped_edges) with edges rewired to survivors
     """
+    result_nodes, result_edges, _ = _deduplicate_entities_with_remap(
+        nodes, edges, communities=communities, dedup_llm_backend=dedup_llm_backend,
+    )
+    return result_nodes, result_edges
+
+
+def _deduplicate_entities_with_remap(
+    nodes: list[dict], edges: list[dict], *, communities: dict[str, int],
+    dedup_llm_backend: str | None = None,
+) -> tuple[list[dict], list[dict], dict[str, str]]:
+    """Also return actual endpoint lineage for incremental hyperedge composition."""
     # Guard: cross-project dedup is not supported — nodes from different repos
     # share label names by coincidence and must never be merged by string similarity.
     # If you need to dedup a global graph, run deduplicate_entities per-repo first.
@@ -311,7 +322,7 @@ def deduplicate_entities(
         )
 
     if len(nodes) <= 1:
-        return nodes, edges
+        return nodes, edges, {}
 
     # Pre-deduplicate: one node per ID. The survivor is the node that *defines* the
     # ID (its source_file is the file the ID encodes), not merely the first seen —
@@ -342,7 +353,7 @@ def deduplicate_entities(
     unique_nodes = list(seen_ids.values())
 
     if len(unique_nodes) <= 1:
-        return unique_nodes, edges
+        return unique_nodes, edges, {}
 
     # ── pass 1: exact normalization ───────────────────────────────────────────
     norm_to_nodes: dict[str, list[dict]] = defaultdict(list)
@@ -509,7 +520,7 @@ def deduplicate_entities(
 
     # ── apply remap ───────────────────────────────────────────────────────────
     if not remap:
-        return unique_nodes, edges
+        return unique_nodes, edges, {}
 
     total = len(remap)
     msg = f"[graphify] Deduplicated {total} node(s)"
@@ -546,7 +557,7 @@ def deduplicate_entities(
         if e["source"] != e["target"]:
             deduped_edges.append(e)
 
-    return deduped_nodes, deduped_edges
+    return deduped_nodes, deduped_edges, remap
 
 
 def _pick_winner(nodes: list[dict]) -> dict:

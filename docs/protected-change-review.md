@@ -116,10 +116,14 @@ with a bounded rationale. Freeze the plan and invariant map by digest.
 Keep a continuation record in the attempt's external evidence envelope, outside
 the candidate inventory. Record each reviewer's canonical identity, lane,
 supported resume/followup API and target, independence, last reviewed candidate
-digest, original response reference/digest, and supported finding dispositions.
+digest and review phase at that digest (`initial` or `post-initial re-review`),
+original response reference/digest, and supported finding dispositions.
 Preserve the consolidated repair packet, outstanding findings, scope-reopening
-triggers, and recovery outcomes. Carry this record into continuation; names and
-leader summaries alone do not authenticate an approval or prove continuity.
+triggers, and recovery outcomes in the leader's complete evidence record. Carry
+this record into continuation; filtering reviewer-facing inputs by review phase
+does not discard that history, change its attribution, or prove continuity.
+Names and leader summaries alone do not authenticate an approval or prove
+continuity.
 
 An inventory that omits a known reviewer is incomplete reachability evidence.
 Before creating a replacement, try that known identity through the host's
@@ -127,17 +131,27 @@ supported resume/followup API. For the native collaboration surface, use
 `collaboration.followup_task` with the recorded `target` and bounded `message`;
 `collaboration.list_agents` omission alone is not an unavailable result. Use the
 current host tool schema rather than assuming a runtime-specific command exists.
-Send the complete current review packet and retained dispositions, preserving
-initial feedback blindness and the section 3 review scope.
+Before dispatch, distinguish an unfinished initial review from post-initial
+re-review. To complete an initial review, send the complete candidate materials
+required above and any retained work belonging to that reviewer, but withhold
+every other reviewer's findings and dispositions and the consolidated repair
+packet until the reviewer submits its initial verdict. For post-initial
+re-review, send the complete new candidate, consolidated repair packet, and
+supported disposition history. Preserve the section 3 review scope in either
+case.
 
 - Successful resumption: verify the responding identity and independence, then
   retain that reviewer. Successful dispatch is not a completed review; await the
   actual candidate-bound result and preserve its original provenance.
 - Explicit unavailable/unknown identity: record the exact target and tool result.
   A replacement may then be assigned with documented identity, independence, and
-  reason. Give it the complete packet and disposition history; it must establish
-  its own review basis and issue its own verdict. Never label it the old reviewer
-  or inherit an approval by renaming a lane.
+  reason. Apply the same phase distinction: a replacement completing an initial
+  independent review receives the complete candidate materials but no other
+  reviewer's findings or dispositions before its initial verdict; a replacement
+  continuing post-initial re-review receives the complete new candidate,
+  consolidated repair packet, and supported disposition history. It must
+  establish its own review basis and issue its own verdict. Never label it the old
+  reviewer or inherit an approval by renaming a lane.
 - Capacity exhaustion: record a capacity blocker, not reviewer unavailability.
   Do not create backup lanes. Wait for capacity, or end only proven session-owned
   redundant work through the supported lifecycle API when authorized. Retry the
@@ -814,7 +828,8 @@ Authority:
 - Reserved external or destructive actions:
 - Writer, leader, and stable reviewers:
 - Continuation record: canonical reviewer IDs, lane/API/target, independence,
-  candidate digest, original response references/digests, supported dispositions:
+  candidate digest and bound review phase, original response references/digests,
+  supported dispositions:
 - Recovery attempts/results, capacity change before retry, replacement basis if needed:
 Pre-implementation evidence:
 - Red regression or feasibility spike, or bounded N/A rationale:
