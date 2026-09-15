@@ -446,3 +446,122 @@ def test_resolved_edge_source_is_not_semantically_rekeyed_twice(tmp_path, dedup,
             build_merge([{"nodes": fresh_nodes, "edges": [incoming]}], path,
                         root=tmp_path, prune_sources=["deleted.md"], dedup=dedup)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("malformed", [[], [1], {}, {"bad": 1}])
+@pytest.mark.parametrize("dedup", [False, True])
+def test_malformed_fresh_group_identity_preserves_valid_siblings(tmp_path, capsys, malformed, dedup):
+    path, _ = seed(tmp_path, [node("a")], [])
+    valid = [{"nodes": ["a"]}, {"id": "valid", "nodes": ["a"]}]
+    before = path.read_bytes()
+    graph = build_merge([{"hyperedges": [{"id": malformed, "nodes": ["a"]}, *valid]}],
+                        path, root=tmp_path, dedup=dedup)
+    assert graph.graph["hyperedges"] == valid
+    assert "skipping fresh hyperedge with non-hashable id" in capsys.readouterr().err
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("owner_form", ["source", "absolute"])
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("dedup", [False, True])
+def test_retained_owner_view_resolves_alias_and_provenance(tmp_path, owner_form, directed, dedup):
+    retained = node("docs_policy_rule", source="docs/policy.md")
+    if owner_form == "source":
+        retained["source"] = retained.pop("source_file")
+    else:
+        retained["source_file"] = str(tmp_path / "docs/policy.md")
+    path, data = seed(tmp_path, [retained, node("other", source="")], [])
+    before = path.read_bytes()
+    incoming = edge("policy_rule", "other")
+    incoming.pop("source_file")
+    graph = build_merge([{"edges": [incoming], "hyperedges": [{"id": "new", "nodes": ["policy_rule"]}]}],
+                        path, root=tmp_path, directed=directed, dedup=dedup)
+    assert graph.has_edge("docs_policy_rule", "other")
+    assert graph.edges["docs_policy_rule", "other"]["source_file"] == "docs/policy.md"
+    assert graph.graph["hyperedges"][0]["nodes"] == ["docs_policy_rule"]
+    assert_retained(graph, data)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("transform", ["dedup", "doc_twin"])
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("conflict", [False, True])
+def test_collapsed_raw_claim_checks_canonical_retained_slot(tmp_path, transform, directed, conflict):
+    if transform == "dedup":
+        source, target, canonical = "a_chunk1", "a", "a"
+        fresh_nodes = [node(target, "Shared concept", "changed.md"),
+                       node(source, "Shared concept", "changed.md")]
+    else:
+        source, target, canonical = "guide", "guide_doc", "guide_doc"
+        fresh_nodes = [node(source, source="guide.md"), node(target, source="guide.md")]
+    accepted = edge(canonical, canonical)
+    path, _ = seed(tmp_path, [node(canonical, source="deleted.md")], [accepted])
+    before = path.read_bytes()
+    incoming = dict(accepted, source=source, target=target,
+                    confidence="INFERRED" if conflict else "EXTRACTED")
+    fresh = {"nodes": fresh_nodes, "edges": [incoming]}
+    if conflict:
+        with pytest.raises(ValueError, match="retained edge"):
+            build_merge([fresh], path, root=tmp_path, directed=directed,
+                        dedup=transform == "dedup", prune_sources=["deleted.md"])
+    else:
+        graph = build_merge([fresh], path, root=tmp_path, directed=directed,
+                            dedup=transform == "dedup", prune_sources=["deleted.md"])
+        assert graph.has_edge(canonical, canonical)
+        assert graph.edges[canonical, canonical]["confidence"] == "EXTRACTED"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("owner_form", ["source", "absolute"])
+def test_retained_owner_alias_view_preserves_ambiguity(tmp_path, owner_form):
+    records = [node("docs_policy_rule", source="docs/policy.md"),
+               node("other_policy_rule", source="other/policy.md"), node("anchor")]
+    for record in records[:2]:
+        if owner_form == "source":
+            record["source"] = record.pop("source_file")
+        else:
+            record["source_file"] = str(tmp_path / record["source_file"])
+    path, data = seed(tmp_path, records, [])
+    graph = build_merge([{"edges": [edge("anchor", "policy_rule")]}], path, root=tmp_path)
+    assert graph.number_of_edges() == 0
+    assert_retained(graph, data)
+
+
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("conflict", [False, True])
+def test_collapsed_raw_claim_composes_dedup_before_semantic_rekey(tmp_path, directed, conflict):
+    accepted = edge("docs_policy_rule", "docs_policy_rule")
+    path, _ = seed(tmp_path, [node("docs_policy_rule", source="deleted.md")], [accepted])
+    before = path.read_bytes()
+    fresh = {"nodes": [node("policy_rule", "Shared policy", "docs/policy.md"),
+                       node("policy_rule_chunk1", "Shared policy", "docs/policy.md")],
+             "edges": [{"source": "policy_rule_chunk1", "target": "policy_rule", "source_file": "stable.md",
+                        "relation": "references", "confidence": "INFERRED" if conflict else "EXTRACTED"}]}
+    if conflict:
+        with pytest.raises(ValueError, match="retained edge"):
+            build_merge([fresh], path, root=tmp_path, directed=directed, prune_sources=["deleted.md"])
+    else:
+        graph = build_merge([fresh], path, root=tmp_path, directed=directed, prune_sources=["deleted.md"])
+        assert graph.edges["docs_policy_rule", "docs_policy_rule"]["source_file"] == "stable.md"
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("legacy_owner", [False, True])
+@pytest.mark.parametrize("relation,confidence,target_file,kept", [
+    ("references", "EXTRACTED", "client.ts", False),
+    ("calls", "INFERRED", "client.ts", False),
+    ("calls", "EXTRACTED", "client.ts", True),
+    ("references", "EXTRACTED", "client.py", True),
+])
+def test_retained_owner_view_preserves_language_guard(tmp_path, legacy_owner, relation, confidence, target_file, kept):
+    records = [node("docs_service_run", source="docs/service.py"), node("client", source=target_file)]
+    if legacy_owner:
+        for record in records:
+            record["source"] = record.pop("source_file")
+    path, data = seed(tmp_path, records, [])
+    before = path.read_bytes()
+    incoming = dict(edge("service_run", "client"), relation=relation, confidence=confidence)
+    graph = build_merge([{"edges": [incoming]}], path, root=tmp_path)
+    assert graph.has_edge("docs_service_run", "client") is kept
+    assert_retained(graph, data)
+    assert path.read_bytes() == before

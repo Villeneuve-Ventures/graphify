@@ -616,6 +616,17 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
                          if identity not in G)
         node_set = set(G)
 
+    # Canonical ownership is a lookup view, never a rewrite of accepted payloads.
+    retained_sources = {
+        record["id"]: _norm_source_file(record.get("source_file", record.get("source")), _root)
+        for record in (_retained_nodes or [])
+    }
+
+    def node_source(identity):
+        if identity in retained_sources:
+            return retained_sources[identity]
+        return G.nodes[identity].get("source_file") if identity in G else None
+
     # Normalized ID map: lets edges survive when the LLM generates IDs with
     # slightly different casing or punctuation than the AST extractor.
     # e.g. "Session_ValidateToken" maps to "session_validatetoken".
@@ -662,7 +673,7 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
     _alias_candidates: dict[str, set[str]] = {}
     for nid in node_set:
         attrs = G.nodes[nid]
-        sf = attrs.get("source_file")
+        sf = node_source(nid)
         if not sf:
             continue
         rel = Path(str(sf))
@@ -693,13 +704,13 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             by_normalized.setdefault(_normalize_id(alias), set()).update(identities)
         norm_to_id = {key: next(iter(ids)) for key, ids in by_normalized.items() if len(ids) == 1}
     if _validate_raw_edges is not None:
-        def endpoint_source(identity):
+        def resolve_endpoint(identity):
             identity = _rekey.get(identity, identity)
             identity = _doc_remap.get(identity, identity)
             if identity not in node_set:
                 identity = norm_to_id.get(_normalize_id(identity), identity)
-            return G.nodes[identity].get("source_file") if identity in G else None
-        _validate_raw_edges(endpoint_source, G.nodes)
+            return identity
+        _validate_raw_edges(resolve_endpoint, node_source)
     # Iterate edges in a deterministic order. The graph is undirected and stores
     # direction in _src/_tgt; when two edges collapse onto the same node pair the
     # last write wins, so an unstable iteration order flips _src/_tgt run-to-run
@@ -745,8 +756,8 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         # flags and leaves query results with no file reference (#1279).
         if not attrs.get("source_file"):
             attrs["source_file"] = (
-                G.nodes[src].get("source_file")
-                or G.nodes[tgt].get("source_file")
+                node_source(src)
+                or node_source(tgt)
                 or ""
             )
         if "source_file" in attrs:
@@ -760,8 +771,8 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         # Python `import time` must not bind to a `time.ts`, #1749).
         _edge_rel = attrs.get("relation")
         if _edge_rel in ("calls", "imports", "imports_from", "references"):
-            src_ext = Path(G.nodes[src].get("source_file") or "").suffix.lower()
-            tgt_ext = Path(G.nodes[tgt].get("source_file") or "").suffix.lower()
+            src_ext = Path(node_source(src) or "").suffix.lower()
+            tgt_ext = Path(node_source(tgt) or "").suffix.lower()
             src_fam = _EDGE_LANG_FAMILY.get(src_ext)
             tgt_fam = _EDGE_LANG_FAMILY.get(tgt_ext)
             if _edge_rel == "calls":
@@ -1059,10 +1070,12 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             fresh[key].extend(deepcopy(chunk.get(key, [])))
     valid_groups = []
     for group in fresh["hyperedges"]:
-        if isinstance(group, dict):
-            valid_groups.append(group)
-        else:
+        if not isinstance(group, dict):
             print("[graphify] WARNING: skipping non-object fresh hyperedge.", file=sys.stderr)
+        elif not _hashable(group.get("id")):
+            print("[graphify] WARNING: skipping fresh hyperedge with non-hashable id.", file=sys.stderr)
+        else:
+            valid_groups.append(group)
     fresh["hyperedges"] = valid_groups
     normalize = lambda source: _norm_source_file(source, root)
     node_owner = lambda n: normalize(n.get("source_file", n.get("source")))
@@ -1136,9 +1149,8 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             normalized = {k: v for k, v in incoming.items() if k not in {"from", "to"}}
             normalized.update(source=source, target=target)
             before, after = _fact_attributes(old), _fact_attributes(normalized)
-            endpoint_sources = [retained_by_id[endpoint].get("source_file")
-                if endpoint in retained_by_id else source_for(remap.get(endpoint, endpoint)) if raw
-                else resolved_nodes[endpoint].get("source_file")
+            endpoint_sources = [node_owner(retained_by_id[endpoint])
+                if endpoint in retained_by_id else source_for(resolve(remap.get(endpoint, endpoint)) if raw else endpoint)
                 for endpoint in (source, target)]
             for fact in (before, after):
                 fact["source_file"] = normalize(fact.get("source_file")
@@ -1173,14 +1185,19 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             _normalize_hyperedge_members(group)
             if isinstance(group.get("nodes"), list):
                 group["nodes"] = [remap.get(m, m) if _hashable(m) else m for m in group["nodes"]]
-    def check_raw_edges(endpoint_source, node_attributes):
-        nonlocal source_for, resolved_nodes
-        source_for, resolved_nodes = endpoint_source, node_attributes
-        # Preserve every original claim, including edges removed by transformations.
+    def check_raw_edges(resolve_endpoint, node_source):
+        nonlocal source_for, resolve
+        source_for, resolve = node_source, resolve_endpoint
+        # Check both slots before lossy transforms can erase a conflicting claim.
         for record in raw_edges:
             check_edge(record, raw=True)
+            source = record.get("source", record.get("from"))
+            target = record.get("target", record.get("to"))
+            if isinstance(source, str) and isinstance(target, str):
+                check_edge({**record, "source": resolve(remap.get(source, source)),
+                            "target": resolve(remap.get(target, target))})
 
-    source_for = resolved_nodes = None
+    source_for = resolve = None
     graph = build_from_json(fresh, directed=directed, root=root, _retained_nodes=retained,
                             _validate_edge=check_edge, _validate_hyperedge=check_group,
                             _validate_raw_edges=check_raw_edges)
