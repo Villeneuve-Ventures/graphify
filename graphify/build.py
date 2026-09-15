@@ -800,14 +800,16 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
             # itself when no valid member remains (single-member hyperedges
             # are legal in this codebase, e.g. a per-file flow, so we prune
             # rather than require two survivors).
-            if isinstance(he, dict) and isinstance(he.get("nodes"), list):
-                if _validate_hyperedge is not None:
+            if isinstance(he, dict) and _validate_hyperedge is not None:
+                claim = he
+                if isinstance(he.get("nodes"), list):
                     claim = {**he, "nodes": [
                         norm_to_id.get(_normalize_id(m), m)
                         if isinstance(m, str) and m not in node_set else m
                         for m in he["nodes"]
                     ]}
-                    _validate_hyperedge(claim)
+                _validate_hyperedge(claim)
+            if isinstance(he, dict) and isinstance(he.get("nodes"), list):
                 valid_members = []
                 for m in he["nodes"]:
                     try:
@@ -1143,6 +1145,7 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         return isinstance(identity, bool), identity
 
     groups_by_id = {group_key(h): h for h in retained_groups if has_group_identity(h)}
+    fresh_group_claims = {}
 
     def group_facts(group, *, retained=False):
         canonical = deepcopy(group)
@@ -1154,13 +1157,19 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
 
     def check_group(incoming, *, members=True):
         old = groups_by_id.get(group_key(incoming)) if has_group_identity(incoming) else None
-        if old is not None:
+        # Memberless retained collisions remain subject to survival before staging.
+        if old is not None and (not members or isinstance(incoming.get("nodes"), list)):
             before, after = group_facts(old, retained=True), group_facts(incoming)
             if not members:
                 before.pop("nodes", None)
                 after.pop("nodes", None)
             if before != after:
                 raise ValueError("Semantic update conflicts with retained hyperedge identity")
+        if members and has_group_identity(incoming):
+            key, facts = group_key(incoming), group_facts(incoming)
+            if key in fresh_group_claims and fresh_group_claims[key] != facts:
+                raise ValueError("Semantic update conflicts with fresh hyperedge identity")
+            fresh_group_claims[key] = facts
 
     def check_edge(incoming, *, raw=False):
         source = incoming.get("source", incoming.get("from"))
@@ -1245,13 +1254,17 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             "_src": source, "_tgt": target,
         })
     carried, carried_facts = {}, {}
+    retained_group_keys = set()
 
     def stage_group(group, *, retained=False):
         key, facts = group_key(group), group_facts(group, retained=retained)
         if key in carried_facts and carried_facts[key] != facts:
             kind = "retained" if retained else "fresh"
             raise ValueError(f"Semantic update conflicts with {kind} hyperedge identity")
-        carried[key], carried_facts[key] = group, facts
+        if key not in retained_group_keys:
+            carried[key], carried_facts[key] = group, facts
+        if retained:
+            retained_group_keys.add(key)
 
     for group in graph.graph.get("hyperedges", []):
         if has_group_identity(group):

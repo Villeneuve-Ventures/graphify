@@ -819,6 +819,96 @@ def test_equivalent_retained_group_alias_copies_share_comparison_view(tmp_path):
     assert graph.graph["hyperedges"] == [group]
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("fresh", [False, True])
+def test_first_retained_group_payload_replaces_fresh_once(tmp_path, reverse, fresh):
+    groups = [{"id": "flow", "members": ["a"], "quotation": "accepted", "community": 1},
+              {"id": "flow", "nodes": ["a"], "quotation": "accepted", "community": 2}]
+    if reverse:
+        groups.reverse()
+    path, _ = seed(tmp_path, [node("a")], [], groups)
+    before = path.read_bytes()
+    chunks = [{"hyperedges": [{"id": "flow", "nodes": ["a"],
+                               "quotation": "accepted", "community": 3}]}] if fresh else []
+    graph = build_merge(chunks, path, root=tmp_path)
+    assert graph.graph["hyperedges"] == [groups[0]]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_unequal_retained_group_payloads_still_refuse(tmp_path, reverse):
+    groups = [{"id": "flow", "members": ["a"], "quotation": "accepted"},
+              {"id": "flow", "nodes": ["a"], "quotation": "different"}]
+    if reverse:
+        groups.reverse()
+    path, _ = seed(tmp_path, [node("a")], [], groups)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="retained hyperedge"):
+        build_merge([], path, root=tmp_path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_fresh_group_claims_refuse_before_dangling_filter(tmp_path, reverse):
+    path, _ = seed(tmp_path, [node("a")], [])
+    before = path.read_bytes()
+    groups = [{"id": "flow", "nodes": ["a"]},
+              {"id": "flow", "nodes": ["a", "unknown"]}]
+    if reverse:
+        groups.reverse()
+    with pytest.raises(ValueError, match="fresh hyperedge"):
+        build_merge([{"hyperedges": [group]} for group in groups], path, root=tmp_path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_memberless_fresh_group_refuses_fully_filtered_peer(tmp_path, reverse):
+    path, _ = seed(tmp_path, [node("a")], [])
+    before = path.read_bytes()
+    groups = [{"id": "flow", "quotation": "accepted"},
+              {"id": "flow", "quotation": "accepted", "nodes": ["unknown"]}]
+    if reverse:
+        groups.reverse()
+    with pytest.raises(ValueError, match="fresh hyperedge"):
+        build_merge([{"hyperedges": [group]} for group in groups], path, root=tmp_path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_fresh_group_claims_compare_resolved_aliases(tmp_path, reverse):
+    path, _ = seed(tmp_path, [node("a")], [])
+    before = path.read_bytes()
+    groups = [{"id": "flow", "nodes": ["a"]}, {"id": "flow", "nodes": ["A"]}]
+    if reverse:
+        groups.reverse()
+    graph = build_merge([{"hyperedges": [group]} for group in groups], path, root=tmp_path)
+    assert graph.graph["hyperedges"] == [{"id": "flow", "nodes": ["a"]}]
+    assert path.read_bytes() == before
+
+
+def test_fresh_group_claims_compare_dedup_remapped_members(tmp_path):
+    path, _ = seed(tmp_path, [node("retained")], [])
+    before = path.read_bytes()
+    fresh = {"nodes": [node("fresh", "A duplicated source concept", "changed.md"),
+                       node("fresh_chunk1", "A duplicated source concept", "changed.md")],
+             "hyperedges": [{"id": "mixed", "source_file": "changed.md", "nodes": [member, "retained"]}
+                            for member in ("fresh", "fresh_chunk1")]}
+    graph = build_merge([fresh], path, root=tmp_path)
+    assert "fresh" in graph and "fresh_chunk1" not in graph
+    assert graph.graph["hyperedges"] == [{"id": "mixed", "source_file": "changed.md",
+                                          "nodes": ["fresh", "retained"]}]
+    assert path.read_bytes() == before
+
+
+def test_single_fresh_group_still_filters_unknown_member(tmp_path):
+    path, _ = seed(tmp_path, [node("a")], [])
+    before = path.read_bytes()
+    graph = build_merge([{"hyperedges": [{"id": "flow", "nodes": ["a", "unknown"]}]}],
+                        path, root=tmp_path)
+    assert graph.graph["hyperedges"] == [{"id": "flow", "nodes": ["a"]}]
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("conflict", [False, True])
 def test_fresh_group_claims_checked_before_cross_chunk_collapse(tmp_path, conflict):
     path, _ = seed(tmp_path, [node("anchor")], [])
