@@ -109,6 +109,66 @@ def test_to_json_stages_beside_destination_when_system_temp_is_full(tmp_path, mo
     assert len(stages) == 1
     assert list(output_dir.iterdir()) == [output_dir / "graph.json"]
 
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_to_json_updates_writable_file_in_nonwritable_parent(tmp_path, unsupported):
+    import os
+    import networkx as nx
+
+    if os.name == "nt":
+        pytest.skip("requires POSIX directory permission semantics")
+    output_dir = tmp_path / "protected"
+    output_dir.mkdir()
+    target = output_dir / "graph.json"
+    sentinel = b'{"nodes": [{"id": "old"}], "links": []}'
+    target.write_bytes(sentinel)
+    output_dir.chmod(0o555)
+    try:
+        try:
+            probe = tempfile.TemporaryFile(dir=output_dir)
+        except PermissionError:
+            pass
+        else:
+            probe.close()
+            pytest.skip("directory permissions do not prevent sibling creation")
+        with target.open("r+") as existing:
+            assert existing.read() == sentinel.decode()
+        graph = nx.Graph()
+        graph.add_node("new", label="new")
+        if unsupported:
+            graph.nodes["new"]["unsupported"] = {"not", "json"}
+            with pytest.raises(TypeError):
+                to_json(graph, {}, str(target), built_at_commit="test")
+            assert target.read_bytes() == sentinel
+        else:
+            assert to_json(graph, {}, str(target), built_at_commit="test")
+            assert json.loads(target.read_text())["nodes"][0]["id"] == "new"
+        assert list(output_dir.iterdir()) == [target]
+    finally:
+        output_dir.chmod(0o755)
+
+def test_to_json_does_not_retry_nonpermission_staging_errors(tmp_path, monkeypatch):
+    import errno
+    import networkx as nx
+    from graphify.export import tempfile as export_tempfile
+
+    target = tmp_path / "graph.json"
+    sentinel = b'{"nodes": [{"id": "old"}], "links": []}'
+    target.write_bytes(sentinel)
+    calls = []
+
+    def full_filesystem(*args, **kwargs):
+        calls.append(kwargs.get("dir"))
+        raise OSError(errno.ENOSPC, "destination filesystem is full")
+
+    monkeypatch.setattr(export_tempfile, "TemporaryFile", full_filesystem)
+    graph = nx.Graph()
+    graph.add_node("new", label="new")
+    with pytest.raises(OSError) as error:
+        to_json(graph, {}, str(target), built_at_commit="test")
+    assert error.value.errno == errno.ENOSPC
+    assert calls == [tmp_path]
+    assert target.read_bytes() == sentinel
+
 def test_to_json_creates_file():
     G = make_graph()
     communities = cluster(G)

@@ -72,8 +72,14 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
         _GFY_ROOT_LINE=""
         _GFY_ROOT_EXTRA=""
         if exec 3< "$_GFY_ROOT_MARKER"; then
-            IFS= read -r _GFY_ROOT_LINE <&3 || [ -n "$_GFY_ROOT_LINE" ]
-            _GFY_ROOT_STATUS=$?
+            _GFY_ROOT_TERMINATED=0
+            if IFS= read -r _GFY_ROOT_LINE <&3; then
+                _GFY_ROOT_TERMINATED=1
+                _GFY_ROOT_STATUS=0
+            else
+                [ -n "$_GFY_ROOT_LINE" ]
+                _GFY_ROOT_STATUS=$?
+            fi
             if IFS= read -r _GFY_ROOT_EXTRA <&3 || [ -n "$_GFY_ROOT_EXTRA" ]; then
                 _GFY_ROOT_STATUS=1
             fi
@@ -81,12 +87,16 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
             _GFY_BOM=$(printf '\\357\\273\\277')
             case "$_GFY_ROOT_LINE" in "$_GFY_BOM"*) _GFY_ROOT_LINE=${_GFY_ROOT_LINE#"$_GFY_BOM"} ;; esac
             _GFY_CR=$(printf '\\r')
-            while :; do
-                case "$_GFY_ROOT_LINE" in
-                    *"$_GFY_CR") _GFY_ROOT_LINE=${_GFY_ROOT_LINE%"$_GFY_CR"} ;;
-                    *) break ;;
-                esac
-            done
+            # Writers save paths without a terminator; a trailing CR at EOF
+            # can be part of a POSIX directory name and must remain denied.
+            if [ "$_GFY_ROOT_TERMINATED" = 1 ]; then
+                while :; do
+                    case "$_GFY_ROOT_LINE" in
+                        *"$_GFY_CR") _GFY_ROOT_LINE=${_GFY_ROOT_LINE%"$_GFY_CR"} ;;
+                        *) break ;;
+                    esac
+                done
+            fi
             _GFY_ROOT_NATIVE=0
             _GFY_BACKSLASH=$(printf '\\\\')
             case "$_GFY_ROOT_LINE" in
