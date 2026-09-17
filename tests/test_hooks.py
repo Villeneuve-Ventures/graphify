@@ -859,7 +859,7 @@ def test_rebuild_bodies_read_graphify_root(name, body):
     # The recovered root is what gets rebuilt, not a hardcoded cwd.
     assert "_rebuild_code(_root" in body, f"{name} does not pass the recovered root"
     # Quote-safe inside the shell-double-quoted launcher: single quotes only.
-    assert "read_text(encoding='utf-8')" in body, f"{name} root read is not single-quoted"
+    assert "read_graphify_root(_saved)" in body, f"{name} bypasses shared root decoding"
 
 
 def test_rebuild_bodies_with_graphify_root_are_valid_python():
@@ -1798,10 +1798,14 @@ def test_trusted_pin_allows_identity_valid_project_local_editable_origin(tmp_pat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
-@pytest.mark.parametrize("marker_prefix", [b"", b"\xef\xbb\xbf"], ids=["no-newline", "utf8-bom"])
+@pytest.mark.parametrize("marker_prefix", [b"", b"\xef\xbb\xbf"], ids=["plain", "utf8-bom"])
+@pytest.mark.parametrize(
+    "marker_suffix", [b"", b"\n", b"\r\n", b"\r\r\n"],
+    ids=["no-newline", "lf", "crlf", "repeated-cr"],
+)
 @pytest.mark.parametrize("marker_kind", ["posix", "windows-drive", "windows-unc"])
 def test_dynamic_hook_discovery_denies_persisted_external_corpus(
-    tmp_path, marker_prefix, marker_kind
+    tmp_path, marker_prefix, marker_suffix, marker_kind
 ):
     """A saved corpus root denies lower-authority editable installations."""
     workspace = tmp_path / "workspace"
@@ -1819,7 +1823,7 @@ def test_dynamic_hook_discovery_denies_persisted_external_corpus(
         "windows-unc": br"\\server\share\External Corpus",
     }
     (graphify_out / ".graphify_root").write_bytes(
-        marker_prefix + marker_values[marker_kind]
+        marker_prefix + marker_values[marker_kind] + marker_suffix
     )
     script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
     if marker_kind == "posix":
@@ -1936,6 +1940,75 @@ def test_dynamic_hook_discovery_denies_persisted_external_corpus(
     )
     assert f"SELECTED={interpreter}" not in failed_result.stdout
     assert not ambient_marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+@pytest.mark.parametrize("trailing_cr", ["\r", "\r\r"], ids=["cr", "repeated-cr"])
+def test_persisted_hook_root_preserves_unterminated_trailing_cr(tmp_path, trailing_cr):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    graphify_out = workspace / "graphify-out"
+    graphify_out.mkdir(parents=True)
+    corpus = tmp_path / ("external-corpus" + trailing_cr)
+    corpus.mkdir()
+    # Match the watch/rebuild writer: the resolved path has no added terminator.
+    (graphify_out / ".graphify_root").write_text(str(corpus.resolve()), encoding="utf-8")
+    # Check the actual root and its denial directly: interpreter discovery can
+    # independently reject control characters and conceal a lost denial root.
+    reader = _PYTHON_DETECT.split("_gfy_normalize_path() {", 1)[0]
+    result = _run_python_detect(
+        reader.replace("__PINNED_PYTHON__", "")
+        + '\n[ "$_GFY_PERSISTED_ROOT" = "$GFY_EXPECTED_ROOT" ] && printf "ROOT_MATCH\\n"\n'
+        + '_gfy_path_denied "$GFY_EXPECTED_ROOT/graphify/__init__.py" && printf "DENIED\\n"\n',
+        cwd=workspace,
+        env_overrides={"GFY_EXPECTED_ROOT": str(corpus.resolve())},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "ROOT_MATCH\n" in result.stdout
+    assert "DENIED\n" in result.stdout
+
+    # A normal-named alias keeps .pth parsing from stripping the CR itself.
+    # The real origin must still be denied by the persisted corpus root.
+    _write_graphify_package(corpus)
+    alias = tmp_path / "corpus-alias"
+    alias.symlink_to(corpus, target_is_directory=True)
+    interpreter = _editable_interpreter(tmp_path / "dynamic", alias)
+    result = _run_python_detect(
+        _PYTHON_DETECT.replace("__PINNED_PYTHON__", ""),
+        cwd=workspace,
+        interpreter=interpreter,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"SELECTED={interpreter}" not in result.stdout
+    assert "could not locate a trusted" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_persisted_hook_root_preserves_trailing_path_whitespace(tmp_path):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    graphify_out = workspace / "graphify-out"
+    graphify_out.mkdir(parents=True)
+    corpus = tmp_path / "external-corpus \t"
+    corpus.mkdir()
+    (graphify_out / ".graphify_root").write_bytes(
+        b"\xef\xbb\xbf" + os.fsencode(corpus) + b"\r\n"
+    )
+    # Isolate the marker reader so later interpreter policy cannot mask a
+    # decoding failure by independently rejecting an origin with whitespace.
+    reader = _PYTHON_DETECT.split("_gfy_path_denied() {", 1)[0]
+    result = _run_python_detect(
+        reader.replace("__PINNED_PYTHON__", "")
+        + '\nprintf \'ROOT=%s\\n\' "$_GFY_PERSISTED_ROOT"\n',
+        cwd=workspace,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"ROOT={corpus.resolve()}\n" in result.stdout
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")

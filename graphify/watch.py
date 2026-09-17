@@ -12,6 +12,7 @@ from pathlib import Path
 
 # Single source of truth in graphify.paths (#1423); re-exported as _GRAPHIFY_OUT.
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
+from graphify.paths import read_graphify_root
 _PENDING_FILENAME = ".pending_changes"
 
 
@@ -297,7 +298,7 @@ class _StoredSourcePaths:
         root_marker = out / ".graphify_root"
         if root_marker.exists():
             try:
-                saved_root = Path(root_marker.read_text(encoding="utf-8").strip())
+                saved_root = Path(read_graphify_root(root_marker))
                 if saved_root.is_absolute():
                     self.existing_source_root = saved_root.resolve()
                 else:

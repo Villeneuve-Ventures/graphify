@@ -2,6 +2,7 @@ import json
 import math
 import re
 import tempfile
+import pytest
 from pathlib import Path
 from graphify.build import build_from_json
 from graphify.cluster import cluster
@@ -9,8 +10,164 @@ from graphify.export import to_json, to_cypher, to_graphml, to_html, to_canvas, 
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+@pytest.mark.parametrize("force", [False, True])
+def test_to_json_serialization_failure_preserves_existing_bytes(tmp_path, force):
+    import networkx as nx
+
+    target = tmp_path / "graph.json"
+    sentinel = b'{"nodes": [{"id": "sentinel"}], "links": []}'
+    target.write_bytes(sentinel)
+    graph = nx.Graph()
+    graph.add_node("new", label="new", unsupported={"not", "json"})
+
+    with pytest.raises(TypeError):
+        to_json(graph, {0: ["new"]}, str(target), force=force)
+
+    assert target.read_bytes() == sentinel
+
 def make_graph():
     return build_from_json(json.loads((FIXTURES / "extraction.json").read_text()))
+
+def test_to_json_does_not_buffer_complete_serialized_graph(tmp_path):
+    import networkx as nx
+    import tracemalloc
+
+    graph = nx.Graph()
+    payload = "x" * 16384
+    for index in range(512):
+        graph.add_node(str(index), label="node", payload=payload)
+    target = tmp_path / "large.json"
+
+    tracemalloc.start()
+    try:
+        assert to_json(graph, {}, str(target), built_at_commit="test")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert target.stat().st_size > 8 * 1024 * 1024
+    assert peak < 4 * 1024 * 1024, f"serialized output buffered: peak={peak}"
+
+@pytest.mark.parametrize("failure", ["serialization", "destination", None])
+def test_to_json_closes_staging_stream(tmp_path, monkeypatch, failure):
+    import networkx as nx
+    from graphify.export import tempfile as export_tempfile
+
+    temporary_file = tempfile.TemporaryFile
+    streams = []
+
+    def record_stream(*args, **kwargs):
+        stream = temporary_file(*args, **kwargs)
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(export_tempfile, "TemporaryFile", record_stream)
+    graph = nx.Graph()
+    graph.add_node("new", label="new")
+    target = tmp_path / "graph.json"
+    if failure == "serialization":
+        graph.nodes["new"]["unsupported"] = {"not", "json"}
+        with pytest.raises(TypeError):
+            to_json(graph, {}, str(target))
+        assert not target.exists()
+    elif failure == "destination":
+        target.mkdir()
+        with pytest.raises(OSError):
+            to_json(graph, {}, str(target))
+    else:
+        assert to_json(graph, {}, str(target))
+        assert json.loads(target.read_text())["nodes"][0]["id"] == "new"
+    assert len(streams) == 1
+    assert streams[0].closed
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_to_json_stages_beside_destination_when_system_temp_is_full(tmp_path, monkeypatch, relative):
+    import errno
+    import networkx as nx
+    from graphify.export import tempfile as export_tempfile
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    monkeypatch.chdir(output_dir)
+    target = Path("graph.json") if relative else output_dir / "graph.json"
+    temporary_file = tempfile.TemporaryFile
+    stages = []
+
+    def require_output_filesystem(*args, **kwargs):
+        directory = kwargs.get("dir")
+        if directory is None:
+            raise OSError(errno.ENOSPC, "system temporary filesystem is full")
+        assert Path(directory).resolve() == output_dir.resolve()
+        stages.append(directory)
+        return temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(export_tempfile, "TemporaryFile", require_output_filesystem)
+    graph = nx.Graph()
+    graph.add_node("new", label="new")
+    assert to_json(graph, {}, str(target), built_at_commit="test")
+    assert json.loads(target.read_text())["nodes"][0]["id"] == "new"
+    assert len(stages) == 1
+    assert list(output_dir.iterdir()) == [output_dir / "graph.json"]
+
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_to_json_updates_writable_file_in_nonwritable_parent(tmp_path, unsupported):
+    import os
+    import networkx as nx
+
+    if os.name == "nt":
+        pytest.skip("requires POSIX directory permission semantics")
+    output_dir = tmp_path / "protected"
+    output_dir.mkdir()
+    target = output_dir / "graph.json"
+    sentinel = b'{"nodes": [{"id": "old"}], "links": []}'
+    target.write_bytes(sentinel)
+    output_dir.chmod(0o555)
+    try:
+        try:
+            probe = tempfile.TemporaryFile(dir=output_dir)
+        except PermissionError:
+            pass
+        else:
+            probe.close()
+            pytest.skip("directory permissions do not prevent sibling creation")
+        with target.open("r+") as existing:
+            assert existing.read() == sentinel.decode()
+        graph = nx.Graph()
+        graph.add_node("new", label="new")
+        if unsupported:
+            graph.nodes["new"]["unsupported"] = {"not", "json"}
+            with pytest.raises(TypeError):
+                to_json(graph, {}, str(target), built_at_commit="test")
+            assert target.read_bytes() == sentinel
+        else:
+            assert to_json(graph, {}, str(target), built_at_commit="test")
+            assert json.loads(target.read_text())["nodes"][0]["id"] == "new"
+        assert list(output_dir.iterdir()) == [target]
+    finally:
+        output_dir.chmod(0o755)
+
+def test_to_json_does_not_retry_nonpermission_staging_errors(tmp_path, monkeypatch):
+    import errno
+    import networkx as nx
+    from graphify.export import tempfile as export_tempfile
+
+    target = tmp_path / "graph.json"
+    sentinel = b'{"nodes": [{"id": "old"}], "links": []}'
+    target.write_bytes(sentinel)
+    calls = []
+
+    def full_filesystem(*args, **kwargs):
+        calls.append(kwargs.get("dir"))
+        raise OSError(errno.ENOSPC, "destination filesystem is full")
+
+    monkeypatch.setattr(export_tempfile, "TemporaryFile", full_filesystem)
+    graph = nx.Graph()
+    graph.add_node("new", label="new")
+    with pytest.raises(OSError) as error:
+        to_json(graph, {}, str(target), built_at_commit="test")
+    assert error.value.errno == errno.ENOSPC
+    assert calls == [tmp_path]
+    assert target.read_bytes() == sentinel
 
 def test_to_json_creates_file():
     G = make_graph()

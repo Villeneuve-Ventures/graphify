@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -266,8 +267,20 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     commit = built_at_commit if built_at_commit is not None else _git_head()
     if commit:
         data["built_at_commit"] = commit
-    with open(output_path, "w", encoding="utf-8") as f:  # nosec
-        json.dump(data, f, indent=2)
+    # Stage beside the destination to use its storage capacity and preserve it
+    # on serialization failure without buffering the complete JSON in memory.
+    try:
+        serialized = tempfile.TemporaryFile(
+            mode="w+", encoding="utf-8", newline="", dir=Path(output_path).parent,
+        )
+    except PermissionError:
+        # A writable existing file need not have a writable parent directory.
+        serialized = tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="")
+    with serialized:
+        json.dump(data, serialized, indent=2)
+        serialized.seek(0)
+        with open(output_path, "w", encoding="utf-8") as f:  # nosec
+            shutil.copyfileobj(serialized, f, length=64 * 1024)
     return True
 
 
