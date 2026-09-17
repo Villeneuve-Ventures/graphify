@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 from collections import Counter
 from datetime import date
 from pathlib import Path
@@ -266,9 +267,13 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     commit = built_at_commit if built_at_commit is not None else _git_head()
     if commit:
         data["built_at_commit"] = commit
-    serialized = json.dumps(data, indent=2)
-    with open(output_path, "w", encoding="utf-8") as f:  # nosec
-        f.write(serialized)
+    # Stage serialization on disk so failures preserve the destination without
+    # retaining another complete graph-sized string in memory.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as serialized:
+        json.dump(data, serialized, indent=2)
+        serialized.seek(0)
+        with open(output_path, "w", encoding="utf-8") as f:  # nosec
+            shutil.copyfileobj(serialized, f, length=64 * 1024)
     return True
 
 

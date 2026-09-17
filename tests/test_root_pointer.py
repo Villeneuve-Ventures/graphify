@@ -39,10 +39,10 @@ def test_reflect_resolves_saved_root(saved_root):
 
 def test_watch_retains_saved_source_identity(saved_root):
     from graphify.build import _norm_source_file
-    from graphify.watch import _StoredSourcePaths
+    import graphify.watch as watch
 
     root, out = saved_root
-    paths = _StoredSourcePaths(
+    paths = watch._StoredSourcePaths(
         {}, out=out, project_root=out.parent, watch_root=root,
         normalize_source=_norm_source_file,
     )

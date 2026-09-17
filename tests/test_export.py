@@ -28,6 +28,57 @@ def test_to_json_serialization_failure_preserves_existing_bytes(tmp_path, force)
 def make_graph():
     return build_from_json(json.loads((FIXTURES / "extraction.json").read_text()))
 
+def test_to_json_does_not_buffer_complete_serialized_graph(tmp_path):
+    import networkx as nx
+    import tracemalloc
+
+    graph = nx.Graph()
+    payload = "x" * 16384
+    for index in range(512):
+        graph.add_node(str(index), label="node", payload=payload)
+    target = tmp_path / "large.json"
+
+    tracemalloc.start()
+    try:
+        assert to_json(graph, {}, str(target), built_at_commit="test")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert target.stat().st_size > 8 * 1024 * 1024
+    assert peak < 4 * 1024 * 1024, f"serialized output buffered: peak={peak}"
+
+@pytest.mark.parametrize("failure", ["serialization", "destination", None])
+def test_to_json_closes_staging_stream(tmp_path, monkeypatch, failure):
+    import networkx as nx
+    import graphify.export as export
+
+    temporary_file = tempfile.TemporaryFile
+    streams = []
+
+    def record_stream(*args, **kwargs):
+        stream = temporary_file(*args, **kwargs)
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(export.tempfile, "TemporaryFile", record_stream)
+    graph = nx.Graph()
+    graph.add_node("new", label="new")
+    target = tmp_path / "graph.json"
+    if failure == "serialization":
+        graph.nodes["new"]["unsupported"] = {"not", "json"}
+        with pytest.raises(TypeError):
+            to_json(graph, {}, str(target))
+        assert not target.exists()
+    elif failure == "destination":
+        with pytest.raises(OSError):
+            to_json(graph, {}, str(tmp_path / "missing" / "graph.json"))
+    else:
+        assert to_json(graph, {}, str(target))
+        assert json.loads(target.read_text())["nodes"][0]["id"] == "new"
+    assert len(streams) == 1
+    assert streams[0].closed
+
 def test_to_json_creates_file():
     G = make_graph()
     communities = cluster(G)
