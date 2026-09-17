@@ -58,15 +58,20 @@ Every relationship is tagged with one of three labels:
 | `AMBIGUOUS` | Uncertain — flagged in the report for manual review |
 
 Scores may be assigned by structural or semantic extraction; a numeric score
-does not by itself identify model-derived evidence. The semantic extraction
-prompt assigns EXTRACTED edges a `confidence_score` of 1.0 and uses this rubric
-for INFERRED edges:
+does not by itself identify model-derived evidence. The host skill's
+[shared extraction instructions](../tools/skillgen/fragments/references/shared/extraction-spec.md)
+require EXTRACTED edges to have a `confidence_score` of 1.0 and prescribe this
+rubric for INFERRED edges:
 
 - **0.95** — near-certain (explicit cross-file reference, one plausible target)
 - **0.85** — strong evidence (naming + context align)
 - **0.75** — reasonable (contextual but not explicit)
 - **0.65** — weak (naming similarity only)
 - **0.55** — speculative
+
+The headless CLI uses a separate
+[`_EXTRACTION_SYSTEM` prompt](../graphify/llm.py). Its output schema includes
+`confidence_score`, but the prompt does not prescribe the discrete rubric above.
 
 When a score is absent, [`to_json()`](../graphify/export.py) fills it in for
 `graph.json` using the confidence tag: EXTRACTED **1.0**, INFERRED **0.5**, or
