@@ -23,6 +23,7 @@ import pytest
 
 import graphify.workspace.identity as identity_module
 import graphify.workspace.leases as lease_module
+import graphify.workspace.persistence as persistence_module
 
 from graphify.workspace.contracts import FencedLease, canonical_json_bytes
 from graphify.workspace.identity import (
@@ -31,6 +32,7 @@ from graphify.workspace.identity import (
     OperatorAuthorization,
     SourceAmbiguousError,
     SourceDiscoveryError,
+    SourceDiscoveryTimeout,
     SourceIdentity,
     UUIDCollisionError,
     discover_source,
@@ -2831,13 +2833,15 @@ def test_concurrent_initialization_cannot_recreate_removed_registry_lock(
 def test_lease_acquisition_deadline_bounds_mutating_lock_wait(
     tmp_path: Path,
     lock_name: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _create_repo(tmp_path / "repo", REPO_UUID)
     state_root = tmp_path / "state"
     registry = RegistryStore(state_root, capabilities=SUPPORTED)
     leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    source = discover_source(repo)
     registry.enroll(
-        discover_source(repo),
+        source,
         _authorization(IdentityAction.ENROLL, "enroll"),
         expected_revision=0,
     )
@@ -2856,12 +2860,39 @@ def test_lease_acquisition_deadline_bounds_mutating_lock_wait(
             "release": release,
         },
     )
-    release_timer = threading.Timer(1.0, release.set)
+    deadline_ns = 1_100_000_000
+    observed_deadlines: list[int | None] = []
+
+    def cached_discover_source(
+        source_root: Path,
+        *,
+        deadline_ns: int | None = None,
+    ) -> SourceIdentity:
+        assert source_root == source.root
+        observed_deadlines.append(deadline_ns)
+        return source
+
+    class ContentionClock:
+        now_ns = 1_000_000_000
+
+        def __init__(self) -> None:
+            self.polls: list[float] = []
+
+        def monotonic_ns(self) -> int:
+            return self.now_ns
+
+        def sleep(self, seconds: float) -> None:
+            assert 0 < seconds <= 0.001
+            time.sleep(seconds)
+            self.polls.append(seconds)
+            self.now_ns = deadline_ns
+
+    clock = ContentionClock()
+    monkeypatch.setattr(lease_module, "discover_source", cached_discover_source)
+    monkeypatch.setattr(persistence_module, "time", clock)
     try:
         holder.start()
         assert acquired.wait(timeout=5)
-        release_timer.start()
-        started = time.monotonic()
         with pytest.raises(LockTimeout) as raised:
             leases.acquire(
                 REPO_UUID,
@@ -2874,14 +2905,14 @@ def test_lease_acquisition_deadline_bounds_mutating_lock_wait(
                 acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
                 monotonic_ns=20_000,
                 ttl_ns=30_000_000_000,
-                deadline_ns=time.monotonic_ns() + 100_000_000,
+                deadline_ns=deadline_ns,
             )
-        assert time.monotonic() - started < 0.5
+        assert clock.polls == [0.001]
+        assert observed_deadlines == ([] if lock_name == "registry" else [deadline_ns])
         assert raised.value.phase == "acquire"
         assert raised.value.kind == lock_name
     finally:
         release.set()
-        release_timer.cancel()
         if holder.pid is not None:
             holder.join(timeout=5)
             if holder.is_alive():
@@ -2889,6 +2920,54 @@ def test_lease_acquisition_deadline_bounds_mutating_lock_wait(
                 holder.join(timeout=5)
 
     assert workspace_path.read_bytes() == workspace_before
+
+
+def test_rollback_lease_propagates_source_discovery_timeout_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _create_repo(tmp_path / "repo", REPO_UUID)
+    state_root = tmp_path / "state"
+    registry = RegistryStore(state_root, capabilities=SUPPORTED)
+    leases = LeaseStore(state_root, registry, capabilities=SUPPORTED)
+    registry.enroll(
+        discover_source(repo),
+        _authorization(IdentityAction.ENROLL, "enroll"),
+        expected_revision=0,
+    )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    observed: list[int | None] = []
+    failure = SourceDiscoveryTimeout("source verification exceeded its deadline")
+
+    def timeout_discover_source(
+        source_root: Path,
+        *,
+        deadline_ns: int | None = None,
+    ) -> SourceIdentity:
+        assert source_root == repo.resolve()
+        observed.append(deadline_ns)
+        raise failure
+
+    monkeypatch.setattr(lease_module, "discover_source", timeout_discover_source)
+    before = _tree_snapshot(state_root)
+    with pytest.raises(SourceDiscoveryTimeout) as raised:
+        leases.acquire(
+            REPO_UUID,
+            "ROLLBACK",
+            leases.current_owner(),
+            expected_registry_revision=1,
+            expected_active_source_revision=1,
+            expected_operation_epoch=1,
+            expected_migration_epoch=0,
+            acquired_at=datetime(2026, 7, 16, 15, 7, tzinfo=timezone.utc),
+            monotonic_ns=20_000,
+            ttl_ns=30_000_000_000,
+            deadline_ns=deadline_ns,
+        )
+
+    assert observed == [deadline_ns]
+    assert raised.value is failure
+    assert _tree_snapshot(state_root) == before
 
 
 def test_repair_lease_threads_deadline_through_source_verification(

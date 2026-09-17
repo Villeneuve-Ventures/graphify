@@ -6,6 +6,8 @@ pre-parse screen rejects bombs before openpyxl/python-docx ever decompress them.
 """
 import zipfile
 
+import pytest
+
 from graphify import detect
 
 
@@ -88,3 +90,48 @@ def test_pdf_over_cap_returns_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(detect, "_file_within_size_cap",
                         lambda p, cap=100: p.stat().st_size <= cap if p.exists() else False)
     assert detect.extract_pdf_text(big) == ""
+
+
+@pytest.mark.parametrize("form_repetitions", [0, 3])
+def test_pdf_extracts_plain_text_and_repeated_forms(tmp_path, form_repetitions):
+    """Small real PDFs retain ordinary and repeated form text after dependency upgrades."""
+    pypdf = pytest.importorskip("pypdf")
+    from pypdf.generic import (
+        ArrayObject, DecodedStreamObject, DictionaryObject, NameObject, NumberObject,
+    )
+
+    writer = pypdf.PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    resources = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+    })
+    page[NameObject("/Resources")] = resources
+    content = b"BT /F1 12 Tf 20 250 Td (Ordinary PDF text) Tj ET\n"
+    if form_repetitions:
+        form = DecodedStreamObject()
+        form.set_data(b"BT /F1 12 Tf 0 0 Td (Repeated form text) Tj ET")
+        form.update({
+            NameObject("/Type"): NameObject("/XObject"),
+            NameObject("/Subtype"): NameObject("/Form"),
+            NameObject("/BBox"): ArrayObject([NumberObject(n) for n in (0, 0, 200, 20)]),
+            NameObject("/Resources"): DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+            }),
+        })
+        resources[NameObject("/XObject")] = DictionaryObject({NameObject("/Fm1"): form})
+        for index in range(form_repetitions):
+            content += f"q 1 0 0 1 20 {200 - index * 20} cm /Fm1 Do Q\n".encode("ascii")
+    stream = DecodedStreamObject()
+    stream.set_data(content)
+    page[NameObject("/Contents")] = stream
+    pdf = tmp_path / "text.pdf"
+    writer.write(pdf)
+
+    text = detect.extract_pdf_text(pdf)
+    assert text.count("Ordinary PDF text") == 1
+    assert text.count("Repeated form text") == form_repetitions

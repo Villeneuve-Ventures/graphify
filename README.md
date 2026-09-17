@@ -16,6 +16,12 @@
 
 Type `/graphify` in your AI coding assistant and it maps your entire project (code, docs, PDFs, images, videos) into a **knowledge graph** you can **query instead of grepping** through files.
 
+> **Workspace development fork:** This repository develops
+> `graphifyy 0.9.16+workspace.1` on `workspace/v1`, based on
+> [upstream Graphify](https://github.com/Graphify-Labs/graphify).
+> For this fork, use the [development setup](#development-setup). The
+> package-name install commands below do not select this repository or branch.
+
 - **Code maps for free, fully local.** Code is parsed with tree-sitter AST: deterministic, no LLM, nothing leaves your machine. (Docs, PDFs, images and video use your assistant's model, or a configured API key, for a semantic pass.)
 - **Every edge is explained.** Each connection is tagged `EXTRACTED` (explicit in the source) or `INFERRED` (resolved by graphify), so you can tell what was read directly from what was inferred.
 - **Not a vector index.** No embeddings, no vector store: a real graph you traverse. Ask a question, trace the path between two things, or explain one concept.
@@ -50,6 +56,27 @@ graphify-out/
 ```
 
 **Works in** Claude Code, Cursor, Codex, Gemini CLI, GitHub Copilot, and 15+ more — [pick your platform](#install).
+
+---
+
+## Workspace runtime in this fork
+
+Alongside the existing graph-building and assistant workflows, this branch
+implements an identity-bound workspace control plane: registration and source
+selection, code-only sync, certified-generation queries, status/doctor,
+rollback, pointer repair, and offline garbage collection. Workspace commands
+use installed runtime authority and explicit request contracts; an editable
+package install alone does not provision that authority.
+
+The semantic worker, handoff, certification, promotion, and release-policy
+prerequisites have bounded accepted implementations. Full semantic sync and
+semantic-content release remain unfinished, and the isolated installation
+proof does not constitute production installation or portfolio migration.
+See the [workspace overview and current scope](docs/workspace/v1/README.md),
+[architecture](docs/workspace/v1/architecture.md), and
+[verification contract](docs/workspace/v1/verification.md) before using these
+surfaces. The [fork changelog](CHANGELOG.md#unreleased--workspace-development-fork)
+summarizes the additions; the upstream workflows continue below.
 
 ---
 
@@ -142,6 +169,9 @@ uv python install 3.14
 ## Install
 
 > **Official package:** The PyPI package is `graphifyy` (double-y). Other `graphify*` packages on PyPI are not affiliated. The CLI command is still `graphify`.
+
+These are the published-package installation instructions. To develop or test
+the workspace fork from source, use [Development setup](#development-setup).
 
 **Step 1 — install the package:**
 
@@ -600,6 +630,11 @@ graphify-out/
 
 ## Full command reference
 
+This section covers the existing graph and assistant commands. The
+[`graphify workspace` reference](docs/workspace/v1/README.md) documents this
+fork's separate workspace commands, request schemas, and authority requirements.
+Use `uv run --frozen graphify --help` from this checkout for its command list.
+
 ```
 /graphify                          # run on current directory
 /graphify ./raw                    # run on a specific folder
@@ -758,6 +793,7 @@ graphify label ./my-project --backend=openai --model gpt-4o   # force a specific
 
 - [How it works](docs/how-it-works.md) — the extraction pipeline, community detection, confidence scoring, benchmarks
 - [ARCHITECTURE.md](ARCHITECTURE.md) — module breakdown, how to add a language
+- [Workspace v1](docs/workspace/v1/README.md) — workspace commands, implemented scope, and remaining work
 - [Optional integrations](docs/docker-mcp-sqlite.md) — Docker MCP Toolkit + SQLite
 - [The Memory Layer](https://safishamsi.gumroad.com/l/qetvlo) — the book on the ideas behind graphify, the architecture end to end
 
@@ -781,21 +817,26 @@ Built for people whose work lives across hundreds of conversations and documents
 The project uses [uv](https://docs.astral.sh/uv/) for dev workflow. Install it once, then:
 
 ```bash
-git clone https://github.com/safishamsi/graphify.git
+git clone --branch workspace/v1 https://github.com/Villeneuve-Ventures/graphify.git
 cd graphify
-git checkout v8                        # active development branch
 
 # Create the project venv and install graphify + all extras + the dev group
 # (pytest). uv installs the dev dependency group by default; pass --no-dev to
 # skip it.
-uv sync --all-extras
+uv sync --all-extras --frozen
 ```
 
 Verify the editable install:
 ```bash
-uv run graphify --version
-uv run python -c "import graphify; print(graphify.__file__)"
+uv run --frozen graphify --version
+uv run --frozen python -c "import graphify; print(graphify.__file__)"
 ```
+
+The version should match `pyproject.toml`, and the module path should point into
+this checkout. Use `uv run --frozen graphify ...` for fork commands so a global
+upstream executable does not take precedence. This sets up the development
+environment; workspace authority provisioning and production installation remain
+separate, governed steps described in the [workspace docs](docs/workspace/v1/README.md).
 
 ### Running tests
 
@@ -810,9 +851,38 @@ uv run pytest tests/ -q -k "python"    # filter by name
 
 ### Git workflow
 
-- Active development happens on the `v8` branch.
+- Workspace development in this fork happens on `workspace/v1`; upstream
+  contribution instructions and branches are separate.
 - Commit style: `fix: <description>` / `feat: <description>` / `docs: <description>`
-- Before opening a PR, run `uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0` and confirm it passes.
+- Before opening a PR, choose local validation by the change's effects:
+  - **Editorial documentation only:** For prose, spelling, formatting, or ordinary-link
+    changes that do not alter executable, security, governance, generated-artifact,
+    installation, CLI, schema, or workspace contracts, run `git diff --check`, review
+    the final Markdown and diff, and directly verify any changed links or command
+    examples. The full local pytest suite is not required solely because a PR contains
+    Markdown.
+  - **Contract-sensitive documentation:** Run the existing focused checks that prove the
+    changed claim. For generated or installed skill documentation, edit the owning
+    `tools/skillgen/` fragments and run the applicable CI guards:
+    `uv run --frozen python -m tools.skillgen --check`,
+    `uv run --frozen python -m tools.skillgen --audit-coverage`,
+    `uv run --frozen python -m tools.skillgen --schema-singleton`,
+    `uv run --frozen python -m tools.skillgen --monolith-roundtrip`, and
+    `uv run --frozen python -m tools.skillgen --always-on-roundtrip`. For CLI/install
+    guidance, run `uv run --frozen graphify --help` plus the focused install or
+    round-trip tests covering the documented behavior; for installation-surface strings,
+    one existing example is
+    `uv run --frozen pytest tests/test_install_strings.py -q --tb=short`. Workspace-v1
+    documentation follows its [verification contract](docs/workspace/v1/verification.md),
+    and security or release-artifact claims use the relevant Bandit or
+    `tools.workspace_artifacts` command from the [CI workflow](.github/workflows/ci.yml).
+  - **Mixed or unknown effects:** If the diff includes code, tests, configuration,
+    schemas, lockfiles, workflows, generated-source ownership, binary/unknown files, or
+    cannot be classified confidently, run
+    `uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0`
+    plus applicable CI-parity checks.
+- More-specific repository validation contracts override this generic route. External CI
+  remains the blocking broad gate for every PR.
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
 
 ### What to contribute

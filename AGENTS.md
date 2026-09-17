@@ -40,42 +40,37 @@ entry points without explicit operator approval.
 
 ## Workflow Precedence
 
-OMX is Graphify's primary workflow surface for non-trivial planning,
-coordination, durable execution, adversarial QA, and review. Direct Codex work
-remains appropriate for small, coherent changes with obvious validation and no
-protected or cross-contract surface.
+Default to direct execution for coherent work with known validation. Use OMX
+for the explicit requests, decision needs, and protected stages below; file
+count or an accepted ordinary plan alone does not require orchestration.
+Repository-state questions, review-only work, and unclear causes begin with
+read-only evidence; stop at a verdict unless a patch is requested.
 
-Choose the highest applicable lane before editing and reclassify if scope
-expands, a protected surface appears, validation fails non-obviously, or review
-shows that the lane is mismatched:
+Before non-trivial work, choose the highest applicable lane:
 
-- Direct Codex: small, single-surface changes with an obvious focused test.
-- Evidence/read-only: repository-state questions, review-only work, or unclear
-  causes. Use normal repository inspection or `$analyze` for grounded
-  cross-file synthesis; stop at a verdict unless a patch is requested.
-- `$deep-interview`: materially ambiguous goals, missing acceptance criteria,
-  explicit "do not assume" instructions, or operator choices that repository
-  evidence cannot answer.
-- `$best-practice-research`: current official or upstream evidence when an
-  external API, SDK, format, security rule, or compatibility claim materially
-  affects the plan. It does not authorize edits.
-- `$ralplan`: multi-file behavior, architecture or test-shape uncertainty,
-  migrations, compatibility changes, or any non-trivial protected-surface
-  change that needs a reviewed implementation plan.
-- `$ultragoal`: the default durable execution handoff after an accepted plan,
-  with goal state and checkpoints kept in local `.omx/` artifacts.
-- `$team`: coordinated parallel execution only when independent lanes,
-  worktrees, shared task state, or durable tmux coordination justify the
-  overhead. Team is an explicit tmux/runtime surface, not the default for a
-  small patch.
-- `$ultraqa`: hostile end-to-end validation when install/uninstall behavior,
-  corpus boundaries, graph integrity, recovery, or cross-platform behavior
-  needs adversarial scenarios beyond ordinary focused tests.
-- `$code-review`: final independent review for protected, cross-cutting, or
-  review-sensitive changes after the relevant tests pass.
-- `$autopilot`: only when the operator explicitly requests hands-off staged
-  orchestration; preserve its supervised interview, planning, and durable
-  execution stages.
+- Use Deep Interview for material acceptance or operator decisions that remain
+  unresolved after repo inspection and need structured clarification.
+  Use Best Practice Research when official/upstream evidence materially affects
+  an external API, format, security, or compatibility claim; research does not
+  authorize edits.
+- Use Ralplan for unresolved architecture/test-shape decisions, migrations,
+  compatibility changes, or non-trivial protected changes. The
+  protected-surface requirements below govern extraction, paths, manifests,
+  publication, and workspace contracts even when the diff is small.
+- Use Ultragoal for an explicit request, the protected requirement below, or a
+  named checkpoint/resume need. Keep checkpoints in local `.omx/` artifacts.
+  Use Team only when persistent shared ownership or durable runtime coordination
+  justifies it; ordinary independent slices may use native subagents.
+- After focused checks, use UltraQA only with explicit operator opt-in. Install,
+  corpus, graph-integrity, recovery, and cross-platform risks identify candidate
+  scenarios, not automatic activation. Start with one bounded cycle. Use Code
+  Review for final independent review of protected, cross-cutting, or
+  review-sensitive changes after relevant tests.
+- Use Autopilot only for an explicit hands-off staged request; preserve its
+  supervised interview, planning, and durable execution stages.
+
+Reclassify when scope expands, a protected surface appears, validation fails
+non-obviously, or review shows that the lane is mismatched.
 
 When routing work through OMX, use only workflows that are active in the
 currently installed OMX catalog, and use live `omx --help` when workflow
@@ -106,6 +101,11 @@ Treat the following as protected or cross-contract work:
   semantic handoff/release, rollback, garbage collection, policy authority,
   and failure-atomicity contracts.
 
+Classify protected work by the behavior or contract effect, not the filename.
+Name the affected invariant and why a change is non-trivial. Editorial
+explanation of an unchanged invariant does not itself trigger implementation
+orchestration.
+
 For a non-trivial protected-surface change, inspect the governing contract and
 tests first, use `$ralplan` before implementation, and execute an accepted plan
 through `$ultragoal`. Add or reproduce a failing regression before changing bug
@@ -135,30 +135,38 @@ its own section without deleting hand-authored repository instructions.
 
 ## Validation
 
-Use the smallest check that proves the changed claim, then expand in proportion
-to risk. The repository requires Python 3.14 and uses the committed `uv.lock`;
-prefer frozen commands matching CI.
+Use focused checks during implementation. At final local PR validation, code,
+test, configuration, cross-cutting, release-sensitive, or uncertain effects
+require the canonical full suite below plus applicable surface checks. Follow
+more-specific workspace contracts. Editorial docs require scoped whitespace,
+link, and claim checks; contract docs require the checks covering their effects.
+A completed check is reusable only while its inputs and applicable freshness
+rules permit; a printed command or planned check is not completion evidence.
 
-- Focused tests:
-  `uv run --frozen pytest tests/<test_file>.py -q --tb=short`
-- Canonical full test gate for cross-cutting or release-sensitive changes:
-  `uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0`
-- Serial diagnostic and compatibility fallback:
-  `uv run --frozen pytest tests/ -q --tb=short`
-- Generated skill changes:
-  `uv run --frozen python -m tools.skillgen --check`, followed when applicable
-  by `--audit-coverage`, `--schema-singleton`, `--monolith-roundtrip`, and
-  `--always-on-roundtrip` exactly as defined in `.github/workflows/ci.yml`.
+The repository requires Python 3.14 and uses the committed `uv.lock`; prefer
+frozen commands matching CI.
+
+- During implementation: run focused tests with
+  `uv run --frozen pytest tests/<test_file>.py -q --tb=short`.
+- Final full validation: run the canonical gate,
+  `uv run --frozen pytest tests/ -q --tb=short -n 2 --dist=loadfile --max-worker-restart=0`.
+  Use `uv run --frozen pytest tests/ -q --tb=short` for serial diagnostics or
+  compatibility fallback. Protected changes also require the planning and
+  independent review described above.
+- Generated skills: run `uv run --frozen python -m tools.skillgen --check`,
+  followed when applicable by `--audit-coverage`, `--schema-singleton`,
+  `--monolith-roundtrip`, and `--always-on-roundtrip` exactly as defined in
+  `.github/workflows/ci.yml`.
 - CLI/install changes: run focused install/round-trip tests plus
-  `uv run --frozen graphify --help`; perform any real install smoke test only
-  in a disposable environment.
-- Security or release-artifact changes: run the relevant Bandit and
+  `uv run --frozen graphify --help`; use a disposable environment for any real
+  install smoke test.
+- Workspace-v1: follow `docs/workspace/v1/verification.md` and run focused
+  workspace tests before the broader gate.
+- Security or release artifacts: run the relevant Bandit and
   `tools.workspace_artifacts` build/audit commands from
   `.github/workflows/ci.yml`.
-- Workspace-v1 changes: follow `docs/workspace/v1/verification.md` and run the
-  focused workspace tests before the broader gate.
 - Run configured Ruff or Pyright checks when they materially cover the changed
-  surface; do not present them as blocking CI gates unless CI says so.
+  surface; do not call them blocking CI gates unless CI says so.
 - Always run `git diff --check` and inspect the final diff for scope.
 
 Graphify has no repo-local `make review-ready` contract. Do not import that
@@ -174,8 +182,17 @@ For PR review, issue-fix, or review-comment work that edits files:
 2. Patch only justified in-scope behavior.
 3. Run focused validation, then the applicable CI-parity checks.
 4. Review the final diff against the requested scope.
-5. Use `$code-review` for protected or cross-cutting changes and report any
-   unresolved findings as blockers.
+5. Use `$code-review` for protected or cross-cutting changes. Block on supported
+   in-scope defects; record other findings as rejected with evidence or
+   non-blocking follow-ups. A priority label alone does not establish a defect.
+
+After the required initial full-scope review, verify repairs and affected
+dependencies; reopen discovery only for changed scope/contracts or concrete new
+evidence. Preserve stronger review requirements in the governing protected
+contract. Before another attempt, name the correction or evidence change. If
+neither exists, diagnose the shared cause or report the bounded blocker instead
+of launching another reviewer to seek a clean verdict. Planning-only work stops
+at the plan; completing a milestone does not authorize its successors.
 
 Local edit authority does not imply commit, push, PR mutation, review
 submission, merge, or cleanup authority. Final reports must name the exact
@@ -195,6 +212,21 @@ post-code-change graph refresh was required and completed.
 - Attached tmux is required only by a selected OMX runtime such as Team, by an
   explicit operator request, or by a future repo gate that says so. Do not
   invent an attached-tmux readiness requirement for ordinary Graphify changes.
+
+## Graph Orientation and Refresh Scope
+
+This manual policy governs the installer-owned footer below. Use a retained
+graph when it materially helps the requested lookup, starting with one bounded
+scoped query. Additional queries must resolve a named remaining question. If
+the graph is unavailable, stale, invalid, or unhelpful, preserve its output,
+report the limitation, and use current source inspection. Do not rebuild or
+repair graph infrastructure merely to answer a read-only question.
+
+Batch required code-change refreshes on a stable candidate, before any proof
+that depends on the refreshed graph. Refresh again only when changed inputs or
+applicable freshness rules require it. Failure does not authorize force mode,
+provider activation, or wider scope. Preserve mandatory workspace certification
+and refresh contracts for tasks that actually depend on graph output.
 
 ## graphify
 
