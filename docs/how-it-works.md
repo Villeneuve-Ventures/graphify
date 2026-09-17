@@ -57,13 +57,22 @@ Every relationship is tagged with one of three labels:
 | `INFERRED` | A relationship derived by structural resolution or semantic inference |
 | `AMBIGUOUS` | Uncertain — flagged in the report for manual review |
 
-The semantic extraction prompt assigns EXTRACTED edges a `confidence_score` of
-1.0 and uses this rubric for INFERRED edges:
+Scores may be assigned by structural or semantic extraction; a numeric score
+does not by itself identify model-derived evidence. The semantic extraction
+prompt assigns EXTRACTED edges a `confidence_score` of 1.0 and uses this rubric
+for INFERRED edges:
+
 - **0.95** — near-certain (explicit cross-file reference, one plausible target)
 - **0.85** — strong evidence (naming + context align)
 - **0.75** — reasonable (contextual but not explicit)
 - **0.65** — weak (naming similarity only)
 - **0.55** — speculative
+
+When a score is absent, [`to_json()`](../graphify/export.py) fills it in for
+`graph.json` using the confidence tag: EXTRACTED **1.0**, INFERRED **0.5**, or
+AMBIGUOUS **0.2**. Existing scores are preserved. Separately,
+[`normalize_edge()`](../graphify/callflow_html.py) provides a read-time fallback
+for call-flow rendering; it is not the source of these export defaults.
 
 ---
 
@@ -117,7 +126,7 @@ Each edge has:
 - `source`, `target` — node IDs
 - `relation` — verb phrase (e.g. `calls`, `imports`, `implements`, `semantically_similar_to`)
 - `confidence` — `EXTRACTED`, `INFERRED`, or `AMBIGUOUS`
-- `confidence_score` — numeric score supplied by semantic extraction for each confidence tag
+- `confidence_score` — numeric score from structural or semantic extraction, or a confidence-tag default applied during export when absent (see [Confidence tagging](#confidence-tagging))
 - `source_file` — where the relationship was found
 
 Hyperedges (group relationships connecting 3+ nodes) live in `G.graph["hyperedges"]`.

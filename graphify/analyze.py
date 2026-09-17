@@ -498,7 +498,7 @@ def suggest_questions(
             questions.append({
                 "type": "verify_inferred",
                 "question": f"Are the {len(inferred)} inferred relationships involving `{label}` (e.g. with `{others[0]}` and `{others[1]}`) actually correct?",
-                "why": f"`{label}` has {len(inferred)} INFERRED edges - model-reasoned connections that need verification.",
+                "why": f"`{label}` has {len(inferred)} INFERRED edges - connections derived by structural resolution or semantic inference that need verification.",
             })
 
     # 4. Isolated or weakly-connected nodes → exploration questions
