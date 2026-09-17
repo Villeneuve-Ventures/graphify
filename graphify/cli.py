@@ -16,6 +16,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
+from graphify.paths import read_graphify_root
 from pathlib import Path
 
 
@@ -2781,7 +2782,7 @@ def _dispatch_command(cmd: str) -> None:
             # Try to recover the scan root saved by the last full build
             saved = Path(_GRAPHIFY_OUT) / ".graphify_root"
             if saved.exists():
-                watch_path = Path(saved.read_text(encoding="utf-8").strip())
+                watch_path = Path(read_graphify_root(saved))
             else:
                 watch_path = Path(".")
         if not watch_path.exists():

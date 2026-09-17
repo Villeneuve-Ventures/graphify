@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from graphify.ingest import OUTCOMES
-from graphify.paths import GRAPHIFY_OUT_NAME
+from graphify.paths import GRAPHIFY_OUT_NAME, read_graphify_root
 
 _UNCATEGORIZED = "Uncategorized"
 
@@ -730,7 +730,7 @@ def _resolve_source_path(src: str, graph_path: Path) -> Path | None:
     out_dir = gp.parent
     candidates: list[Path] = []
     try:
-        recorded = (out_dir / ".graphify_root").read_text(encoding="utf-8").strip()
+        recorded = read_graphify_root(out_dir / ".graphify_root")
         if recorded:
             candidates.append(Path(recorded))
     except (OSError, ValueError):

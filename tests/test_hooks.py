@@ -859,7 +859,7 @@ def test_rebuild_bodies_read_graphify_root(name, body):
     # The recovered root is what gets rebuilt, not a hardcoded cwd.
     assert "_rebuild_code(_root" in body, f"{name} does not pass the recovered root"
     # Quote-safe inside the shell-double-quoted launcher: single quotes only.
-    assert "read_text(encoding='utf-8')" in body, f"{name} root read is not single-quoted"
+    assert "read_graphify_root(_saved)" in body, f"{name} bypasses shared root decoding"
 
 
 def test_rebuild_bodies_with_graphify_root_are_valid_python():

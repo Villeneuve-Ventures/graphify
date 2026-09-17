@@ -224,6 +224,15 @@ def out_path(*parts: str) -> Path:
     return Path(GRAPHIFY_OUT, *parts)
 
 
+def read_graphify_root(marker: Path) -> str:
+    """Read a saved root, accepting a BOM and removing only CR/LF terminators.
+
+    Spaces and tabs are path characters. Leave empty-pointer handling and
+    read/decode failures to each caller's existing policy.
+    """
+    return marker.read_text(encoding="utf-8-sig").rstrip("\r\n")
+
+
 def default_graph_json() -> str:
     """Default ``graph.json`` path under the configured output dir.
 

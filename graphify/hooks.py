@@ -294,7 +294,8 @@ try:
     _out = os.environ.get('GRAPHIFY_OUT', 'graphify-out')
     _saved = Path(_out) / '.graphify_root'
     if _saved.exists():
-        _txt = _saved.read_text(encoding='utf-8').strip()
+        from graphify.paths import read_graphify_root
+        _txt = read_graphify_root(_saved)
         if _txt:
             _root = Path(_txt)
     _rebuild_code(_root, changed_paths=changed, force=_force)
@@ -335,7 +336,8 @@ try:
     _out = os.environ.get('GRAPHIFY_OUT', 'graphify-out')
     _saved = Path(_out) / '.graphify_root'
     if os.environ.get('_GFY_REBUILD_CURRENT_ROOT') != '1' and _saved.exists():
-        _txt = _saved.read_text(encoding='utf-8').strip()
+        from graphify.paths import read_graphify_root
+        _txt = read_graphify_root(_saved)
         if _txt:
             _root = Path(_txt)
     _rebuild_code(_root, force=_force)
