@@ -154,7 +154,30 @@ def test_ci_full_suite_command_and_serial_fallback_are_exact():
     assert f"`{serial}`" in instructions
     assert f"{selected}  # full CI gate" in readme
     assert f"{serial}  # serial diagnostic and compatibility fallback" in readme
-    assert f"Before opening a PR, run `{selected}`" in readme
+    policy = " ".join(
+        readme.split("### Git workflow", 1)[1].split("### What to contribute", 1)[0].split()
+    )
+    editorial, remainder = policy.split("**Editorial documentation only:**", 1)[1].split(
+        "**Contract-sensitive documentation:**", 1
+    )
+    contract, mixed = remainder.split("**Mixed or unknown effects:**", 1)
+    assert "changes that do not alter" in editorial
+    for excluded_contract in (
+        "executable", "security", "governance", "generated-artifact", "installation",
+        "CLI", "schema", "workspace contracts",
+    ):
+        assert excluded_contract in editorial
+    assert "`git diff --check`" in editorial
+    assert "directly verify any changed links or command examples" in editorial
+    assert "The full local pytest suite is not required solely" in editorial
+    assert "Run the existing focused checks that prove the changed claim" in contract
+    assert "verification contract](docs/workspace/v1/verification.md)" in contract
+    for full_suite_effect in (
+        "code", "tests", "configuration", "schemas", "lockfiles", "workflows",
+        "generated-source ownership", "binary/unknown files", "cannot be classified confidently",
+    ):
+        assert full_suite_effect in mixed
+    assert f"run `{selected}` plus applicable CI-parity checks" in mixed
 
 
 def test_repository_manifest_detects_file_mode_and_symlink(tmp_path: Path):

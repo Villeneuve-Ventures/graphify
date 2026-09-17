@@ -1,6 +1,35 @@
 # Changelog
 
-Full release notes with details on each version: [GitHub Releases](https://github.com/safishamsi/graphify/releases)
+Upstream release notes: [GitHub Releases](https://github.com/safishamsi/graphify/releases).
+The historical upstream entries below are preserved separately from this fork's
+development summary.
+
+## Unreleased — workspace development fork
+
+The `workspace/v1` branch identifies its package as `0.9.16+workspace.1`.
+This section summarizes implemented fork work, not a published release or a
+production deployment. The [workspace overview](docs/workspace/v1/README.md)
+and linked acceptance receipts define the exact implemented boundaries.
+
+- Added workspace-v1 contracts and external durable state for registry and
+  source identity, leases, journals, generations, pointers, and recovery.
+- Added workspace registration and identity maintenance, active-source
+  selection, code-only structural sync, one-shot certified queries, read-only
+  status/doctor, exact-last-good rollback, fenced pointer repair, and offline
+  GC preview and lifecycle commands.
+- Added bounded semantic queue/worker, result handoff, generation certification,
+  and promotion implementations, plus private release trust-root,
+  policy-authority, and decision-store/capacity prerequisites. Full semantic
+  sync and semantic-content release/DLP composition remain waiting; accepted
+  prerequisites do not authorize publication or provision live policy.
+- Added candidate runtime-authority generation and isolated installation,
+  compensation, and rollback proofs. Production installation and portfolio
+  cutover remain outside those proofs.
+- Standardized development on Python 3.14 and the frozen dependency lock;
+  made the canonical full pytest gate use two workers with file-based
+  distribution and retained the serial diagnostic fallback.
+- Updated the public overview, architecture/API map, extractor migration status,
+  and pipeline documentation to distinguish fork behavior from upstream history.
 
 ## 0.9.16 (2026-07-14)
 

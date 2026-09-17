@@ -603,6 +603,26 @@ def test_god_nodes_filter_is_case_insensitive():
         assert variant not in labels, f"`{variant}` should be filtered as JSON-key noise"
 
 
+def test_suggest_questions_does_not_assume_inferred_edges_are_model_generated():
+    """INFERRED edges may come from structural resolution without any model."""
+    G = nx.Graph()
+    G.add_node("caller", label="Caller", file_type="code", source_file="caller.py")
+    for target in ("First", "Second"):
+        G.add_node(target, label=target, file_type="code", source_file="targets.py")
+        G.add_edge("caller", target, relation="uses", confidence="INFERRED")
+
+    questions = suggest_questions(G, communities={}, community_labels={}, top_n=10)
+    inferred = [question for question in questions if question["type"] == "verify_inferred"]
+
+    assert len(inferred) == 1
+    assert "2 INFERRED edges" in inferred[0]["why"]
+    assert "structural resolution or semantic inference" in inferred[0]["why"]
+    assert "model-reasoned" not in inferred[0]["why"]
+    assert "`First`" in inferred[0]["question"]
+    assert "`Second`" in inferred[0]["question"]
+    assert all(data["confidence"] == "INFERRED" for _, _, data in G.edges(data=True))
+
+
 def test_suggest_questions_excludes_rationale_nodes_from_isolated_count():
     G = nx.Graph()
     G.add_node("service", label="Service", file_type="code", source_file="service.py")

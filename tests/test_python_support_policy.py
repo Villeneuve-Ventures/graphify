@@ -87,8 +87,8 @@ def test_supported_extras_have_no_dead_python_markers_or_graspologic() -> None:
         all_requirements.extend(requirements)
     assert all("python_version" not in requirement for requirement in all_requirements)
     assert "graspologic" not in _dependency_names(all_requirements)
-    assert _minimum_version(pdf, "pypdf") >= (6, 14, 2)
-    assert _minimum_version(all_extra, "pypdf") >= (6, 14, 2)
+    assert _minimum_version(pdf, "pypdf") >= (6, 16, 1)
+    assert _minimum_version(all_extra, "pypdf") >= (6, 16, 1)
 
 
 def test_runtime_and_repository_tools_use_stdlib_tomllib() -> None:
