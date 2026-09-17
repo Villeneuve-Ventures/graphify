@@ -51,7 +51,7 @@ def test_to_json_does_not_buffer_complete_serialized_graph(tmp_path):
 @pytest.mark.parametrize("failure", ["serialization", "destination", None])
 def test_to_json_closes_staging_stream(tmp_path, monkeypatch, failure):
     import networkx as nx
-    import graphify.export as export
+    from graphify.export import tempfile as export_tempfile
 
     temporary_file = tempfile.TemporaryFile
     streams = []
@@ -61,7 +61,7 @@ def test_to_json_closes_staging_stream(tmp_path, monkeypatch, failure):
         streams.append(stream)
         return stream
 
-    monkeypatch.setattr(export.tempfile, "TemporaryFile", record_stream)
+    monkeypatch.setattr(export_tempfile, "TemporaryFile", record_stream)
     graph = nx.Graph()
     graph.add_node("new", label="new")
     target = tmp_path / "graph.json"
@@ -71,13 +71,43 @@ def test_to_json_closes_staging_stream(tmp_path, monkeypatch, failure):
             to_json(graph, {}, str(target))
         assert not target.exists()
     elif failure == "destination":
+        target.mkdir()
         with pytest.raises(OSError):
-            to_json(graph, {}, str(tmp_path / "missing" / "graph.json"))
+            to_json(graph, {}, str(target))
     else:
         assert to_json(graph, {}, str(target))
         assert json.loads(target.read_text())["nodes"][0]["id"] == "new"
     assert len(streams) == 1
     assert streams[0].closed
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_to_json_stages_beside_destination_when_system_temp_is_full(tmp_path, monkeypatch, relative):
+    import errno
+    import networkx as nx
+    from graphify.export import tempfile as export_tempfile
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    monkeypatch.chdir(output_dir)
+    target = Path("graph.json") if relative else output_dir / "graph.json"
+    temporary_file = tempfile.TemporaryFile
+    stages = []
+
+    def require_output_filesystem(*args, **kwargs):
+        directory = kwargs.get("dir")
+        if directory is None:
+            raise OSError(errno.ENOSPC, "system temporary filesystem is full")
+        assert Path(directory).resolve() == output_dir.resolve()
+        stages.append(directory)
+        return temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(export_tempfile, "TemporaryFile", require_output_filesystem)
+    graph = nx.Graph()
+    graph.add_node("new", label="new")
+    assert to_json(graph, {}, str(target), built_at_commit="test")
+    assert json.loads(target.read_text())["nodes"][0]["id"] == "new"
+    assert len(stages) == 1
+    assert list(output_dir.iterdir()) == [output_dir / "graph.json"]
 
 def test_to_json_creates_file():
     G = make_graph()

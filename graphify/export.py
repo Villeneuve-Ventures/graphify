@@ -267,9 +267,11 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     commit = built_at_commit if built_at_commit is not None else _git_head()
     if commit:
         data["built_at_commit"] = commit
-    # Stage serialization on disk so failures preserve the destination without
-    # retaining another complete graph-sized string in memory.
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as serialized:
+    # Stage beside the destination to use its storage capacity and preserve it
+    # on serialization failure without buffering the complete JSON in memory.
+    with tempfile.TemporaryFile(
+        mode="w+", encoding="utf-8", newline="", dir=Path(output_path).parent,
+    ) as serialized:
         json.dump(data, serialized, indent=2)
         serialized.seek(0)
         with open(output_path, "w", encoding="utf-8") as f:  # nosec

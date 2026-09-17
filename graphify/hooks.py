@@ -80,6 +80,13 @@ if [ -z "$GRAPHIFY_PYTHON" ]; then
             exec 3<&-
             _GFY_BOM=$(printf '\\357\\273\\277')
             case "$_GFY_ROOT_LINE" in "$_GFY_BOM"*) _GFY_ROOT_LINE=${_GFY_ROOT_LINE#"$_GFY_BOM"} ;; esac
+            _GFY_CR=$(printf '\\r')
+            while :; do
+                case "$_GFY_ROOT_LINE" in
+                    *"$_GFY_CR") _GFY_ROOT_LINE=${_GFY_ROOT_LINE%"$_GFY_CR"} ;;
+                    *) break ;;
+                esac
+            done
             _GFY_ROOT_NATIVE=0
             _GFY_BACKSLASH=$(printf '\\\\')
             case "$_GFY_ROOT_LINE" in

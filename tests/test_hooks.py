@@ -1798,10 +1798,14 @@ def test_trusted_pin_allows_identity_valid_project_local_editable_origin(tmp_pat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
-@pytest.mark.parametrize("marker_prefix", [b"", b"\xef\xbb\xbf"], ids=["no-newline", "utf8-bom"])
+@pytest.mark.parametrize("marker_prefix", [b"", b"\xef\xbb\xbf"], ids=["plain", "utf8-bom"])
+@pytest.mark.parametrize(
+    "marker_suffix", [b"", b"\n", b"\r\n", b"\r\r\n"],
+    ids=["no-newline", "lf", "crlf", "repeated-cr"],
+)
 @pytest.mark.parametrize("marker_kind", ["posix", "windows-drive", "windows-unc"])
 def test_dynamic_hook_discovery_denies_persisted_external_corpus(
-    tmp_path, marker_prefix, marker_kind
+    tmp_path, marker_prefix, marker_suffix, marker_kind
 ):
     """A saved corpus root denies lower-authority editable installations."""
     workspace = tmp_path / "workspace"
@@ -1819,7 +1823,7 @@ def test_dynamic_hook_discovery_denies_persisted_external_corpus(
         "windows-unc": br"\\server\share\External Corpus",
     }
     (graphify_out / ".graphify_root").write_bytes(
-        marker_prefix + marker_values[marker_kind]
+        marker_prefix + marker_values[marker_kind] + marker_suffix
     )
     script = _PYTHON_DETECT.replace("__PINNED_PYTHON__", "")
     if marker_kind == "posix":
@@ -1936,6 +1940,31 @@ def test_dynamic_hook_discovery_denies_persisted_external_corpus(
     )
     assert f"SELECTED={interpreter}" not in failed_result.stdout
     assert not ambient_marker.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
+def test_persisted_hook_root_preserves_trailing_path_whitespace(tmp_path):
+    from graphify.hooks import _PYTHON_DETECT
+
+    workspace = tmp_path / "workspace"
+    graphify_out = workspace / "graphify-out"
+    graphify_out.mkdir(parents=True)
+    corpus = tmp_path / "external-corpus \t"
+    corpus.mkdir()
+    (graphify_out / ".graphify_root").write_bytes(
+        b"\xef\xbb\xbf" + os.fsencode(corpus) + b"\r\n"
+    )
+    # Isolate the marker reader so later interpreter policy cannot mask a
+    # decoding failure by independently rejecting an origin with whitespace.
+    reader = _PYTHON_DETECT.split("_gfy_path_denied() {", 1)[0]
+    result = _run_python_detect(
+        reader.replace("__PINNED_PYTHON__", "")
+        + '\nprintf \'ROOT=%s\\n\' "$_GFY_PERSISTED_ROOT"\n',
+        cwd=workspace,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"ROOT={corpus.resolve()}\n" in result.stdout
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX hook discovery contract")
