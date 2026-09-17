@@ -2,12 +2,28 @@ import json
 import math
 import re
 import tempfile
+import pytest
 from pathlib import Path
 from graphify.build import build_from_json
 from graphify.cluster import cluster
 from graphify.export import to_json, to_cypher, to_graphml, to_html, to_canvas, to_obsidian
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+@pytest.mark.parametrize("force", [False, True])
+def test_to_json_serialization_failure_preserves_existing_bytes(tmp_path, force):
+    import networkx as nx
+
+    target = tmp_path / "graph.json"
+    sentinel = b'{"nodes": [{"id": "sentinel"}], "links": []}'
+    target.write_bytes(sentinel)
+    graph = nx.Graph()
+    graph.add_node("new", label="new", unsupported={"not", "json"})
+
+    with pytest.raises(TypeError):
+        to_json(graph, {0: ["new"]}, str(target), force=force)
+
+    assert target.read_bytes() == sentinel
 
 def make_graph():
     return build_from_json(json.loads((FIXTURES / "extraction.json").read_text()))

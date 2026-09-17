@@ -266,8 +266,9 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     commit = built_at_commit if built_at_commit is not None else _git_head()
     if commit:
         data["built_at_commit"] = commit
+    serialized = json.dumps(data, indent=2)
     with open(output_path, "w", encoding="utf-8") as f:  # nosec
-        json.dump(data, f, indent=2)
+        f.write(serialized)
     return True
 
 
