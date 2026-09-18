@@ -5,10 +5,16 @@ on:
     branches: ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "main", "baseline/**", "workspace/**"]
   pull_request:
     branches: ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "main", "baseline/**", "workspace/**"]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   skillgen-check:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
     # the fragments in tools/skillgen/. This fails if someone hand-edited a
     # generated file or forgot to re-run the generator and bless expected/, and it
@@ -48,6 +54,7 @@ jobs:
         run: uv run --frozen python -m tools.skillgen --always-on-roundtrip
 
   test:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -87,6 +94,7 @@ jobs:
           uv run --frozen graphify install
 
   security-scan:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     # Audit the exact release artifacts and every locked dependency scope. The
     # job is blocking: a high-severity Bandit finding, failed audit collection,
     # vulnerable dependency, non-editable wheel mismatch, or candidate drift
