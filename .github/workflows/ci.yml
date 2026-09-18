@@ -4,11 +4,17 @@ on:
   push:
     branches: ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "main"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: ["v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "main"]
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   pr-agent-compatibility:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -25,6 +31,7 @@ jobs:
         run: python -m pytest --noconftest tests/test_pr_agent_runtime.py -q
 
   skillgen-check:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
     # the fragments in tools/skillgen/. This fails if someone hand-edited a
     # generated file or forgot to re-run the generator and bless expected/, and it
@@ -63,6 +70,7 @@ jobs:
         run: uv run --frozen python -m tools.skillgen --always-on-roundtrip
 
   test:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -111,6 +119,7 @@ jobs:
           uv run --frozen graphify install
 
   security-scan:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     # Advisory policy: findings and scanner failures remain nonblocking, but
     # completion and coverage are validated independently of the job conclusion.
     permissions:
@@ -176,6 +185,7 @@ jobs:
         run: '"${{ steps.reporting_python.outputs.python-path }}" -I -S tools/security_receipts.py publish --output "$RUNNER_TEMP/security-receipts"'
 
   leiden-binary-smoke:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: Leiden binary smoke (macOS)
     runs-on: macos-latest
     steps:
