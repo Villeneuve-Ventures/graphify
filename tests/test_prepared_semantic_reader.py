@@ -375,3 +375,25 @@ tx.finalize_prepared_transaction()
         assert nodes[node["id"]] == node
     assert all(edge in published.data["links"] for edge in fixture.baseline.data["links"])
     assert published.data["hyperedges"] == fixture.baseline.data["hyperedges"]
+
+
+def test_malformed_member_conflict_preserves_all_published_bytes(tmp_path, monkeypatch):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = {
+        path.relative_to(fixture.output): path.read_bytes()
+        for path in fixture.output.rglob("*")
+        if path.is_file()
+    }
+    assert {Path("graph.json"), Path("manifest.json"), Path(tx.RECEIPT_FILE)} <= set(before)
+    group = {**_chunk("one")["hyperedges"][0], "nodes": ["retained", []]}
+
+    with pytest.raises(ValueError, match="retained hyperedge identity"):
+        _run(
+            fixture,
+            f"build_merge([{{'hyperedges': [{group!r}]}}], Path.cwd() / 'graph.json', root=root)",
+        )
+
+    after = {name: (fixture.output / name).read_bytes() for name in before}
+    assert after == before
+    with pytest.raises(tx.PendingTransactionError):
+        tx.open_graph_snapshot(fixture.output / "graph.json", purpose="refused-malformed-member")

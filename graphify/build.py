@@ -1147,10 +1147,23 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
 
     groups_by_id = {group_key(h): h for h in retained_groups if has_group_identity(h)}
     fresh_group_claims = {}
+    warned_non_hashable_group_member = False
 
     def group_facts(group, *, retained=False):
+        nonlocal warned_non_hashable_group_member
         canonical = deepcopy(group)
         _normalize_hyperedge_members(canonical)
+        if isinstance(canonical.get("nodes"), list):
+            members = [member for member in canonical["nodes"] if _hashable(member)]
+            if len(members) != len(canonical["nodes"]):
+                if not warned_non_hashable_group_member:
+                    print(
+                        "[graphify] WARNING: skipping non-hashable hyperedge member(s) "
+                        "in comparison view.",
+                        file=sys.stderr,
+                    )
+                    warned_non_hashable_group_member = True
+                canonical["nodes"] = members
         if retained and isinstance(canonical.get("nodes"), list):
             canonical["nodes"] = [prior_reference(member) for member in canonical["nodes"]]
         canonical["source_file"] = normalize(canonical.get("source_file"))

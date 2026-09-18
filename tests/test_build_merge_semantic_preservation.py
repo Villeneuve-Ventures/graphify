@@ -812,6 +812,109 @@ def test_fresh_group_members_are_not_resolved_in_prior_namespace_again(tmp_path)
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("member_key", ["nodes", "members", "node_ids"])
+@pytest.mark.parametrize("dedup", [False, True], ids=["no-dedup", "dedup"])
+def test_identical_malformed_member_replay_preserves_raw_group(
+        tmp_path, capsys, member_key, dedup):
+    group = {
+        "id": "accepted-group",
+        member_key: ["anchor", []],
+        "source_file": "stable.md",
+        "quotation": "accepted evidence",
+    }
+    path, _ = seed(tmp_path, [node("anchor")], [], [group])
+    incoming = {"hyperedges": [deepcopy(group)]}
+    original_input = deepcopy(incoming)
+
+    for _ in range(2):
+        before = path.read_bytes()
+        graph = build_merge([incoming], path, root=tmp_path, dedup=dedup)
+
+        assert graph.graph["hyperedges"] == [group]
+        assert incoming == original_input
+        assert path.read_bytes() == before
+        assert "skipping non-hashable hyperedge member" in capsys.readouterr().err
+
+        assert to_json(graph, {}, path)
+        assert json.loads(path.read_text())["hyperedges"] == [group]
+
+
+def test_non_hashable_member_value_differences_are_comparison_inert(tmp_path, capsys):
+    retained = {"id": "group", "nodes": ["anchor", []], "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("anchor")], [], [retained])
+    incoming = {"id": "group", "nodes": ["anchor", {"different": "invalid"}],
+                "quotation": "accepted"}
+
+    graph = build_merge([{"hyperedges": [incoming]}], path, root=tmp_path)
+
+    assert graph.graph["hyperedges"] == [retained]
+    assert "skipping non-hashable hyperedge member" in capsys.readouterr().err
+
+
+def test_fresh_non_hashable_member_value_differences_are_comparison_inert(tmp_path, capsys):
+    path, _ = seed(tmp_path, [node("anchor")], [])
+    groups = [
+        {"id": "group", "nodes": ["anchor", []]},
+        {"id": "group", "nodes": ["anchor", {"different": "invalid"}]},
+    ]
+
+    graph = build_merge([{"hyperedges": groups}], path, root=tmp_path)
+
+    assert graph.graph["hyperedges"] == [{"id": "group", "nodes": ["anchor"]}]
+    assert "skipping non-hashable hyperedge member" in capsys.readouterr().err
+
+
+def test_malformed_only_member_replay_keeps_retained_group(tmp_path, capsys):
+    group = {"id": "accepted-group", "nodes": [[], {}], "quotation": "accepted evidence"}
+    path, _ = seed(tmp_path, [node("anchor")], [], [group])
+    incoming = {"hyperedges": [deepcopy(group)]}
+    original_input = deepcopy(incoming)
+
+    graph = build_merge([incoming], path, root=tmp_path)
+
+    assert graph.graph["hyperedges"] == [group]
+    assert incoming == original_input
+    assert "skipping non-hashable hyperedge member" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("conflict", [
+    "different-valid-member",
+    "changed-evidence",
+    "unknown-hashable-member",
+    "ambiguous-hashable-alias",
+])
+def test_malformed_member_replay_still_refuses_hashable_conflicts(tmp_path, conflict):
+    group = {
+        "id": "accepted-group",
+        "nodes": ["anchor", []],
+        "source_file": "stable.md",
+        "quotation": "accepted evidence",
+    }
+    path, _ = seed(
+        tmp_path,
+        [node("anchor"), node("other"), node("Rule-One"), node("rule_one")],
+        [],
+        [group],
+    )
+    incoming = deepcopy(group)
+    if conflict == "different-valid-member":
+        incoming["nodes"] = ["other", []]
+    elif conflict == "changed-evidence":
+        incoming["quotation"] = "different evidence"
+    elif conflict == "unknown-hashable-member":
+        incoming["nodes"] = ["anchor", [], "unknown"]
+    else:
+        incoming["nodes"] = ["anchor", [], "RULE ONE"]
+    original_input = deepcopy(incoming)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="retained hyperedge identity"):
+        build_merge([{"hyperedges": [incoming]}], path, root=tmp_path)
+
+    assert incoming == original_input
+    assert path.read_bytes() == before
+
+
 def test_equivalent_retained_group_alias_copies_share_comparison_view(tmp_path):
     group = {"id": "group", "members": ["policy_rule"], "quotation": "accepted"}
     path, _ = seed(tmp_path, [node("docs_policy_rule", source="docs/policy.md")], [], [group, deepcopy(group)])
