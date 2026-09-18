@@ -7,6 +7,23 @@ those sources classifies an enumerated protected surface before implementation.
 Review findings and validation receipts cannot activate the workflow or widen
 authority.
 
+A protected designation must be an exact, current statement that identifies the
+change or bounded surface as protected and is attributable to an authorized
+source listed above. No special wording or self-citation is required. Do not
+infer protection from subject matter, affected paths, policy category lists,
+test scope, review findings, or similarity to earlier protected work. A stale,
+mismatched, or nonexistent citation is not a designation. Re-read the live source
+and quote the designation before stopping ordinary work or activating a protected
+workflow.
+
+When no exact designation exists, continue under the ordinary repository workflow.
+Do not activate protected review, planning, or orchestration merely because the
+policy could have covered the change if an authorized source had classified it.
+This default never overrides a valid explicit designation, pinned instructions,
+or other safety, validation, and delivery requirements. An unavailable source
+does not revoke a designation already established for the active run; resolve
+material uncertainty about an existing designation before proceeding.
+
 The current run's instructions and permissions stay pinned. Editing this file or
 the policy does not authorize its own approval, commit, publication, merge, or
 cleanup. Keep the detailed policy, acceptance packet, and complete candidate
