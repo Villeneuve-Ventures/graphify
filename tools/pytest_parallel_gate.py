@@ -124,7 +124,12 @@ _BASELINE_PYTEST_PLUGIN_ENTRYPOINTS = [
     },
 ]
 _CANDIDATE_PYTEST_PLUGIN_ENTRYPOINTS = [
-    *_BASELINE_PYTEST_PLUGIN_ENTRYPOINTS,
+    *(
+        {**entrypoint, "version": "4.14.2"}
+        if entrypoint["distribution"] == "anyio"
+        else entrypoint
+        for entrypoint in _BASELINE_PYTEST_PLUGIN_ENTRYPOINTS
+    ),
     {
         "name": "xdist",
         "value": "xdist.plugin",
@@ -2493,7 +2498,7 @@ def verify_evidence(manifest_path: Path) -> dict[str, Any]:
         or not isinstance(expected_candidate_versions, dict)
         or expected_candidate_versions.get("pytest_xdist") != "3.8.0"
         or expected_candidate_versions.get("execnet") != "2.1.2"
-        or expected_candidate_versions.get("anyio") != "4.13.0"
+        or expected_candidate_versions.get("anyio") != "4.14.2"
         or expected_candidate_versions.get("hypothesis") != "6.153.0"
         or expected_candidate_versions.get("openai") != "2.36.0"
         or expected_candidate_versions.get("pytest_cov") != "7.1.0"
