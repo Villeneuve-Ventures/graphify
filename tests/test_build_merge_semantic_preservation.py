@@ -839,6 +839,31 @@ def test_identical_malformed_member_replay_preserves_raw_group(
         assert json.loads(path.read_text())["hyperedges"] == [group]
 
 
+def test_non_hashable_member_value_differences_are_comparison_inert(tmp_path, capsys):
+    retained = {"id": "group", "nodes": ["anchor", []], "quotation": "accepted"}
+    path, _ = seed(tmp_path, [node("anchor")], [], [retained])
+    incoming = {"id": "group", "nodes": ["anchor", {"different": "invalid"}],
+                "quotation": "accepted"}
+
+    graph = build_merge([{"hyperedges": [incoming]}], path, root=tmp_path)
+
+    assert graph.graph["hyperedges"] == [retained]
+    assert "skipping non-hashable hyperedge member" in capsys.readouterr().err
+
+
+def test_fresh_non_hashable_member_value_differences_are_comparison_inert(tmp_path, capsys):
+    path, _ = seed(tmp_path, [node("anchor")], [])
+    groups = [
+        {"id": "group", "nodes": ["anchor", []]},
+        {"id": "group", "nodes": ["anchor", {"different": "invalid"}]},
+    ]
+
+    graph = build_merge([{"hyperedges": groups}], path, root=tmp_path)
+
+    assert graph.graph["hyperedges"] == [{"id": "group", "nodes": ["anchor"]}]
+    assert "skipping non-hashable hyperedge member" in capsys.readouterr().err
+
+
 def test_malformed_only_member_replay_keeps_retained_group(tmp_path, capsys):
     group = {"id": "accepted-group", "nodes": [[], {}], "quotation": "accepted evidence"}
     path, _ = seed(tmp_path, [node("anchor")], [], [group])
