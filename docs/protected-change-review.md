@@ -21,6 +21,24 @@ Use this workflow only when one of these sources designates a change as protecte
   installer or update path, Git lifecycle boundary, publication or release
   boundary, or supported CLI/output contract.
 
+The categories in the final bullet define what a properly designated acceptance
+owner may classify; they are not automatic protected surfaces. Activation evidence
+must include an exact, current statement that identifies the change or bounded
+surface as protected and is attributable to an authorized source listed above.
+No special wording or self-citation is required. Subject matter,
+affected paths, integrity or publication implications, test coverage, resemblance
+to prior protected work, and this policy's own category list do not supply the
+missing designation.
+
+When no valid explicit designation applies, this workflow is inactive and the
+ordinary repository workflow applies. Re-read a
+cited source before relying on it. A stale, mismatched, or nonexistent citation
+cannot activate this policy or justify stopping ordinary work. This inactive
+default never overrides a valid explicit designation, pinned instructions, or
+other safety, validation, and delivery requirements. An unavailable source does
+not revoke a designation already established for the active run; resolve material
+uncertainty about an existing designation before proceeding.
+
 Reviewers may recommend protection but cannot activate it or widen scope. Policy
 text, digests, verdicts, and receipts are evidence, not permission. Local
 readiness never grants commit, push, GitHub mutation, publication, merge, release,
