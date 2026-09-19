@@ -254,3 +254,63 @@ external local fixtures, and exercise disposable installation and tamper refusal
 They avoid requiring another reviewer's machine-local wheel or temporary paths.
 The committed CI workflow specifies the remaining checks, and GitHub run results
 must be inspected separately before making remote-CI claims.
+
+### Second review follow-up (`51b830ba` input)
+
+The refreshed snapshot contains 11 conversation comments, five reviews and 18
+inline threads. Prior dispositions still apply; the repeated Python-specifier
+order and protected-packet claims supply no new supporting evidence. Five new
+findings are addressed:
+
+- Fixture inputs are opened as descriptors, checked against their named identity
+  before and after bounded reads, and reject regular-file/symlink substitutions,
+  non-regular inputs and changes during capture. Available no-follow/nonblocking
+  flags are used without introducing a new platform restriction.
+- POSIX publication revalidates the pinned parent before and after rename.
+  A detached parent cannot report successful publication at the requested path;
+  a completed artifact in the detached directory is preserved on refusal.
+- Installed script paths and their allowed directory use consistent resolved
+  identities, accepting legitimate symlinked installation ancestors.
+- Current-interpreter bytecode caches are compared with freshly compiled verified
+  source, including normal timestamp/hash caches, optimization levels and the
+  active external cache prefix. The admitting process never unmarshals caches;
+  a disposable isolated interpreter compares every serialized code field without
+  executing cached code. Comparison preserves constant types, values and float
+  bits, but excludes interpreter interning/reference-sharing history. Ordinary
+  same-source compilation was observed to vary immutable constant sharing;
+  exact object-identity equivalence is not claimed. Nonstandard compiler/filename
+  payloads refuse. Transport preserves decomposed Unicode filename spellings.
+  Input and wall limits apply on all hosts, CPU limits on POSIX, and an
+  address-space cap on non-Darwin POSIX. This is not an OS sandbox; Darwin and
+  Windows do not have the address-space cap.
+  This is observed on-disk evidence, not proof of already imported modules,
+  custom import hooks, a hostile interpreter, or subsequent concurrent writes.
+- Completion construction requires a `CompatibilityManifest`; an unrelated
+  document with a `sha256` property can no longer supply the candidate binding.
+
+All 31 focused stdlib unittest tests across the three review-regression modules
+passed, including the six earlier refusal tests affected by the installed-check
+changes. A fresh wheel passed source/fixture archive checks, valid completion
+binding, disposable installation, and installed verification both without caches
+and after compiling the full package at optimization levels 0, 1 and 2.
+The full-package probe first exposed a false rejection from comparing raw marshal
+bytes: string interning changes serialization without changing executable code.
+Full code-field comparison corrected it; regressions cover the actual
+`transaction.py` module and altered stack size, exception table and line metadata.
+Independent review identified Unicode normalization in the child transport;
+preserving exact filename strings corrected it. Its proposed constant-sharing
+check was narrowed after ordinary same-source compilation demonstrated varying
+sharing; the documented field/value equivalence contract covers that boundary.
+The focused correction rereview returned CLEAN. Scoped Ruff and interpreter-pinned
+Pyright passed, and the final AST graph update completed with 13,566 nodes and
+30,233 edges (the same five zero-node JSON warnings remain).
+Pytest remains unrun under the operator's instruction. Native Linux/Windows
+validation and fresh full-suite proof are not claimed.
+
+Out-of-scope baseline follow-ups are tracked separately:
+[XML admission #150](https://github.com/Villeneuve-Ventures/graphify/issues/150)
+and [dependency maintenance #151](https://github.com/Villeneuve-Ventures/graphify/issues/151).
+The existing [security baseline #113](https://github.com/Villeneuve-Ventures/graphify/issues/113)
+remains the umbrella for contextual hash/bind-address dispositions and any future
+enforcement policy. No duplicate umbrella issue, blanket suppression, public-bind
+behavior change, dependency update or S3 implementation is included here.

@@ -408,6 +408,8 @@ class CompletionBinding(Document):
 
     @classmethod
     def bind(cls, initial, consumed, *, compatibility, graph_sha256):
+        if not isinstance(compatibility, CompatibilityManifest):
+            raise ContractError("completion requires a compatibility manifest")
         a, b = initial.to_dict(), consumed.to_dict()
         if a["phase"] != "detection" or not consumed.complete:
             raise ContractError("completion requires initial detection and complete extraction")

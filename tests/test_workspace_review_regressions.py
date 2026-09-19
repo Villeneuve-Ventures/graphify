@@ -11,16 +11,18 @@ from graphify.workspace.adapters.base import QueryRejected, QueryRequest
 from graphify.workspace.composition import (
     WorkspaceAuthorityInvalid, verify_installed_candidate,
 )
+from graphify.workspace.contracts import (
+    CompletionBinding, ContractError, InputManifest, StateRootMarker,
+)
 
 
 class QueryEncodingTests(unittest.TestCase):
     def test_surrogates_use_query_refusal_for_both_fields(self):
         for surrogate in ("\ud800", "\udfff"):
-            for values in ({"question": surrogate},
-                           {"question": "valid", "context_filters": (surrogate,)}):
-                with self.subTest(values=repr(values)):
+            for question, filters in ((surrogate, ()), ("valid", (surrogate,))):
+                with self.subTest(question=repr(question), filters=repr(filters)):
                     with self.assertRaises(QueryRejected):
-                        QueryRequest(**values)
+                        QueryRequest(question, context_filters=filters)
 
     def test_valid_multibyte_text_remains_accepted(self):
         request = QueryRequest("café 😀", context_filters=("日本語",))
@@ -71,6 +73,26 @@ class InstalledMemberRefusalTests(unittest.TestCase):
         with patch.object(Path, "read_bytes", side_effect=ValueError("unrelated")):
             with self.assertRaisesRegex(ValueError, "unrelated"):
                 verify_installed_candidate(self.expected)
+
+
+class CompletionCompatibilityTests(unittest.TestCase):
+    def test_unrelated_document_cannot_supply_the_compatibility_digest(self):
+        common = {
+            "contract": "graphify.workspace.source-inputs", "format_version": 1,
+            "roots": ["source"], "code_inputs": [], "outcomes": [], "failure": None,
+            "evidence": [{"operation": "directory", "path": ".", "value": [1, 2, 16832]}],
+        }
+        initial = InputManifest.from_mapping(dict(common, phase="detection"))
+        consumed = InputManifest.from_mapping(dict(common, phase="consumed"))
+        marker = StateRootMarker.from_mapping({
+            "contract": "graphify.workspace.state-root", "state_schema_version": 2,
+            "owner": "graphify.workspace",
+        })
+        for wrong in (marker, SimpleNamespace(sha256="a" * 64), None):
+            with self.subTest(wrong=type(wrong).__name__):
+                with self.assertRaisesRegex(ContractError, "compatibility manifest"):
+                    CompletionBinding.bind(initial, consumed, compatibility=wrong,
+                                           graph_sha256="b" * 64)
 
 
 if __name__ == "__main__":

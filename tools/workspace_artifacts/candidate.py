@@ -31,15 +31,47 @@ MAX_WHEEL_MEMBER_BYTES = MAX_INPUT_BYTES
 MAX_WHEEL_EXPANDED_BYTES = 256 * 1024 * 1024
 
 
+def _input_identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _read(path):
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_INPUT_BYTES:
-        raise ContractError("fixture input must be a bounded singular regular file")
-    with path.open("rb") as stream:
-        payload = stream.read(MAX_INPUT_BYTES + 1)
-    if len(payload) > MAX_INPUT_BYTES:
-        raise ContractError("fixture input exceeds byte limit")
-    return payload
+    descriptor = None
+    try:
+        named = path.lstat()
+        if (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                or named.st_size > MAX_INPUT_BYTES):
+            raise ContractError("fixture input must be a bounded singular regular file")
+        flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size > MAX_INPUT_BYTES):
+            raise ContractError("fixture input must be a bounded singular regular file")
+        if (_input_identity(named) != _input_identity(before)
+                or _input_identity(path.lstat()) != _input_identity(before)):
+            raise ContractError("fixture input changed before reading")
+        chunks, size = [], 0
+        while True:
+            chunk = os.read(descriptor, min(65536, MAX_INPUT_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > MAX_INPUT_BYTES:
+                raise ContractError("fixture input exceeds byte limit")
+        if (_input_identity(before) != _input_identity(os.fstat(descriptor))
+                or _input_identity(before) != _input_identity(path.lstat())
+                or size != before.st_size):
+            raise ContractError("fixture input changed while reading")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ContractError("fixture input cannot be safely read") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def package_members(repo):
@@ -215,4 +247,8 @@ def _publish_fixture(payload_root, output):
         # Tooling-only import: preserve the workspace composition cold boundary.
         from graphify.transaction import _atomic_rename_no_replace, pin_output
         with pin_output(output.parent, create=False) as parent:
+            parent.validate()
             _atomic_rename_no_replace(parent, str(payload_root.relative_to(output.parent)), output.name)
+            # A rename through the pinned descriptor can succeed after its
+            # directory was detached. Refuse success, preserving that artifact.
+            parent.validate()

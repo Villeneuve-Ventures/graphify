@@ -145,6 +145,10 @@ def verify_installed_candidate(expected):
 
     Wheel digest provenance belongs to the fixture builder; installed files are
     checked independently. A wheel's RECORD alone is not trusted as file content.
+    Current-interpreter caches are compared by code fields and constant values,
+    including unrecorded caches; immutable constant reference sharing is excluded.
+    This is on-disk admission evidence, not proof of already imported code or
+    protection against later writes, import hooks, or a hostile interpreter.
     """
     import hashlib
     import graphify
@@ -164,7 +168,7 @@ def verify_installed_candidate(expected):
         prefix = f"graphifyy-{DISTRIBUTION_VERSION}.dist-info/"
         owned = {str(p): p for p in (dist.files or ())}
         allowed_metadata = {prefix + name for name in (*INSTALLATION_METADATA, "RECORD", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json")}
-        scripts = Path(sysconfig.get_path("scripts"))
+        scripts = Path(sysconfig.get_path("scripts")).resolve()
         for name, member in owned.items():
             if name in actual or name in allowed_metadata:
                 continue
@@ -183,12 +187,153 @@ def verify_installed_candidate(expected):
             try:
                 if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
                     raise WorkspaceAuthorityInvalid("unsafe installed package member")
-                if hashlib.sha256(path.read_bytes()).hexdigest() != wanted:
+                source = path.read_bytes()
+                if hashlib.sha256(source).hexdigest() != wanted:
                     raise WorkspaceAuthorityInvalid("installed package member mismatch")
+                if name.endswith(".py"):
+                    _verify_source_caches(path, source)
             except OSError as exc:
                 raise WorkspaceAuthorityInvalid("installed package member unreadable") from exc
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
+
+
+def _verify_source_caches(path, source):
+    """Inspect executable caches; deserialize only in a bounded child interpreter.
+
+    cache_from_source follows sys.pycache_prefix, just like the source loader.
+    Other interpreter tags and legacy caches beside present .py files are not
+    selected by this loader. Nonstandard compiler/filename caches are explicitly
+    refused rather than silently treated as authorized. Never rewrite a cache.
+    """
+    from importlib.util import MAGIC_NUMBER, cache_from_source
+    import base64
+
+    caches = []
+    limit = 64 * 1024 * 1024
+    # Resolve symlinked installation ancestors consistently, while supporting
+    # caches created with either the installation spelling or its real path.
+    filenames = tuple(dict.fromkeys((str(path), str(path.resolve()))))
+    for filename in filenames:
+        for optimize in (0, 1, 2):
+            cache = Path(cache_from_source(filename, optimization=str(optimize) if optimize else ""))
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            try:
+                info = cache.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                raise WorkspaceAuthorityInvalid("unsafe installed bytecode cache")
+            fd = os.open(cache, flags)
+            with os.fdopen(fd, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if _file_identity(info) != _file_identity(opened):
+                    raise WorkspaceAuthorityInvalid("installed bytecode cache changed")
+                payload = stream.read(limit + 1)
+                if (len(payload) > limit or _file_identity(opened) != _file_identity(os.fstat(stream.fileno()))
+                        or _file_identity(opened) != _file_identity(cache.lstat())):
+                    raise WorkspaceAuthorityInvalid("installed bytecode cache changed")
+            if (len(payload) < 16 or payload[:4] != MAGIC_NUMBER
+                    or int.from_bytes(payload[4:8], "little") not in (0, 1, 3)):
+                raise WorkspaceAuthorityInvalid("unverified installed bytecode cache header")
+            caches.append([optimize, base64.b64encode(payload[16:]).decode("ascii")])
+    if caches:
+        _compare_cached_code(source, filenames, caches)
+
+
+# CPython code equality omits some fields. Compare every serialized code field,
+# recursively, preserving constant types and float bits. Marshal string interning
+# and reference flags vary across ordinary compilation history. This compares
+# code fields and immutable constant types/values, not constant object sharing
+# or observational equivalence of identity-sensitive programs.
+_CACHE_COMPARISON = r"""
+import base64, io, json, marshal, struct, sys, types
+try:
+    # Windows has no resource module. Darwin rejects a useful address-space
+    # cap for this interpreter. Input/wall bounds apply on every platform.
+    if sys.platform != 'win32':
+        import resource
+        if sys.platform != 'darwin':
+            resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))
+        resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
+    fields = (
+        'co_argcount', 'co_posonlyargcount', 'co_kwonlyargcount', 'co_nlocals',
+        'co_stacksize', 'co_flags', 'co_code', 'co_consts', 'co_names',
+        'co_varnames', 'co_filename', 'co_name', 'co_qualname', 'co_firstlineno',
+        'co_linetable', 'co_exceptiontable', 'co_freevars', 'co_cellvars',
+    )
+    def identity(value):
+        kind = type(value)
+        if kind is types.CodeType:
+            return ('code', tuple(identity(getattr(value, field)) for field in fields))
+        if kind is tuple:
+            return ('tuple', tuple(identity(item) for item in value))
+        if kind is frozenset:
+            return ('frozenset', frozenset(identity(item) for item in value))
+        if kind is slice:
+            return ('slice', identity(value.start), identity(value.stop), identity(value.step))
+        if kind is float:
+            return ('float', struct.pack('>d', value))
+        if kind is complex:
+            return ('complex', struct.pack('>dd', value.real, value.imag))
+        if kind in (type(None), type(Ellipsis), bool, int, str, bytes):
+            return (kind.__name__, value)
+        raise ValueError('unsupported code constant')
+    raw = sys.stdin.buffer.read(256 * 1024 * 1024 + 1)
+    if len(raw) > 256 * 1024 * 1024:
+        raise ValueError('comparison input limit')
+    request = json.loads(raw)
+    source = base64.b64decode(request['source'], validate=True)
+    expected = {}
+    for optimize, encoded in request['caches']:
+        stream = io.BytesIO(base64.b64decode(encoded, validate=True))
+        cached = marshal.load(stream)
+        if type(cached) is not types.CodeType or stream.read(1):
+            raise ValueError('invalid cache payload')
+        if optimize not in expected:
+            expected[optimize] = []
+            for filename in request['filenames']:
+                code = compile(source, filename, 'exec', dont_inherit=True, optimize=optimize)
+                # Model the loader's reconstruction, not compiler object reuse.
+                expected[optimize].append(identity(marshal.loads(marshal.dumps(code))))
+        if identity(cached) not in expected[optimize]:
+            raise ValueError('code mismatch')
+    sys.stdout.write('verified')
+except BaseException:
+    sys.exit(1)
+"""
+
+
+def _compare_cached_code(source, filenames, caches):
+    """A disposable interpreter, not an OS sandbox; cached code is never executed.
+
+    Deserialization is outside the admitting process, with input/wall limits,
+    POSIX CPU limits, and an address-space cap except on Darwin/Windows.
+    Malformed caches fail closed.
+    No provider environment, site initialization, or bytecode writes are needed.
+    """
+    import base64
+    import json
+    import subprocess
+    import sys
+
+    # This is a private transport, not a canonical contract document: filenames
+    # must retain their exact Unicode spelling for co_filename comparison.
+    request = json.dumps({"source": base64.b64encode(source).decode("ascii"),
+                          "filenames": filenames, "caches": caches}).encode("utf-8")
+    if len(request) > 256 * 1024 * 1024:
+        raise WorkspaceAuthorityInvalid("installed bytecode comparison input limit exceeded")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", "-B", "-c", _CACHE_COMPARISON],
+            input=request, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"}, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise WorkspaceAuthorityInvalid("installed bytecode comparison unavailable") from exc
+    if result.returncode != 0 or result.stdout != b"verified":
+        raise WorkspaceAuthorityInvalid("installed bytecode cache could not be verified against authorized source")
+
 
 
 @dataclass(frozen=True)
