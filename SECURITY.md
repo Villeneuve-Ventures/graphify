@@ -22,7 +22,7 @@ We will acknowledge receipt within 48 hours and aim to release a fix within 7 da
 
 ## Security Model
 
-graphify is a **local development tool**. It runs as a Claude Code skill and optionally as a local MCP stdio server. It makes no network calls during graph analysis - only during `ingest` (explicit URL fetch by the user).
+graphify is a **local development tool** with a CLI, assistant skills, and a local MCP stdio server. Structural code extraction runs locally. Semantic extraction sends content to the selected AI assistant or backend, which may use a remote model service; network access is not limited to explicit URL ingestion. Video/audio transcription runs locally, but the skill workflow passes the resulting transcripts onward for semantic extraction. Consult the [README privacy guidance](README.md#privacy) when choosing a processing destination for sensitive content.
 
 ### Threat Surface
 
