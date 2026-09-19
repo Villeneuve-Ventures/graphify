@@ -234,7 +234,10 @@ def test_public_code_refresh_withholds_failed_ast_publication(tmp_path, monkeypa
     if failure == "inner_import_read":
         original_read = Path.read_bytes
         def inner_read(path):
-            if path == repo / "first.py" and sys._getframe(1).f_code.co_name == "_resolve_cross_file_imports":
+            frame = sys._getframe(1)
+            if frame.f_code.co_name == "source_read_bytes":
+                frame = frame.f_back
+            if path == repo / "first.py" and frame.f_code.co_name == "_resolve_cross_file_imports":
                 reads.append(path)
                 raise OSError("injected inner import read")
             return original_read(path)
@@ -319,7 +322,10 @@ def test_public_code_refresh_withholds_vue_read_failure(tmp_path, monkeypatch, p
     original_read = Path.read_text
     reads = []
     def failed_read(path, *args, **kwargs):
-        if path == vue and sys._getframe(1).f_code.co_name == "extract_" + suffix:
+        frame = sys._getframe(1)
+        if frame.f_code.co_name == "source_read_text":
+            frame = frame.f_back
+        if path == vue and frame.f_code.co_name == "extract_" + suffix:
             reads.append(path)
             raise OSError("injected component read failure")
         return original_read(path, *args, **kwargs)

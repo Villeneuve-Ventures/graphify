@@ -1,5 +1,6 @@
 """Dm extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes, source_read_text, source_resolve, source_stat
 
 import re
 
@@ -19,7 +20,7 @@ def extract_dm(path: Path, *, strict: bool = False) -> dict:
     try:
         language = Language(tsdm.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:
@@ -88,7 +89,7 @@ def extract_dm(path: Path, *, strict: bool = False) -> dict:
             raw = _read_include_path(file_node)
             if raw:
                 norm = raw.replace("\\", "/").lstrip("./")
-                resolved = (path.parent / norm).resolve()
+                resolved = source_resolve(path.parent / norm)
                 edge: dict = {
                     "source": file_nid,
                     "target": _make_id(str(resolved)) if checked_exists(resolved, strict=strict) else _make_id(norm),
@@ -276,7 +277,7 @@ def _read_dmi_description(data: bytes) -> str:
 def extract_dmi(path: Path) -> dict:
     """Extract icon state names from a .dmi (BYOND PNG icon sheet)."""
     try:
-        data = path.read_bytes()
+        data = source_read_bytes(path)
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 
@@ -365,9 +366,9 @@ def _dmm_type_path(entry: str) -> str:
 def extract_dmm(path: Path) -> dict:
     """Extract type-path references from a .dmm map file's tile dictionary."""
     try:
-        if path.stat().st_size > 50 * 1024 * 1024:
+        if source_stat(path).st_size > 50 * 1024 * 1024:
             return {"nodes": [], "edges": [], "error": "file too large (>50 MB)"}
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = source_read_text(path, encoding="utf-8", errors="replace")
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 
@@ -437,7 +438,7 @@ _DMF_TYPE_RE = re.compile(r'^\s*type\s*=\s*(\S+)\s*$')
 def extract_dmf(path: Path) -> dict:
     """Extract windows and controls from a .dmf interface file."""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = source_read_text(path, encoding="utf-8", errors="replace")
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 

@@ -1,5 +1,6 @@
 """Apex extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_text
 
 
 from pathlib import Path
@@ -12,7 +13,7 @@ def extract_apex(path: Path, *, strict: bool = False) -> dict:
     Apex .cls and .trigger files using regex (no tree-sitter grammar on PyPI)."""
     import re as _re
     try:
-        source = path.read_text(encoding="utf-8", errors="replace")
+        source = source_read_text(path, encoding="utf-8", errors="replace")
     except OSError:
         if strict:
             raise

@@ -80,7 +80,10 @@ def test_strict_inner_source_read_refusal(tmp_path, monkeypatch, helper, suffix)
     observed = []
     fail = False
     def inner_read(path, *args, **kwargs):
-        if path == source and sys._getframe(1).f_code.co_name == helper:
+        frame = sys._getframe(1)
+        if frame.f_code.co_name in {"source_read_bytes", "source_read_text"}:
+            frame = frame.f_back
+        if path == source and frame.f_code.co_name == helper:
             observed.append(path)
             if fail:
                 raise OSError("injected inner source read")

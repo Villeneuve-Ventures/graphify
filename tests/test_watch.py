@@ -1022,13 +1022,110 @@ def _watchdog_available() -> bool:
         return False
 
 
+@pytest.fixture
+def running_watch(monkeypatch):
+    """Wait for observer startup and join watchers before test state disappears."""
+    import threading
+    from types import SimpleNamespace
+    from graphify import watch as watch_module
+
+    watchers = []
+
+    def start(path, **kwargs):
+        from watchdog.observers import Observer
+        from watchdog.observers.polling import PollingObserver
+
+        stop = threading.Event()
+        ready = threading.Event()
+        observer_type = PollingObserver if sys.platform == "darwin" else Observer
+        real_start = observer_type.start
+
+        def start_and_signal(observer):
+            real_start(observer)
+            ready.set()
+
+        monkeypatch.setattr(observer_type, "start", start_and_signal)
+
+        def interruptible_sleep(seconds):
+            if stop.wait(timeout=seconds):
+                raise KeyboardInterrupt
+
+        # Replace this module's clock, never the process-wide time.sleep.
+        monkeypatch.setattr(watch_module, "time", SimpleNamespace(
+            monotonic=time.monotonic, sleep=interruptible_sleep,
+        ))
+        thread = threading.Thread(target=watch_module.watch, args=(path,),
+                                  kwargs=kwargs, daemon=True)
+        watchers.append((thread, stop))
+        thread.start()
+        assert ready.wait(timeout=5), "watcher observer did not start"
+        return thread
+
+    yield start
+    for _, stop in watchers:
+        stop.set()
+    for thread, _ in watchers:
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "watcher did not stop and join its observer"
+
+
 @pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
-def test_watch_handler_honors_graphifyignore(tmp_path, monkeypatch):
+def test_running_watch_waits_for_observer_readiness(tmp_path, monkeypatch, running_watch):
+    import threading
+    import watchdog.observers
+    import watchdog.observers.polling
+
+    entered = threading.Event()
+    release = threading.Event()
+    ready = threading.Event()
+    returned = threading.Event()
+    errors = []
+
+    class DelayedObserver:
+        def schedule(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            entered.set()
+            assert release.wait(timeout=5), "observer startup was not released"
+            ready.set()
+
+        def stop(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(watchdog.observers, "Observer", DelayedObserver)
+    monkeypatch.setattr(watchdog.observers.polling, "PollingObserver", DelayedObserver)
+
+    def start_watcher():
+        try:
+            running_watch(tmp_path)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            returned.set()
+
+    caller = threading.Thread(target=start_watcher)
+    caller.start()
+    try:
+        assert entered.wait(timeout=5)
+        assert not returned.wait(timeout=0.1), "fixture returned before observer startup"
+    finally:
+        release.set()
+        caller.join(timeout=5)
+    assert not caller.is_alive()
+    assert not errors
+    assert returned.is_set() and ready.is_set()
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+def test_watch_handler_honors_graphifyignore(tmp_path, monkeypatch, running_watch):
     """gh-928: the watch Handler must short-circuit paths matching
     .graphifyignore so busy volumes (node_modules churn, build artefacts,
     Time Machine writes, …) don't wake the rebuild pipeline.
     """
-    import threading
     from graphify import watch as watch_mod
 
     watch_root = tmp_path / ".hidden-parent" / "corpus"
@@ -1044,14 +1141,7 @@ def test_watch_handler_honors_graphifyignore(tmp_path, monkeypatch):
 
     # Run watch() in a thread with a short debounce so we can verify the
     # post-debounce dispatch path actually runs on real events.
-    t = threading.Thread(
-        target=watch_mod.watch,
-        args=(watch_root,),
-        kwargs={"debounce": 0.2},
-        daemon=True,
-    )
-    t.start()
-    time.sleep(0.5)  # let observer.start() settle
+    running_watch(watch_root, debounce=0.2)
 
     # Ignored writes — handler must drop these.
     (watch_root / "node_modules" / "junk.js").write_text("// noise\n", encoding="utf-8")
@@ -1069,12 +1159,11 @@ def test_watch_handler_honors_graphifyignore(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
-def test_watch_loads_graphifyignore_once(tmp_path, monkeypatch):
+def test_watch_loads_graphifyignore_once(tmp_path, monkeypatch, running_watch):
     """gh-928: .graphifyignore must be parsed exactly once at watch() startup,
     not per filesystem event. Otherwise busy volumes re-read the file
     thousands of times per second.
     """
-    import threading
     from graphify import watch as watch_mod
     from graphify import detect as detect_mod
 
@@ -1093,9 +1182,7 @@ def test_watch_loads_graphifyignore_once(tmp_path, monkeypatch):
     monkeypatch.setattr(watch_mod, "_rebuild_code", lambda p, **kw: True)
     monkeypatch.setattr(watch_mod, "_notify_only", lambda p: None)
 
-    t = threading.Thread(target=watch_mod.watch, args=(tmp_path,), kwargs={"debounce": 0.2}, daemon=True)
-    t.start()
-    time.sleep(0.5)
+    running_watch(tmp_path, debounce=0.2)
 
     # Generate many events; loader must not be called again.
     for i in range(50):
@@ -2201,6 +2288,7 @@ def test_watcher_dispatch_recovers_merge_pending_union(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+@pytest.mark.parametrize("background_sleep", [False, True])
 @pytest.mark.parametrize(
     ("suffix", "operation", "message"),
     [
@@ -2209,8 +2297,9 @@ def test_watcher_dispatch_recovers_merge_pending_union(tmp_path, monkeypatch):
     ],
 )
 def test_watcher_defers_transaction_errors_without_terminating(
-    tmp_path, monkeypatch, capsys, suffix, operation, message
+    tmp_path, monkeypatch, capsys, suffix, operation, message, background_sleep
 ):
+    import threading
     from types import SimpleNamespace
 
     from graphify import transaction as transaction_module
@@ -2230,6 +2319,12 @@ def test_watcher_defers_transaction_errors_without_terminating(
             self.handler.on_any_event(
                 SimpleNamespace(is_directory=False, src_path=str(source))
             )
+            if background_sleep:
+                # A different thread must not consume this watcher's stop budget.
+                other = threading.Thread(target=lambda: time.sleep(0))
+                other.start()
+                other.join(timeout=5)
+                assert not other.is_alive()
 
         def stop(self):
             pass
@@ -2252,7 +2347,9 @@ def test_watcher_defers_transaction_errors_without_terminating(
         if sleep_calls > 1:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(watch_module.time, "sleep", stop_after_deferral)
+    monkeypatch.setattr(watch_module, "time", SimpleNamespace(
+        sleep=stop_after_deferral, monotonic=time.monotonic,
+    ))
 
     watch_module.watch(tmp_path, debounce=0)
 

@@ -1,5 +1,6 @@
 """Dart extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_text, source_resolve
 
 import re
 
@@ -11,7 +12,7 @@ from graphify.extractors.base import _file_stem, _make_id, strict_aware, checked
 def extract_dart(path: Path, *, strict: bool = False) -> dict:
     """Extract classes, mixins, functions, imports, generic calls, and annotations from a .dart file using regex."""
     try:
-        src = path.read_text(encoding="utf-8", errors="replace")
+        src = source_read_text(path, encoding="utf-8", errors="replace")
     except OSError:
         if strict:
             raise
@@ -43,7 +44,7 @@ def extract_dart(path: Path, *, strict: bool = False) -> dict:
         parent_ref = part_of_match.group(1)
         if parent_ref.endswith(".dart"):
             try:
-                parent_path = (path.parent / parent_ref).resolve()
+                parent_path = source_resolve(path.parent / parent_ref)
                 if checked_exists(parent_path, strict=strict):
                     stem = _file_stem(parent_path)
                     file_nid = _make_id(str(parent_path))

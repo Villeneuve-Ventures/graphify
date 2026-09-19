@@ -1,5 +1,6 @@
 """Sln extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_text, source_resolve
 
 import re
 
@@ -11,7 +12,7 @@ from graphify.extractors.base import _make_id, strict_aware
 def extract_sln(path: Path, *, strict: bool = False) -> dict:
     """Extract projects and inter-project dependencies from a .sln file."""
     try:
-        src = path.read_text(encoding="utf-8", errors="replace")
+        src = source_read_text(path, encoding="utf-8", errors="replace")
     except OSError:
         if strict:
             raise
@@ -49,7 +50,7 @@ def extract_sln(path: Path, *, strict: bool = False) -> dict:
             abs_proj = proj_name
         else:
             try:
-                abs_proj = str((path.parent / proj_path).resolve())
+                abs_proj = str(source_resolve(path.parent / proj_path))
             except Exception:
                 if strict:
                     raise

@@ -1,5 +1,6 @@
 """Laravel Blade template extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_text
 
 from pathlib import Path
 
@@ -10,7 +11,7 @@ def extract_blade(path: Path) -> dict:
     """Extract @include, <livewire:> components, and wire:click bindings from Blade templates."""
     import re
     try:
-        src = path.read_text(encoding="utf-8", errors="replace")
+        src = source_read_text(path, encoding="utf-8", errors="replace")
     except OSError:
         return {"error": f"cannot read {path}"}
 

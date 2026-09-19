@@ -181,6 +181,44 @@ def _git_head() -> str | None:
         return None
 
 
+def write_json(G, communities, stream, *, built_at_commit=None, community_labels=None):
+    """Serialize through a caller-owned text stream without path or Git I/O.
+
+    The caller owns output admission, lifetime, flushing and publication. Pass an
+    explicit commit if wanted; unlike to_json, this function never discovers one.
+    """
+    node_community = _node_community_map(communities)
+    _labels: dict[int, str] = {int(k): v for k, v in (community_labels or {}).items()}
+    try:
+        data = json_graph.node_link_data(G, edges="links")
+    except TypeError:
+        data = json_graph.node_link_data(G)
+    for node in data["nodes"]:
+        cid = node_community.get(node["id"])
+        node["community"] = cid
+        if cid is not None and _labels:
+            node["community_name"] = _labels.get(cid, f"Community {cid}")
+        node["norm_label"] = _strip_diacritics(node.get("label", "")).lower()
+    for link in data["links"]:
+        if "confidence_score" not in link:
+            conf = link.get("confidence", "EXTRACTED")
+            link["confidence_score"] = _CONFIDENCE_SCORE_DEFAULTS.get(conf, 1.0)
+        # Restore original edge direction. Undirected NetworkX storage may
+        # canonicalize endpoint order, flipping `calls` and other directional
+        # edges in graph.json. The build path stashes the true endpoints in
+        # _src/_tgt for exactly this purpose (#563).
+        true_src = link.pop("_src", None)
+        true_tgt = link.pop("_tgt", None)
+        if true_src is not None and true_tgt is not None:
+            link["source"] = true_src
+            link["target"] = true_tgt
+    data["hyperedges"] = getattr(G, "graph", {}).get("hyperedges", [])
+    commit = built_at_commit if built_at_commit is not None else None
+    if commit:
+        data["built_at_commit"] = commit
+    json.dump(data, stream, indent=2)
+
+
 def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False, built_at_commit: str | None = None, community_labels: dict[int, str] | None = None) -> bool:
     # Safety check: refuse to silently shrink an existing graph (#479)
     existing_path = Path(output_path)
@@ -238,35 +276,6 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
                 )
                 return False
 
-    node_community = _node_community_map(communities)
-    _labels: dict[int, str] = {int(k): v for k, v in (community_labels or {}).items()}
-    try:
-        data = json_graph.node_link_data(G, edges="links")
-    except TypeError:
-        data = json_graph.node_link_data(G)
-    for node in data["nodes"]:
-        cid = node_community.get(node["id"])
-        node["community"] = cid
-        if cid is not None and _labels:
-            node["community_name"] = _labels.get(cid, f"Community {cid}")
-        node["norm_label"] = _strip_diacritics(node.get("label", "")).lower()
-    for link in data["links"]:
-        if "confidence_score" not in link:
-            conf = link.get("confidence", "EXTRACTED")
-            link["confidence_score"] = _CONFIDENCE_SCORE_DEFAULTS.get(conf, 1.0)
-        # Restore original edge direction. Undirected NetworkX storage may
-        # canonicalize endpoint order, flipping `calls` and other directional
-        # edges in graph.json. The build path stashes the true endpoints in
-        # _src/_tgt for exactly this purpose (#563).
-        true_src = link.pop("_src", None)
-        true_tgt = link.pop("_tgt", None)
-        if true_src is not None and true_tgt is not None:
-            link["source"] = true_src
-            link["target"] = true_tgt
-    data["hyperedges"] = getattr(G, "graph", {}).get("hyperedges", [])
-    commit = built_at_commit if built_at_commit is not None else _git_head()
-    if commit:
-        data["built_at_commit"] = commit
     # Stage beside the destination to use its storage capacity and preserve it
     # on serialization failure without buffering the complete JSON in memory.
     try:
@@ -277,7 +286,9 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
         # A writable existing file need not have a writable parent directory.
         serialized = tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="")
     with serialized:
-        json.dump(data, serialized, indent=2)
+        write_json(G, communities, serialized, built_at_commit=(
+            built_at_commit if built_at_commit is not None else _git_head()),
+            community_labels=community_labels)
         serialized.seek(0)
         with open(output_path, "w", encoding="utf-8") as f:  # nosec
             shutil.copyfileobj(serialized, f, length=64 * 1024)

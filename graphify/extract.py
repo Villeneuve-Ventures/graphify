@@ -1,5 +1,6 @@
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
+from graphify.source_io import diagnostics_enabled, current_source_io, engine_inputs, SourceError, source_ancestors, engine_print, source_read_bytes, source_read_text, source_resolve
 
 import hashlib
 import importlib
@@ -7,6 +8,7 @@ import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -164,13 +166,13 @@ def _safe_extract(extractor: Callable, path: Path) -> dict:
     try:
         return extractor(path)
     except RecursionError:
-        print(f"  warning: skipped {path} (recursion limit exceeded)", file=sys.stderr, flush=True)
+        engine_print(f"  warning: skipped {path} (recursion limit exceeded)", file=sys.stderr, flush=True)
         return {"nodes": [], "edges": [], "error": "recursion_limit_exceeded"}
     except Exception as e:
-        if os.environ.get("GRAPHIFY_DEBUG"):
+        if diagnostics_enabled() and os.environ.get("GRAPHIFY_DEBUG"):
             import traceback
             traceback.print_exc(file=sys.stderr)
-        print(f"  warning: skipped {path} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
+        engine_print(f"  warning: skipped {path} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
         return {"nodes": [], "edges": [], "error": f"{type(e).__name__}: {e}"}
 
 
@@ -954,7 +956,7 @@ def _extract_python_rationale(path: Path, result: dict, *, strict: bool = False)
         from tree_sitter import Language, Parser
         language = Language(tspython.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception:
@@ -1110,7 +1112,7 @@ def _extract_js_rationale(path: Path, result: dict, *, strict: bool = False) -> 
     Mutates result in-place by appending to result['nodes'] and result['edges'].
     """
     try:
-        source_text = path.read_text(encoding="utf-8", errors="replace")
+        source_text = source_read_text(path, encoding="utf-8", errors="replace")
     except Exception:
         if strict:
             raise
@@ -1195,7 +1197,7 @@ def extract_svelte(path: Path, *, strict: bool = False) -> dict:
     result = _extract_generic(path, _JS_CONFIG, strict=strict)
     try:
         import re as _re
-        src = path.read_text(encoding="utf-8", errors="replace")
+        src = source_read_text(path, encoding="utf-8", errors="replace")
         existing_ids = {n["id"] for n in result.get("nodes", [])}
         # Source file node ID must match the one _extract_generic creates:
         # _make_id(str(path)) - single arg, no stem prefix. Otherwise the source
@@ -1329,7 +1331,7 @@ def extract_astro(path: Path, *, strict: bool = False) -> dict:
     result = _extract_generic(path, _JS_CONFIG, strict=strict)
     try:
         import re as _re
-        src = path.read_text(encoding="utf-8", errors="replace")
+        src = source_read_text(path, encoding="utf-8", errors="replace")
         existing_ids = {n["id"] for n in result.get("nodes", [])}
         file_node_id = _make_id(str(path))
         aliases = _load_tsconfig_aliases(path.parent, strict=strict)
@@ -1456,7 +1458,7 @@ def extract_vue(path: Path, *, strict: bool = False) -> dict:
     ``import('…')`` dynamic imports the AST does not edge.
     """
     try:
-        src = path.read_text(encoding="utf-8", errors="replace")
+        src = source_read_text(path, encoding="utf-8", errors="replace")
     except OSError:
         if strict:
             raise
@@ -1536,7 +1538,7 @@ def _is_spock_file(path: Path, ts_result: dict, *, strict: bool = False) -> bool
     import re as _re
     _SPOCK_FEATURE_RE = _re.compile(r"""^\s*def\s+[\"']""", _re.MULTILINE)
     try:
-        return bool(_SPOCK_FEATURE_RE.search(path.read_text(errors="replace")))
+        return bool(_SPOCK_FEATURE_RE.search(source_read_text(path, errors="replace")))
     except OSError:
         if strict:
             raise
@@ -1549,7 +1551,7 @@ def _extract_spock_fallback(path: Path, ts_result: dict) -> dict:
     (which survive reliably) with class and feature-method nodes extracted via regex.
     """
     import re as _re
-    source = path.read_text(errors="replace")
+    source = source_read_text(path, errors="replace")
     str_path = str(path)
     stem = _file_stem(path)
 
@@ -2887,6 +2889,13 @@ register_language_resolver(
 )
 
 
+_SCOPED_RESOLVERS = frozenset({
+    _resolve_swift_member_calls, _resolve_python_member_calls, resolve_ruby_member_calls,
+    _resolve_typescript_member_calls, _resolve_cpp_member_calls, _resolve_objc_member_calls,
+    _resolve_csharp_member_calls, _resolve_java_member_calls, resolve_pascal_inherited_calls,
+})
+
+
 # Inline markdown link: [text](target "optional title"). The negative lookbehind
 # excludes images (![alt](src)). The target stops at whitespace/closing paren so
 # an optional "title" after the URL is dropped; an optional <...> wrapper is too.
@@ -2945,7 +2954,7 @@ def extract_lazarus_package(path: Path, *, strict: bool = False) -> dict:
     """
     try:
         import xml.etree.ElementTree as ET
-        src = path.read_bytes()
+        src = source_read_bytes(path)
     except OSError as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 
@@ -3053,7 +3062,7 @@ def extract_slnx(path: Path, *, strict: bool = False) -> dict:
     import xml.etree.ElementTree as ET
 
     try:
-        src = path.read_bytes()
+        src = source_read_bytes(path)
     except OSError:
         if strict:
             raise
@@ -3085,7 +3094,7 @@ def extract_slnx(path: Path, *, strict: bool = False) -> dict:
     def _resolve(proj_path: str) -> str:
         proj_path = proj_path.replace("\\", "/")
         try:
-            return str((path.parent / proj_path).resolve())
+            return str(source_resolve(path.parent / proj_path))
         except Exception:
             if strict:
                 raise
@@ -3137,7 +3146,7 @@ def extract_csproj(path: Path, *, strict: bool = False) -> dict:
     import xml.etree.ElementTree as ET
 
     try:
-        src = path.read_bytes()
+        src = source_read_bytes(path)
     except OSError:
         if strict:
             raise
@@ -3219,7 +3228,7 @@ def extract_csproj(path: Path, *, strict: bool = False) -> dict:
             continue
         ref_path_norm = ref_path.replace("\\", "/")
         try:
-            abs_ref = str((path.parent / ref_path_norm).resolve())
+            abs_ref = str(source_resolve(path.parent / ref_path_norm))
         except Exception:
             if strict:
                 raise
@@ -3408,7 +3417,7 @@ def _xaml_codebehind_symbols(
     # parameter list on method nodes, so we read it from the code-behind source
     # at the method's recorded line.
     try:
-        cb_lines = codebehind.read_text(encoding="utf-8", errors="replace").splitlines()
+        cb_lines = source_read_text(codebehind, encoding="utf-8", errors="replace").splitlines()
     except OSError:
         if strict:
             raise
@@ -3506,9 +3515,11 @@ def _xaml_inferred_viewmodel_names(view_name: str | None) -> list[str]:
 def _xaml_project_root(path: Path, *, strict: bool = False) -> Path:
     project_markers = (".csproj", ".fsproj", ".vbproj", ".sln", ".slnx")
     root = path.parent
-    for directory in (path.parent, *path.parent.parents):
+    for directory in source_ancestors(path.parent):
         try:
-            if any(child.suffix in project_markers for child in (checked_glob(directory, "*", strict=True) if strict else directory.iterdir())):
+            children = (checked_glob(directory, "*", strict=strict)
+                        if strict or current_source_io() is not None else directory.iterdir())
+            if any(child.suffix in project_markers for child in children):
                 root = directory
                 break
         except OSError:
@@ -3517,9 +3528,9 @@ def _xaml_project_root(path: Path, *, strict: bool = False) -> Path:
             continue
     if _XAML_ACTIVE_EXTRACT_ROOT is None:
         return root
-    boundary = _XAML_ACTIVE_EXTRACT_ROOT.resolve()
+    boundary = source_resolve(_XAML_ACTIVE_EXTRACT_ROOT)
     try:
-        root.resolve().relative_to(boundary)
+        source_resolve(root).relative_to(boundary)
         return root
     except ValueError:
         return boundary
@@ -3528,7 +3539,7 @@ def _xaml_project_root(path: Path, *, strict: bool = False) -> Path:
 def _xaml_csharp_class_nodes(path: Path, *, strict: bool = False) -> dict[str, list[dict]]:
     from graphify.detect import _is_ignored, _is_noise_dir, _load_graphifyignore
     root = _xaml_project_root(path, strict=strict)
-    cache_key = str(root.resolve()) if _XAML_ACTIVE_EXTRACT_ROOT is not None else None
+    cache_key = str(source_resolve(root)) if _XAML_ACTIVE_EXTRACT_ROOT is not None else None
     if not strict and cache_key and cache_key in _XAML_CSHARP_CLASS_CACHE:
         return _XAML_CSHARP_CLASS_CACHE[cache_key]
     classes: dict[str, list[dict]] = {}
@@ -3582,7 +3593,7 @@ def _xaml_communitytoolkit_members(vm_node: dict, *, strict: bool = False) -> tu
     try:
         # errors="replace" so a non-UTF8 code-behind can't raise UnicodeDecodeError
         # and abort the whole extract_xaml (matches every other reader here).
-        lines = Path(source_file).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = source_read_text(Path(source_file), encoding="utf-8", errors="replace").splitlines()
     except OSError:
         if strict:
             raise
@@ -3649,7 +3660,7 @@ def extract_xaml(path: Path, *, strict: bool = False) -> dict:
     import xml.etree.ElementTree as ET
 
     try:
-        src = path.read_bytes()
+        src = source_read_bytes(path)
     except OSError:
         return {"nodes": [], "edges": [], "error": f"cannot read {path}"}
 
@@ -4063,7 +4074,7 @@ def _is_objc_header(path: Path, *, strict: bool = False) -> bool:
     extract_objc while leaving every C/C++ header on its existing extractor.
     """
     try:
-        head = path.read_bytes()[:256 * 1024]
+        head = source_read_bytes(path)[:256 * 1024]
     except OSError:
         if strict:
             raise
@@ -4108,7 +4119,7 @@ def _is_cpp_header(path: Path, *, strict: bool = False) -> bool:
     here and keeps its existing extract_c routing.
     """
     try:
-        head = path.read_bytes()[:256 * 1024]
+        head = source_read_bytes(path)[:256 * 1024]
     except OSError:
         if strict:
             raise
@@ -4164,8 +4175,11 @@ def _get_extractor(path: Path, *, strict: bool = False) -> Any | None:
 
 def _safe_extract_with_xaml_root(extractor, path: Path, root: Path, *, strict: bool = False) -> dict:
     global _XAML_ACTIVE_EXTRACT_ROOT
+    scope = current_source_io()
+    if scope is not None and extractor not in _SCOPED_EXTRACTORS:
+        scope.refuse('unadapted extractor callback')
     previous_root = _XAML_ACTIVE_EXTRACT_ROOT
-    _XAML_ACTIVE_EXTRACT_ROOT = root.resolve()
+    _XAML_ACTIVE_EXTRACT_ROOT = source_resolve(root)
     try:
         return _safe_extract(lambda source: call_with_strict(extractor, source, strict=strict), path)
     finally:
@@ -4187,7 +4201,8 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     Returns:
         (index, result_dict) so results can be placed back in order.
     """
-    strict = len(args) == 5 and args[4]
+    strict = len(args) >= 5 and args[4]
+    use_cache = args[5] if len(args) >= 6 else True
     if len(args) >= 4:
         args = args[:4]
         idx, path_str, root_str, cache_location_str = args
@@ -4198,7 +4213,7 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     root = Path(root_str)
     cache_location = Path(cache_location_str)
     _raise_recursion_limit()
-    bypass_cache = strict or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+    bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
 
     # Check cache first (avoid re-extraction)
     if not bypass_cache:
@@ -4232,6 +4247,7 @@ def _extract_parallel(
     total_files: int,
     cache_location: Path | None = None,
     strict: bool = False,
+    use_cache: bool = True,
 ) -> bool:
     """Extract uncached files in parallel using ProcessPoolExecutor.
 
@@ -4273,7 +4289,9 @@ def _extract_parallel(
     root_str = str(root)
     cache_loc_str = str(cache_location if cache_location is not None else root)
     work_items = [(idx, str(path), root_str, cache_loc_str) for idx, path in uncached_work]
-    if strict:
+    if not use_cache:
+        work_items = [(*item, strict, False) for item in work_items]
+    elif strict:
         work_items = [(*item, True) for item in work_items]
 
     done_count = 0
@@ -4292,7 +4310,7 @@ def _extract_parallel(
                     if strict:
                         raise RuntimeError("AST worker failed") from exc
                     pos = futures[future]
-                    print(
+                    engine_print(
                         f"  warning: worker failed for {work_items[pos][1]}: {exc}",
                         file=sys.stderr, flush=True,
                     )
@@ -4301,7 +4319,7 @@ def _extract_parallel(
                     total_files >= _PROGRESS_INTERVAL
                     and done_count % _PROGRESS_INTERVAL == 0
                 ):
-                    print(
+                    engine_print(
                         f"  AST extraction: {done_count}/{len(uncached_work)} uncached files "
                         f"({done_count * 100 // len(uncached_work)}%) [{max_workers} workers]",
                         flush=True,
@@ -4314,7 +4332,7 @@ def _extract_parallel(
         # __main__ guard, so worker bootstrap raises and the pool dies before
         # any work completes. Fall back to in-process sequential extraction —
         # slower but correct.
-        print(
+        engine_print(
             "  warning: parallel extraction failed (BrokenProcessPool); "
             "falling back to sequential. On Windows this usually means the "
             'caller is missing an `if __name__ == "__main__":` guard. Pass '
@@ -4328,7 +4346,7 @@ def _extract_parallel(
         # corpus made the count jump upward at the end (cached hits + files with no
         # extractor never entered uncached_work), which read as inconsistent (#1693).
         _done = len(uncached_work)
-        print(
+        engine_print(
             f"  AST extraction: {_done}/{_done} uncached files (100%) [{max_workers} workers]",
             flush=True,
         )
@@ -4342,6 +4360,8 @@ def _extract_sequential(
     total_files: int,
     cache_location: Path | None = None,
     strict: bool = False,
+    use_cache: bool = True,
+    input_outcomes: list[dict] | None = None,
 ) -> None:
     """Extract uncached files sequentially (fallback for small batches)."""
     _PROGRESS_INTERVAL = 100
@@ -4351,40 +4371,132 @@ def _extract_sequential(
             and work_idx % _PROGRESS_INTERVAL == 0
             and work_idx > 0
         ):
-            print(
+            engine_print(
                 f"  AST extraction: {work_idx}/{len(uncached_work)} uncached files ({work_idx * 100 // len(uncached_work)}%)",
                 flush=True,
             )
-        extractor = _get_extractor(path, strict=strict)
-        if extractor is None:
-            per_file[idx] = {"nodes": [], "edges": []}
-            continue
-        bypass_cache = strict or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
-        # XAML boundary anchors on `root` (the corpus), not the cache location.
-        if strict:
-            result = _safe_extract_with_xaml_root(extractor, path, root, strict=True)
-        else:
-            result = _safe_extract_with_xaml_root(extractor, path, root)
-        # See _extract_single_file: don't cache an anomalous zero-node result (#1666).
-        if not bypass_cache and "error" not in result and result.get("nodes"):
-            save_cached(path, result, root, cache_root=cache_location)
-        per_file[idx] = result
+        with _observe_input(path, input_outcomes, idx):
+            extractor = _get_extractor(path, strict=strict)
+            if extractor is None:
+                result = {"nodes": [], "edges": [], "_unsupported": True}
+            else:
+                # XAML boundary anchors on `root`, not the cache location.
+                if strict:
+                    result = _safe_extract_with_xaml_root(extractor, path, root, strict=True)
+                else:
+                    result = _safe_extract_with_xaml_root(extractor, path, root)
+            bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+            # Never persist anomalous zero-node results (#1666).
+            if not bypass_cache and "error" not in result and result.get("nodes"):
+                save_cached(path, result, root, cache_root=cache_location)
+            per_file[idx] = result
+        if input_outcomes is not None:
+            input_outcomes[idx] = _input_outcome(path, result)
     if total_files >= _PROGRESS_INTERVAL:
         # Consistent denominator with the intermediate lines (#1693).
         _done = len(uncached_work)
-        print(f"  AST extraction: {_done}/{_done} uncached files (100%)", flush=True)
+        engine_print(f"  AST extraction: {_done}/{_done} uncached files (100%)", flush=True)
 
 
 _PARALLEL_THRESHOLD = 20
 
 
-def extract(
+class ExtractionIncomplete(RuntimeError):
+    """Structured incomplete result; partial graph facts must not be certified."""
+    def __init__(self, outcomes, *, failure=None):
+        self.outcomes = outcomes
+        self.failure = failure
+        super().__init__('AST extraction incomplete: ' + repr(outcomes)
+                         + (f'; {failure}' if failure else ''))
+
+
+@contextmanager
+def _observe_input(path, outcomes, index):
+    """Attribute a scoped failure before the poisoned context stops the batch."""
+    try:
+        yield
+        if outcomes is not None:
+            current_source_io().check()
+    except SourceError as exc:
+        if outcomes is not None:
+            outcomes[index] = {'path': str(path), 'status': exc.code, 'detail': str(exc)}
+        raise
+
+
+def _input_outcome(path, result):
+    if not isinstance(result, dict):
+        status, detail = 'failed_extraction', 'missing result'
+    elif result.get('_unsupported'):
+        status, detail = 'unsupported_extractor', 'no registered extractor'
+    elif result.get('error'):
+        detail = str(result['error'])
+        status = 'missing_parser' if 'not installed' in detail else 'failed_extraction'
+    elif not isinstance(result.get('nodes'), list) or not isinstance(result.get('edges'), list):
+        status, detail = 'failed_extraction', 'invalid result'
+    else:
+        status, detail = ('success' if result['nodes'] else 'empty'), None
+    return {'path': str(path), 'status': status, **({'detail': detail} if detail else {})}
+
+
+# Explicit built-in dispatch inventory. A plugin callback is not automatically
+# source-I/O-aware because its signature happens to accept strict=True.
+_SCOPED_EXTRACTORS = frozenset(_DISPATCH.values()) | frozenset(_SHEBANG_DISPATCH.values()) | {
+    extract_blade, extract_mcp_config, extract_package_manifest, extract_objc, extract_cpp,
+}
+
+
+def extract(paths, cache_root=None, *, parallel=True, max_workers=None, strict=False,
+            source_root=None, source_io=None, quiet=False, ambient_output=True,
+            report_outcomes=False):
+    """Run the existing engine, optionally with rooted, cache-free input evidence.
+
+    Scoped calls are synchronous, strict, and return per-input outcomes. Their
+    SourceIO must already be open. ``source_root`` controls IDs/resolution while
+    ``cache_root`` retains its ordinary output destination. ``ambient_output=False``
+    also disables caches for unscoped callers. Quiet only suppresses diagnostics.
+    """
+    paths = [Path(path) for path in paths]
+    with engine_inputs(source_io, quiet=quiet):
+        scope = current_source_io()
+        if scope is not None:
+            if source_root is not None and source_resolve(source_root) != scope.root:
+                scope.refuse('logical source root differs from input scope')
+            source_root = scope.root
+            paths = [path if path.is_absolute() else scope.root / path for path in paths]
+            parallel = False
+        input_outcomes = ([{'path': str(path), 'status': 'not_processed'} for path in paths]
+                          if scope is not None else None)
+        try:
+            return _extract_impl(paths, cache_root, parallel=parallel, max_workers=max_workers,
+                                 strict=strict or scope is not None, use_cache=ambient_output,
+                                 source_root=source_root,
+                                 input_outcomes=input_outcomes,
+                                 report_outcomes=report_outcomes or scope is not None)
+        except SourceError as exc:
+            if scope is None:
+                raise
+            raise ExtractionIncomplete(input_outcomes,
+                                       failure={'status': exc.code, 'detail': str(exc)}) from exc
+        except ExtractionIncomplete:
+            raise
+        except Exception as exc:
+            if scope is None:
+                raise
+            raise ExtractionIncomplete(input_outcomes, failure={
+                'status': 'failed_extraction', 'detail': str(exc)}) from exc
+
+
+def _extract_impl(
     paths: list[Path],
     cache_root: Path | None = None,
     *,
     parallel: bool = True,
     max_workers: int | None = None,
     strict: bool = False,
+    source_root: Path | None = None,
+    report_outcomes: bool = False,
+    use_cache: bool = True,
+    input_outcomes: list[dict] | None = None,
 ) -> dict:
     """Extract AST nodes and edges from a list of code files.
 
@@ -4435,7 +4547,9 @@ def extract(
         root = Path(".")
     if cache_root is not None:
         root = cache_root
-    root = root.resolve()
+    if source_root is not None:
+        root = source_root
+    root = source_resolve(root)
 
     # #1774: the cache is an OUTPUT, so when no explicit cache_root is given it is
     # written under the current working directory — never `root` (the inferred
@@ -4443,7 +4557,7 @@ def extract(
     # read-only or foreign corpus. `root` still anchors the content-hash keys,
     # node ids, symbol resolution, and the XAML project-scan boundary; only the
     # cache directory's location diverges from it.
-    cache_location = (cache_root if cache_root is not None else Path(".")).resolve()
+    cache_location = source_resolve(cache_root if cache_root is not None else Path("."))
     total = len(paths)
 
     # Phase 1: separate cached hits from uncached work
@@ -4451,10 +4565,14 @@ def extract(
     uncached_work: list[tuple[int, Path]] = []
 
     for i, path in enumerate(paths):
-        if _get_extractor(path, strict=strict) is None:
-            per_file[i] = {"nodes": [], "edges": []}
+        with _observe_input(path, input_outcomes, i):
+            extractor = _get_extractor(path, strict=strict)
+        if extractor is None:
+            per_file[i] = {"nodes": [], "edges": [], "_unsupported": True}
+            if input_outcomes is not None:
+                input_outcomes[i] = _input_outcome(path, per_file[i])
             continue
-        bypass_cache = strict or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+        bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         if not bypass_cache:
             cached = load_cached(path, root, cache_root=cache_location)
             if cached is not None:
@@ -4469,10 +4587,20 @@ def extract(
             ran_parallel = _extract_parallel(
                 uncached_work, per_file, root, max_workers, total, cache_location,
                 *([True] if strict else []),
+                **({'use_cache': False} if not use_cache else {}),
             )
         if not ran_parallel:
             _extract_sequential(uncached_work, per_file, root, total, cache_location,
-                                *([True] if strict else []))
+                                *([True] if strict else []),
+                                **({'use_cache': False} if not use_cache else {}),
+                                **({'input_outcomes': input_outcomes}
+                                   if input_outcomes is not None else {}))
+
+    outcomes = [_input_outcome(path, result) for path, result in zip(paths, per_file)]
+    if current_source_io() is not None:
+        current_source_io().check()
+        if any(item["status"] not in {"success", "empty"} for item in outcomes):
+            raise ExtractionIncomplete(outcomes)
 
     if strict and any(not isinstance(result, dict) or "error" in result
                       or not isinstance(result.get("nodes"), list)
@@ -4497,7 +4625,7 @@ def extract(
     if _empty_sources:
         _shown = ", ".join(Path(x).name for x in _empty_sources[:5])
         _more = f" (+{len(_empty_sources) - 5} more)" if len(_empty_sources) > 5 else ""
-        print(
+        engine_print(
             f"  warning: {len(_empty_sources)} source file(s) produced zero nodes and "
             f"are absent from the graph: {_shown}{_more}. A re-run will retry them "
             f"(empties are no longer cached); if it persists, please report the "
@@ -4521,7 +4649,7 @@ def extract(
             f"{ext} ({n})" for ext, n in sorted(_no_extractor.items(), key=lambda kv: (-kv[1], kv[0]))
         )
         _tot = sum(_no_extractor.values())
-        print(
+        engine_print(
             f"  warning: {_tot} file(s) are classified as code but graphify has no AST "
             f"extractor for their language, so they contributed nothing to the graph: "
             f"{_by_count}. Please open an issue to request support for these (#1689).",
@@ -4551,7 +4679,7 @@ def extract(
         else:
             _reason = _missing_dep_error[_ext]
             _hint = ""
-        print(
+        engine_print(
             f"  warning: {_n} {_ext} file(s) contributed nothing to the graph "
             f"because a dependency is missing: {_reason}.{_hint} (#1745)",
             file=sys.stderr, flush=True,
@@ -4607,7 +4735,7 @@ def extract(
             rel = path.relative_to(root)
         except ValueError:
             try:
-                rel = path.resolve().relative_to(root)
+                rel = source_resolve(path).relative_to(root)
             except ValueError:
                 continue
         new_id = _file_node_id(rel)
@@ -4616,18 +4744,18 @@ def extract(
         # Also register the absolute-resolved form of the file-level id so
         # alias/workspace import targets (resolved via .resolve()) remap to
         # canonical instead of orphaning (#1529).
-        old_id_abs = _make_id(str(path.resolve()))
+        old_id_abs = _make_id(str(source_resolve(path)))
         if old_id_abs != new_id:
             id_remap[old_id_abs] = new_id
         old_prefs: list[tuple[str, str]] = []
         old_pref = _file_node_id(path)
         if old_pref != new_id:
             old_prefs.append((old_pref, new_id))
-        old_pref_abs = _file_node_id(path.resolve())
+        old_pref_abs = _file_node_id(source_resolve(path))
         if old_pref_abs != new_id and old_pref_abs != old_pref:
             old_prefs.append((old_pref_abs, new_id))
         if old_prefs:
-            prefix_remap[path.resolve()] = old_prefs
+            prefix_remap[source_resolve(path)] = old_prefs
     if id_remap:
         for n in all_nodes:
             if n.get("id") in id_remap:
@@ -4650,7 +4778,7 @@ def extract(
             if n.get("type") == "package":
                 continue
             try:
-                entry = prefix_remap.get(Path(sf).resolve())
+                entry = prefix_remap.get(source_resolve(Path(sf)))
             except Exception:
                 if strict:
                     raise
@@ -5025,7 +5153,8 @@ def extract(
     # receiver-typed/qualified calls the shared pass skipped) with its own
     # single-definition god-node guard. Registered in graphify.resolver_registry so
     # a new language plugs in without editing this body (#1356 Swift, #1446 Python).
-    run_language_resolvers(paths, per_file, all_nodes, all_edges, strict=strict)
+    run_language_resolvers(paths, per_file, all_nodes, all_edges, strict=strict,
+                           scoped_resolvers=_SCOPED_RESOLVERS)
 
     # Relativize source_file fields so paths are portable across machines (#555).
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash
@@ -5107,10 +5236,13 @@ def extract(
         "edges": all_edges,
         "input_tokens": 0,
         "output_tokens": 0,
+        **({"outcomes": outcomes} if report_outcomes else {}),
     }
 
 
 def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | None = None) -> list[Path]:
+    if current_source_io() is not None:
+        current_source_io().refuse("collect_files is not a scoped detector; use detect(source_io=...)")
     containment_root = root if root is not None else target
     from graphify.detect import _resolves_under_root
     if target.is_file():
@@ -5174,7 +5306,7 @@ def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | N
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python -m graphify.extract <file_or_dir> ...", file=sys.stderr)
+        engine_print("Usage: python -m graphify.extract <file_or_dir> ...", file=sys.stderr)
         sys.exit(1)
 
     paths: list[Path] = []
@@ -5182,4 +5314,4 @@ if __name__ == "__main__":
         paths.extend(collect_files(Path(arg)))
 
     result = extract(paths)
-    print(json.dumps(result, indent=2))
+    engine_print(json.dumps(result, indent=2))

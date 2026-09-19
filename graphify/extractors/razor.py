@@ -1,5 +1,6 @@
 """ASP.NET Razor component extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_text
 
 import re
 from pathlib import Path
@@ -10,7 +11,7 @@ from graphify.extractors.base import _file_stem, _make_id
 def extract_razor(path: Path) -> dict:
     """Extract directives, component refs, and @code methods from .razor/.cshtml."""
     try:
-        src = path.read_text(encoding="utf-8", errors="replace")
+        src = source_read_text(path, encoding="utf-8", errors="replace")
     except OSError:
         return {"nodes": [], "edges": [], "error": f"cannot read {path}"}
 

@@ -1,5 +1,6 @@
 """julia — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes
 
 from graphify.extractors.base import _file_stem, _make_id, _read_text
 from graphify.extractors.engine import _semantic_reference_edge
@@ -17,7 +18,7 @@ def extract_julia(path: Path) -> dict:
     try:
         language = Language(tsjulia.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:

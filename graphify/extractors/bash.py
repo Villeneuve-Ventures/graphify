@@ -1,5 +1,6 @@
 """Bash extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import current_source_io, source_read_bytes, source_resolve
 
 
 from pathlib import Path
@@ -19,7 +20,7 @@ def extract_bash(path: Path, *, strict: bool = False) -> dict:
     try:
         language = Language(tsbash.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:
@@ -172,7 +173,7 @@ def extract_bash(path: Path, *, strict: bool = False) -> dict:
                         raw = _read_text(args[0], source).strip().strip("'\"")
                         line = node.start_point[0] + 1
                         if raw.startswith((".", "/")):
-                            resolved = (path.parent / raw).resolve()
+                            resolved = source_resolve(path.parent / raw)
                             # Only emit the edge if the target actually exists on
                             # disk — prevents graph pollution from crafted paths
                             # like `source ../../etc/passwd` that traverse outside
@@ -191,12 +192,12 @@ def extract_bash(path: Path, *, strict: bool = False) -> dict:
                     if cmd in _BASH_SCRIPT_RUNNERS and args:
                         raw = literal(args[0])
                     if raw and raw.endswith(".sh"):
-                        resolved = (path.parent / raw).resolve()
+                        resolved = source_resolve(path.parent / raw)
                         if checked_is_file(resolved, strict=strict):
                             target_path = resolved
                             if not path.is_absolute():
                                 try:
-                                    target_path = resolved.relative_to(Path.cwd().resolve())
+                                    target_path = resolved.relative_to((current_source_io().root if current_source_io() else source_resolve(Path.cwd())))
                                 except ValueError:
                                     pass
                             caller_nid = entry_nid if parent_nid == file_nid else parent_nid

@@ -1,5 +1,6 @@
 """Sql extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes
 
 import re
 
@@ -21,7 +22,7 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
         source = (
             content.encode("utf-8") if isinstance(content, str)
             else content if content is not None
-            else path.read_bytes()
+            else source_read_bytes(path)
         )
         tree = parser.parse(source)
         root = tree.root_node

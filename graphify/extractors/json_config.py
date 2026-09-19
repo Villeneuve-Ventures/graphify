@@ -1,5 +1,6 @@
 """Json_config extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import current_source_io, SourceTooLarge
 
 
 from pathlib import Path
@@ -65,17 +66,21 @@ def extract_json(path: Path) -> dict:
         return {"nodes": [], "edges": [], "error": "tree-sitter-json not installed"}
 
     try:
-        # Bounded read instead of stat()+read() to eliminate TOCTOU (J-1):
-        # read one byte beyond the limit so we can detect oversized files even
-        # if the file grows between stat and read.
-        with path.open("rb") as _f:
-            source = _f.read(_JSON_MAX_BYTES + 1)
+        # SourceIO checks the complete read against the cap, including growth.
+        # Ordinary reads retain a one-byte sentinel to detect oversized files.
+        if current_source_io() is not None:
+            source = current_source_io().read_bytes(path, max_bytes=_JSON_MAX_BYTES)
+        else:
+            with path.open("rb") as _f:
+                source = _f.read(_JSON_MAX_BYTES + 1)
         if len(source) > _JSON_MAX_BYTES:
             return {"nodes": [], "edges": [], "error": "json file too large to index"}
         language = Language(tsjson.language())
         parser = Parser(language)
         tree = parser.parse(source)
         root = tree.root_node
+    except SourceTooLarge:
+        return {"nodes": [], "edges": [], "error": "json file too large to index"}
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 

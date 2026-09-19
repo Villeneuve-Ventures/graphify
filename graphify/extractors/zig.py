@@ -1,5 +1,6 @@
 """Zig extractor (tree-sitter). Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes
 
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,7 @@ def extract_zig(path: Path) -> dict:
     try:
         language = Language(tszig.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:

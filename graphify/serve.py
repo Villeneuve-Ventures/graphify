@@ -106,9 +106,29 @@ def _has_chinese(text: str) -> bool:
     return any("一" <= ch <= "鿿" for ch in text)
 
 
-def _segment_chinese(text: str) -> list[str]:
+def memory_query_segmenter():
+    """Private pinned-dictionary segmentation without jieba's ambient disk cache.
+
+    Invoke in a process launched with -B/PYTHONDONTWRITEBYTECODE before imports
+    when startup must also be read-only. No global tokenizer state is modified.
+    Missing optional Chinese support retains the ordinary bigram fallback.
+    """
+    if _jieba is None:
+        return lambda text: [text[i:i + 2] for i in range(len(text) - 1)] or [text]
+    if getattr(_jieba, '__version__', None) != '0.42.1':
+        raise RuntimeError('memory tokenizer requires qualified jieba 0.42.1')
+    tokenizer = _jieba.Tokenizer()
+    with tokenizer.get_dict_file() as dictionary:
+        tokenizer.FREQ, tokenizer.total = tokenizer.gen_pfdict(dictionary)
+    tokenizer.initialized = True
+    return tokenizer.cut
+
+
+def _segment_chinese(text: str, *, segmenter=None) -> list[str]:
     """Segment Chinese text and keep the original term for exact matching."""
-    if _jieba is not None:
+    if segmenter is not None:
+        segments = [w for w in segmenter(text) if len(w.strip()) > 0]
+    elif _jieba is not None:
         segments = [w for w in _jieba.cut(text) if len(w.strip()) > 0]
     else:
         segments = [text[i:i + 2] for i in range(len(text) - 1)] or [text]
@@ -178,7 +198,7 @@ _QUERY_STOPWORDS = frozenset({
 })
 
 
-def _query_terms(question: str) -> list[str]:
+def _query_terms(question: str, *, segmenter=None) -> list[str]:
     """Split a query into searchable terms, segmenting Chinese text, then drop
     question/filler words (`_QUERY_STOPWORDS`, English plus common German/
     Romance-language fillers) so content words drive seeding. Falls back to the
@@ -187,7 +207,7 @@ def _query_terms(question: str) -> list[str]:
     terms: list[str] = []
     for raw in question.split():
         if _has_chinese(raw):
-            for seg in _segment_chinese(raw.lower().strip()):
+            for seg in _segment_chinese(raw.lower().strip(), segmenter=segmenter):
                 seg = seg.strip()
                 if seg and _is_searchable(seg):
                     terms.append(seg)
@@ -882,8 +902,9 @@ def _query_graph_text(
     depth: int = 3,
     token_budget: int = 2000,
     context_filters: list[str] | None = None,
+    segmenter=None,
 ) -> str:
-    terms = _query_terms(question)
+    terms = _query_terms(question, segmenter=segmenter)
     # One graph scoring pass produces both the combined ranking (used to drive
     # the gap-based seed selection below) and the per-token singleton winners
     # (used by _pick_seeds' per-term guarantee). Previously this was T+1 passes
