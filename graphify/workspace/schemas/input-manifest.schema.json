@@ -1,0 +1,298 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/input-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "format_version",
+    "phase",
+    "roots",
+    "evidence",
+    "code_inputs",
+    "outcomes",
+    "failure"
+  ],
+  "properties": {
+    "contract": {
+      "const": "graphify.workspace.source-inputs",
+      "type": "string"
+    },
+    "format_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "phase": {
+      "enum": [
+        "detection",
+        "consumed"
+      ]
+    },
+    "roots": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "source",
+          "git",
+          "policy"
+        ]
+      },
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "contains": {
+        "const": "source",
+        "type": "string"
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "path",
+              "value"
+            ],
+            "properties": {
+              "operation": {
+                "const": "directory",
+                "type": "string"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "value": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9223372036854775807
+                },
+                "minItems": 3,
+                "maxItems": 3
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "path",
+              "value"
+            ],
+            "properties": {
+              "operation": {
+                "const": "probe",
+                "type": "string"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "value": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "minItems": 3,
+                    "maxItems": 3
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "minItems": 6,
+                    "maxItems": 6
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "path",
+              "value"
+            ],
+            "properties": {
+              "operation": {
+                "const": "read",
+                "type": "string"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "value": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "minItems": 6,
+                    "maxItems": 6
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "path",
+              "value"
+            ],
+            "properties": {
+              "operation": {
+                "const": "list",
+                "type": "string"
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "value": {
+                "type": "array",
+                "prefixItems": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9223372036854775807
+                    },
+                    "minItems": 3,
+                    "maxItems": 3
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "array",
+                      "prefixItems": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096
+                        },
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "minItems": 3,
+                          "maxItems": 3
+                        }
+                      ],
+                      "items": false,
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "maxItems": 100000
+                  }
+                ],
+                "items": false,
+                "minItems": 2,
+                "maxItems": 2
+              }
+            }
+          }
+        ]
+      },
+      "maxItems": 100000
+    },
+    "code_inputs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096
+      },
+      "maxItems": 100000,
+      "uniqueItems": true
+    },
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "status"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "status": {
+            "enum": [
+              "success",
+              "empty",
+              "not_processed",
+              "unsupported_extractor",
+              "missing_parser",
+              "failed_extraction",
+              "source_error",
+              "inconsistent_input",
+              "unsupported_input",
+              "failed_read",
+              "partial_enumeration"
+            ]
+          }
+        }
+      },
+      "maxItems": 100000
+    },
+    "failure": {
+      "enum": [
+        null,
+        "unsupported_extractor",
+        "missing_parser",
+        "failed_extraction",
+        "source_error",
+        "inconsistent_input",
+        "unsupported_input",
+        "failed_read",
+        "partial_enumeration"
+      ]
+    }
+  }
+}
