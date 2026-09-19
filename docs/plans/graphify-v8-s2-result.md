@@ -12,7 +12,10 @@ The donor `workspace/v1` reference was inspected at
 implementation was copied. The adapter query bounds and canonical encoding
 conventions were adapted. The implementation worktree is
 `/Users/lisrel.claw/graphify-v8-workspace-contracts`, branch
-`codex/v8-workspace-contracts`. No commit, push or PR is part of this task.
+`codex/v8-workspace-contracts`. The initial implementation stopped at a local
+diff. Subsequent operator authorization delivered commit `f02bca18` through
+[PR #149](https://github.com/Villeneuve-Ventures/graphify/pull/149); the review
+follow-up below records later repairs separately from that initial proof.
 
 ## Contract decisions
 
@@ -126,7 +129,7 @@ untouched.
 | `tests/test_workspace_contracts.py`, `tests/test_workspace_composition.py`, `tests/test_wheel_packaging.py` | Evidence/schema/refusal/import/authority/package/installation/tamper proof |
 | This document | Task-owned current progress and evidence; historical plans preserved |
 
-### Completed evidence
+### Completed evidence for the initial candidate (`f02bca18`)
 
 - Final full serial gate, `uv run --frozen pytest tests/ -q --tb=short`:
   **5,918 passed, 42 skipped**, five warnings, **254.32 seconds**. All-extra frozen
@@ -178,8 +181,76 @@ The local proof directory is `/private/tmp/graphify-s2-proof-zkaol32b`:
 and pinned-base reproduction are retained. `review.diff` includes all 17 changed
 files, including new untracked files. `wheel/` contains the final wheel, and
 `fixture/` contains its canonical local identity and `fixture-bundle.zip`.
-Neither these artifacts nor the uncommitted branch are certified release inputs.
+These machine-local artifacts are historical diagnostics, not portable review
+attachments or certified release inputs. They may disappear after local cleanup.
 
-No required S2 proof remains open. S3/S4 operational behavior and S7 committed
+The initial candidate completed its required S2 proof. S3/S4 operational behavior and S7 committed
 whole-candidate/native lifecycle proof remain later work, as do the stated D3
 compatibility decision and real installation/adoption boundaries.
+
+### PR review follow-up
+
+The review snapshot covered all five conversation comments, three submitted
+reviews, and 15 inline threads on PR #149 at `f02bca18`, including the schema
+mapping suggestion nested in the CodeRabbit review. Duplicate summaries were
+evaluated with their corresponding inline findings.
+
+| Finding | Disposition |
+|---|---|
+| Unbounded wheel expansion | Accepted: validate the complete namespace, member sizes and aggregate expansion before decompression; bound actual reads. |
+| Partial fixture writes prevent retry | Accepted: write and close the complete fixture in private sibling staging, then publish without replacing an existing destination. Failure cleanup never recursively removes the public output. Hard-crash durability remains outside this local fixture helper. |
+| Surrogates escape query refusal | Accepted: question and context-filter encoding failures now raise `QueryRejected`. |
+| Installed-member filesystem races escape refusal | Accepted: member stat/read `OSError` now raises `WorkspaceAuthorityInvalid`; other errors retain their meaning. |
+| Cold-import test has no timeout | Accepted: add a 30-second subprocess timeout. |
+| Schema/document positional coupling | Accepted: choose documents by schema filename and check complete coverage. |
+| Three descriptor-leak reports | Not reproduced: each successful open is tracked and closed by the existing `finally` block. Wrapping directory descriptors in `os.fdopen` would not preserve this implementation. |
+| Three protocol ellipsis reports | No change: ellipses are intentional typed `Protocol` method declarations. |
+| Two mixed-import reports | No change: tests need the module object to monkeypatch module-level bindings. `MAX_ENTRIES` is not an `InputManifest` class attribute; the suggested replacement is incorrect. |
+| Normal wheel rejected due to Requires-Python order | Not reproduced: the actual built wheel emits `==3.14.*,>=3.14.2`, matching the existing check. Source declaration order does not determine emitted metadata order. |
+| Missing protected acceptance packet | Not applicable: no authorized source designated S2 protected. Review findings cannot activate that policy. Portable reproduction guidance is supplied below without inventing a protected packet. |
+| Default docstring coverage warning | No bulk changes: this is a bot advisory, not a configured repository gate or a demonstrated missing behavioral contract. |
+
+The earlier full-suite totals apply to `f02bca18`, not to these modified files.
+The operator's instruction not to rerun pytest remains in force. New focused
+stdlib-unit regressions cover UTF-8 refusal and installed-member races; wheel
+resource and failed-publication regressions are added for subsequent CI execution.
+The follow-up uses scoped static checks and new isolated reproductions; it does
+not claim a new full-suite pass or whole-candidate certification.
+
+Follow-up evidence: six new stdlib unittest tests passed, covering both surrogate
+fields, valid multibyte text, installed-member stat/read races, normal success,
+specific hash-mismatch refusal, and propagation of unrelated errors. New isolated
+wheel probes passed pre-decompression rejection for package/metadata/license
+sizes, aggregate expansion and unexpected namespace; write-error/interruption
+retry; and preservation of racing empty/populated public destinations. A fresh
+wheel produced a source-matching fixture with every archive member/hash checked.
+Scoped Ruff passed and Pyright reported zero errors using the repository's venv
+interpreter. An initial Pyright invocation without that interpreter could not
+resolve `packaging`; correcting the invocation resolved it without source or
+dependency changes. AST graph update completed with 13,521 nodes / 30,087 edges.
+
+The same independent reviewer identified a cleanup race in the first repair.
+Private staging and no-replace publication replaced that repair; the focused
+correction review returned CLEAN. Publication reuses the existing native
+no-replace primitive on macOS/Linux and Windows rename semantics on Windows.
+Only macOS was exercised here; Linux/Windows branches remain untested locally,
+and unsupported POSIX publication fails closed. No fsync/crash-durability claim
+is added to this local fixture builder.
+
+Portable reproduction starts from the checked-out PR revision and the committed
+lockfile. These commands are guidance for reviewers; listing them does not claim
+they were rerun during the follow-up:
+
+```sh
+uv sync --all-extras --frozen
+uv run --frozen python -B -m unittest tests.test_workspace_review_regressions -v
+# When pytest execution is authorized:
+uv run --frozen pytest tests/test_workspace_contracts.py tests/test_workspace_composition.py tests/test_wheel_packaging.py -q
+uv run --frozen pytest tests/ -q --tb=short
+```
+
+The packaging tests build a fresh wheel, verify its full namespace, create
+external local fixtures, and exercise disposable installation and tamper refusal.
+They avoid requiring another reviewer's machine-local wheel or temporary paths.
+The committed CI workflow specifies the remaining checks, and GitHub run results
+must be inspected separately before making remote-CI claims.

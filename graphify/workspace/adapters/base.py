@@ -119,7 +119,11 @@ class QueryRequest:
             raise QueryRejected("question must be a string")
         if not self.question or self.question.strip() != self.question:
             raise QueryRejected("question must be non-empty and trimmed")
-        if len(self.question.encode("utf-8")) > _MAX_QUERY_QUESTION_BYTES:
+        try:
+            question_size = len(self.question.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise QueryRejected("question must be valid UTF-8") from None
+        if question_size > _MAX_QUERY_QUESTION_BYTES:
             raise QueryRejected(
                 f"question must not exceed {_MAX_QUERY_QUESTION_BYTES} UTF-8 bytes"
             )
@@ -153,7 +157,10 @@ class QueryRequest:
             raise QueryRejected(
                 f"context filters must not exceed {_MAX_QUERY_CONTEXT_FILTERS} entries"
             )
-        filter_sizes = tuple(len(item.encode("utf-8")) for item in self.context_filters)
+        try:
+            filter_sizes = tuple(len(item.encode("utf-8")) for item in self.context_filters)
+        except UnicodeEncodeError:
+            raise QueryRejected("context filters must be valid UTF-8") from None
         if any(size > _MAX_QUERY_CONTEXT_FILTER_BYTES for size in filter_sizes):
             raise QueryRejected(
                 f"each context filter must not exceed {_MAX_QUERY_CONTEXT_FILTER_BYTES} UTF-8 bytes"

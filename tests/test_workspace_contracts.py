@@ -197,8 +197,12 @@ def test_schemas_positive_and_negative_wire_fixtures(tmp_path):
     })
     marker = StateRootMarker.from_mapping({"contract": "graphify.workspace.state-root", "state_schema_version": 2, "owner": "graphify.workspace"})
     binding = CompletionBinding.bind(initial, final, compatibility=comp, graph_sha256="b" * 64)
-    documents = [comp, final, binding, authority, marker]
-    for schema, document in zip(schemas, documents):
+    documents = {"compatibility.schema.json": comp, "input-manifest.schema.json": final,
+                 "completion-binding.schema.json": binding,
+                 "runtime-authority.schema.json": authority, "state-root.schema.json": marker}
+    assert set(documents) == set(SCHEMA_FILES)
+    for name, schema in zip(SCHEMA_FILES, schemas):
+        document = documents[name]
         Draft202012Validator.check_schema(schema)
         validator = Draft202012Validator(schema, registry=registry)
         validator.validate(document.to_dict())

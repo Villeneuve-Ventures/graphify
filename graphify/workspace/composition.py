@@ -180,10 +180,13 @@ def verify_installed_candidate(expected):
             if name not in owned:
                 raise WorkspaceAuthorityInvalid("missing installed distribution metadata")
             path = Path(str(dist.locate_file(owned[name])))
-            if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
-                raise WorkspaceAuthorityInvalid("unsafe installed package member")
-            if hashlib.sha256(path.read_bytes()).hexdigest() != wanted:
-                raise WorkspaceAuthorityInvalid("installed package member mismatch")
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+                    raise WorkspaceAuthorityInvalid("unsafe installed package member")
+                if hashlib.sha256(path.read_bytes()).hexdigest() != wanted:
+                    raise WorkspaceAuthorityInvalid("installed package member mismatch")
+            except OSError as exc:
+                raise WorkspaceAuthorityInvalid("installed package member unreadable") from exc
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
 

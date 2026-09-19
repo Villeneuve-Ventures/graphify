@@ -124,7 +124,7 @@ import graphify.workspace.adapters
 print("S2-IMPORT-OK")
 '''
     result = subprocess.run([sys.executable, "-B", "-c", code], env=env, cwd=tmp_path,
-                            text=True, capture_output=True)
+                            text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "S2-IMPORT-OK"
     assert list(tmp_path.iterdir()) == []

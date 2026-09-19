@@ -232,3 +232,97 @@ def test_wheel_hash_and_validation_use_same_captured_bytes(built_wheel, tmp_path
     fixture = candidate.build_fixture(repo_root=REPO, wheel=copy, output_root=tmp_path / "captured",
                                       policy=StructuralPolicy(8, 16384, 1, 4, 1048576))
     assert fixture.to_dict()["wheel_sha256"] == hashlib.sha256(original).hexdigest()
+
+
+@pytest.mark.parametrize("damage", ["package", "metadata", "license", "total", "namespace"])
+def test_wheel_expansion_rejected_before_read(built_wheel, tmp_path, monkeypatch, damage):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    original_infos = zipfile.ZipFile.infolist
+
+    def damaged_infos(archive):
+        infos = original_infos(archive)
+        if damage == "namespace":
+            infos.append(zipfile.ZipInfo("unexpected.pth"))
+        elif damage != "total":
+            suffix = {"package": "graphify/source_io.py", "metadata": "/METADATA",
+                      "license": "/licenses/LICENSE"}[damage]
+            next(info for info in infos if info.filename.endswith(suffix)).file_size = (
+                candidate.MAX_WHEEL_MEMBER_BYTES + 1)
+        return infos
+
+    def forbidden_open(*args, **kwargs):
+        raise AssertionError("invalid wheel was decompressed before preflight")
+
+    monkeypatch.setattr(zipfile.ZipFile, "infolist", damaged_infos)
+    monkeypatch.setattr(zipfile.ZipFile, "open", forbidden_open)
+    if damage == "total":
+        monkeypatch.setattr(candidate, "MAX_WHEEL_EXPANDED_BYTES", 1)
+    output = tmp_path / "refused"
+    with pytest.raises(ContractError, match="expanded byte limit|whole-wheel members"):
+        candidate.build_fixture(repo_root=REPO, wheel=built_wheel, output_root=output,
+                                policy=StructuralPolicy(8, 16384, 1, 4, 1048576))
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+def test_fixture_write_failure_allows_retry(tmp_path, monkeypatch, failure):
+    from tools.workspace_artifacts import candidate
+    output = tmp_path / "fixture"
+    bundle = {name: b"{}" for name in
+              ("source-manifest.json", "compatibility.json", "runtime-manifest.json")}
+    original = zipfile.ZipFile.writestr
+
+    def fail_write(*args, **kwargs):
+        raise failure("injected write failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", fail_write)
+    with pytest.raises(failure):
+        candidate._write_fixture(output, bundle, b"{}")
+    assert not output.exists()
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", original)
+    candidate._write_fixture(output, bundle, b"{}")
+    assert (output / "fixture-bundle.zip").is_file()
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_fixture_publication_preserves_racing_destination(tmp_path, monkeypatch, occupied):
+    from tools.workspace_artifacts import candidate
+    output = tmp_path / "fixture"
+    bundle = {name: b"{}" for name in
+              ("source-manifest.json", "compatibility.json", "runtime-manifest.json")}
+    publish = candidate._publish_fixture
+
+    def racing_publish(payload_root, destination):
+        output.mkdir()
+        if occupied:
+            (output / "other-owner").write_bytes(b"keep")
+        publish(payload_root, destination)
+
+    monkeypatch.setattr(candidate, "_publish_fixture", racing_publish)
+    with pytest.raises(FileExistsError):
+        candidate._write_fixture(output, bundle, b"{}")
+    assert output.is_dir()
+    assert sorted(p.name for p in output.iterdir()) == (["other-owner"] if occupied else [])
+    if occupied:
+        assert (output / "other-owner").read_bytes() == b"keep"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fixture"]
+
+
+def test_fixture_failure_never_cleans_public_destination(tmp_path, monkeypatch):
+    from tools.workspace_artifacts import candidate
+    output = tmp_path / "fixture"
+    bundle = {name: b"{}" for name in
+              ("source-manifest.json", "compatibility.json", "runtime-manifest.json")}
+
+    def create_destination_and_fail(*args, **kwargs):
+        output.mkdir()
+        (output / "other-owner").write_bytes(b"keep")
+        raise OSError("injected failure")
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", create_destination_and_fail)
+    with pytest.raises(OSError, match="injected failure"):
+        candidate._write_fixture(output, bundle, b"{}")
+    assert (output / "other-owner").read_bytes() == b"keep"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fixture"]
