@@ -364,6 +364,36 @@ Scoped Ruff and Pyright passed with zero findings. The complete test suite was
 not rerun because these localized regressions and affected modules cover the
 demonstrated failures; no unrelated gate or policy was activated.
 
+### Fifth review follow-up (`8c4d9ffb` input)
+
+The GitHub Actions test job reached the end of the suite with 5,975 passing and
+five failing assertions. All failures were stale review-regression mocks that
+still intercepted the pre-descriptor `Path` APIs. They now inject failures at
+the active `os.open`/`os.read` boundary and retain the check that unrelated
+programming errors are not translated.
+
+Six current-head findings were accepted and repaired within S2:
+
+- bytecode-cache disappearance and permission races now use the documented
+  `WorkspaceAuthorityInvalid` refusal while initial absence remains permitted;
+- project dependency containers and requirement strings are validated before
+  comparison, with parser failures translated to `ContractError`;
+- every detection-phase code input must have regular-file identity evidence;
+  incomplete consumed manifests may still honestly record unprocessed inputs;
+- wheel `RECORD` must enumerate the accepted archive exactly, with correct
+  SHA-256 hashes and sizes and the required empty self-entry;
+- the PEP 427 filename must bind the captured project name/version, reject a
+  build tag and carry exactly the supported `py3-none-any` tag; and
+- the stale descriptor tests noted above were updated without weakening their
+  refusal or exception-boundary assertions.
+
+Focused validation after these repairs: 172 wheel-packaging tests, 63
+contract/composition/review-regression tests with 11 subtests, and all 19
+installed-identity unittests passed. Scoped Ruff, Pyright and diff checks passed.
+The failed CI run already supplied the broader evidence: 5,975 other tests
+passed before the stale-test failure was reported, so no redundant local full
+suite was added.
+
 Out-of-scope baseline follow-ups are tracked separately:
 [XML admission #150](https://github.com/Villeneuve-Ventures/graphify/issues/150)
 and [dependency maintenance #151](https://github.com/Villeneuve-Ventures/graphify/issues/151).

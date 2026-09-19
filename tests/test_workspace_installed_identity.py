@@ -180,6 +180,20 @@ class InstalledIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "bytecode"):
             verify_installed_candidate(self.expected)
 
+    def test_cache_resolution_races_use_authority_refusal(self):
+        cached = self.cache()
+        resolve = Path.resolve
+
+        def racing_resolve(path, *args, **kwargs):
+            if path == cached:
+                raise FileNotFoundError("cache removed during verification")
+            return resolve(path, *args, **kwargs)
+
+        with (patch.object(Path, "resolve", racing_resolve),
+              self.assertRaisesRegex(WorkspaceAuthorityInvalid, "bytecode cache unreadable") as caught):
+            verify_installed_candidate(self.expected)
+        self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
+
     def test_symlinked_installation_ancestors_accept_either_compile_filename(self):
         alias = self.root / "alias"
         alias.symlink_to(self.package, target_is_directory=True)

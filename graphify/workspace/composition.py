@@ -301,18 +301,22 @@ def _verify_source_caches(path, source):
                 info = cache.lstat()
             except FileNotFoundError:
                 continue
-            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-                raise WorkspaceAuthorityInvalid("unsafe installed bytecode cache")
-            fd = os.open(cache, flags)
-            with os.fdopen(fd, "rb") as stream:
-                opened = os.fstat(stream.fileno())
-                if _file_identity(info) != _file_identity(opened):
-                    raise WorkspaceAuthorityInvalid("installed bytecode cache changed")
-                payload = stream.read(limit + 1)
-                if (len(payload) > limit or _file_identity(opened) != _file_identity(os.fstat(stream.fileno()))
-                        or _file_identity(opened) != _file_identity(cache.lstat())):
-                    raise WorkspaceAuthorityInvalid("installed bytecode cache changed")
-                resolved = cache.resolve(strict=True)
+            try:
+                if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                    raise WorkspaceAuthorityInvalid("unsafe installed bytecode cache")
+                fd = os.open(cache, flags)
+                with os.fdopen(fd, "rb") as stream:
+                    opened = os.fstat(stream.fileno())
+                    if _file_identity(info) != _file_identity(opened):
+                        raise WorkspaceAuthorityInvalid("installed bytecode cache changed")
+                    payload = stream.read(limit + 1)
+                    if (len(payload) > limit
+                            or _file_identity(opened) != _file_identity(os.fstat(stream.fileno()))
+                            or _file_identity(opened) != _file_identity(cache.lstat())):
+                        raise WorkspaceAuthorityInvalid("installed bytecode cache changed")
+                    resolved = cache.resolve(strict=True)
+            except OSError as exc:
+                raise WorkspaceAuthorityInvalid("installed bytecode cache unreadable") from exc
             if (len(payload) < 16 or payload[:4] != MAGIC_NUMBER
                     or int.from_bytes(payload[4:8], "little") not in (0, 1, 3)):
                 raise WorkspaceAuthorityInvalid("unverified installed bytecode cache header")

@@ -6,6 +6,8 @@ must match every intended package member before any fixture output is created.
 """
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
 import io
 import configparser
@@ -120,6 +122,73 @@ def _validate_core_metadata(payload, project):
     return metadata
 
 
+def _validate_wheel_filename(path, project):
+    """Bind the installer-facing wheel name to the captured project identity."""
+    from packaging.tags import Tag
+    from packaging.utils import canonicalize_name, parse_wheel_filename
+    from packaging.version import Version
+
+    try:
+        name, version, build, tags = parse_wheel_filename(path.name)
+        project_name = canonicalize_name(project["name"])
+        project_version = Version(project["version"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ContractError("invalid wheel filename or project identity") from exc
+    if (name != project_name or version != project_version or build
+            or tags != {Tag("py3", "none", "any")}):
+        raise ContractError("wheel filename differs from supported project identity")
+
+
+def _project_requirements(project):
+    """Validate project dependency containers and return canonical requirements."""
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    try:
+        dependencies = project["dependencies"]
+        optional = project["optional-dependencies"]
+        if (type(dependencies) is not list
+                or not all(type(requirement) is str for requirement in dependencies)
+                or type(optional) is not dict
+                or not all(type(extra) is str and type(requirements) is list
+                           and all(type(requirement) is str for requirement in requirements)
+                           for extra, requirements in optional.items())):
+            raise TypeError("dependency declarations must contain strings")
+        expected = {str(Requirement(requirement)) for requirement in dependencies}
+        for extra, requirements in optional.items():
+            for requirement in requirements:
+                base, separator, marker = requirement.partition(";")
+                combined = (base + "; "
+                            + (f"({marker.strip()}) and " if separator else "")
+                            + f'extra == "{extra}"')
+                expected.add(str(Requirement(combined)))
+    except (KeyError, TypeError, AttributeError, InvalidRequirement) as exc:
+        raise ContractError("invalid project dependency declarations") from exc
+    return expected, set(optional)
+
+
+def _validate_wheel_record(payload, names, record_name, read_member):
+    """Require RECORD to describe the accepted archive exactly and correctly."""
+    try:
+        rows = list(csv.reader(io.StringIO(payload.decode("utf-8"), newline=""), strict=True))
+    except (UnicodeError, csv.Error) as exc:
+        raise ContractError("malformed wheel RECORD") from exc
+    if (any(len(row) != 3 for row in rows) or len(rows) != len(names)
+            or len({row[0] for row in rows}) != len(rows)
+            or {row[0] for row in rows} != set(names)):
+        raise ContractError("wheel RECORD namespace differs from archive")
+    for path, recorded_hash, recorded_size in rows:
+        if path == record_name:
+            if recorded_hash or recorded_size:
+                raise ContractError("wheel RECORD must omit its own hash and size")
+            continue
+        member = read_member(path)
+        expected_hash = "sha256=" + base64.urlsafe_b64encode(
+            hashlib.sha256(member).digest()
+        ).rstrip(b"=").decode("ascii")
+        if recorded_hash != expected_hash or recorded_size != str(len(member)):
+            raise ContractError("wheel RECORD member identity mismatch")
+
+
 def package_members(repo):
     """Mirror explicit setuptools package/data selection, preserving all host data."""
     config = tomllib.loads((repo / "pyproject.toml").read_text())["tool"]["setuptools"]
@@ -167,6 +236,9 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
         raise ContractError("explicit fixture policy is required")
     inventory = source_manifest(repo)
     members = package_members(repo)
+    project = tomllib.loads((repo / "pyproject.toml").read_text())["project"]
+    expected_requirements, expected_extras = _project_requirements(project)
+    _validate_wheel_filename(wheel, project)
     wheel_bytes = _read(wheel)
     with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
         infos = archive.infolist()
@@ -202,7 +274,8 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
         actual = {name: hashlib.sha256(read_member(name)).hexdigest() for name in members}
         if actual != members:
             raise ContractError("wheel does not match the complete candidate package")
-        project = tomllib.loads((repo / "pyproject.toml").read_text())["project"]
+        record_name = dist_info + "RECORD"
+        _validate_wheel_record(read_member(record_name), names, record_name, read_member)
         entry_points = configparser.ConfigParser()
         entry_points.read_string(read_member(dist_info + "entry_points.txt").decode())
         if (entry_points.sections() != ["console_scripts"]
@@ -213,19 +286,9 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
         _validate_wheel_metadata(read_member(dist_info + "WHEEL"))
         metadata_name = dist_info + "METADATA"
         meta = _validate_core_metadata(read_member(metadata_name), project)
-        if set(meta.provides_extra or []) != set(project["optional-dependencies"]):
+        if set(meta.provides_extra or []) != expected_extras:
             raise ContractError("wheel optional extras differ from project")
-        # Use build-tooling packaging (already in the dev toolchain), not a new
-        # runtime dependency. Preserve dependency markers and optional extras.
-        from packaging.requirements import Requirement
-        expected_requirements = set(project["dependencies"])
-        for extra, requirements in project["optional-dependencies"].items():
-            for requirement in requirements:
-                base, separator, marker = requirement.partition(";")
-                expected_requirements.add(base + "; " +
-                    (f"({marker.strip()}) and " if separator else "") + f'extra == "{extra}"')
-        if {str(requirement) for requirement in (meta.requires_dist or [])} != {
-                str(Requirement(r)) for r in expected_requirements}:
+        if {str(requirement) for requirement in (meta.requires_dist or [])} != expected_requirements:
             raise ContractError("wheel dependencies differ from project")
         installation_metadata = {name: hashlib.sha256(read_member(dist_info + name)).hexdigest()
                                  for name in INSTALLATION_METADATA}

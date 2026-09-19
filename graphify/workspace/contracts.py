@@ -240,7 +240,7 @@ def _evidence(records, roots):
             probe = indexed.get(("probe", path))
             if probe is None or probe["value"] != record["value"][0]:
                 raise ContractError("consumption requires matching S1 probe evidence")
-    return indexed
+    return indexed, bindings
 
 
 @dataclass(frozen=True)
@@ -328,7 +328,7 @@ class InputManifest(Document):
                 or list(roots) != sorted(set(roots)) or "source" not in roots
                 or not set(roots) <= ROOT_LABELS):
             raise ContractError("invalid input root allowlist")
-        indexed = _evidence(value["evidence"], roots)
+        indexed, bindings = _evidence(value["evidence"], roots)
         code = value["code_inputs"]
         if not isinstance(code, (list, tuple)) or len(code) > MAX_ENTRIES:
             raise ContractError("invalid code inventory")
@@ -340,6 +340,9 @@ class InputManifest(Document):
         if not isinstance(outcomes, (list, tuple)):
             raise ContractError("invalid outcomes")
         if value["phase"] == "detection":
+            if any(bindings.get(path) is None or not stat.S_ISREG(bindings[path][2])
+                   for path in code):
+                raise ContractError("code input requires regular-file identity evidence")
             if outcomes or value["failure"] is not None:
                 raise ContractError("detection does not assert extraction outcomes")
         elif value["phase"] == "consumed":

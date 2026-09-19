@@ -7,6 +7,10 @@ This builds the wheel once and asserts every committed skill artifact ships in i
 """
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
+import io
 import subprocess
 import sys
 import zipfile
@@ -268,20 +272,34 @@ def test_fixture_rejects_invalid_core_metadata(built_wheel, tmp_path, damage):
     from graphify.workspace.contracts import ContractError
     from tools.workspace_artifacts import candidate
     changed = tmp_path / built_wheel.name
-    with zipfile.ZipFile(built_wheel) as source, zipfile.ZipFile(changed, "w") as target:
-        for info in source.infolist():
-            payload = source.read(info.filename)
-            if info.filename.endswith("/METADATA"):
-                if damage == "duplicate-name":
-                    payload = payload.replace(b"Name: graphifyy\n", b"Name: graphifyy\nName: unexpected\n", 1)
-                elif damage == "missing-version":
-                    payload = b"\n".join(
-                        line for line in payload.split(b"\n")
-                        if not line.startswith(b"Metadata-Version:")
-                    )
-                else:
-                    payload = b"not a metadata header\n" + payload
-            target.writestr(info, payload)
+    with zipfile.ZipFile(built_wheel) as source:
+        infos = source.infolist()
+        payloads = {info.filename: source.read(info.filename) for info in infos}
+    metadata_name = next(name for name in payloads if name.endswith("/METADATA"))
+    payload = payloads[metadata_name]
+    if damage == "duplicate-name":
+        payload = payload.replace(b"Name: graphifyy\n", b"Name: graphifyy\nName: unexpected\n", 1)
+    elif damage == "missing-version":
+        payload = b"\n".join(
+            line for line in payload.split(b"\n")
+            if not line.startswith(b"Metadata-Version:")
+        )
+    else:
+        payload = b"not a metadata header\n" + payload
+    payloads[metadata_name] = payload
+    record_name = next(name for name in payloads if name.endswith("/RECORD"))
+    rows = list(csv.reader(io.StringIO(payloads[record_name].decode("utf-8"), newline="")))
+    row = next(row for row in rows if row[0] == metadata_name)
+    row[1] = "sha256=" + base64.urlsafe_b64encode(
+        hashlib.sha256(payload).digest()
+    ).rstrip(b"=").decode("ascii")
+    row[2] = str(len(payload))
+    stream = io.StringIO(newline="")
+    csv.writer(stream, lineterminator="\n").writerows(rows)
+    payloads[record_name] = stream.getvalue().encode("utf-8")
+    with zipfile.ZipFile(changed, "w") as target:
+        for info in infos:
+            target.writestr(info, payloads[info.filename])
     output = tmp_path / "refused-core-metadata"
     with pytest.raises(ContractError, match="metadata"):
         candidate.build_fixture(
@@ -314,6 +332,95 @@ def test_fixture_binds_wheel_identity_to_project(
     monkeypatch.setattr(candidate.tomllib, "loads", changed_project)
     output = tmp_path / "refused-project-identity"
     with pytest.raises(ContractError, match="project|identity"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=built_wheel,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("filename", [
+    "graphifyy-0.10.0-py2-none-any.whl",
+    "unexpected-0.10.0-py3-none-any.whl",
+    "graphifyy-0.10.1-py3-none-any.whl",
+    "graphifyy-0.10.0-1-py3-none-any.whl",
+])
+def test_fixture_rejects_inconsistent_wheel_filename(built_wheel, tmp_path, filename):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    changed = tmp_path / filename
+    changed.write_bytes(built_wheel.read_bytes())
+    output = tmp_path / "refused-wheel-filename"
+    with pytest.raises(ContractError, match="wheel filename"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=changed,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("damage", ["missing-row", "bad-hash", "bad-size", "unsafe-row"])
+def test_fixture_rejects_invalid_wheel_record(built_wheel, tmp_path, damage):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    changed = tmp_path / built_wheel.name
+    with zipfile.ZipFile(built_wheel) as source, zipfile.ZipFile(changed, "w") as target:
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename.endswith("/RECORD"):
+                rows = list(csv.reader(io.StringIO(payload.decode("utf-8"), newline="")))
+                ordinary = next(row for row in rows if not row[0].endswith("/RECORD"))
+                if damage == "missing-row":
+                    rows.remove(ordinary)
+                elif damage == "bad-hash":
+                    ordinary[1] = "sha256=invalid"
+                elif damage == "bad-size":
+                    ordinary[2] = str(int(ordinary[2]) + 1)
+                else:
+                    rows.append(["../outside", "", ""])
+                stream = io.StringIO(newline="")
+                csv.writer(stream, lineterminator="\n").writerows(rows)
+                payload = stream.getvalue().encode("utf-8")
+            target.writestr(info, payload)
+    output = tmp_path / "refused-wheel-record"
+    with pytest.raises(ContractError, match="RECORD"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=changed,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("dependencies", ["not a valid requirement ???"]),
+    ("dependencies", [7]),
+    ("optional-dependencies", {"broken": ["not a valid requirement ???"]}),
+    ("optional-dependencies", {"broken": "not-a-list"}),
+])
+def test_fixture_translates_malformed_project_dependencies(
+        built_wheel, tmp_path, monkeypatch, field, value):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    loads = candidate.tomllib.loads
+
+    def changed_project(payload):
+        parsed = loads(payload)
+        if "project" in parsed:
+            parsed["project"][field] = value
+        return parsed
+
+    monkeypatch.setattr(candidate.tomllib, "loads", changed_project)
+    output = tmp_path / "refused-project-dependencies"
+    with pytest.raises(ContractError, match="dependenc"):
         candidate.build_fixture(
             repo_root=REPO,
             wheel=built_wheel,

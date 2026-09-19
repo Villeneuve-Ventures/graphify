@@ -206,6 +206,14 @@ def test_malformed_input_manifest_refuses(tmp_path, mutation):
     with pytest.raises(ContractError): InputManifest.from_mapping(data)
 
 
+def test_admitted_code_input_requires_identity_evidence(tmp_path):
+    initial, _ = manifests(tmp_path)
+    data = initial.to_dict()
+    data["code_inputs"] = ["unbound.py"]
+    with pytest.raises(ContractError, match="code input.*evidence"):
+        InputManifest.from_mapping(data)
+
+
 def test_aggregate_bounds_and_missing_initial_evidence(tmp_path, monkeypatch):
     import graphify.workspace.contracts as contracts
     initial, final = manifests(tmp_path)

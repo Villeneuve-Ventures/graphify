@@ -52,14 +52,14 @@ class InstalledMemberRefusalTests(unittest.TestCase):
     def test_matching_installed_member_is_accepted(self):
         verify_installed_candidate(self.expected)
 
-    def test_stat_and_read_races_use_authority_refusal(self):
-        for operation in ("stat", "read_bytes"):
+    def test_descriptor_races_use_authority_refusal(self):
+        for operation in ("open", "read"):
             for error in (FileNotFoundError, PermissionError):
                 with self.subTest(operation=operation, error=error):
-                    # Reach the selected operation after the preliminary checks.
-                    with patch.object(Path, "is_file", return_value=True), \
-                         patch.object(Path, "is_symlink", return_value=False), \
-                         patch.object(Path, operation, side_effect=error("fixture race")):
+                    with patch(
+                        f"graphify.workspace.composition.os.{operation}",
+                        side_effect=error("fixture race"),
+                    ):
                         with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "unreadable") as caught:
                             verify_installed_candidate(self.expected)
                         self.assertIsInstance(caught.exception.__cause__, error)
@@ -70,7 +70,7 @@ class InstalledMemberRefusalTests(unittest.TestCase):
             verify_installed_candidate(self.expected)
 
     def test_unrelated_programming_error_is_not_hidden(self):
-        with patch.object(Path, "read_bytes", side_effect=ValueError("unrelated")):
+        with patch("graphify.workspace.composition.os.read", side_effect=ValueError("unrelated")):
             with self.assertRaisesRegex(ValueError, "unrelated"):
                 verify_installed_candidate(self.expected)
 
