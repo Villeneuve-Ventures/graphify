@@ -1024,7 +1024,7 @@ def _watchdog_available() -> bool:
 
 @pytest.fixture
 def running_watch(monkeypatch):
-    """Join each real watcher before its test's patches and paths disappear."""
+    """Wait for observer startup and join watchers before test state disappears."""
     import threading
     from types import SimpleNamespace
     from graphify import watch as watch_module
@@ -1032,7 +1032,19 @@ def running_watch(monkeypatch):
     watchers = []
 
     def start(path, **kwargs):
+        from watchdog.observers import Observer
+        from watchdog.observers.polling import PollingObserver
+
         stop = threading.Event()
+        ready = threading.Event()
+        observer_type = PollingObserver if sys.platform == "darwin" else Observer
+        real_start = observer_type.start
+
+        def start_and_signal(observer):
+            real_start(observer)
+            ready.set()
+
+        monkeypatch.setattr(observer_type, "start", start_and_signal)
 
         def interruptible_sleep(seconds):
             if stop.wait(timeout=seconds):
@@ -1046,6 +1058,7 @@ def running_watch(monkeypatch):
                                   kwargs=kwargs, daemon=True)
         watchers.append((thread, stop))
         thread.start()
+        assert ready.wait(timeout=5), "watcher observer did not start"
         return thread
 
     yield start
@@ -1054,6 +1067,57 @@ def running_watch(monkeypatch):
     for thread, _ in watchers:
         thread.join(timeout=5)
         assert not thread.is_alive(), "watcher did not stop and join its observer"
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+def test_running_watch_waits_for_observer_readiness(tmp_path, monkeypatch, running_watch):
+    import threading
+    import watchdog.observers
+    import watchdog.observers.polling
+
+    entered = threading.Event()
+    release = threading.Event()
+    ready = threading.Event()
+    returned = threading.Event()
+    errors = []
+
+    class DelayedObserver:
+        def schedule(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            entered.set()
+            assert release.wait(timeout=5), "observer startup was not released"
+            ready.set()
+
+        def stop(self):
+            pass
+
+        def join(self):
+            pass
+
+    monkeypatch.setattr(watchdog.observers, "Observer", DelayedObserver)
+    monkeypatch.setattr(watchdog.observers.polling, "PollingObserver", DelayedObserver)
+
+    def start_watcher():
+        try:
+            running_watch(tmp_path)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            returned.set()
+
+    caller = threading.Thread(target=start_watcher)
+    caller.start()
+    try:
+        assert entered.wait(timeout=5)
+        assert not returned.wait(timeout=0.1), "fixture returned before observer startup"
+    finally:
+        release.set()
+        caller.join(timeout=5)
+    assert not caller.is_alive()
+    assert not errors
+    assert returned.is_set() and ready.is_set()
 
 
 @pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
@@ -1078,7 +1142,6 @@ def test_watch_handler_honors_graphifyignore(tmp_path, monkeypatch, running_watc
     # Run watch() in a thread with a short debounce so we can verify the
     # post-debounce dispatch path actually runs on real events.
     running_watch(watch_root, debounce=0.2)
-    time.sleep(0.5)  # let observer.start() settle
 
     # Ignored writes — handler must drop these.
     (watch_root / "node_modules" / "junk.js").write_text("// noise\n", encoding="utf-8")
@@ -1120,7 +1183,6 @@ def test_watch_loads_graphifyignore_once(tmp_path, monkeypatch, running_watch):
     monkeypatch.setattr(watch_mod, "_notify_only", lambda p: None)
 
     running_watch(tmp_path, debounce=0.2)
-    time.sleep(0.5)
 
     # Generate many events; loader must not be called again.
     for i in range(50):
