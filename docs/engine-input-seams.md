@@ -64,12 +64,15 @@ or failed extraction. Successful parsing may tolerate syntax errors according to
 the existing extractor contract. Missing selected extras are not empty success;
 working documented fallbacks, such as Pascal's regex extractor, remain available.
 A scoped I/O failure poisons its context even if a tolerant extractor catches it.
-On interruption, completed per-input results retain their status and inputs not
-yet extracted are `not_processed`. The triggering input receives the source error;
+When a scoped source failure stops extraction, completed per-input results retain
+their status and inputs not yet extracted are `not_processed`. The triggering
+input receives the source error;
 `ExtractionIncomplete.failure` also describes the batch failure. A later shared
 resolution failure preserves completed extraction outcomes and is reported in
 `failure`, without falsely attributing it to every input. These completed outcomes
 do not make the incomplete batch graph usable for certification.
+`KeyboardInterrupt` and other `BaseException` interruptions propagate normally;
+they are not converted to structured extraction failures.
 
 ## Reader inventory
 
